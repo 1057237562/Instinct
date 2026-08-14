@@ -1,0 +1,2088 @@
+"""
+MiniMind Config WebUI
+=======================
+Interactive configuration tool for MiniMind model parameters.
+Streamlit-based UI with real-time parameter count estimation
+and architecture visualization. Works standalone — no model
+weights required.
+
+Run from the scripts/ directory:
+    streamlit run config_webui.py
+"""
+
+import streamlit as st
+import math
+import json
+import os
+import re
+import sys
+import subprocess
+import time
+
+# ═══════════════════════════════════════════════════════════════
+# Page config
+# ═══════════════════════════════════════════════════════════════
+st.set_page_config(page_title="MiniMind Config", layout="wide")
+
+# ═══════════════════════════════════════════════════════════════
+# Preset definitions
+# ═══════════════════════════════════════════════════════════════
+PRESETS = {
+    "minimind-3": {
+        "hidden_size": 768,
+        "num_hidden_layers": 8,
+        "vocab_size": 6400,
+        "dropout": 0.0,
+        "hidden_act": "silu",
+        "tie_word_embeddings": True,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 4,
+        "max_position_embeddings": 32768,
+        "rope_theta": 1e6,
+        "inference_rope_scaling": False,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "factor": 16,
+        "original_max_position_embeddings": 2048,
+        "attention_factor": 1.0,
+        "use_moe": False,
+        "num_experts": 4,
+        "num_experts_per_tok": 1,
+        "norm_topk_prob": True,
+        "router_aux_loss_coef": 5e-4,
+        "rms_norm_eps": 1e-6,
+        "flash_attn": True,
+        "model_architecture": "standard",
+    },
+    "minimind-3-moe": {
+        "hidden_size": 768,
+        "num_hidden_layers": 8,
+        "vocab_size": 6400,
+        "dropout": 0.0,
+        "hidden_act": "silu",
+        "tie_word_embeddings": True,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 4,
+        "max_position_embeddings": 32768,
+        "rope_theta": 1e6,
+        "inference_rope_scaling": False,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "factor": 16,
+        "original_max_position_embeddings": 2048,
+        "attention_factor": 1.0,
+        "use_moe": True,
+        "num_experts": 4,
+        "num_experts_per_tok": 1,
+        "norm_topk_prob": True,
+        "router_aux_loss_coef": 5e-4,
+        "rms_norm_eps": 1e-6,
+        "flash_attn": True,
+        "model_architecture": "standard",
+    },
+    "minimind2-small": {
+        "hidden_size": 512,
+        "num_hidden_layers": 8,
+        "vocab_size": 6400,
+        "dropout": 0.0,
+        "hidden_act": "silu",
+        "tie_word_embeddings": True,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 32768,
+        "rope_theta": 1e6,
+        "inference_rope_scaling": False,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "factor": 16,
+        "original_max_position_embeddings": 2048,
+        "attention_factor": 1.0,
+        "use_moe": False,
+        "num_experts": 4,
+        "num_experts_per_tok": 1,
+        "norm_topk_prob": True,
+        "router_aux_loss_coef": 5e-4,
+        "rms_norm_eps": 1e-6,
+        "flash_attn": True,
+        "model_architecture": "standard",
+    },
+    "minimind2": {
+        "hidden_size": 768,
+        "num_hidden_layers": 16,
+        "vocab_size": 6400,
+        "dropout": 0.0,
+        "hidden_act": "silu",
+        "tie_word_embeddings": True,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 32768,
+        "rope_theta": 1e6,
+        "inference_rope_scaling": False,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "factor": 16,
+        "original_max_position_embeddings": 2048,
+        "attention_factor": 1.0,
+        "use_moe": False,
+        "num_experts": 4,
+        "num_experts_per_tok": 1,
+        "norm_topk_prob": True,
+        "router_aux_loss_coef": 5e-4,
+        "rms_norm_eps": 1e-6,
+        "flash_attn": True,
+        "model_architecture": "standard",
+    },
+    "minimind-linear": {
+        "hidden_size": 768,
+        "num_hidden_layers": 8,
+        "vocab_size": 6400,
+        "dropout": 0.0,
+        "hidden_act": "silu",
+        "tie_word_embeddings": True,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 4,
+        "max_position_embeddings": 32768,
+        "rope_theta": 1e6,
+        "inference_rope_scaling": False,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "factor": 16,
+        "original_max_position_embeddings": 2048,
+        "attention_factor": 1.0,
+        "use_moe": False,
+        "num_experts": 4,
+        "num_experts_per_tok": 1,
+        "norm_topk_prob": True,
+        "router_aux_loss_coef": 5e-4,
+        "rms_norm_eps": 1e-6,
+        "flash_attn": True,
+        "model_architecture": "linear",
+        "full_attention_interval": 4,
+        "linear_conv_kernel_dim": 4,
+        "linear_key_head_dim": 96,
+        "linear_value_head_dim": 96,
+        "linear_num_key_heads": 8,
+        "linear_num_value_heads": 8,
+    },
+}
+
+# ═══════════════════════════════════════════════════════════════
+# CSS — dark theme, clean modern look
+# ═══════════════════════════════════════════════════════════════
+st.markdown(
+    """
+<style>
+    [data-testid="stAppDeployButton"] { display: none; }
+
+    /* Architecture diagram blocks */
+    .arch-wrap {
+        display: flex; flex-direction: column; align-items: center;
+        width: 100%;
+    }
+    .arch-block {
+        display: flex; flex-direction: column; align-items: center;
+        justify-content: center;
+        padding: 10px 20px; border-radius: 10px; margin: 3px 0;
+        font-family: 'Courier New', monospace; font-size: 14px;
+        font-weight: 700; letter-spacing: 0.5px;
+        border: 1px solid rgba(255,255,255,0.08);
+        width: 100%; max-width: 360px;
+        transition: transform 0.15s;
+    }
+    .arch-block:hover { transform: translateX(4px); }
+    .arch-arrow {
+        color: #64748b; text-align: center; font-size: 16px;
+        line-height: 1; margin: 1px 0; font-weight: 300;
+    }
+    .arch-label {
+        font-size: 10px; opacity: 0.65; font-weight: 400;
+        margin-top: 2px; font-family: -apple-system, sans-serif;
+        letter-spacing: 0.3px;
+    }
+
+    /* Parameter cards */
+    .param-card {
+        background: linear-gradient(135deg, #1e293b 0%, #1a2234 100%);
+        border: 1px solid #2d3a4e; border-radius: 10px;
+        padding: 12px 16px; margin: 6px 0;
+    }
+    .param-label {
+        font-size: 11px; color: #94a3b8; font-weight: 500;
+        text-transform: uppercase; letter-spacing: 0.6px;
+    }
+    .param-value {
+        font-size: 20px; font-weight: 700;
+        font-family: 'Courier New', monospace;
+        color: #f1f5f9; margin-top: 2px;
+    }
+
+    /* Badge row */
+    .badge {
+        display: inline-block;
+        background: linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%);
+        color: white; padding: 4px 14px; border-radius: 20px;
+        font-size: 12px; font-weight: 600; margin: 2px 4px;
+        white-space: nowrap; font-family: 'Courier New', monospace;
+    }
+    .badge-moe {
+        background: linear-gradient(135deg, #5b21b6 0%, #7c3aed 100%);
+    }
+    .badge-green {
+        background: linear-gradient(135deg, #065f46 0%, #10b981 100%);
+    }
+
+    /* Section header */
+    .section-title {
+        font-size: 11px; font-weight: 600; letter-spacing: 1px;
+        color: #64748b; text-transform: uppercase; margin: 20px 0 8px 0;
+        border-bottom: 1px solid #1e293b; padding-bottom: 6px;
+    }
+
+    /* Streamlit dark overrides */
+    .stApp { background: #0f172a; }
+    .st-emotion-cache-1kyxreq { color: #e2e8f0; }
+    .st-emotion-cache-1r4qj8v { background: #1a2332; }
+    div[data-testid="stExpander"] div[role="button"] p {
+        font-size: 14px; font-weight: 600;
+    }
+    .st-emotion-cache-1gulkj5 { color: #94a3b8; }
+    .stDataFrame { font-size: 13px; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# ═══════════════════════════════════════════════════════════════
+# Helper functions
+# ═══════════════════════════════════════════════════════════════
+
+
+def fmt_num(n: int) -> str:
+    """Format integer with thousands separators."""
+    return f"{n:,}"
+
+
+def compute_intermediate_size(hidden_size: int) -> int:
+    """Compute the FFN intermediate size the same way MiniMindConfig does."""
+    return math.ceil(hidden_size * math.pi / 64) * 64
+
+
+def compute_head_dim(hidden_size: int, num_attention_heads: int) -> int:
+    """Auto-compute head dimension."""
+    if num_attention_heads <= 0:
+        return 0
+    return hidden_size // num_attention_heads
+
+
+def calc_params(config: dict) -> dict:
+    """Calculate full parameter breakdown from a config dict.
+
+    All formulas are implemented in pure Python — no model imports.
+    """
+    h = config["hidden_size"]
+    n_layers = config["num_hidden_layers"]
+    vocab = config["vocab_size"]
+    q_heads = config["num_attention_heads"]
+    kv_heads = config["num_key_value_heads"]
+    head_dim = config.get("head_dim", compute_head_dim(h, q_heads))
+    int_size = config.get("intermediate_size", compute_intermediate_size(h))
+    tie_word = config.get("tie_word_embeddings", False)
+    use_moe = config.get("use_moe", False)
+    num_experts = config.get("num_experts", 4)
+    num_experts_per_tok = config.get("num_experts_per_tok", 1)
+    moe_int_size = config.get("moe_intermediate_size", int_size)
+    arch = config.get("model_architecture", "standard")
+
+    # ---- Embedding ----
+    embedding = vocab * h
+
+    # ---- Per-layer Full Attention ----
+    q_proj = h * (q_heads * head_dim)
+    k_proj = h * (kv_heads * head_dim)
+    v_proj = h * (kv_heads * head_dim)
+    o_proj = (q_heads * head_dim) * h
+    q_norm = head_dim
+    k_norm = head_dim
+    full_attn_per_layer = q_proj + k_proj + v_proj + o_proj + q_norm + k_norm
+
+    q_proj_str = f"{h} x ({q_heads} x {head_dim})"
+    k_proj_str = f"{h} x ({kv_heads} x {head_dim})"
+    v_proj_str = f"{h} x ({kv_heads} x {head_dim})"
+    o_proj_str = f"({q_heads} x {head_dim}) x {h}"
+
+    # ---- GatedDeltaNet (Linear) Attention params ----
+    if arch == "linear":
+        lkhd = config.get("linear_key_head_dim", head_dim)
+        lvhd = config.get("linear_value_head_dim", head_dim)
+        lnkh = config.get("linear_num_key_heads", q_heads)
+        lnvh = config.get("linear_num_value_heads", q_heads)
+        lkd = config.get("linear_conv_kernel_dim", 4)
+
+        key_dim = lkhd * lnkh
+        value_dim = lvhd * lnvh
+        conv_dim = key_dim * 2 + value_dim
+
+        conv1d_params = conv_dim * lkd
+        dt_bias_A_log = lnvh * 2
+        norm = lvhd
+        out_proj = value_dim * h
+        in_proj_qkv = h * (key_dim * 2 + value_dim)
+        in_proj_z = h * value_dim
+        in_proj_b = h * lnvh
+        in_proj_a = h * lnvh
+
+        linear_attn_per_layer = (
+            conv1d_params + dt_bias_A_log + norm + out_proj
+            + in_proj_qkv + in_proj_z + in_proj_b + in_proj_a
+        )
+
+        lin_attn_formula = (
+            f"conv1d={conv_dim}x{lkd}, dt_bias+A_log=2x{lnvh}, "
+            f"norm={lvhd}, out_proj={value_dim}x{h}, "
+            f"in_proj_qkv={h}x({key_dim}x2+{value_dim}), "
+            f"in_proj_z={h}x{value_dim}, "
+            f"in_proj_b={h}x{lnvh}, in_proj_a={h}x{lnvh}"
+        )
+
+        interval = config.get("full_attention_interval", 4)
+        num_full = n_layers // interval if interval > 0 else n_layers
+        num_linear = n_layers - num_full
+    else:
+        linear_attn_per_layer = 0
+        lin_attn_formula = ""
+        num_full = n_layers
+        num_linear = 0
+
+    # ---- Per-layer FFN ----
+    if use_moe:
+        gate_proj = h * moe_int_size
+        up_proj = h * moe_int_size
+        down_proj = moe_int_size * h
+        per_expert = gate_proj + up_proj + down_proj
+        router = h * num_experts
+        ffn_per_layer = router + num_experts * per_expert
+        active_ffn_per_layer = num_experts_per_tok * per_expert
+        ffn_detail = (
+            f"router={h}x{num_experts} + "
+            f"{num_experts} experts x ({h}x{moe_int_size} + "
+            f"{h}x{moe_int_size} + {moe_int_size}x{h})"
+        )
+        active_ffn_detail = (
+            f"{num_experts_per_tok} active x ({h}x{moe_int_size} + "
+            f"{h}x{moe_int_size} + {moe_int_size}x{h})"
+        )
+    else:
+        gate_proj = h * int_size
+        up_proj = h * int_size
+        down_proj = int_size * h
+        ffn_per_layer = gate_proj + up_proj + down_proj
+        active_ffn_per_layer = ffn_per_layer
+        ffn_detail = f"gate={h}x{int_size}, up={h}x{int_size}, down={int_size}x{h}"
+        active_ffn_detail = ffn_detail
+
+    # ---- Norms per layer ----
+    input_layernorm = h
+    post_attention_layernorm = h
+    norms_per_layer = input_layernorm + post_attention_layernorm
+
+    # ---- Layer totals (per type) ----
+    full_layer_total = full_attn_per_layer + ffn_per_layer + norms_per_layer
+    full_active_layer_total = full_attn_per_layer + active_ffn_per_layer + norms_per_layer
+    if arch == "linear" and num_linear > 0:
+        linear_layer_total = linear_attn_per_layer + ffn_per_layer + norms_per_layer
+        linear_active_layer_total = linear_attn_per_layer + active_ffn_per_layer + norms_per_layer
+    else:
+        linear_layer_total = 0
+        linear_active_layer_total = 0
+
+    # ---- Final norm ----
+    final_norm = h
+
+    # ---- LM Head ----
+    lm_head = 0 if tie_word else vocab * h
+
+    # ---- Looped (LoopUS) modules: gate + q_head ----
+    looped_gate = 0
+    looped_q_head = 0
+    if arch == "looped":
+        dt_rank = max(1, h // 16)
+        looped_gate = (h * dt_rank) + (dt_rank * h + h) + h  # dt_input_proj + delta_proj(+bias) + A_log
+        looped_q_head = 2 * h + (h * 1 + 1)  # LayerNorm + Linear(h,1)(+bias)
+
+    # ---- Grand totals ----
+    total = (
+        embedding
+        + num_full * full_layer_total
+        + num_linear * linear_layer_total
+        + final_norm + lm_head
+        + looped_gate + looped_q_head
+    )
+    total_active = (
+        embedding
+        + num_full * full_active_layer_total
+        + num_linear * linear_active_layer_total
+        + final_norm + lm_head
+        + looped_gate + looped_q_head
+    )
+
+    if arch == "linear":
+        breakdown = {
+            "Embedding": {"value": embedding, "formula": f"{vocab} x {h}"},
+            "Full Attention (per layer)": {
+                "value": full_attn_per_layer,
+                "formula": (
+                    f"q_proj={q_proj_str}, k_proj={k_proj_str}, "
+                    f"v_proj={v_proj_str}, o_proj={o_proj_str}, "
+                    f"q_norm+k_norm=2x{head_dim}"
+                ),
+            },
+            "Linear Attention (per layer)": {
+                "value": linear_attn_per_layer,
+                "formula": lin_attn_formula,
+            },
+            "Per-Layer FFN": {
+                "value": ffn_per_layer,
+                "formula": ffn_detail,
+            },
+            "Per-Layer Norms": {
+                "value": norms_per_layer,
+                "formula": f"input_layernorm+post_attention_layernorm = 2x{h}",
+            },
+            "Layer Distribution": {
+                "value": 0,
+                "formula": f"{num_full} full attention + {num_linear} linear attention",
+            },
+            "Final Norm": {
+                "value": final_norm,
+                "formula": f"RMSNorm({h})",
+            },
+            "LM Head": {
+                "value": lm_head,
+                "formula": "0 (tied)" if tie_word else f"{vocab} x {h}",
+            },
+            "Total Params": {
+                "value": total,
+                "formula": "",
+            },
+        }
+    else:
+        breakdown = {
+            "Embedding": {"value": embedding, "formula": f"{vocab} x {h}"},
+            "Per-Layer Attention": {
+                "value": full_attn_per_layer,
+                "formula": (
+                    f"q_proj={q_proj_str}, k_proj={k_proj_str}, "
+                    f"v_proj={v_proj_str}, o_proj={o_proj_str}, "
+                    f"q_norm+k_norm=2x{head_dim}"
+                ),
+            },
+            "Per-Layer FFN": {
+                "value": ffn_per_layer,
+                "formula": ffn_detail,
+            },
+            "Per-Layer Norms": {
+                "value": norms_per_layer,
+                "formula": f"input_layernorm+post_attention_layernorm = 2x{h}",
+            },
+            f"All {n_layers} Layers": {
+                "value": n_layers * full_layer_total,
+                "formula": f"{n_layers} x (attn + ffn + norms)",
+            },
+            "Final Norm": {
+                "value": final_norm,
+                "formula": f"RMSNorm({h})",
+            },
+            "LM Head": {
+                "value": lm_head,
+                "formula": "0 (tied)" if tie_word else f"{vocab} x {h}",
+            },
+            "Total Params": {
+                "value": total,
+                "formula": "",
+            },
+        }
+
+    if arch == "looped":
+        breakdown["SelectiveGate"] = {
+            "value": looped_gate,
+            "formula": (
+                f"dt_input_proj={h}x{max(1, h // 16)}, "
+                f"delta_proj={max(1, h // 16)}x{h}+{h}, A_log={h}"
+            ),
+        }
+        breakdown["Q-Head"] = {
+            "value": looped_q_head,
+            "formula": f"LayerNorm(2x{h}) + Linear({h},1)+1",
+        }
+
+    if use_moe:
+        if arch == "linear":
+            breakdown["Per-Layer Active FFN"] = {
+                "value": active_ffn_per_layer,
+                "formula": active_ffn_detail,
+            }
+        else:
+            breakdown["Per-Layer Active FFN"] = {
+                "value": active_ffn_per_layer,
+                "formula": active_ffn_detail,
+            }
+        breakdown["Active Total"] = {
+            "value": total_active,
+            "formula": "",
+        }
+
+    return breakdown
+
+
+def fmt_table(breakdown: dict) -> list:
+    """Convert breakdown dict to list-of-dicts for st.dataframe."""
+    rows = []
+    for name, info in breakdown.items():
+        rows.append(
+            {
+                "Component": name,
+                "Parameters": fmt_num(info["value"]),
+                "Computation": info["formula"],
+            }
+        )
+    return rows
+
+
+def build_config_dict() -> dict:
+    """Assemble a MiniMindConfig-compatible dict from st.session_state."""
+    d = {
+        "hidden_size": st.session_state.get("hidden_size", 768),
+        "num_hidden_layers": st.session_state.get("num_hidden_layers", 8),
+        "vocab_size": st.session_state.get("vocab_size", 6400),
+        "dropout": st.session_state.get("dropout", 0.0),
+        "hidden_act": st.session_state.get("hidden_act", "silu"),
+        "tie_word_embeddings": st.session_state.get("tie_word_embeddings", False),
+        "num_attention_heads": st.session_state.get("num_attention_heads", 8),
+        "num_key_value_heads": st.session_state.get("num_key_value_heads", 4),
+        "max_position_embeddings": st.session_state.get("max_position_embeddings", 32768),
+        "rope_theta": st.session_state.get("rope_theta", 1e6),
+        "inference_rope_scaling": st.session_state.get("inference_rope_scaling", False),
+        "use_moe": st.session_state.get("use_moe", False),
+        "rms_norm_eps": st.session_state.get("rms_norm_eps", 1e-6),
+        "flash_attn": st.session_state.get("flash_attn", True),
+        "intermediate_size": compute_intermediate_size(st.session_state.get("hidden_size", 768)),
+    }
+
+    # head_dim
+    h = d["hidden_size"]
+    q_heads = d["num_attention_heads"]
+    d["head_dim"] = compute_head_dim(h, q_heads)
+
+    # YaRN rope_scaling
+    if d.get("inference_rope_scaling"):
+        d["rope_scaling"] = {
+            "type": "yarn",
+            "beta_fast": st.session_state.get("beta_fast", 32),
+            "beta_slow": st.session_state.get("beta_slow", 1),
+            "factor": st.session_state.get("factor", 16),
+            "original_max_position_embeddings": st.session_state.get(
+                "original_max_position_embeddings", 2048
+            ),
+            "attention_factor": st.session_state.get("attention_factor", 1.0),
+        }
+
+    # Model architecture
+    d["model_architecture"] = st.session_state.get("model_architecture", "standard")
+
+    # Early Exit
+    if st.session_state.get("early_exit_enabled", False):
+        d["early_exit_layers"] = st.session_state.get("early_exit_layers", [4, 5, 6, 7])
+        d["early_exit_loss_weight"] = st.session_state.get("early_exit_loss_weight", 0.3)
+
+    # Linear arch params
+    if d["model_architecture"] == "linear":
+        d["full_attention_interval"] = st.session_state.get("full_attention_interval", 4)
+        d["linear_conv_kernel_dim"] = st.session_state.get("linear_conv_kernel_dim", 4)
+        d["linear_key_head_dim"] = st.session_state.get("linear_key_head_dim", compute_head_dim(h, q_heads))
+        d["linear_value_head_dim"] = st.session_state.get("linear_value_head_dim", compute_head_dim(h, q_heads))
+        d["linear_num_key_heads"] = st.session_state.get("linear_num_key_heads", q_heads)
+        d["linear_num_value_heads"] = st.session_state.get("linear_num_value_heads", q_heads)
+
+    # Looped (LoopUS) arch params
+    if d["model_architecture"] == "looped":
+        d["loop_max_steps"] = st.session_state.get("loop_max_steps", 32)
+        d["loop_grad_checkpoint"] = st.session_state.get("loop_grad_checkpoint", False)
+        d["q_threshold"] = st.session_state.get("loop_q_threshold", 0.9)
+        d["n_supervision"] = st.session_state.get("loop_n_supervision", 6)
+        d["depth_reward"] = st.session_state.get("loop_depth_reward", 0.01)
+        d["exit_in_training"] = st.session_state.get("exit_in_training", True)
+        d["beta"] = st.session_state.get("loop_beta", 0.5)
+        d["distill_weight"] = st.session_state.get("loop_distill_weight", 0.0)
+        d["distill_temperature"] = st.session_state.get("loop_distill_temperature", 2.0)
+        d["teacher_stop_grad"] = st.session_state.get("teacher_stop_grad", True)
+        d["depth_gain_reward"] = st.session_state.get("loop_depth_gain_reward", 0.0)
+        d["loop_encoder_layers"] = st.session_state.get("loop_encoder_layers", [0, 1])
+        d["loop_body_layers"] = st.session_state.get("loop_body_layers", [2, 3, 4])
+        d["loop_output_layers"] = st.session_state.get("loop_output_layers", [5, 6, 7])
+
+    # MoE
+    if d["use_moe"]:
+        d["num_experts"] = st.session_state.get("num_experts", 4)
+        d["num_experts_per_tok"] = st.session_state.get("num_experts_per_tok", 1)
+        d["moe_intermediate_size"] = st.session_state.get(
+            "moe_intermediate_size",
+            compute_intermediate_size(h),
+        )
+        d["norm_topk_prob"] = st.session_state.get("norm_topk_prob", True)
+        d["router_aux_loss_coef"] = st.session_state.get("router_aux_loss_coef", 5e-4)
+
+    return d
+
+
+def gen_python_code(cfg: dict) -> str:
+    """Generate MiniMindConfig instantiation code."""
+    is_linear = cfg.get("model_architecture") == "linear"
+    is_looped = cfg.get("model_architecture") == "looped"
+    if is_looped:
+        module = "model.model_minimind_loop"
+        cls = "MiniMindConfig"
+    else:
+        module = "model.model_minimind_linear" if is_linear else "model.model_minimind"
+        cls = "MiniMindConfig"
+    lines = [f"from {module} import {cls}", "", f"config = {cls}("]
+    params = [
+        ("hidden_size", cfg["hidden_size"]),
+        ("num_hidden_layers", cfg["num_hidden_layers"]),
+        ("vocab_size", cfg["vocab_size"]),
+        ("dropout", cfg["dropout"]),
+        ("hidden_act", f'"{cfg["hidden_act"]}"'),
+        ("tie_word_embeddings", str(cfg["tie_word_embeddings"])),
+        ("num_attention_heads", cfg["num_attention_heads"]),
+        ("num_key_value_heads", cfg["num_key_value_heads"]),
+        ("max_position_embeddings", cfg["max_position_embeddings"]),
+        ("rope_theta", f'{cfg["rope_theta"]:.0f}'),
+        ("rms_norm_eps", f'{cfg["rms_norm_eps"]}'),
+        ("flash_attn", str(cfg["flash_attn"])),
+    ]
+
+    if cfg["use_moe"]:
+        params.append(("use_moe", "True"))
+        params.append(("num_experts", cfg["num_experts"]))
+        params.append(("num_experts_per_tok", cfg["num_experts_per_tok"]))
+        params.append(("norm_topk_prob", str(cfg["norm_topk_prob"])))
+        params.append(("router_aux_loss_coef", f'{cfg["router_aux_loss_coef"]}'))
+    else:
+        params.append(("use_moe", "False"))
+
+    if cfg["inference_rope_scaling"]:
+        params.append(("inference_rope_scaling", "True"))
+
+    if cfg.get("model_architecture") == "linear":
+        params.append(("full_attention_interval", cfg.get("full_attention_interval", 4)))
+        params.append(("linear_conv_kernel_dim", cfg.get("linear_conv_kernel_dim", 4)))
+        params.append(("linear_key_head_dim", cfg.get("linear_key_head_dim", cfg["head_dim"])))
+        params.append(("linear_value_head_dim", cfg.get("linear_value_head_dim", cfg["head_dim"])))
+        params.append(("linear_num_key_heads", cfg.get("linear_num_key_heads", cfg["num_attention_heads"])))
+        params.append(("linear_num_value_heads", cfg.get("linear_num_value_heads", cfg["num_attention_heads"])))
+
+    if cfg.get("model_architecture") == "looped":
+        params.append(("loop_max_steps", cfg.get("loop_max_steps", 32)))
+        if cfg.get("loop_grad_checkpoint"):
+            params.append(("loop_grad_checkpoint", "True"))
+        params.append(("q_threshold", cfg.get("q_threshold", 0.9)))
+        params.append(("n_supervision", cfg.get("n_supervision", 6)))
+        params.append(("depth_reward", cfg.get("depth_reward", 0.01)))
+        params.append(("exit_in_training", str(cfg.get("exit_in_training", True))))
+        params.append(("beta", cfg.get("beta", 0.5)))
+        if cfg.get("distill_weight"):
+            params.append(("distill_weight", cfg.get("distill_weight", 0.0)))
+        if cfg.get("distill_temperature") != 2.0:
+            params.append(("distill_temperature", cfg.get("distill_temperature", 2.0)))
+        if not cfg.get("teacher_stop_grad", True):
+            params.append(("teacher_stop_grad", str(cfg.get("teacher_stop_grad", True))))
+        if cfg.get("depth_gain_reward"):
+            params.append(("depth_gain_reward", cfg.get("depth_gain_reward", 0.0)))
+        params.append(("loop_encoder_layers", str(cfg.get("loop_encoder_layers", [0, 1]))))
+        params.append(("loop_body_layers", str(cfg.get("loop_body_layers", [2, 3, 4]))))
+        params.append(("loop_output_layers", str(cfg.get("loop_output_layers", [5, 6, 7]))))
+
+    if cfg.get("early_exit_layers") and cfg.get("early_exit_layers") != [4, 5, 6, 7]:
+        params.append(("early_exit_layers", str(cfg["early_exit_layers"])))
+    if cfg.get("early_exit_loss_weight") and cfg["early_exit_loss_weight"] != 0.3:
+        params.append(("early_exit_loss_weight", cfg["early_exit_loss_weight"]))
+
+    for i, (k, v) in enumerate(params):
+        comma = "," if i < len(params) - 1 else ""
+        lines.append(f"    {k}={v}{comma}")
+
+    lines.append(")")
+    return "\n".join(lines)
+
+
+def gen_config_json(cfg: dict) -> str:
+    """Generate a clean config.json dict."""
+    out = {}
+    keys = [
+        "hidden_size",
+        "intermediate_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "head_dim",
+        "vocab_size",
+        "max_position_embeddings",
+        "rope_theta",
+        "hidden_act",
+        "dropout",
+        "tie_word_embeddings",
+        "rms_norm_eps",
+        "flash_attn",
+        "use_moe",
+    ]
+    for k in keys:
+        if k == "rope_theta":
+            out[k] = int(cfg[k])
+        else:
+            out[k] = cfg.get(k)
+
+    if cfg.get("inference_rope_scaling") and cfg.get("rope_scaling"):
+        out["inference_rope_scaling"] = True
+        out["rope_scaling"] = cfg["rope_scaling"]
+    else:
+        out["inference_rope_scaling"] = False
+
+    out["model_architecture"] = cfg.get("model_architecture", "standard")
+
+    if cfg.get("use_moe"):
+        for k in ["num_experts", "num_experts_per_tok", "moe_intermediate_size",
+                   "norm_topk_prob", "router_aux_loss_coef"]:
+            out[k] = cfg.get(k)
+
+    if cfg.get("model_architecture") == "linear":
+        for k in ["full_attention_interval", "linear_conv_kernel_dim",
+                   "linear_key_head_dim", "linear_value_head_dim",
+                   "linear_num_key_heads", "linear_num_value_heads"]:
+            out[k] = cfg.get(k)
+
+    if cfg.get("model_architecture") == "looped":
+        for k in ["loop_max_steps", "loop_grad_checkpoint", "q_threshold", "n_supervision",
+                   "depth_reward", "exit_in_training", "beta",
+                   "distill_weight", "distill_temperature", "teacher_stop_grad",
+                   "depth_gain_reward",
+                   "loop_encoder_layers", "loop_body_layers", "loop_output_layers"]:
+            out[k] = cfg.get(k)
+
+    if cfg.get("early_exit_layers"):
+        out["early_exit_layers"] = cfg["early_exit_layers"]
+    if cfg.get("early_exit_loss_weight"):
+        out["early_exit_loss_weight"] = cfg["early_exit_loss_weight"]
+
+    return json.dumps(out, indent=2)
+
+
+def load_config_to_session(config_dict: dict):
+    """Populate st.session_state from a config dict (reverse of build_config_dict).
+    Detects matching preset name; falls back to 'Custom'."""
+    # Detect matching preset
+    matched = "Custom"
+    for name, preset in PRESETS.items():
+        match = True
+        for k, v in preset.items():
+            if config_dict.get(k) != v:
+                match = False
+                break
+        if match:
+            matched = name
+            break
+
+    st.session_state.preset = matched
+    if matched != "Custom":
+        init_from_preset(matched)
+        return
+
+    # Manual populate for custom configs
+    st.session_state.hidden_size = config_dict.get("hidden_size", 768)
+    st.session_state.num_hidden_layers = config_dict.get("num_hidden_layers", 8)
+    st.session_state.vocab_size = config_dict.get("vocab_size", 6400)
+    st.session_state.dropout = config_dict.get("dropout", 0.0)
+    st.session_state.hidden_act = config_dict.get("hidden_act", "silu")
+    st.session_state.tie_word_embeddings = config_dict.get("tie_word_embeddings", False)
+    st.session_state.num_attention_heads = config_dict.get("num_attention_heads", 8)
+    st.session_state.num_key_value_heads = config_dict.get("num_key_value_heads", 4)
+    st.session_state.max_position_embeddings = config_dict.get("max_position_embeddings", 32768)
+    st.session_state.rope_theta = float(config_dict.get("rope_theta", 1e6))
+    st.session_state.inference_rope_scaling = config_dict.get("inference_rope_scaling", False)
+    st.session_state.use_moe = config_dict.get("use_moe", False)
+    st.session_state.rms_norm_eps = config_dict.get("rms_norm_eps", 1e-6)
+    st.session_state.flash_attn = config_dict.get("flash_attn", True)
+
+    # Model architecture
+    arch = config_dict.get("model_architecture", "standard")
+    st.session_state.model_architecture = arch
+
+    # YaRN params
+    rs = config_dict.get("rope_scaling") or {}
+    if config_dict.get("inference_rope_scaling") and rs:
+        st.session_state.beta_fast = rs.get("beta_fast", 32)
+        st.session_state.beta_slow = rs.get("beta_slow", 1)
+        st.session_state.factor = rs.get("factor", 16)
+        st.session_state.original_max_position_embeddings = rs.get("original_max_position_embeddings", 2048)
+        st.session_state.attention_factor = rs.get("attention_factor", 1.0)
+
+    # MoE
+    if config_dict.get("use_moe"):
+        st.session_state.num_experts = config_dict.get("num_experts", 4)
+        st.session_state.num_experts_per_tok = config_dict.get("num_experts_per_tok", 1)
+        st.session_state.moe_intermediate_size = config_dict.get(
+            "moe_intermediate_size",
+            compute_intermediate_size(st.session_state.hidden_size),
+        )
+        st.session_state.norm_topk_prob = config_dict.get("norm_topk_prob", True)
+        st.session_state.router_aux_loss_coef = config_dict.get("router_aux_loss_coef", 5e-4)
+
+    # Linear arch
+    if arch == "linear":
+        st.session_state.full_attention_interval = config_dict.get("full_attention_interval", 4)
+        st.session_state.linear_conv_kernel_dim = config_dict.get("linear_conv_kernel_dim", 4)
+        st.session_state.linear_key_head_dim = config_dict.get(
+            "linear_key_head_dim",
+            compute_head_dim(st.session_state.hidden_size, st.session_state.num_attention_heads),
+        )
+        st.session_state.linear_value_head_dim = config_dict.get(
+            "linear_value_head_dim",
+            compute_head_dim(st.session_state.hidden_size, st.session_state.num_attention_heads),
+        )
+        st.session_state.linear_num_key_heads = config_dict.get("linear_num_key_heads", st.session_state.num_attention_heads)
+        st.session_state.linear_num_value_heads = config_dict.get("linear_num_value_heads", st.session_state.num_attention_heads)
+
+    # Looped arch
+    if arch == "looped":
+        st.session_state.loop_max_steps = config_dict.get("loop_max_steps", 32)
+        st.session_state.loop_grad_checkpoint = config_dict.get("loop_grad_checkpoint", False)
+        st.session_state.loop_q_threshold = config_dict.get("q_threshold", 0.9)
+        st.session_state.loop_n_supervision = config_dict.get("n_supervision", 6)
+        st.session_state.loop_depth_reward = config_dict.get("depth_reward", 0.01)
+        st.session_state.exit_in_training = config_dict.get("exit_in_training", True)
+        st.session_state.loop_beta = config_dict.get("beta", 0.5)
+        st.session_state.loop_distill_weight = config_dict.get("distill_weight", 0.0)
+        st.session_state.loop_distill_temperature = config_dict.get("distill_temperature", 2.0)
+        st.session_state.teacher_stop_grad = config_dict.get("teacher_stop_grad", True)
+        st.session_state.loop_depth_gain_reward = config_dict.get("depth_gain_reward", 0.0)
+        st.session_state.loop_encoder_layers = config_dict.get("loop_encoder_layers", [0, 1])
+        st.session_state.loop_body_layers = config_dict.get("loop_body_layers", [2, 3, 4])
+        st.session_state.loop_output_layers = config_dict.get("loop_output_layers", [5, 6, 7])
+
+    # Early Exit
+    ee_layers = config_dict.get("early_exit_layers")
+    st.session_state.early_exit_enabled = bool(ee_layers)
+    if ee_layers:
+        st.session_state.early_exit_layers = ee_layers
+        st.session_state.early_exit_loss_weight = config_dict.get("early_exit_loss_weight", 0.3)
+
+
+def parse_training_metrics(log_text):
+    """Extract training metrics from log for charting. Returns list of dicts."""
+    rows = []
+    for line in log_text.strip().split("\n"):
+        ep = re.search(r"Epoch:\[(\d+)/(\d+)\]\((\d+)/(\d+)\)", line)
+        if not ep:
+            continue
+        row = {}
+        for m in re.finditer(r"([a-zA-Z_]\w*):\s*([\d.eE+-]+)", line):
+            try:
+                row[m.group(1)] = float(m.group(2))
+            except ValueError:
+                pass
+        if row:
+            rows.append(row)
+    return rows
+
+
+def render_metrics_charts(metrics, columns=3):
+    """Render loss, lr, epoch_time into separate charts to avoid scale mismatch."""
+    if not metrics:
+        return
+
+    loss_keys = [k for k in metrics[0] if k.endswith("loss") or k == "loss"]
+    lr_key = "lr" if "lr" in metrics[0] else "learning_rate"
+    time_key = "epoch_time"
+
+    chart_groups = []
+    if loss_keys:
+        chart_groups.append(("Loss", loss_keys))
+    if lr_key in metrics[0]:
+        chart_groups.append(("Learning Rate", [lr_key]))
+    if time_key in metrics[0]:
+        chart_groups.append(("Epoch Time (min)", [time_key]))
+
+    if not chart_groups:
+        return
+
+    cols = st.columns(min(len(chart_groups), columns))
+    for col, (title, keys) in zip(cols, chart_groups):
+        with col:
+            st.caption(title)
+            chart_data = [{"step": i + 1, **{k: m[k] for k in keys if k in m}}
+                          for i, m in enumerate(metrics)]
+            st.line_chart(chart_data, x="step", use_container_width=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Architecture diagram (HTML)
+# ═══════════════════════════════════════════════════════════════
+
+def arch_diagram(cfg: dict) -> str:
+    """Build an HTML architecture diagram string."""
+    n = cfg["num_hidden_layers"]
+    use_moe = cfg.get("use_moe", False)
+    arch = cfg.get("model_architecture", "standard")
+
+    blocks = []
+
+    def _block(text, detail="", color_start="#1e3a5f", color_end="#2563eb"):
+        return (
+            f'<div class="arch-block" style="background: linear-gradient(135deg, '
+            f'{color_start} 0%, {color_end} 100%);">'
+            f"<div>{text}</div>"
+            f'<div class="arch-label">{detail}</div>'
+            f"</div>"
+        )
+
+    def _arrow():
+        return '<div class="arch-arrow">&#9660;</div>'
+
+    # Input
+    blocks.append(_block("Input", "token ids"))
+    blocks.append(_arrow())
+
+    # Embedding
+    emb_detail = f"vocab={cfg['vocab_size']}, dim={cfg['hidden_size']}"
+    blocks.append(_block("Embedding", emb_detail, "#0f3b5e", "#1d6fa5"))
+    blocks.append(_arrow())
+
+    # Layer stack
+    layer_color_s = "#1a3a5c"
+    layer_color_e = "#2d6a9f"
+    linear_color_s = "#3b1f6e"
+    linear_color_e = "#7c3aed"
+    for i in range(min(n, 32)):  # cap display at 32
+        label = f"Layer {i+1}" if n <= 32 or i < 16 or i >= n - 16 else "..."
+
+        if n > 32 and i == 16:
+            blocks.append(
+                _block(
+                    "&#8942;",
+                    f"... {n - 30} more layers ...",
+                    "#1a2332",
+                    "#1a2332",
+                )
+            )
+            blocks.append(_arrow())
+            continue
+        elif n > 32 and i >= 16 and i < n - 16:
+            continue
+
+        if arch == "linear":
+            interval = cfg.get("full_attention_interval", 4)
+            is_full = interval > 0 and (i + 1) % interval == 0
+            attn_type = "Full Attn" if is_full else "Linear Attn"
+            cs, ce = (layer_color_s, layer_color_e) if is_full else (linear_color_s, linear_color_e)
+        else:
+            attn_type = f"Attn({cfg['num_attention_heads']}h/{cfg['num_key_value_heads']}kv)"
+            cs, ce = layer_color_s, layer_color_e
+
+        ffn_label = "MoE-FFN" if use_moe else "FFN"
+        layer_detail = f"{attn_type} + {ffn_label}"
+        if use_moe:
+            n_exp = cfg.get("num_experts", 4)
+            n_top = cfg.get("num_experts_per_tok", 1)
+            layer_detail += f" ({n_exp}E, top-{n_top})"
+        if cfg.get("early_exit_layers") and (i + 1) in cfg["early_exit_layers"]:
+            layer_detail += " · EE"
+
+        if arch == "looped":
+            loop_color_s, loop_color_e = "#4a1d5e", "#9d4edd"
+            if i in cfg.get("loop_body_layers", []):
+                layer_detail += " · LOOP"
+                cs, ce = loop_color_s, loop_color_e
+            elif i in cfg.get("loop_encoder_layers", []):
+                layer_detail += " · ENC"
+                cs, ce = "#0f3b5e", "#1d6fa5"
+            elif i in cfg.get("loop_output_layers", []):
+                layer_detail += " · DEC"
+                cs, ce = "#1b4332", "#2d8a4e"
+
+        blocks.append(
+            _block(f"Layer {i+1}", layer_detail, cs, ce)
+        )
+        blocks.append(_arrow())
+
+    # Final Norm
+    blocks.append(
+        _block("Final Norm", f"RMSNorm({cfg['hidden_size']})", "#1b4332", "#2d8a4e")
+    )
+    blocks.append(_arrow())
+
+    # LM Head
+    lm_detail = f"vocab={cfg['vocab_size']}, dim={cfg['hidden_size']}"
+    if cfg.get("tie_word_embeddings"):
+        lm_detail += " (tied)"
+    blocks.append(_block("LM Head", lm_detail, "#4a1942", "#7c3aed"))
+    blocks.append(_arrow())
+
+    # Output
+    blocks.append(_block("Output", "logits", "#3b0f2e", "#6b1d5e"))
+
+    return f'<div class="arch-wrap">{"".join(blocks)}</div>'
+
+
+# ═══════════════════════════════════════════════════════════════
+# Initialize session state
+# ═══════════════════════════════════════════════════════════════
+
+def init_from_preset(preset_name: str):
+    """Load preset values into session_state."""
+    if preset_name == "Custom":
+        return
+    data = PRESETS.get(preset_name)
+    if data is None:
+        return
+    for k, v in data.items():
+        st.session_state[k] = v
+
+
+if "preset" not in st.session_state:
+    st.session_state.preset = "minimind-3"
+    init_from_preset("minimind-3")
+
+if "model_architecture" not in st.session_state:
+    st.session_state.model_architecture = "standard"
+
+# Auto-load config from file on first page load (before any user interaction)
+if not st.session_state.get("_config_auto_loaded"):
+    st.session_state._config_auto_loaded = True
+    trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
+    default_config = os.path.join(trainer_dir, "config_pretrain.json")
+    if os.path.exists(default_config):
+        with open(default_config, "r", encoding="utf-8") as f:
+            load_config_to_session(json.load(f))
+        if st.session_state.preset != "minimind-3":
+            st.rerun()
+
+# Handle deferred config load from button click (must run before any widget with the same key)
+if "_pending_config_load" in st.session_state:
+    load_config_to_session(st.session_state._pending_config_load)
+    del st.session_state._pending_config_load
+    st.rerun()
+
+# ═══════════════════════════════════════════════════════════════
+# Refresh recovery — detect running training process on page reload
+# ═══════════════════════════════════════════════════════════════
+def _find_running_train_process():
+    """Check if a train_*.py process is still alive. Returns (pid, script_name) or (None, None)."""
+    import subprocess as _sp
+    try:
+        if sys.platform == "win32":
+            result = _sp.run(
+                ['wmic', 'process', 'where', 'name="python.exe"', 'get', 'ProcessId,CommandLine'],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                if 'train_' in line and '.py' in line:
+                    parts = line.strip().rsplit(None, 1)
+                    if len(parts) == 2 and parts[1].isdigit():
+                        script = line.split('train_')[1].split('.py')[0] if 'train_' in line else '?'
+                        return int(parts[1]), f"train_{script}"
+        else:
+            result = _sp.run(['pgrep', '-f', 'train_.*\\.py'], capture_output=True, text=True, timeout=5)
+            pids = result.stdout.strip().split()
+            if pids:
+                result2 = _sp.run(['ps', '-p', pids[0], '-o', 'command='], capture_output=True, text=True, timeout=5)
+                script = 'train_' + result2.stdout.split('train_')[1].split('.py')[0] if 'train_' in result2.stdout else '?'
+                return int(pids[0]), f"train_{script}"
+    except Exception:
+        pass
+    return None, None
+
+def _latest_train_log(trainer_dir):
+    """Return the most recently modified training log file (or None)."""
+    candidates = []
+    logs_dir = os.path.join(trainer_dir, "logs")
+    if os.path.isdir(logs_dir):
+        candidates += [os.path.join(logs_dir, f) for f in os.listdir(logs_dir) if f.endswith(".log")]
+    legacy = os.path.join(trainer_dir, "train_output.log")
+    if os.path.exists(legacy):
+        candidates.append(legacy)
+    if not candidates:
+        return None
+    return max(candidates, key=os.path.getmtime)
+
+
+_DEFAULT_WEIGHT_PREFIX = {
+    "pretrain": "pretrain",
+    "full_sft": "full_sft",
+    "lora": "lora",
+    "dpo": "dpo",
+    "ppo": "ppo_actor",
+    "grpo": "grpo",
+    "agent": "agent",
+    "distillation": "full_dist",
+}
+
+
+def _default_weight_prefix(train_type):
+    return _DEFAULT_WEIGHT_PREFIX.get(train_type, train_type)
+
+
+def _latest_checkpoint_prefix(train_type, hidden_size, use_moe):
+    """Derive the newest matching run id from checkpoints/{train_type}_*_{dim}{moe}_resume.pth."""
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    ckpt_dir = os.path.join(repo_root, "checkpoints")
+    if not os.path.isdir(ckpt_dir):
+        return None
+    dim_suffix = f"_{hidden_size}{'_moe' if use_moe else ''}"
+    matches = []
+    for f in os.listdir(ckpt_dir):
+        if not f.endswith("_resume.pth"):
+            continue
+        stem = f[: -len("_resume.pth")]
+        if stem.endswith(dim_suffix):
+            prefix = stem[: -len(dim_suffix)]
+            if prefix.startswith(f"{train_type}_"):
+                matches.append((os.path.getmtime(os.path.join(ckpt_dir, f)), prefix))
+    if not matches:
+        return None
+    matches.sort(reverse=True)
+    return matches[0][1]
+
+
+def _resolve_save_prefix(train_type, hidden_size, use_moe, from_resume, stamp):
+    if from_resume:
+        prefix = st.session_state.get(f"save_prefix_{train_type}")
+        if not prefix:
+            prefix = _latest_checkpoint_prefix(train_type, hidden_size, use_moe)
+        if prefix:
+            return prefix
+    prefix = f"{_default_weight_prefix(train_type)}_{stamp}"
+    st.session_state[f"save_prefix_{train_type}"] = prefix
+    return prefix
+
+
+def _try_recover_training_state():
+    if "train_status" in st.session_state:
+        return
+
+    trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
+    log_path = _latest_train_log(trainer_dir)
+
+    if log_path is None:
+        return
+
+    mtime = os.path.getmtime(log_path)
+    recently_modified = (time.time() - mtime) < 60
+
+    pid, script = _find_running_train_process()
+
+    if recently_modified or pid is not None:
+        st.session_state.train_status = "running"
+        st.session_state.train_log_path = log_path
+        if pid and script:
+            st.session_state.train_type = script
+    elif pid is None and not recently_modified:
+        with open(log_path, "r", encoding="utf-8") as f:
+            log = f.read()
+        if log.strip():
+            st.session_state.train_status = "success"
+            st.session_state.train_log_path = log_path
+
+_try_recover_training_state()
+
+# ═══════════════════════════════════════════════════════════════
+# ═══ SIDEBAR ═══
+# ═══════════════════════════════════════════════════════════════
+
+with st.sidebar:
+    st.markdown(
+        '<div style="font-size:22px; font-weight:700; letter-spacing:-0.5px; '
+        'background: linear-gradient(135deg, #60a5fa, #a78bfa); '
+        '-webkit-background-clip: text; -webkit-text-fill-color: transparent; '
+        'margin-bottom: 4px;">miniMind</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption("Interactive Model Configurator")
+    st.markdown(
+        '<hr style="margin: 8px 0 16px 0; border-color: #1e293b;">',
+        unsafe_allow_html=True,
+    )
+
+    # ── Model Preset ──
+    with st.expander("Model Preset", expanded=True):
+        preset_options = [
+            "minimind-3",
+            "minimind-3-moe",
+            "minimind2-small",
+            "minimind2",
+            "minimind-linear",
+            "Custom",
+        ]
+        current_preset = st.session_state.preset
+        default_idx = (
+            preset_options.index(current_preset)
+            if current_preset in preset_options
+            else 5
+        )
+        chosen = st.radio(
+            "Quick-select preset",
+            preset_options,
+            index=default_idx,
+            key="_preset_radio",
+            label_visibility="collapsed",
+            horizontal=False,
+        )
+        if chosen != st.session_state.preset:
+            st.session_state.preset = chosen
+            if chosen != "Custom":
+                init_from_preset(chosen)
+            st.rerun()
+
+    # ── Model Architecture ──
+    with st.expander("Model Architecture", expanded=True):
+        arch_options = ["Standard Transformer", "MoE Transformer", "GatedDeltaNet (Linear)", "Looped Transformer"]
+        current_arch = st.session_state.get("model_architecture", "standard")
+        arch_index = {"standard": 0, "moe": 1, "linear": 2, "looped": 3}.get(current_arch, 0)
+        chosen_arch = st.radio(
+            "Architecture type",
+            arch_options,
+            index=arch_index,
+            key="_arch_radio",
+            label_visibility="collapsed",
+            horizontal=False,
+        )
+        arch_map = {
+            "Standard Transformer": "standard",
+            "MoE Transformer": "moe",
+            "GatedDeltaNet (Linear)": "linear",
+            "Looped Transformer": "looped",
+        }
+        mapped = arch_map[chosen_arch]
+        if mapped != st.session_state.get("model_architecture", "standard"):
+            st.session_state.model_architecture = mapped
+            if mapped == "moe":
+                st.session_state.use_moe = True
+            st.rerun()
+
+    # ── Core Architecture ──
+    with st.expander("Core Architecture", expanded=True):
+        st.slider(
+            "hidden_size",
+            128,
+            2048,
+            st.session_state.get("hidden_size", 768),
+            step=64,
+            key="hidden_size",
+        )
+        st.slider(
+            "num_hidden_layers",
+            1,
+            64,
+            st.session_state.get("num_hidden_layers", 8),
+            key="num_hidden_layers",
+        )
+        st.number_input(
+            "vocab_size",
+            1000,
+            100000,
+            st.session_state.get("vocab_size", 6400),
+            step=100,
+            key="vocab_size",
+        )
+        st.slider(
+            "dropout",
+            0.0,
+            0.5,
+            st.session_state.get("dropout", 0.0),
+            step=0.05,
+            key="dropout",
+        )
+        st.selectbox(
+            "hidden_act",
+            ["silu", "gelu", "relu"],
+            index=["silu", "gelu", "relu"].index(
+                st.session_state.get("hidden_act", "silu")
+            ),
+            key="hidden_act",
+        )
+        st.checkbox(
+            "tie_word_embeddings",
+            value=st.session_state.get("tie_word_embeddings", False),
+            key="tie_word_embeddings",
+        )
+
+    # ── Attention ──
+    with st.expander("Attention", expanded=True):
+        st.slider(
+            "num_attention_heads",
+            1,
+            32,
+            st.session_state.get("num_attention_heads", 8),
+            key="num_attention_heads",
+        )
+        st.slider(
+            "num_key_value_heads",
+            1,
+            32,
+            st.session_state.get("num_key_value_heads", 4),
+            key="num_key_value_heads",
+        )
+        _h = st.session_state.get("hidden_size", 768)
+        _q = st.session_state.get("num_attention_heads", 8)
+        _hd = compute_head_dim(_h, _q)
+        st.markdown(
+            f'<div style="background:#1a2332;border:1px solid #2d3a4e;'
+            f'border-radius:8px;padding:8px 12px;margin-top:4px;">'
+            f'<span style="color:#94a3b8;font-size:12px;">head_dim (auto) </span>'
+            f'<span style="font-family:Courier New;font-weight:700;font-size:18px;'
+            f'color:#e2e8f0;">{_hd}</span>'
+            f'<span style="color:#64748b;font-size:12px;margin-left:8px;">'
+            f'= {_h} // {_q}</span>'
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── Linear Attention Config ──
+    if st.session_state.get("model_architecture") == "linear":
+        with st.expander("Linear Attention Config", expanded=True):
+            _h = st.session_state.get("hidden_size", 768)
+            _q = st.session_state.get("num_attention_heads", 8)
+            _hd = compute_head_dim(_h, _q)
+            st.slider(
+                "full_attention_interval",
+                1, 16,
+                st.session_state.get("full_attention_interval", 4),
+                key="full_attention_interval",
+                help="Every Nth layer uses standard full attention",
+            )
+            st.slider(
+                "linear_conv_kernel_dim",
+                1, 8,
+                st.session_state.get("linear_conv_kernel_dim", 4),
+                key="linear_conv_kernel_dim",
+                help="Conv1d kernel size for GatedDeltaNet",
+            )
+            override_lin_kd = st.checkbox(
+                "Override linear_key_head_dim",
+                value=st.session_state.get("_override_lin_kd", False),
+                key="_override_lin_kd",
+            )
+            if override_lin_kd:
+                st.number_input(
+                    "linear_key_head_dim",
+                    value=st.session_state.get("linear_key_head_dim", _hd),
+                    step=8, key="linear_key_head_dim",
+                )
+            else:
+                st.session_state["linear_key_head_dim"] = _hd
+                st.markdown(
+                    f'<div style="background:#1a2332;border:1px solid #2d3a4e;'
+                    f'border-radius:8px;padding:8px 12px;margin-top:4px;">'
+                    f'<span style="color:#94a3b8;font-size:12px;">linear_key_head_dim (auto) </span>'
+                    f'<span style="font-family:Courier New;font-weight:700;'
+                    f'font-size:18px;color:#e2e8f0;">{_hd}</span>'
+                    f"</div>", unsafe_allow_html=True,
+                )
+            override_lin_vd = st.checkbox(
+                "Override linear_value_head_dim",
+                value=st.session_state.get("_override_lin_vd", False),
+                key="_override_lin_vd",
+            )
+            if override_lin_vd:
+                st.number_input(
+                    "linear_value_head_dim",
+                    value=st.session_state.get("linear_value_head_dim", _hd),
+                    step=8, key="linear_value_head_dim",
+                )
+            else:
+                st.session_state["linear_value_head_dim"] = _hd
+                st.markdown(
+                    f'<div style="background:#1a2332;border:1px solid #2d3a4e;'
+                    f'border-radius:8px;padding:8px 12px;margin-top:4px;">'
+                    f'<span style="color:#94a3b8;font-size:12px;">linear_value_head_dim (auto) </span>'
+                    f'<span style="font-family:Courier New;font-weight:700;'
+                    f'font-size:18px;color:#e2e8f0;">{_hd}</span>'
+                    f"</div>", unsafe_allow_html=True,
+                )
+            st.number_input(
+                "linear_num_key_heads",
+                value=st.session_state.get("linear_num_key_heads", _q),
+                step=1, key="linear_num_key_heads",
+            )
+            st.number_input(
+                "linear_num_value_heads",
+                value=st.session_state.get("linear_num_value_heads", _q),
+                step=1, key="linear_num_value_heads",
+            )
+
+    # ── Looped (LoopUS) Config ──
+    if st.session_state.get("model_architecture") == "looped":
+        with st.expander("Looped (LoopUS) Config", expanded=True):
+            _n_layers = st.session_state.get("num_hidden_layers", 8)
+            st.number_input(
+                "loop_max_steps (safety cap)",
+                min_value=1, max_value=128,
+                value=st.session_state.get("loop_max_steps", 32),
+                key="loop_max_steps",
+                help="Dynamic loop safety cap. The loop exits when q >= threshold; "
+                     "this only bounds worst-case (effectively infinite for trained models).",
+            )
+            st.checkbox(
+                "loop_grad_checkpoint",
+                value=st.session_state.get("loop_grad_checkpoint", False),
+                key="loop_grad_checkpoint",
+                help="Gradient checkpointing on the loop body: recompute activations "
+                     "during backward instead of storing all loop-step activations. "
+                     "Big memory saving for large-batch/long-seq pretraining "
+                     "(loop activations scale with cap × step size otherwise).",
+            )
+            st.slider(
+                "loop_q_threshold",
+                0.1, 1.0,
+                st.session_state.get("loop_q_threshold", 0.9),
+                step=0.05,
+                key="loop_q_threshold",
+                help="Confidence threshold for early exit (q > threshold halts)",
+            )
+            st.number_input(
+                "loop_n_supervision",
+                min_value=1, max_value=128,
+                value=st.session_state.get("loop_n_supervision", 6),
+                key="loop_n_supervision",
+                help="How many of the loop steps get gradients (random deep supervision)",
+            )
+            st.slider(
+                "loop_depth_reward (λ)",
+                0.0, 0.5,
+                st.session_state.get("loop_depth_reward", 0.01),
+                step=0.005,
+                key="loop_depth_reward",
+                help="Reward weight on expected loop depth λ·E[steps]. "
+                     "Higher λ → stronger incentive to exit early. Anneal upward for faster exit.",
+            )
+            st.checkbox(
+                "exit_in_training",
+                value=st.session_state.get("exit_in_training", True),
+                key="exit_in_training",
+                help="Allow per-sample early exit during training (q > threshold stops the loop). "
+                     "Disable to always run the full cap and only reward via λ.",
+            )
+            st.slider(
+                "loop_beta (monotonicity weight)",
+                0.0, 2.0,
+                st.session_state.get("loop_beta", 0.5),
+                step=0.05,
+                key="loop_beta",
+            )
+            st.markdown("#### Deep-Thinking Rewards")
+            st.caption("Self-distillation + depth-gain reward. Train with "
+                       "exit_in_training OFF so every loop state is visited.")
+            st.slider(
+                "loop_distill_weight",
+                0.0, 2.0,
+                st.session_state.get("loop_distill_weight", 0.0),
+                step=0.05,
+                key="loop_distill_weight",
+                help="Self-distillation weight: shallower loop depths imitate the "
+                     "final depth's output distribution (KL), forcing deeper states "
+                     "to carry richer representation. 0 = off.",
+            )
+            st.slider(
+                "loop_distill_temperature",
+                0.5, 5.0,
+                st.session_state.get("loop_distill_temperature", 2.0),
+                step=0.1,
+                key="loop_distill_temperature",
+                help="Self-distillation temperature T (soften teacher/student "
+                     "distributions; KL scaled by T²)",
+            )
+            st.checkbox(
+                "teacher_stop_grad",
+                value=st.session_state.get("teacher_stop_grad", True),
+                key="teacher_stop_grad",
+                help="Stop gradient on teacher (final-depth) logits to avoid the "
+                     "trivial self-KL solution. 1 = recommended.",
+            )
+            st.slider(
+                "loop_depth_gain_reward",
+                0.0, 1.0,
+                st.session_state.get("loop_depth_gain_reward", 0.0),
+                step=0.01,
+                key="loop_depth_gain_reward",
+                help="Depth-gain reward: reward a deeper step only when it reduces "
+                     "LM loss vs the shallowest-supervised-depth baseline "
+                     "(L1 − Lb)_+. 0 = off.",
+            )
+            st.caption(f"Layer partition (total: {_n_layers})")
+            enc_s = st.text_input(
+                "Encoder layers (comma-separated)",
+                value=",".join(str(x) for x in st.session_state.get("loop_encoder_layers", [0, 1])),
+                key="_loop_encoder_layers_str",
+            )
+            body_s = st.text_input(
+                "Loop body layers (comma-separated)",
+                value=",".join(str(x) for x in st.session_state.get("loop_body_layers", [2, 3, 4])),
+                key="_loop_body_layers_str",
+            )
+            out_s = st.text_input(
+                "Output layers (comma-separated)",
+                value=",".join(str(x) for x in st.session_state.get("loop_output_layers", [5, 6, 7])),
+                key="_loop_output_layers_str",
+            )
+            try:
+                st.session_state.loop_encoder_layers = [int(x.strip()) for x in enc_s.split(",") if x.strip()]
+                st.session_state.loop_body_layers = [int(x.strip()) for x in body_s.split(",") if x.strip()]
+                st.session_state.loop_output_layers = [int(x.strip()) for x in out_s.split(",") if x.strip()]
+            except ValueError:
+                pass
+
+    # ── Position Encoding ──
+    with st.expander("Position Encoding", expanded=True):
+        st.number_input(
+            "max_position_embeddings",
+            value=st.session_state.get("max_position_embeddings", 32768),
+            step=1024,
+            key="max_position_embeddings",
+            format="%d",
+        )
+        st.number_input(
+            "rope_theta",
+            10000.0,
+            10000000.0,
+            value=st.session_state.get("rope_theta", 1e6),
+            format="%.0e",
+            key="rope_theta",
+        )
+        st.checkbox(
+            "YaRN (inference_rope_scaling)",
+            value=st.session_state.get("inference_rope_scaling", False),
+            key="inference_rope_scaling",
+        )
+        if st.session_state.get("inference_rope_scaling", False):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.number_input(
+                    "beta_fast",
+                    value=st.session_state.get("beta_fast", 32),
+                    key="beta_fast",
+                )
+                st.number_input(
+                    "beta_slow",
+                    value=st.session_state.get("beta_slow", 1),
+                    key="beta_slow",
+                )
+                st.number_input(
+                    "factor",
+                    value=st.session_state.get("factor", 16),
+                    key="factor",
+                )
+            with c2:
+                st.number_input(
+                    "original_max_pos",
+                    value=st.session_state.get(
+                        "original_max_position_embeddings", 2048
+                    ),
+                    key="original_max_position_embeddings",
+                )
+                st.number_input(
+                    "attention_factor",
+                    value=st.session_state.get("attention_factor", 1.0),
+                    step=0.1,
+                    key="attention_factor",
+                    format="%.1f",
+                )
+
+    # ── MoE ──
+    with st.expander("MoE (Experimental)", expanded=True):
+        st.checkbox(
+            "use_moe",
+            value=st.session_state.get("use_moe", False),
+            key="use_moe",
+        )
+        if st.session_state.get("use_moe", False):
+            st.slider(
+                "num_experts",
+                2,
+                16,
+                st.session_state.get("num_experts", 4),
+                key="num_experts",
+            )
+            st.slider(
+                "num_experts_per_tok",
+                1,
+                4,
+                st.session_state.get("num_experts_per_tok", 1),
+                key="num_experts_per_tok",
+            )
+            _moe_int = st.session_state.get(
+                "moe_intermediate_size", compute_intermediate_size(_h)
+            )
+            override_moe = st.checkbox(
+                "Override moe_intermediate_size",
+                value=st.session_state.get("_override_moe_int", False),
+                key="_override_moe_int",
+            )
+            if override_moe:
+                st.number_input(
+                    "moe_intermediate_size",
+                    value=_moe_int,
+                    step=64,
+                    key="moe_intermediate_size",
+                )
+            else:
+                _auto_moe_int = compute_intermediate_size(
+                    st.session_state.get("hidden_size", 768)
+                )
+                st.session_state["moe_intermediate_size"] = _auto_moe_int
+                st.markdown(
+                    f'<div style="background:#1a2332;border:1px solid #2d3a4e;'
+                    f'border-radius:8px;padding:8px 12px;margin-top:4px;">'
+                    f'<span style="color:#94a3b8;font-size:12px;">'
+                    f"moe_intermediate_size (auto) </span>"
+                    f'<span style="font-family:Courier New;font-weight:700;'
+                    f'font-size:18px;color:#e2e8f0;">{_auto_moe_int}</span>'
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            st.checkbox(
+                "norm_topk_prob",
+                value=st.session_state.get("norm_topk_prob", True),
+                key="norm_topk_prob",
+            )
+            st.number_input(
+                "router_aux_loss_coef",
+                0.0,
+                0.01,
+                value=st.session_state.get("router_aux_loss_coef", 5e-4),
+                format="%.1e",
+                key="router_aux_loss_coef",
+            )
+
+    # ── Early Exit (training only) ──
+    with st.expander("Early Exit (Training)", expanded=False):
+        st.checkbox(
+            "Enable Early Exit Loss",
+            value=st.session_state.get("early_exit_enabled", False),
+            key="early_exit_enabled",
+            help="Add shared-LM-head CE loss at intermediate layers during training",
+        )
+        if st.session_state.get("early_exit_enabled", False):
+            ee_default = st.session_state.get("early_exit_layers", [4, 5, 6, 7])
+            layers_str = st.text_input(
+                "early_exit_layers (comma-separated)",
+                value=",".join(str(x) for x in ee_default),
+                key="_early_exit_layers_str",
+            )
+            try:
+                st.session_state.early_exit_layers = [int(x.strip()) for x in layers_str.split(",") if x.strip()]
+            except ValueError:
+                st.session_state.early_exit_layers = [4, 5, 6, 7]
+            st.slider(
+                "early_exit_loss_weight",
+                0.0, 1.0,
+                st.session_state.get("early_exit_loss_weight", 0.3),
+                0.05,
+                key="early_exit_loss_weight",
+            )
+
+    # ── Misc ──
+    with st.expander("Misc"):
+        st.number_input(
+            "rms_norm_eps",
+            value=st.session_state.get("rms_norm_eps", 1e-6),
+            format="%.0e",
+            key="rms_norm_eps",
+        )
+        st.checkbox(
+            "flash_attn",
+            value=st.session_state.get("flash_attn", True),
+            key="flash_attn",
+        )
+
+    # ── Training ──
+    with st.expander("🚀 Training", expanded=(st.session_state.get("train_status") == "running")):
+        train_type = st.selectbox(
+            "Training type",
+            ["pretrain", "full_sft", "lora", "dpo", "ppo", "grpo", "agent", "distillation"],
+            key="train_type",
+        )
+        if train_type in ("pretrain", "full_sft", "distillation"):
+            st.radio("Dataset size", ["mini", "normal"], key="dataset_size", horizontal=True)
+        config_file = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "trainer", f"config_{train_type}.json"
+        )
+        if os.path.exists(config_file):
+            if st.button("📂 Load config from file", use_container_width=True, key="btn_load_config",
+                         help=f"Load model architecture from {config_file}"):
+                with open(config_file, "r", encoding="utf-8") as f:
+                    st.session_state._pending_config_load = json.load(f)
+                st.rerun()
+        st.checkbox("Resume from checkpoint (--from_resume)", value=False, key="from_resume",
+                    help="Auto-detect and resume from checkpoints/{weight}_{dim}{_moe}_resume.pth")
+        st.selectbox(
+            "Optimizer",
+            ["adamw", "adafactor", "muon"],
+            index=["adamw", "adafactor", "muon"].index(
+                st.session_state.get("optimizer", "adamw")
+            ),
+            key="optimizer",
+            help="AdamW (默认) / Adafactor (torch 内置) / Muon (torch>=2.10 内置，"
+                 "否则自动回退到原生纯 PyTorch 实现)",
+        )
+        if st.button("Start Training", use_container_width=True, key="btn_start_train"):
+            st.session_state.train_triggered = True
+        if st.session_state.get("train_status") == "running":
+            log_path = st.session_state.get("train_log_path")
+            if log_path and os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8") as f:
+                    log = f.read()
+                pi = re.findall(r'Epoch:\[(\d+)/(\d+)\]\((\d+)/(\d+)\)', log)
+                if pi:
+                    ep, te, stp, tst = map(int, pi[-1])
+                    pct = min(((ep - 1) + stp / tst) / te, 1.0)
+                    st.progress(pct)
+                    st.caption(f"Epoch {ep}/{te} — Step {stp}/{tst} ({pct * 100:.1f}%)")
+                else:
+                    st.info("Training in progress...")
+            else:
+                st.info("Training in progress...")
+        elif st.session_state.get("train_status") == "success":
+            st.success("Training completed")
+        elif st.session_state.get("train_status") == "failed":
+            st.error("Failed to start training")
+
+# ═══════════════════════════════════════════════════════════════
+# ═══ MAIN AREA ═══
+# ═══════════════════════════════════════════════════════════════
+
+if st.session_state.get("train_triggered", False):
+    st.session_state.train_triggered = False
+    proc = st.session_state.get("train_proc")
+    if proc is not None:
+        if proc.poll() is None:
+            st.session_state.train_status = "running"
+        else:
+            st.session_state.train_proc = None
+    if st.session_state.get("train_proc") is None:
+        try:
+            trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
+            train_type = st.session_state.get("train_type", "pretrain")
+            script_name = f"train_{train_type}.py"
+            script_path = os.path.join(trainer_dir, script_name)
+            if not os.path.exists(script_path):
+                st.session_state.train_status = "failed"
+            else:
+                cfg = build_config_dict()
+                config_path = os.path.join(trainer_dir, f"config_{train_type}.json")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+                from_resume = st.session_state.get("from_resume", False)
+                stamp = time.strftime("%Y%m%d_%H%M%S")
+                save_prefix = _resolve_save_prefix(train_type, cfg["hidden_size"], cfg["use_moe"],
+                                                   from_resume, stamp)
+                cmd = [sys.executable, "-u", script_path]
+                cmd.extend([
+                    "--config_path", config_path,
+                    "--hidden_size", str(cfg["hidden_size"]),
+                    "--num_hidden_layers", str(cfg["num_hidden_layers"]),
+                    "--use_moe", "1" if cfg["use_moe"] else "0",
+                ])
+                cmd.extend(["--optimizer", st.session_state.get("optimizer", "adamw")])
+                if train_type == "lora":
+                    cmd.extend(["--lora_name", save_prefix])
+                else:
+                    cmd.extend(["--save_weight", save_prefix])
+                if cfg.get("model_architecture") == "looped":
+                    cmd.extend(["--use_looped", "1"])
+                if cfg.get("early_exit_layers") and st.session_state.get("early_exit_enabled", False):
+                    cmd.extend(["--early_exit", "1"])
+                if from_resume:
+                    cmd.extend(["--from_resume", "1"])
+                if train_type == "pretrain":
+                    suffix = "_mini" if st.session_state.get("dataset_size", "mini") == "mini" else ""
+                    cmd.extend(["--data_path", f"../dataset/pretrain_t2t{suffix}.jsonl"])
+                elif train_type in ("full_sft", "distillation"):
+                    suffix = "_mini" if st.session_state.get("dataset_size", "mini") == "mini" else ""
+                    cmd.extend(["--data_path", f"../dataset/sft_t2t{suffix}.jsonl"])
+                logs_dir = os.path.join(trainer_dir, "logs")
+                os.makedirs(logs_dir, exist_ok=True)
+                log_path = os.path.join(logs_dir, f"train_{save_prefix}.log")
+                if not from_resume:
+                    seq = 1
+                    while os.path.exists(log_path):
+                        seq += 1
+                        log_path = os.path.join(logs_dir, f"train_{save_prefix}_{seq}.log")
+                log_file = open(log_path, "a" if from_resume else "w", encoding="utf-8")
+                st.session_state.train_log_path = log_path
+                st.session_state.train_proc = subprocess.Popen(
+                    cmd,
+                    cwd=trainer_dir,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                )
+                st.session_state.train_status = "running"
+        except Exception:
+            st.session_state.train_status = "failed"
+
+if st.session_state.get("train_status") == "running":
+    proc = st.session_state.get("train_proc")
+    if proc is not None and proc.poll() is not None:
+        st.session_state.train_status = "success" if proc.poll() == 0 else "failed"
+
+cfg = build_config_dict()
+breakdown = calc_params(cfg)
+total_params = breakdown["Total Params"]["value"]
+
+# ── Header row ──
+name = st.session_state.preset
+if name == "Custom":
+    name = "Custom Model"
+
+suffix = ""
+if cfg["use_moe"]:
+    active_total = breakdown["Active Total"]["value"]
+    suffix = " (MoE)"
+elif cfg.get("model_architecture") == "linear":
+    active_total = total_params
+    suffix = " (Linear)"
+elif cfg.get("model_architecture") == "looped":
+    active_total = total_params
+    suffix = " (Looped)"
+else:
+    active_total = total_params
+    suffix = ""
+name_label = f"{name} &nbsp;{suffix}" if suffix else name
+
+col_title, col_badges = st.columns([1.2, 2])
+with col_title:
+    st.markdown(
+        f'<div style="font-size: 26px; font-weight: 700; '
+        f'letter-spacing: -0.5px; color: #f1f5f9;">{name_label}</div>',
+        unsafe_allow_html=True,
+    )
+
+with col_badges:
+    badge_html = (
+        f'<span class="badge">{fmt_num(total_params)} params</span>'
+    )
+    if cfg["use_moe"]:
+        badge_html += (
+            f'<span class="badge badge-moe">{fmt_num(active_total)} active</span>'
+        )
+    badge_html += (
+        f'<span class="badge badge-green">{cfg["num_hidden_layers"]} layers</span>'
+    )
+    badge_html += (
+        f'<span class="badge">dim={cfg["hidden_size"]}</span>'
+    )
+    badge_html += (
+        f'<span class="badge">vocab={cfg["vocab_size"]}</span>'
+    )
+    st.markdown(
+        f'<div style="margin-top: 6px;">{badge_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+st.markdown(
+    '<hr style="margin: 4px 0 16px 0; border-color: #1e293b;">',
+    unsafe_allow_html=True,
+)
+
+# ── Training progress bar (prominent, top of page) ──
+if st.session_state.get("train_status") == "running":
+    log_path = st.session_state.get("train_log_path")
+    if log_path and os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8") as f:
+            log = f.read()
+        pi = re.findall(r'Epoch:\[(\d+)/(\d+)\]\((\d+)/(\d+)\)', log)
+        if pi:
+            ep, te, stp, tst = map(int, pi[-1])
+            pct = min(((ep - 1) + stp / tst) / te, 1.0)
+            st.progress(pct, text=f"⏳ Training — Epoch {ep}/{te}, Step {stp}/{tst} ({pct*100:.1f}%)")
+        else:
+            st.info("⏳ Training in progress... (waiting for first epoch output)")
+    else:
+        st.info("⏳ Training started...")
+
+# ── Main content (single column) ──
+
+# ═══ Architecture diagram ──
+st.markdown(
+    '<div style="font-size: 13px; font-weight: 600; letter-spacing: 0.8px; '
+    'color: #94a3b8; text-transform: uppercase; margin-bottom: 8px;">'
+    "Architecture</div>",
+    unsafe_allow_html=True,
+)
+
+st.markdown(arch_diagram(cfg), unsafe_allow_html=True)
+
+# Additional architecture info
+int_size = cfg.get("intermediate_size", compute_intermediate_size(cfg["hidden_size"]))
+st.markdown(
+    f'<div style="margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px;">'
+    f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
+    f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
+    f"FFN intermediate: {fmt_num(int_size)}</span>"
+    f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
+    f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
+    f"head_dim: {cfg['head_dim']}</span>"
+    f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
+    f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
+    f"max_pos: {cfg['max_position_embeddings']}</span>"
+    f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
+    f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
+    f"rope_theta: {cfg['rope_theta']:.0e}</span>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
+# ═══ Breakdown + JSON + Code ═══
+# ── Parameter Breakdown ──
+st.markdown(
+    '<div class="section-title">Parameter Breakdown</div>',
+    unsafe_allow_html=True,
+)
+
+table_data = []
+for name, info in breakdown.items():
+    table_data.append(
+        {
+            "Component": name,
+            "Params": fmt_num(info["value"]),
+        }
+    )
+st.dataframe(
+    table_data,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Component": st.column_config.TextColumn("Component", width="medium"),
+        "Params": st.column_config.TextColumn("Parameters", width="small"),
+    },
+)
+
+# Show percentage of total
+pct_rows = []
+for name, info in breakdown.items():
+    if name in ("Total Params", "Active Total", "Layer Distribution"):
+        continue
+    val = info["value"]
+    pct = (val / total_params * 100) if total_params > 0 else 0
+    pct_rows.append(
+        {
+            "Component": name,
+            "% of Total": f"{pct:.1f}%",
+        }
+    )
+st.dataframe(
+    pct_rows,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Component": st.column_config.TextColumn("Component", width="medium"),
+        "% of Total": st.column_config.TextColumn("% of Total", width="small"),
+    },
+)
+
+# ── Config JSON ──
+st.markdown(
+    '<div class="section-title">Config JSON</div>',
+    unsafe_allow_html=True,
+)
+
+json_str = gen_config_json(cfg)
+st.code(json_str, language="json", line_numbers=False)
+
+# ── Python Code ──
+st.markdown(
+    '<div class="section-title">Python Code</div>',
+    unsafe_allow_html=True,
+)
+
+py_code = gen_python_code(cfg)
+st.code(py_code, language="python", line_numbers=False)
+
+# ── Training Log ──
+if st.session_state.get("train_status") == "running":
+    st.markdown('<div class="section-title">📊 Training Monitor</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        auto = st.checkbox("Auto-refresh 2s", value=True, key="auto_refresh_log")
+    with c2:
+        if st.button("Clear Log", key="clear_train_log"):
+            log_path = st.session_state.get("train_log_path")
+            if log_path and os.path.exists(log_path):
+                open(log_path, "w").close()
+                st.rerun()
+    with c3:
+        current_log = st.session_state.get("train_log_path")
+        st.caption(f"log: {os.path.basename(current_log) if current_log else '-'}")
+    log_path = st.session_state.get("train_log_path")
+    if log_path and os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8") as f:
+            log = f.read()
+        metrics = parse_training_metrics(log)
+        if metrics:
+            render_metrics_charts(metrics)
+        with st.expander("📄 Raw Log", expanded=len(metrics) == 0):
+            st.code(log[-10000:] if len(log) > 10000 else log or "(empty)", language="text", line_numbers=False)
+    if auto:
+        time.sleep(2)
+        st.rerun()
+elif st.session_state.get("train_status") == "success":
+    st.success("Training completed successfully")
+    log_path = st.session_state.get("train_log_path")
+    if log_path and os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8") as f:
+            log = f.read()
+        metrics = parse_training_metrics(log)
+        if metrics:
+            st.markdown('<div class="section-title">📊 Training Metrics</div>', unsafe_allow_html=True)
+            render_metrics_charts(metrics)
+        with st.expander("📄 Training Log", expanded=False):
+            st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
+elif st.session_state.get("train_status") == "failed":
+    st.error("Training failed to start")
+    log_path = st.session_state.get("train_log_path")
+    if log_path and os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8") as f:
+            log = f.read()
+        if log.strip():
+            with st.expander("📄 Error Log", expanded=True):
+                st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
+
+# ── Previous Training Logs (kept from every run) ──
+if st.session_state.get("train_status") != "running":
+    trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
+    logs_dir = os.path.join(trainer_dir, "logs")
+    prev_logs = []
+    if os.path.isdir(logs_dir):
+        prev_logs += [os.path.join(logs_dir, f) for f in os.listdir(logs_dir) if f.endswith(".log")]
+    legacy = os.path.join(trainer_dir, "train_output.log")
+    if os.path.exists(legacy):
+        prev_logs.append(legacy)
+    if prev_logs:
+        prev_logs = sorted(prev_logs, key=os.path.getmtime, reverse=True)
+        with st.expander(f"📁 Previous Training Logs ({len(prev_logs)})", expanded=False):
+            names = [os.path.basename(p) for p in prev_logs]
+            sel_name = st.selectbox("Select a log", names, key="prev_log_select")
+            sel_path = next(p for p in prev_logs if os.path.basename(p) == sel_name)
+            with open(sel_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            metrics = parse_training_metrics(content)
+            if metrics:
+                render_metrics_charts(metrics)
+            with st.expander("📄 Raw Log", expanded=False):
+                st.code(content[-5000:] if len(content) > 5000 else content,
+                        language="text", line_numbers=False)
+
+# Footer
+st.markdown(
+'<div style="margin-top: 24px; font-size: 11px; color: #475569; '
+'text-align: center; border-top: 1px solid #1e293b; padding-top: 12px;">'
+"MiniMind Config WebUI &mdash; standalone, no model weights required"
+"</div>",
+unsafe_allow_html=True,
+)

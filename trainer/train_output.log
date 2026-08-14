@@ -1,0 +1,704 @@
+Model Params: 198.42M-A63.94M
+Trainable Params: 198.417M
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 14681 examples [00:00, 113420.96 examples/s]Generating train split: 29345 examples [00:00, 125324.95 examples/s]Generating train split: 44005 examples [00:00, 126935.50 examples/s]Generating train split: 58665 examples [00:00, 129196.17 examples/s]Generating train split: 73348 examples [00:00, 132197.73 examples/s]Generating train split: 103996 examples [00:00, 168564.51 examples/s]Generating train split: 146956 examples [00:00, 214902.03 examples/s]Generating train split: 184233 examples [00:00, 231205.11 examples/s]Generating train split: 221325 examples [00:01, 226193.05 examples/s]Generating train split: 253164 examples [00:01, 223370.21 examples/s]Generating train split: 279711 examples [00:01, 222687.88 examples/s]Generating train split: 306302 examples [00:01, 222522.06 examples/s]Generating train split: 338252 examples [00:01, 223307.99 examples/s]Generating train split: 370173 examples [00:01, 226728.35 examples/s]Generating train split: 402284 examples [00:01, 228962.39 examples/s]Generating train split: 434341 examples [00:02, 231428.31 examples/s]Generating train split: 461223 examples [00:02, 227723.71 examples/s]Generating train split: 493388 examples [00:02, 226258.88 examples/s]Generating train split: 520059 examples [00:02, 223015.50 examples/s]Generating train split: 547894 examples [00:02, 206375.68 examples/s]Generating train split: 571655 examples [00:02, 191503.10 examples/s]Generating train split: 598729 examples [00:02, 185561.29 examples/s]Generating train split: 618812 examples [00:03, 185057.08 examples/s]Generating train split: 649681 examples [00:03, 191477.01 examples/s]Generating train split: 670182 examples [00:03, 191959.76 examples/s]Generating train split: 690828 examples [00:03, 193815.57 examples/s]Generating train split: 722117 examples [00:03, 201993.88 examples/s]Generating train split: 753534 examples [00:03, 208600.41 examples/s]Generating train split: 786261 examples [00:03, 214906.42 examples/s]Generating train split: 823095 examples [00:03, 235083.50 examples/s]Generating train split: 861284 examples [00:04, 257552.05 examples/s]Generating train split: 899359 examples [00:04, 285198.65 examples/s]Generating train split: 905718 examples [00:04, 210500.97 examples/s]
+Epoch:[1/2](100/56608), loss: 2.1648, logits_loss: 2.1608, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 617.0min
+Epoch:[1/2](200/56608), loss: 2.1975, logits_loss: 2.1935, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 410.0min
+Epoch:[1/2](300/56608), loss: 2.0372, logits_loss: 2.0332, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 341.0min
+Epoch:[1/2](400/56608), loss: 2.2376, logits_loss: 2.2336, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 305.0min
+Epoch:[1/2](500/56608), loss: 1.8837, logits_loss: 1.8797, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 283.0min
+Epoch:[1/2](600/56608), loss: 1.9531, logits_loss: 1.9491, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 268.0min
+Epoch:[1/2](700/56608), loss: 1.8833, logits_loss: 1.8793, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 258.0min
+Epoch:[1/2](800/56608), loss: 1.9209, logits_loss: 1.9169, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 249.0min
+Epoch:[1/2](900/56608), loss: 1.8317, logits_loss: 1.8277, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 243.0min
+Epoch:[1/2](1000/56608), loss: 2.0101, logits_loss: 2.0061, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 237.0min
+Epoch:[1/2](1100/56608), loss: 1.9905, logits_loss: 1.9865, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 235.0min
+Epoch:[1/2](1200/56608), loss: 2.0019, logits_loss: 1.9979, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 230.0min
+Epoch:[1/2](1300/56608), loss: 1.8967, logits_loss: 1.8927, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 227.0min
+Epoch:[1/2](1400/56608), loss: 1.9744, logits_loss: 1.9704, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 224.0min
+Epoch:[1/2](1500/56608), loss: 1.6981, logits_loss: 1.6941, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 221.0min
+Epoch:[1/2](1600/56608), loss: 2.0314, logits_loss: 2.0274, aux_loss: 0.0040, lr: 0.00001000, epoch_time: 218.0min
+Epoch:[1/2](1700/56608), loss: 2.0365, logits_loss: 2.0325, aux_loss: 0.0040, lr: 0.00000999, epoch_time: 216.0min
+Epoch:[1/2](1800/56608), loss: 2.0206, logits_loss: 2.0166, aux_loss: 0.0040, lr: 0.00000999, epoch_time: 214.0min
+Epoch:[1/2](1900/56608), loss: 1.9900, logits_loss: 1.9860, aux_loss: 0.0040, lr: 0.00000999, epoch_time: 212.0min
+Epoch:[1/2](2000/56608), loss: 1.7774, logits_loss: 1.7734, aux_loss: 0.0040, lr: 0.00000999, epoch_time: 211.0min
+Epoch:[1/2](2100/56608), loss: 1.7707, logits_loss: 1.7667, aux_loss: 0.0040, lr: 0.00000999, epoch_time: 210.0min
+Epoch:[1/2](2200/56608), loss: 1.7066, logits_loss: 1.7026, aux_loss: 0.0040, lr: 0.00000999, epoch_time: 209.0min
+Epoch:[1/2](2300/56608), loss: 1.9329, logits_loss: 1.9289, aux_loss: 0.0040, lr: 0.00000999, epoch_time: 207.0min
+Epoch:[1/2](2400/56608), loss: 1.8845, logits_loss: 1.8805, aux_loss: 0.0040, lr: 0.00000999, epoch_time: 206.0min
+Epoch:[1/2](2500/56608), loss: 1.8364, logits_loss: 1.8324, aux_loss: 0.0040, lr: 0.00000999, epoch_time: 205.0min
+Epoch:[1/2](2600/56608), loss: 1.8579, logits_loss: 1.8539, aux_loss: 0.0040, lr: 0.00000999, epoch_time: 204.0min
+Epoch:[1/2](2700/56608), loss: 1.9403, logits_loss: 1.9363, aux_loss: 0.0040, lr: 0.00000999, epoch_time: 202.0min
+Epoch:[1/2](2800/56608), loss: 1.5776, logits_loss: 1.5736, aux_loss: 0.0040, lr: 0.00000999, epoch_time: 201.0min
+Epoch:[1/2](2900/56608), loss: 1.9292, logits_loss: 1.9252, aux_loss: 0.0040, lr: 0.00000999, epoch_time: 200.0min
+Epoch:[1/2](3000/56608), loss: 1.8921, logits_loss: 1.8881, aux_loss: 0.0040, lr: 0.00000998, epoch_time: 199.0min
+Epoch:[1/2](3100/56608), loss: 1.6700, logits_loss: 1.6660, aux_loss: 0.0040, lr: 0.00000998, epoch_time: 200.0min
+Epoch:[1/2](3200/56608), loss: 1.7624, logits_loss: 1.7584, aux_loss: 0.0040, lr: 0.00000998, epoch_time: 199.0min
+Epoch:[1/2](3300/56608), loss: 1.9050, logits_loss: 1.9010, aux_loss: 0.0040, lr: 0.00000998, epoch_time: 198.0min
+Epoch:[1/2](3400/56608), loss: 1.7328, logits_loss: 1.7288, aux_loss: 0.0040, lr: 0.00000998, epoch_time: 198.0min
+Epoch:[1/2](3500/56608), loss: 1.6951, logits_loss: 1.6911, aux_loss: 0.0040, lr: 0.00000998, epoch_time: 197.0min
+Epoch:[1/2](3600/56608), loss: 1.7254, logits_loss: 1.7214, aux_loss: 0.0040, lr: 0.00000998, epoch_time: 197.0min
+Epoch:[1/2](3700/56608), loss: 1.8109, logits_loss: 1.8069, aux_loss: 0.0040, lr: 0.00000998, epoch_time: 196.0min
+Epoch:[1/2](3800/56608), loss: 1.9006, logits_loss: 1.8966, aux_loss: 0.0040, lr: 0.00000998, epoch_time: 196.0min
+Epoch:[1/2](3900/56608), loss: 1.8582, logits_loss: 1.8542, aux_loss: 0.0040, lr: 0.00000997, epoch_time: 195.0min
+Epoch:[1/2](4000/56608), loss: 1.8395, logits_loss: 1.8355, aux_loss: 0.0040, lr: 0.00000997, epoch_time: 195.0min
+Epoch:[1/2](4100/56608), loss: 1.8236, logits_loss: 1.8196, aux_loss: 0.0040, lr: 0.00000997, epoch_time: 195.0min
+Epoch:[1/2](4200/56608), loss: 1.8303, logits_loss: 1.8263, aux_loss: 0.0040, lr: 0.00000997, epoch_time: 195.0min
+Epoch:[1/2](4300/56608), loss: 1.7719, logits_loss: 1.7679, aux_loss: 0.0040, lr: 0.00000997, epoch_time: 194.0min
+Epoch:[1/2](4400/56608), loss: 1.6177, logits_loss: 1.6137, aux_loss: 0.0040, lr: 0.00000997, epoch_time: 194.0min
+Epoch:[1/2](4500/56608), loss: 1.8304, logits_loss: 1.8264, aux_loss: 0.0040, lr: 0.00000996, epoch_time: 193.0min
+Epoch:[1/2](4600/56608), loss: 1.9490, logits_loss: 1.9450, aux_loss: 0.0040, lr: 0.00000996, epoch_time: 193.0min
+Epoch:[1/2](4700/56608), loss: 1.9613, logits_loss: 1.9573, aux_loss: 0.0040, lr: 0.00000996, epoch_time: 192.0min
+Epoch:[1/2](4800/56608), loss: 1.7146, logits_loss: 1.7106, aux_loss: 0.0040, lr: 0.00000996, epoch_time: 192.0min
+Epoch:[1/2](4900/56608), loss: 1.9011, logits_loss: 1.8971, aux_loss: 0.0040, lr: 0.00000996, epoch_time: 191.0min
+Epoch:[1/2](5000/56608), loss: 1.8112, logits_loss: 1.8072, aux_loss: 0.0040, lr: 0.00000996, epoch_time: 191.0min
+Epoch:[1/2](5100/56608), loss: 1.7620, logits_loss: 1.7580, aux_loss: 0.0040, lr: 0.00000996, epoch_time: 190.0min
+Epoch:[1/2](5200/56608), loss: 1.7083, logits_loss: 1.7043, aux_loss: 0.0040, lr: 0.00000995, epoch_time: 190.0min
+Epoch:[1/2](5300/56608), loss: 1.7834, logits_loss: 1.7794, aux_loss: 0.0040, lr: 0.00000995, epoch_time: 189.0min
+Epoch:[1/2](5400/56608), loss: 1.7509, logits_loss: 1.7469, aux_loss: 0.0040, lr: 0.00000995, epoch_time: 189.0min
+Epoch:[1/2](5500/56608), loss: 1.7785, logits_loss: 1.7745, aux_loss: 0.0040, lr: 0.00000995, epoch_time: 188.0min
+Epoch:[1/2](5600/56608), loss: 1.8873, logits_loss: 1.8833, aux_loss: 0.0040, lr: 0.00000995, epoch_time: 187.0min
+Epoch:[1/2](5700/56608), loss: 1.8760, logits_loss: 1.8720, aux_loss: 0.0040, lr: 0.00000994, epoch_time: 187.0min
+Epoch:[1/2](5800/56608), loss: 1.7741, logits_loss: 1.7701, aux_loss: 0.0040, lr: 0.00000994, epoch_time: 186.0min
+Epoch:[1/2](5900/56608), loss: 1.8622, logits_loss: 1.8582, aux_loss: 0.0040, lr: 0.00000994, epoch_time: 186.0min
+Epoch:[1/2](6000/56608), loss: 1.7304, logits_loss: 1.7264, aux_loss: 0.0040, lr: 0.00000994, epoch_time: 185.0min
+Epoch:[1/2](6100/56608), loss: 1.7357, logits_loss: 1.7317, aux_loss: 0.0040, lr: 0.00000994, epoch_time: 185.0min
+Epoch:[1/2](6200/56608), loss: 1.7340, logits_loss: 1.7300, aux_loss: 0.0040, lr: 0.00000993, epoch_time: 184.0min
+Epoch:[1/2](6300/56608), loss: 1.7861, logits_loss: 1.7821, aux_loss: 0.0040, lr: 0.00000993, epoch_time: 184.0min
+Epoch:[1/2](6400/56608), loss: 1.8279, logits_loss: 1.8239, aux_loss: 0.0040, lr: 0.00000993, epoch_time: 183.0min
+Epoch:[1/2](6500/56608), loss: 1.7895, logits_loss: 1.7855, aux_loss: 0.0040, lr: 0.00000993, epoch_time: 183.0min
+Epoch:[1/2](6600/56608), loss: 1.8983, logits_loss: 1.8943, aux_loss: 0.0040, lr: 0.00000992, epoch_time: 182.0min
+Epoch:[1/2](6700/56608), loss: 1.9757, logits_loss: 1.9717, aux_loss: 0.0040, lr: 0.00000992, epoch_time: 182.0min
+Epoch:[1/2](6800/56608), loss: 1.9257, logits_loss: 1.9217, aux_loss: 0.0040, lr: 0.00000992, epoch_time: 181.0min
+Epoch:[1/2](6900/56608), loss: 1.8608, logits_loss: 1.8568, aux_loss: 0.0040, lr: 0.00000992, epoch_time: 181.0min
+Epoch:[1/2](7000/56608), loss: 1.7601, logits_loss: 1.7561, aux_loss: 0.0040, lr: 0.00000992, epoch_time: 180.0min
+Epoch:[1/2](7100/56608), loss: 1.8158, logits_loss: 1.8118, aux_loss: 0.0040, lr: 0.00000991, epoch_time: 180.0min
+Epoch:[1/2](7200/56608), loss: 1.6098, logits_loss: 1.6058, aux_loss: 0.0040, lr: 0.00000991, epoch_time: 179.0min
+Epoch:[1/2](7300/56608), loss: 1.7975, logits_loss: 1.7935, aux_loss: 0.0040, lr: 0.00000991, epoch_time: 179.0min
+Epoch:[1/2](7400/56608), loss: 1.8712, logits_loss: 1.8672, aux_loss: 0.0040, lr: 0.00000991, epoch_time: 178.0min
+Epoch:[1/2](7500/56608), loss: 1.6183, logits_loss: 1.6143, aux_loss: 0.0040, lr: 0.00000990, epoch_time: 178.0min
+Epoch:[1/2](7600/56608), loss: 1.8925, logits_loss: 1.8885, aux_loss: 0.0040, lr: 0.00000990, epoch_time: 177.0min
+Epoch:[1/2](7700/56608), loss: 1.8358, logits_loss: 1.8318, aux_loss: 0.0040, lr: 0.00000990, epoch_time: 177.0min
+Epoch:[1/2](7800/56608), loss: 1.8025, logits_loss: 1.7985, aux_loss: 0.0040, lr: 0.00000990, epoch_time: 176.0min
+Epoch:[1/2](7900/56608), loss: 1.7626, logits_loss: 1.7586, aux_loss: 0.0040, lr: 0.00000989, epoch_time: 176.0min
+Epoch:[1/2](8000/56608), loss: 1.7080, logits_loss: 1.7040, aux_loss: 0.0040, lr: 0.00000989, epoch_time: 175.0min
+Epoch:[1/2](8100/56608), loss: 1.5949, logits_loss: 1.5909, aux_loss: 0.0040, lr: 0.00000989, epoch_time: 175.0min
+Epoch:[1/2](8200/56608), loss: 1.6380, logits_loss: 1.6340, aux_loss: 0.0040, lr: 0.00000988, epoch_time: 175.0min
+Epoch:[1/2](8300/56608), loss: 1.4402, logits_loss: 1.4362, aux_loss: 0.0040, lr: 0.00000988, epoch_time: 174.0min
+Epoch:[1/2](8400/56608), loss: 1.7979, logits_loss: 1.7939, aux_loss: 0.0040, lr: 0.00000988, epoch_time: 174.0min
+Epoch:[1/2](8500/56608), loss: 1.8475, logits_loss: 1.8435, aux_loss: 0.0040, lr: 0.00000988, epoch_time: 173.0min
+Epoch:[1/2](8600/56608), loss: 1.8667, logits_loss: 1.8627, aux_loss: 0.0040, lr: 0.00000987, epoch_time: 173.0min
+Epoch:[1/2](8700/56608), loss: 1.7386, logits_loss: 1.7346, aux_loss: 0.0040, lr: 0.00000987, epoch_time: 172.0min
+Epoch:[1/2](8800/56608), loss: 1.7922, logits_loss: 1.7882, aux_loss: 0.0040, lr: 0.00000987, epoch_time: 172.0min
+Epoch:[1/2](8900/56608), loss: 1.6712, logits_loss: 1.6672, aux_loss: 0.0040, lr: 0.00000986, epoch_time: 171.0min
+Epoch:[1/2](9000/56608), loss: 1.8164, logits_loss: 1.8124, aux_loss: 0.0040, lr: 0.00000986, epoch_time: 171.0min
+Epoch:[1/2](9100/56608), loss: 1.8593, logits_loss: 1.8553, aux_loss: 0.0040, lr: 0.00000986, epoch_time: 170.0min
+Epoch:[1/2](9200/56608), loss: 1.7069, logits_loss: 1.7029, aux_loss: 0.0040, lr: 0.00000985, epoch_time: 170.0min
+Epoch:[1/2](9300/56608), loss: 1.7695, logits_loss: 1.7655, aux_loss: 0.0040, lr: 0.00000985, epoch_time: 169.0min
+Epoch:[1/2](9400/56608), loss: 1.8727, logits_loss: 1.8687, aux_loss: 0.0040, lr: 0.00000985, epoch_time: 169.0min
+Epoch:[1/2](9500/56608), loss: 1.8753, logits_loss: 1.8713, aux_loss: 0.0040, lr: 0.00000984, epoch_time: 169.0min
+Epoch:[1/2](9600/56608), loss: 1.8849, logits_loss: 1.8809, aux_loss: 0.0040, lr: 0.00000984, epoch_time: 168.0min
+Epoch:[1/2](9700/56608), loss: 1.6677, logits_loss: 1.6637, aux_loss: 0.0040, lr: 0.00000984, epoch_time: 168.0min
+Epoch:[1/2](9800/56608), loss: 1.7970, logits_loss: 1.7930, aux_loss: 0.0040, lr: 0.00000983, epoch_time: 167.0min
+Epoch:[1/2](9900/56608), loss: 1.6922, logits_loss: 1.6882, aux_loss: 0.0040, lr: 0.00000983, epoch_time: 167.0min
+Epoch:[1/2](10000/56608), loss: 1.7862, logits_loss: 1.7822, aux_loss: 0.0040, lr: 0.00000983, epoch_time: 166.0min
+Epoch:[1/2](10100/56608), loss: 1.7606, logits_loss: 1.7566, aux_loss: 0.0040, lr: 0.00000982, epoch_time: 166.0min
+Epoch:[1/2](10200/56608), loss: 1.7592, logits_loss: 1.7552, aux_loss: 0.0040, lr: 0.00000982, epoch_time: 166.0min
+Epoch:[1/2](10300/56608), loss: 1.6576, logits_loss: 1.6536, aux_loss: 0.0040, lr: 0.00000982, epoch_time: 165.0min
+Epoch:[1/2](10400/56608), loss: 1.9090, logits_loss: 1.9050, aux_loss: 0.0040, lr: 0.00000981, epoch_time: 165.0min
+Epoch:[1/2](10500/56608), loss: 1.9303, logits_loss: 1.9263, aux_loss: 0.0040, lr: 0.00000981, epoch_time: 164.0min
+Epoch:[1/2](10600/56608), loss: 1.7581, logits_loss: 1.7541, aux_loss: 0.0040, lr: 0.00000981, epoch_time: 164.0min
+Epoch:[1/2](10700/56608), loss: 1.7155, logits_loss: 1.7115, aux_loss: 0.0040, lr: 0.00000980, epoch_time: 163.0min
+Epoch:[1/2](10800/56608), loss: 1.6937, logits_loss: 1.6897, aux_loss: 0.0040, lr: 0.00000980, epoch_time: 163.0min
+Epoch:[1/2](10900/56608), loss: 1.8513, logits_loss: 1.8473, aux_loss: 0.0040, lr: 0.00000980, epoch_time: 163.0min
+Epoch:[1/2](11000/56608), loss: 1.7423, logits_loss: 1.7383, aux_loss: 0.0040, lr: 0.00000979, epoch_time: 162.0min
+Epoch:[1/2](11100/56608), loss: 1.7912, logits_loss: 1.7872, aux_loss: 0.0040, lr: 0.00000979, epoch_time: 162.0min
+Epoch:[1/2](11200/56608), loss: 1.6678, logits_loss: 1.6638, aux_loss: 0.0040, lr: 0.00000978, epoch_time: 161.0min
+Epoch:[1/2](11300/56608), loss: 1.7071, logits_loss: 1.7031, aux_loss: 0.0040, lr: 0.00000978, epoch_time: 161.0min
+Epoch:[1/2](11400/56608), loss: 1.7685, logits_loss: 1.7645, aux_loss: 0.0040, lr: 0.00000978, epoch_time: 161.0min
+Epoch:[1/2](11500/56608), loss: 1.9209, logits_loss: 1.9169, aux_loss: 0.0040, lr: 0.00000977, epoch_time: 160.0min
+Epoch:[1/2](11600/56608), loss: 1.4408, logits_loss: 1.4368, aux_loss: 0.0040, lr: 0.00000977, epoch_time: 160.0min
+Epoch:[1/2](11700/56608), loss: 1.8136, logits_loss: 1.8096, aux_loss: 0.0040, lr: 0.00000976, epoch_time: 159.0min
+Epoch:[1/2](11800/56608), loss: 1.7339, logits_loss: 1.7299, aux_loss: 0.0040, lr: 0.00000976, epoch_time: 159.0min
+Epoch:[1/2](11900/56608), loss: 1.8824, logits_loss: 1.8784, aux_loss: 0.0040, lr: 0.00000976, epoch_time: 158.0min
+Epoch:[1/2](12000/56608), loss: 1.6133, logits_loss: 1.6093, aux_loss: 0.0040, lr: 0.00000975, epoch_time: 158.0min
+Epoch:[1/2](12100/56608), loss: 1.9142, logits_loss: 1.9102, aux_loss: 0.0040, lr: 0.00000975, epoch_time: 158.0min
+Epoch:[1/2](12200/56608), loss: 1.7117, logits_loss: 1.7077, aux_loss: 0.0040, lr: 0.00000974, epoch_time: 157.0min
+Epoch:[1/2](12300/56608), loss: 1.6848, logits_loss: 1.6808, aux_loss: 0.0040, lr: 0.00000974, epoch_time: 157.0min
+Epoch:[1/2](12400/56608), loss: 1.7446, logits_loss: 1.7406, aux_loss: 0.0040, lr: 0.00000974, epoch_time: 156.0min
+Epoch:[1/2](12500/56608), loss: 1.7372, logits_loss: 1.7332, aux_loss: 0.0040, lr: 0.00000973, epoch_time: 156.0min
+Epoch:[1/2](12600/56608), loss: 1.9072, logits_loss: 1.9032, aux_loss: 0.0040, lr: 0.00000973, epoch_time: 156.0min
+Epoch:[1/2](12700/56608), loss: 1.8304, logits_loss: 1.8264, aux_loss: 0.0040, lr: 0.00000972, epoch_time: 155.0min
+Epoch:[1/2](12800/56608), loss: 1.7055, logits_loss: 1.7015, aux_loss: 0.0040, lr: 0.00000972, epoch_time: 155.0min
+Epoch:[1/2](12900/56608), loss: 1.7175, logits_loss: 1.7135, aux_loss: 0.0040, lr: 0.00000971, epoch_time: 154.0min
+Epoch:[1/2](13000/56608), loss: 1.7396, logits_loss: 1.7356, aux_loss: 0.0040, lr: 0.00000971, epoch_time: 154.0min
+Epoch:[1/2](13100/56608), loss: 1.6252, logits_loss: 1.6212, aux_loss: 0.0040, lr: 0.00000971, epoch_time: 154.0min
+Epoch:[1/2](13200/56608), loss: 1.8271, logits_loss: 1.8231, aux_loss: 0.0040, lr: 0.00000970, epoch_time: 153.0min
+Epoch:[1/2](13300/56608), loss: 1.8705, logits_loss: 1.8665, aux_loss: 0.0040, lr: 0.00000970, epoch_time: 153.0min
+Epoch:[1/2](13400/56608), loss: 1.8594, logits_loss: 1.8554, aux_loss: 0.0040, lr: 0.00000969, epoch_time: 152.0min
+Epoch:[1/2](13500/56608), loss: 1.6559, logits_loss: 1.6519, aux_loss: 0.0040, lr: 0.00000969, epoch_time: 152.0min
+Epoch:[1/2](13600/56608), loss: 1.7442, logits_loss: 1.7402, aux_loss: 0.0040, lr: 0.00000968, epoch_time: 152.0min
+Epoch:[1/2](13700/56608), loss: 1.7514, logits_loss: 1.7474, aux_loss: 0.0040, lr: 0.00000968, epoch_time: 151.0min
+Epoch:[1/2](13800/56608), loss: 1.8971, logits_loss: 1.8931, aux_loss: 0.0040, lr: 0.00000967, epoch_time: 151.0min
+Epoch:[1/2](13900/56608), loss: 1.8972, logits_loss: 1.8932, aux_loss: 0.0040, lr: 0.00000967, epoch_time: 150.0min
+Epoch:[1/2](14000/56608), loss: 1.6410, logits_loss: 1.6370, aux_loss: 0.0040, lr: 0.00000966, epoch_time: 150.0min
+Epoch:[1/2](14100/56608), loss: 1.9279, logits_loss: 1.9239, aux_loss: 0.0040, lr: 0.00000966, epoch_time: 150.0min
+Epoch:[1/2](14200/56608), loss: 1.7362, logits_loss: 1.7322, aux_loss: 0.0040, lr: 0.00000966, epoch_time: 149.0min
+Epoch:[1/2](14300/56608), loss: 1.7477, logits_loss: 1.7437, aux_loss: 0.0040, lr: 0.00000965, epoch_time: 149.0min
+Epoch:[1/2](14400/56608), loss: 1.8809, logits_loss: 1.8769, aux_loss: 0.0040, lr: 0.00000965, epoch_time: 148.0min
+Epoch:[1/2](14500/56608), loss: 1.5669, logits_loss: 1.5629, aux_loss: 0.0040, lr: 0.00000964, epoch_time: 148.0min
+Epoch:[1/2](14600/56608), loss: 2.0115, logits_loss: 2.0075, aux_loss: 0.0040, lr: 0.00000964, epoch_time: 148.0min
+Epoch:[1/2](14700/56608), loss: 1.7882, logits_loss: 1.7842, aux_loss: 0.0040, lr: 0.00000963, epoch_time: 147.0min
+Epoch:[1/2](14800/56608), loss: 1.7256, logits_loss: 1.7216, aux_loss: 0.0040, lr: 0.00000963, epoch_time: 147.0min
+Epoch:[1/2](14900/56608), loss: 1.7907, logits_loss: 1.7867, aux_loss: 0.0040, lr: 0.00000962, epoch_time: 146.0min
+Epoch:[1/2](15000/56608), loss: 1.6118, logits_loss: 1.6078, aux_loss: 0.0040, lr: 0.00000962, epoch_time: 146.0min
+Epoch:[1/2](15100/56608), loss: 1.7594, logits_loss: 1.7554, aux_loss: 0.0040, lr: 0.00000961, epoch_time: 146.0min
+Epoch:[1/2](15200/56608), loss: 1.7322, logits_loss: 1.7282, aux_loss: 0.0040, lr: 0.00000961, epoch_time: 145.0min
+Epoch:[1/2](15300/56608), loss: 1.6128, logits_loss: 1.6088, aux_loss: 0.0040, lr: 0.00000960, epoch_time: 145.0min
+Epoch:[1/2](15400/56608), loss: 1.7794, logits_loss: 1.7754, aux_loss: 0.0040, lr: 0.00000960, epoch_time: 144.0min
+Epoch:[1/2](15500/56608), loss: 1.6662, logits_loss: 1.6622, aux_loss: 0.0040, lr: 0.00000959, epoch_time: 144.0min
+Epoch:[1/2](15600/56608), loss: 1.6873, logits_loss: 1.6833, aux_loss: 0.0040, lr: 0.00000958, epoch_time: 144.0min
+Epoch:[1/2](15700/56608), loss: 1.8108, logits_loss: 1.8068, aux_loss: 0.0040, lr: 0.00000958, epoch_time: 143.0min
+Epoch:[1/2](15800/56608), loss: 1.7963, logits_loss: 1.7923, aux_loss: 0.0040, lr: 0.00000957, epoch_time: 143.0min
+Epoch:[1/2](15900/56608), loss: 1.6169, logits_loss: 1.6129, aux_loss: 0.0040, lr: 0.00000957, epoch_time: 143.0min
+Epoch:[1/2](16000/56608), loss: 1.7764, logits_loss: 1.7724, aux_loss: 0.0040, lr: 0.00000956, epoch_time: 142.0min
+Epoch:[1/2](16100/56608), loss: 1.5014, logits_loss: 1.4974, aux_loss: 0.0040, lr: 0.00000956, epoch_time: 142.0min
+Epoch:[1/2](16200/56608), loss: 1.5082, logits_loss: 1.5042, aux_loss: 0.0040, lr: 0.00000955, epoch_time: 141.0min
+Epoch:[1/2](16300/56608), loss: 1.8595, logits_loss: 1.8555, aux_loss: 0.0040, lr: 0.00000955, epoch_time: 141.0min
+Epoch:[1/2](16400/56608), loss: 1.6424, logits_loss: 1.6384, aux_loss: 0.0040, lr: 0.00000954, epoch_time: 141.0min
+Epoch:[1/2](16500/56608), loss: 1.6457, logits_loss: 1.6417, aux_loss: 0.0040, lr: 0.00000954, epoch_time: 140.0min
+Epoch:[1/2](16600/56608), loss: 1.7427, logits_loss: 1.7387, aux_loss: 0.0040, lr: 0.00000953, epoch_time: 140.0min
+Epoch:[1/2](16700/56608), loss: 1.7598, logits_loss: 1.7558, aux_loss: 0.0040, lr: 0.00000953, epoch_time: 139.0min
+Epoch:[1/2](16800/56608), loss: 1.8690, logits_loss: 1.8650, aux_loss: 0.0040, lr: 0.00000952, epoch_time: 139.0min
+Epoch:[1/2](16900/56608), loss: 1.6862, logits_loss: 1.6822, aux_loss: 0.0040, lr: 0.00000951, epoch_time: 139.0min
+Epoch:[1/2](17000/56608), loss: 1.5743, logits_loss: 1.5703, aux_loss: 0.0040, lr: 0.00000951, epoch_time: 138.0min
+Epoch:[1/2](17100/56608), loss: 1.7378, logits_loss: 1.7338, aux_loss: 0.0040, lr: 0.00000950, epoch_time: 138.0min
+Epoch:[1/2](17200/56608), loss: 1.7589, logits_loss: 1.7549, aux_loss: 0.0040, lr: 0.00000950, epoch_time: 138.0min
+Epoch:[1/2](17300/56608), loss: 1.6376, logits_loss: 1.6336, aux_loss: 0.0040, lr: 0.00000949, epoch_time: 137.0min
+Epoch:[1/2](17400/56608), loss: 1.5454, logits_loss: 1.5414, aux_loss: 0.0040, lr: 0.00000949, epoch_time: 137.0min
+Epoch:[1/2](17500/56608), loss: 1.7716, logits_loss: 1.7676, aux_loss: 0.0040, lr: 0.00000948, epoch_time: 137.0min
+Epoch:[1/2](17600/56608), loss: 1.7050, logits_loss: 1.7010, aux_loss: 0.0040, lr: 0.00000947, epoch_time: 136.0min
+Epoch:[1/2](17700/56608), loss: 1.6218, logits_loss: 1.6178, aux_loss: 0.0040, lr: 0.00000947, epoch_time: 136.0min
+Epoch:[1/2](17800/56608), loss: 1.7867, logits_loss: 1.7827, aux_loss: 0.0040, lr: 0.00000946, epoch_time: 135.0min
+Epoch:[1/2](17900/56608), loss: 1.6971, logits_loss: 1.6931, aux_loss: 0.0040, lr: 0.00000946, epoch_time: 135.0min
+Epoch:[1/2](18000/56608), loss: 1.6643, logits_loss: 1.6603, aux_loss: 0.0040, lr: 0.00000945, epoch_time: 135.0min
+Epoch:[1/2](18100/56608), loss: 1.8688, logits_loss: 1.8648, aux_loss: 0.0040, lr: 0.00000944, epoch_time: 134.0min
+Epoch:[1/2](18200/56608), loss: 1.7774, logits_loss: 1.7734, aux_loss: 0.0040, lr: 0.00000944, epoch_time: 134.0min
+Epoch:[1/2](18300/56608), loss: 1.6999, logits_loss: 1.6959, aux_loss: 0.0040, lr: 0.00000943, epoch_time: 134.0min
+Epoch:[1/2](18400/56608), loss: 1.6038, logits_loss: 1.5998, aux_loss: 0.0040, lr: 0.00000943, epoch_time: 133.0min
+Epoch:[1/2](18500/56608), loss: 1.7617, logits_loss: 1.7577, aux_loss: 0.0040, lr: 0.00000942, epoch_time: 133.0min
+Epoch:[1/2](18600/56608), loss: 1.7303, logits_loss: 1.7263, aux_loss: 0.0040, lr: 0.00000941, epoch_time: 132.0min
+Epoch:[1/2](18700/56608), loss: 1.5766, logits_loss: 1.5726, aux_loss: 0.0040, lr: 0.00000941, epoch_time: 132.0min
+Epoch:[1/2](18800/56608), loss: 1.8105, logits_loss: 1.8065, aux_loss: 0.0040, lr: 0.00000940, epoch_time: 132.0min
+Epoch:[1/2](18900/56608), loss: 1.7650, logits_loss: 1.7610, aux_loss: 0.0040, lr: 0.00000940, epoch_time: 131.0min
+Epoch:[1/2](19000/56608), loss: 1.5467, logits_loss: 1.5427, aux_loss: 0.0040, lr: 0.00000939, epoch_time: 131.0min
+Epoch:[1/2](19100/56608), loss: 1.7472, logits_loss: 1.7432, aux_loss: 0.0040, lr: 0.00000938, epoch_time: 131.0min
+Epoch:[1/2](19200/56608), loss: 1.6642, logits_loss: 1.6602, aux_loss: 0.0040, lr: 0.00000938, epoch_time: 130.0min
+Epoch:[1/2](19300/56608), loss: 1.7878, logits_loss: 1.7838, aux_loss: 0.0040, lr: 0.00000937, epoch_time: 130.0min
+Epoch:[1/2](19400/56608), loss: 1.9056, logits_loss: 1.9016, aux_loss: 0.0040, lr: 0.00000936, epoch_time: 129.0min
+Epoch:[1/2](19500/56608), loss: 1.4488, logits_loss: 1.4448, aux_loss: 0.0040, lr: 0.00000936, epoch_time: 129.0min
+Epoch:[1/2](19600/56608), loss: 1.7433, logits_loss: 1.7393, aux_loss: 0.0040, lr: 0.00000935, epoch_time: 129.0min
+Epoch:[1/2](19700/56608), loss: 1.8766, logits_loss: 1.8726, aux_loss: 0.0040, lr: 0.00000934, epoch_time: 128.0min
+Epoch:[1/2](19800/56608), loss: 1.5709, logits_loss: 1.5669, aux_loss: 0.0040, lr: 0.00000934, epoch_time: 128.0min
+Epoch:[1/2](19900/56608), loss: 1.6671, logits_loss: 1.6631, aux_loss: 0.0040, lr: 0.00000933, epoch_time: 128.0min
+Epoch:[1/2](20000/56608), loss: 1.6720, logits_loss: 1.6680, aux_loss: 0.0040, lr: 0.00000932, epoch_time: 127.0min
+Epoch:[1/2](20100/56608), loss: 1.7234, logits_loss: 1.7194, aux_loss: 0.0040, lr: 0.00000932, epoch_time: 127.0min
+Epoch:[1/2](20200/56608), loss: 1.8494, logits_loss: 1.8454, aux_loss: 0.0040, lr: 0.00000931, epoch_time: 127.0min
+Epoch:[1/2](20300/56608), loss: 1.8751, logits_loss: 1.8711, aux_loss: 0.0040, lr: 0.00000930, epoch_time: 126.0min
+Epoch:[1/2](20400/56608), loss: 1.6107, logits_loss: 1.6067, aux_loss: 0.0040, lr: 0.00000930, epoch_time: 126.0min
+Epoch:[1/2](20500/56608), loss: 1.4688, logits_loss: 1.4648, aux_loss: 0.0040, lr: 0.00000929, epoch_time: 125.0min
+Epoch:[1/2](20600/56608), loss: 1.7771, logits_loss: 1.7731, aux_loss: 0.0040, lr: 0.00000928, epoch_time: 125.0min
+Epoch:[1/2](20700/56608), loss: 1.6317, logits_loss: 1.6277, aux_loss: 0.0040, lr: 0.00000928, epoch_time: 125.0min
+Epoch:[1/2](20800/56608), loss: 1.4828, logits_loss: 1.4788, aux_loss: 0.0040, lr: 0.00000927, epoch_time: 124.0min
+Epoch:[1/2](20900/56608), loss: 1.7121, logits_loss: 1.7081, aux_loss: 0.0040, lr: 0.00000926, epoch_time: 124.0min
+Epoch:[1/2](21000/56608), loss: 2.1351, logits_loss: 2.1311, aux_loss: 0.0040, lr: 0.00000926, epoch_time: 124.0min
+Epoch:[1/2](21100/56608), loss: 1.8100, logits_loss: 1.8060, aux_loss: 0.0040, lr: 0.00000925, epoch_time: 123.0min
+Epoch:[1/2](21200/56608), loss: 1.5590, logits_loss: 1.5550, aux_loss: 0.0040, lr: 0.00000924, epoch_time: 123.0min
+Epoch:[1/2](21300/56608), loss: 1.7960, logits_loss: 1.7920, aux_loss: 0.0040, lr: 0.00000924, epoch_time: 123.0min
+Epoch:[1/2](21400/56608), loss: 1.7645, logits_loss: 1.7605, aux_loss: 0.0040, lr: 0.00000923, epoch_time: 122.0min
+Epoch:[1/2](21500/56608), loss: 1.7841, logits_loss: 1.7801, aux_loss: 0.0040, lr: 0.00000922, epoch_time: 122.0min
+Epoch:[1/2](21600/56608), loss: 1.7242, logits_loss: 1.7202, aux_loss: 0.0040, lr: 0.00000922, epoch_time: 121.0min
+Epoch:[1/2](21700/56608), loss: 1.6993, logits_loss: 1.6953, aux_loss: 0.0040, lr: 0.00000921, epoch_time: 121.0min
+Epoch:[1/2](21800/56608), loss: 1.7181, logits_loss: 1.7141, aux_loss: 0.0040, lr: 0.00000920, epoch_time: 121.0min
+Epoch:[1/2](21900/56608), loss: 1.5389, logits_loss: 1.5349, aux_loss: 0.0040, lr: 0.00000919, epoch_time: 120.0min
+Epoch:[1/2](22000/56608), loss: 1.6933, logits_loss: 1.6893, aux_loss: 0.0040, lr: 0.00000919, epoch_time: 120.0min
+Epoch:[1/2](22100/56608), loss: 1.5068, logits_loss: 1.5028, aux_loss: 0.0040, lr: 0.00000918, epoch_time: 120.0min
+Epoch:[1/2](22200/56608), loss: 1.7789, logits_loss: 1.7749, aux_loss: 0.0040, lr: 0.00000917, epoch_time: 119.0min
+Epoch:[1/2](22300/56608), loss: 1.5560, logits_loss: 1.5520, aux_loss: 0.0040, lr: 0.00000917, epoch_time: 119.0min
+Epoch:[1/2](22400/56608), loss: 1.6521, logits_loss: 1.6481, aux_loss: 0.0040, lr: 0.00000916, epoch_time: 119.0min
+Epoch:[1/2](22500/56608), loss: 1.5182, logits_loss: 1.5142, aux_loss: 0.0040, lr: 0.00000915, epoch_time: 118.0min
+Epoch:[1/2](22600/56608), loss: 1.8414, logits_loss: 1.8374, aux_loss: 0.0040, lr: 0.00000914, epoch_time: 118.0min
+Epoch:[1/2](22700/56608), loss: 1.7578, logits_loss: 1.7538, aux_loss: 0.0040, lr: 0.00000914, epoch_time: 117.0min
+Epoch:[1/2](22800/56608), loss: 1.6625, logits_loss: 1.6585, aux_loss: 0.0040, lr: 0.00000913, epoch_time: 117.0min
+Epoch:[1/2](22900/56608), loss: 1.6813, logits_loss: 1.6773, aux_loss: 0.0040, lr: 0.00000912, epoch_time: 117.0min
+Epoch:[1/2](23000/56608), loss: 1.6988, logits_loss: 1.6948, aux_loss: 0.0040, lr: 0.00000911, epoch_time: 116.0min
+Epoch:[1/2](23100/56608), loss: 1.7831, logits_loss: 1.7791, aux_loss: 0.0040, lr: 0.00000911, epoch_time: 116.0min
+Epoch:[1/2](23200/56608), loss: 1.7359, logits_loss: 1.7319, aux_loss: 0.0040, lr: 0.00000910, epoch_time: 116.0min
+Epoch:[1/2](23300/56608), loss: 1.6192, logits_loss: 1.6152, aux_loss: 0.0040, lr: 0.00000909, epoch_time: 115.0min
+Epoch:[1/2](23400/56608), loss: 1.4727, logits_loss: 1.4687, aux_loss: 0.0040, lr: 0.00000908, epoch_time: 115.0min
+Epoch:[1/2](23500/56608), loss: 1.8195, logits_loss: 1.8155, aux_loss: 0.0040, lr: 0.00000908, epoch_time: 115.0min
+Epoch:[1/2](23600/56608), loss: 1.7600, logits_loss: 1.7560, aux_loss: 0.0040, lr: 0.00000907, epoch_time: 114.0min
+Epoch:[1/2](23700/56608), loss: 1.8450, logits_loss: 1.8410, aux_loss: 0.0040, lr: 0.00000906, epoch_time: 114.0min
+Epoch:[1/2](23800/56608), loss: 1.8145, logits_loss: 1.8105, aux_loss: 0.0040, lr: 0.00000905, epoch_time: 114.0min
+Epoch:[1/2](23900/56608), loss: 1.4830, logits_loss: 1.4790, aux_loss: 0.0040, lr: 0.00000905, epoch_time: 113.0min
+Epoch:[1/2](24000/56608), loss: 1.7520, logits_loss: 1.7480, aux_loss: 0.0040, lr: 0.00000904, epoch_time: 113.0min
+Epoch:[1/2](24100/56608), loss: 2.0884, logits_loss: 2.0844, aux_loss: 0.0040, lr: 0.00000903, epoch_time: 113.0min
+Epoch:[1/2](24200/56608), loss: 1.5817, logits_loss: 1.5777, aux_loss: 0.0040, lr: 0.00000902, epoch_time: 112.0min
+Epoch:[1/2](24300/56608), loss: 1.8524, logits_loss: 1.8484, aux_loss: 0.0040, lr: 0.00000902, epoch_time: 112.0min
+Epoch:[1/2](24400/56608), loss: 1.6782, logits_loss: 1.6742, aux_loss: 0.0040, lr: 0.00000901, epoch_time: 112.0min
+Epoch:[1/2](24500/56608), loss: 1.8415, logits_loss: 1.8375, aux_loss: 0.0040, lr: 0.00000900, epoch_time: 111.0min
+Epoch:[1/2](24600/56608), loss: 1.7358, logits_loss: 1.7318, aux_loss: 0.0040, lr: 0.00000899, epoch_time: 111.0min
+Epoch:[1/2](24700/56608), loss: 1.6145, logits_loss: 1.6105, aux_loss: 0.0040, lr: 0.00000898, epoch_time: 111.0min
+Epoch:[1/2](24800/56608), loss: 1.6281, logits_loss: 1.6241, aux_loss: 0.0040, lr: 0.00000898, epoch_time: 110.0min
+Epoch:[1/2](24900/56608), loss: 1.7907, logits_loss: 1.7867, aux_loss: 0.0040, lr: 0.00000897, epoch_time: 110.0min
+Epoch:[1/2](25000/56608), loss: 1.6894, logits_loss: 1.6854, aux_loss: 0.0040, lr: 0.00000896, epoch_time: 110.0min
+Epoch:[1/2](25100/56608), loss: 1.7610, logits_loss: 1.7570, aux_loss: 0.0040, lr: 0.00000895, epoch_time: 109.0min
+Epoch:[1/2](25200/56608), loss: 1.5428, logits_loss: 1.5388, aux_loss: 0.0040, lr: 0.00000894, epoch_time: 109.0min
+Epoch:[1/2](25300/56608), loss: 1.7851, logits_loss: 1.7811, aux_loss: 0.0040, lr: 0.00000894, epoch_time: 109.0min
+Epoch:[1/2](25400/56608), loss: 1.6150, logits_loss: 1.6110, aux_loss: 0.0040, lr: 0.00000893, epoch_time: 108.0min
+Epoch:[1/2](25500/56608), loss: 1.8021, logits_loss: 1.7981, aux_loss: 0.0040, lr: 0.00000892, epoch_time: 108.0min
+Epoch:[1/2](25600/56608), loss: 1.8106, logits_loss: 1.8066, aux_loss: 0.0040, lr: 0.00000891, epoch_time: 108.0min
+Epoch:[1/2](25700/56608), loss: 1.6861, logits_loss: 1.6821, aux_loss: 0.0040, lr: 0.00000890, epoch_time: 107.0min
+Epoch:[1/2](25800/56608), loss: 1.6436, logits_loss: 1.6396, aux_loss: 0.0040, lr: 0.00000890, epoch_time: 107.0min
+Epoch:[1/2](25900/56608), loss: 1.8066, logits_loss: 1.8026, aux_loss: 0.0040, lr: 0.00000889, epoch_time: 107.0min
+Epoch:[1/2](26000/56608), loss: 1.8017, logits_loss: 1.7977, aux_loss: 0.0040, lr: 0.00000888, epoch_time: 106.0min
+Epoch:[1/2](26100/56608), loss: 1.7331, logits_loss: 1.7291, aux_loss: 0.0040, lr: 0.00000887, epoch_time: 106.0min
+Epoch:[1/2](26200/56608), loss: 1.8002, logits_loss: 1.7962, aux_loss: 0.0040, lr: 0.00000886, epoch_time: 106.0min
+Epoch:[1/2](26300/56608), loss: 1.6361, logits_loss: 1.6321, aux_loss: 0.0040, lr: 0.00000885, epoch_time: 105.0min
+Epoch:[1/2](26400/56608), loss: 1.4664, logits_loss: 1.4624, aux_loss: 0.0040, lr: 0.00000885, epoch_time: 105.0min
+Epoch:[1/2](26500/56608), loss: 1.6468, logits_loss: 1.6428, aux_loss: 0.0040, lr: 0.00000884, epoch_time: 105.0min
+Epoch:[1/2](26600/56608), loss: 1.7842, logits_loss: 1.7802, aux_loss: 0.0040, lr: 0.00000883, epoch_time: 104.0min
+Epoch:[1/2](26700/56608), loss: 1.7274, logits_loss: 1.7234, aux_loss: 0.0040, lr: 0.00000882, epoch_time: 104.0min
+Epoch:[1/2](26800/56608), loss: 1.5834, logits_loss: 1.5794, aux_loss: 0.0040, lr: 0.00000881, epoch_time: 104.0min
+Epoch:[1/2](26900/56608), loss: 1.6864, logits_loss: 1.6824, aux_loss: 0.0040, lr: 0.00000880, epoch_time: 103.0min
+Epoch:[1/2](27000/56608), loss: 1.6701, logits_loss: 1.6661, aux_loss: 0.0040, lr: 0.00000880, epoch_time: 103.0min
+Epoch:[1/2](27100/56608), loss: 1.5685, logits_loss: 1.5645, aux_loss: 0.0040, lr: 0.00000879, epoch_time: 103.0min
+Epoch:[1/2](27200/56608), loss: 1.8183, logits_loss: 1.8143, aux_loss: 0.0040, lr: 0.00000878, epoch_time: 102.0min
+Epoch:[1/2](27300/56608), loss: 1.5154, logits_loss: 1.5114, aux_loss: 0.0040, lr: 0.00000877, epoch_time: 102.0min
+Epoch:[1/2](27400/56608), loss: 1.5564, logits_loss: 1.5524, aux_loss: 0.0040, lr: 0.00000876, epoch_time: 102.0min
+Epoch:[1/2](27500/56608), loss: 1.8232, logits_loss: 1.8192, aux_loss: 0.0040, lr: 0.00000875, epoch_time: 101.0min
+Epoch:[1/2](27600/56608), loss: 1.5404, logits_loss: 1.5364, aux_loss: 0.0040, lr: 0.00000874, epoch_time: 101.0min
+Epoch:[1/2](27700/56608), loss: 1.7709, logits_loss: 1.7669, aux_loss: 0.0040, lr: 0.00000873, epoch_time: 101.0min
+Epoch:[1/2](27800/56608), loss: 1.6810, logits_loss: 1.6770, aux_loss: 0.0040, lr: 0.00000873, epoch_time: 100.0min
+Epoch:[1/2](27900/56608), loss: 1.5642, logits_loss: 1.5602, aux_loss: 0.0040, lr: 0.00000872, epoch_time: 100.0min
+Epoch:[1/2](28000/56608), loss: 1.6716, logits_loss: 1.6676, aux_loss: 0.0040, lr: 0.00000871, epoch_time: 100.0min
+Epoch:[1/2](28100/56608), loss: 1.4427, logits_loss: 1.4387, aux_loss: 0.0040, lr: 0.00000870, epoch_time: 99.0min
+Epoch:[1/2](28200/56608), loss: 1.6698, logits_loss: 1.6658, aux_loss: 0.0040, lr: 0.00000869, epoch_time: 99.0min
+Epoch:[1/2](28300/56608), loss: 1.7000, logits_loss: 1.6960, aux_loss: 0.0040, lr: 0.00000868, epoch_time: 99.0min
+Epoch:[1/2](28400/56608), loss: 1.6012, logits_loss: 1.5972, aux_loss: 0.0040, lr: 0.00000867, epoch_time: 98.0min
+Epoch:[1/2](28500/56608), loss: 1.7268, logits_loss: 1.7228, aux_loss: 0.0040, lr: 0.00000866, epoch_time: 98.0min
+Epoch:[1/2](28600/56608), loss: 1.6899, logits_loss: 1.6859, aux_loss: 0.0040, lr: 0.00000866, epoch_time: 98.0min
+Epoch:[1/2](28700/56608), loss: 1.6609, logits_loss: 1.6569, aux_loss: 0.0040, lr: 0.00000865, epoch_time: 97.0min
+Epoch:[1/2](28800/56608), loss: 1.6209, logits_loss: 1.6169, aux_loss: 0.0040, lr: 0.00000864, epoch_time: 97.0min
+Epoch:[1/2](28900/56608), loss: 1.6017, logits_loss: 1.5977, aux_loss: 0.0040, lr: 0.00000863, epoch_time: 97.0min
+Epoch:[1/2](29000/56608), loss: 1.7119, logits_loss: 1.7079, aux_loss: 0.0040, lr: 0.00000862, epoch_time: 96.0min
+Epoch:[1/2](29100/56608), loss: 1.7396, logits_loss: 1.7356, aux_loss: 0.0040, lr: 0.00000861, epoch_time: 96.0min
+Epoch:[1/2](29200/56608), loss: 1.7122, logits_loss: 1.7082, aux_loss: 0.0040, lr: 0.00000860, epoch_time: 96.0min
+Epoch:[1/2](29300/56608), loss: 1.6955, logits_loss: 1.6915, aux_loss: 0.0040, lr: 0.00000859, epoch_time: 95.0min
+Epoch:[1/2](29400/56608), loss: 1.6734, logits_loss: 1.6694, aux_loss: 0.0040, lr: 0.00000858, epoch_time: 95.0min
+Epoch:[1/2](29500/56608), loss: 1.6206, logits_loss: 1.6166, aux_loss: 0.0040, lr: 0.00000857, epoch_time: 95.0min
+Epoch:[1/2](29600/56608), loss: 1.6764, logits_loss: 1.6724, aux_loss: 0.0040, lr: 0.00000857, epoch_time: 94.0min
+Epoch:[1/2](29700/56608), loss: 1.6447, logits_loss: 1.6407, aux_loss: 0.0040, lr: 0.00000856, epoch_time: 94.0min
+Epoch:[1/2](29800/56608), loss: 1.5436, logits_loss: 1.5396, aux_loss: 0.0040, lr: 0.00000855, epoch_time: 93.0min
+Epoch:[1/2](29900/56608), loss: 1.7522, logits_loss: 1.7482, aux_loss: 0.0040, lr: 0.00000854, epoch_time: 93.0min
+Epoch:[1/2](30000/56608), loss: 1.7144, logits_loss: 1.7104, aux_loss: 0.0040, lr: 0.00000853, epoch_time: 93.0min
+Epoch:[1/2](30100/56608), loss: 1.5794, logits_loss: 1.5754, aux_loss: 0.0040, lr: 0.00000852, epoch_time: 93.0min
+Epoch:[1/2](30200/56608), loss: 1.6418, logits_loss: 1.6378, aux_loss: 0.0040, lr: 0.00000851, epoch_time: 92.0min
+Epoch:[1/2](30300/56608), loss: 1.7007, logits_loss: 1.6967, aux_loss: 0.0040, lr: 0.00000850, epoch_time: 92.0min
+Epoch:[1/2](30400/56608), loss: 1.7053, logits_loss: 1.7013, aux_loss: 0.0040, lr: 0.00000849, epoch_time: 92.0min
+Epoch:[1/2](30500/56608), loss: 1.4822, logits_loss: 1.4782, aux_loss: 0.0040, lr: 0.00000848, epoch_time: 91.0min
+Epoch:[1/2](30600/56608), loss: 1.4573, logits_loss: 1.4533, aux_loss: 0.0040, lr: 0.00000847, epoch_time: 91.0min
+Epoch:[1/2](30700/56608), loss: 1.7415, logits_loss: 1.7375, aux_loss: 0.0040, lr: 0.00000846, epoch_time: 91.0min
+Epoch:[1/2](30800/56608), loss: 1.4276, logits_loss: 1.4236, aux_loss: 0.0040, lr: 0.00000845, epoch_time: 90.0min
+Epoch:[1/2](30900/56608), loss: 1.7282, logits_loss: 1.7242, aux_loss: 0.0040, lr: 0.00000844, epoch_time: 90.0min
+Epoch:[1/2](31000/56608), loss: 1.7510, logits_loss: 1.7470, aux_loss: 0.0040, lr: 0.00000844, epoch_time: 90.0min
+Epoch:[1/2](31100/56608), loss: 1.6619, logits_loss: 1.6579, aux_loss: 0.0040, lr: 0.00000843, epoch_time: 90.0min
+Epoch:[1/2](31200/56608), loss: 1.7229, logits_loss: 1.7189, aux_loss: 0.0040, lr: 0.00000842, epoch_time: 89.0min
+Epoch:[1/2](31300/56608), loss: 1.7504, logits_loss: 1.7464, aux_loss: 0.0040, lr: 0.00000841, epoch_time: 89.0min
+Epoch:[1/2](31400/56608), loss: 1.6418, logits_loss: 1.6378, aux_loss: 0.0040, lr: 0.00000840, epoch_time: 89.0min
+Epoch:[1/2](31500/56608), loss: 1.8280, logits_loss: 1.8240, aux_loss: 0.0040, lr: 0.00000839, epoch_time: 88.0min
+Epoch:[1/2](31600/56608), loss: 1.7007, logits_loss: 1.6967, aux_loss: 0.0040, lr: 0.00000838, epoch_time: 88.0min
+Epoch:[1/2](31700/56608), loss: 1.5256, logits_loss: 1.5216, aux_loss: 0.0040, lr: 0.00000837, epoch_time: 88.0min
+Epoch:[1/2](31800/56608), loss: 1.5299, logits_loss: 1.5259, aux_loss: 0.0040, lr: 0.00000836, epoch_time: 87.0min
+Epoch:[1/2](31900/56608), loss: 1.7707, logits_loss: 1.7667, aux_loss: 0.0040, lr: 0.00000835, epoch_time: 87.0min
+Epoch:[1/2](32000/56608), loss: 1.7159, logits_loss: 1.7119, aux_loss: 0.0040, lr: 0.00000834, epoch_time: 87.0min
+Epoch:[1/2](32100/56608), loss: 1.5282, logits_loss: 1.5242, aux_loss: 0.0040, lr: 0.00000833, epoch_time: 87.0min
+Epoch:[1/2](32200/56608), loss: 1.6853, logits_loss: 1.6813, aux_loss: 0.0040, lr: 0.00000832, epoch_time: 86.0min
+Epoch:[1/2](32300/56608), loss: 1.7786, logits_loss: 1.7746, aux_loss: 0.0040, lr: 0.00000831, epoch_time: 86.0min
+Epoch:[1/2](32400/56608), loss: 1.6991, logits_loss: 1.6951, aux_loss: 0.0040, lr: 0.00000830, epoch_time: 86.0min
+Epoch:[1/2](32500/56608), loss: 1.6200, logits_loss: 1.6160, aux_loss: 0.0040, lr: 0.00000829, epoch_time: 85.0min
+Epoch:[1/2](32600/56608), loss: 1.7154, logits_loss: 1.7114, aux_loss: 0.0040, lr: 0.00000828, epoch_time: 85.0min
+Epoch:[1/2](32700/56608), loss: 1.8596, logits_loss: 1.8556, aux_loss: 0.0040, lr: 0.00000827, epoch_time: 85.0min
+Epoch:[1/2](32800/56608), loss: 1.5923, logits_loss: 1.5883, aux_loss: 0.0040, lr: 0.00000826, epoch_time: 84.0min
+Epoch:[1/2](32900/56608), loss: 1.7158, logits_loss: 1.7118, aux_loss: 0.0040, lr: 0.00000825, epoch_time: 84.0min
+Epoch:[1/2](33000/56608), loss: 1.7422, logits_loss: 1.7382, aux_loss: 0.0040, lr: 0.00000824, epoch_time: 84.0min
+Epoch:[1/2](33100/56608), loss: 1.4871, logits_loss: 1.4831, aux_loss: 0.0040, lr: 0.00000823, epoch_time: 83.0min
+Epoch:[1/2](33200/56608), loss: 1.6070, logits_loss: 1.6030, aux_loss: 0.0040, lr: 0.00000822, epoch_time: 83.0min
+Epoch:[1/2](33300/56608), loss: 1.6363, logits_loss: 1.6323, aux_loss: 0.0040, lr: 0.00000821, epoch_time: 83.0min
+Epoch:[1/2](33400/56608), loss: 1.4515, logits_loss: 1.4475, aux_loss: 0.0040, lr: 0.00000820, epoch_time: 82.0min
+Epoch:[1/2](33500/56608), loss: 1.6718, logits_loss: 1.6678, aux_loss: 0.0040, lr: 0.00000819, epoch_time: 82.0min
+Epoch:[1/2](33600/56608), loss: 1.8112, logits_loss: 1.8072, aux_loss: 0.0040, lr: 0.00000818, epoch_time: 82.0min
+Epoch:[1/2](33700/56608), loss: 1.8858, logits_loss: 1.8818, aux_loss: 0.0040, lr: 0.00000817, epoch_time: 81.0min
+Epoch:[1/2](33800/56608), loss: 1.5424, logits_loss: 1.5384, aux_loss: 0.0040, lr: 0.00000816, epoch_time: 81.0min
+Epoch:[1/2](33900/56608), loss: 1.7144, logits_loss: 1.7104, aux_loss: 0.0040, lr: 0.00000815, epoch_time: 81.0min
+Epoch:[1/2](34000/56608), loss: 1.5025, logits_loss: 1.4985, aux_loss: 0.0040, lr: 0.00000814, epoch_time: 80.0min
+Epoch:[1/2](34100/56608), loss: 1.5642, logits_loss: 1.5602, aux_loss: 0.0040, lr: 0.00000813, epoch_time: 80.0min
+Epoch:[1/2](34200/56608), loss: 1.8166, logits_loss: 1.8126, aux_loss: 0.0040, lr: 0.00000812, epoch_time: 80.0min
+Epoch:[1/2](34300/56608), loss: 1.7290, logits_loss: 1.7250, aux_loss: 0.0040, lr: 0.00000811, epoch_time: 80.0min
+Epoch:[1/2](34400/56608), loss: 1.7348, logits_loss: 1.7308, aux_loss: 0.0040, lr: 0.00000810, epoch_time: 79.0min
+Epoch:[1/2](34500/56608), loss: 1.9203, logits_loss: 1.9163, aux_loss: 0.0040, lr: 0.00000809, epoch_time: 79.0min
+Epoch:[1/2](34600/56608), loss: 1.6881, logits_loss: 1.6841, aux_loss: 0.0040, lr: 0.00000808, epoch_time: 79.0min
+Epoch:[1/2](34700/56608), loss: 1.6949, logits_loss: 1.6909, aux_loss: 0.0040, lr: 0.00000807, epoch_time: 78.0min
+Epoch:[1/2](34800/56608), loss: 1.9910, logits_loss: 1.9870, aux_loss: 0.0040, lr: 0.00000806, epoch_time: 78.0min
+Epoch:[1/2](34900/56608), loss: 1.6829, logits_loss: 1.6789, aux_loss: 0.0040, lr: 0.00000805, epoch_time: 78.0min
+Epoch:[1/2](35000/56608), loss: 1.6240, logits_loss: 1.6200, aux_loss: 0.0040, lr: 0.00000804, epoch_time: 77.0min
+Epoch:[1/2](35100/56608), loss: 1.6028, logits_loss: 1.5988, aux_loss: 0.0040, lr: 0.00000803, epoch_time: 77.0min
+Epoch:[1/2](35200/56608), loss: 1.6933, logits_loss: 1.6893, aux_loss: 0.0040, lr: 0.00000802, epoch_time: 77.0min
+Epoch:[1/2](35300/56608), loss: 1.4987, logits_loss: 1.4947, aux_loss: 0.0040, lr: 0.00000801, epoch_time: 76.0min
+Epoch:[1/2](35400/56608), loss: 1.4637, logits_loss: 1.4597, aux_loss: 0.0040, lr: 0.00000800, epoch_time: 76.0min
+Epoch:[1/2](35500/56608), loss: 1.5871, logits_loss: 1.5831, aux_loss: 0.0040, lr: 0.00000799, epoch_time: 76.0min
+Epoch:[1/2](35600/56608), loss: 1.6438, logits_loss: 1.6398, aux_loss: 0.0040, lr: 0.00000798, epoch_time: 75.0min
+Epoch:[1/2](35700/56608), loss: 1.7309, logits_loss: 1.7269, aux_loss: 0.0040, lr: 0.00000797, epoch_time: 75.0min
+Epoch:[1/2](35800/56608), loss: 1.6194, logits_loss: 1.6154, aux_loss: 0.0040, lr: 0.00000796, epoch_time: 75.0min
+Epoch:[1/2](35900/56608), loss: 1.7414, logits_loss: 1.7374, aux_loss: 0.0040, lr: 0.00000795, epoch_time: 74.0min
+Epoch:[1/2](36000/56608), loss: 1.7083, logits_loss: 1.7043, aux_loss: 0.0040, lr: 0.00000794, epoch_time: 74.0min
+Epoch:[1/2](36100/56608), loss: 1.8216, logits_loss: 1.8176, aux_loss: 0.0040, lr: 0.00000792, epoch_time: 74.0min
+Epoch:[1/2](36200/56608), loss: 1.6414, logits_loss: 1.6374, aux_loss: 0.0040, lr: 0.00000791, epoch_time: 73.0min
+Epoch:[1/2](36300/56608), loss: 1.7352, logits_loss: 1.7312, aux_loss: 0.0040, lr: 0.00000790, epoch_time: 73.0min
+Epoch:[1/2](36400/56608), loss: 1.6261, logits_loss: 1.6221, aux_loss: 0.0040, lr: 0.00000789, epoch_time: 73.0min
+Epoch:[1/2](36500/56608), loss: 1.4460, logits_loss: 1.4420, aux_loss: 0.0040, lr: 0.00000788, epoch_time: 72.0min
+Epoch:[1/2](36600/56608), loss: 1.6295, logits_loss: 1.6255, aux_loss: 0.0040, lr: 0.00000787, epoch_time: 72.0min
+Epoch:[1/2](36700/56608), loss: 1.5927, logits_loss: 1.5887, aux_loss: 0.0040, lr: 0.00000786, epoch_time: 72.0min
+Epoch:[1/2](36800/56608), loss: 1.5079, logits_loss: 1.5039, aux_loss: 0.0040, lr: 0.00000785, epoch_time: 71.0min
+Epoch:[1/2](36900/56608), loss: 1.4989, logits_loss: 1.4949, aux_loss: 0.0040, lr: 0.00000784, epoch_time: 71.0min
+Epoch:[1/2](37000/56608), loss: 1.4180, logits_loss: 1.4140, aux_loss: 0.0040, lr: 0.00000783, epoch_time: 71.0min
+Epoch:[1/2](37100/56608), loss: 1.9193, logits_loss: 1.9153, aux_loss: 0.0040, lr: 0.00000782, epoch_time: 70.0min
+Epoch:[1/2](37200/56608), loss: 1.7535, logits_loss: 1.7495, aux_loss: 0.0040, lr: 0.00000781, epoch_time: 70.0min
+Epoch:[1/2](37300/56608), loss: 1.8924, logits_loss: 1.8884, aux_loss: 0.0040, lr: 0.00000780, epoch_time: 70.0min
+Epoch:[1/2](37400/56608), loss: 1.6791, logits_loss: 1.6751, aux_loss: 0.0040, lr: 0.00000779, epoch_time: 69.0min
+Epoch:[1/2](37500/56608), loss: 1.8391, logits_loss: 1.8351, aux_loss: 0.0040, lr: 0.00000778, epoch_time: 69.0min
+Epoch:[1/2](37600/56608), loss: 1.5988, logits_loss: 1.5948, aux_loss: 0.0040, lr: 0.00000776, epoch_time: 69.0min
+Epoch:[1/2](37700/56608), loss: 1.6393, logits_loss: 1.6353, aux_loss: 0.0040, lr: 0.00000775, epoch_time: 68.0min
+Epoch:[1/2](37800/56608), loss: 1.7327, logits_loss: 1.7287, aux_loss: 0.0040, lr: 0.00000774, epoch_time: 68.0min
+Epoch:[1/2](37900/56608), loss: 1.7500, logits_loss: 1.7460, aux_loss: 0.0040, lr: 0.00000773, epoch_time: 68.0min
+Epoch:[1/2](38000/56608), loss: 1.6252, logits_loss: 1.6212, aux_loss: 0.0040, lr: 0.00000772, epoch_time: 67.0min
+Epoch:[1/2](38100/56608), loss: 1.6678, logits_loss: 1.6638, aux_loss: 0.0040, lr: 0.00000771, epoch_time: 67.0min
+Epoch:[1/2](38200/56608), loss: 1.4593, logits_loss: 1.4553, aux_loss: 0.0040, lr: 0.00000770, epoch_time: 67.0min
+Epoch:[1/2](38300/56608), loss: 1.5851, logits_loss: 1.5811, aux_loss: 0.0040, lr: 0.00000769, epoch_time: 66.0min
+Epoch:[1/2](38400/56608), loss: 1.4629, logits_loss: 1.4589, aux_loss: 0.0040, lr: 0.00000768, epoch_time: 66.0min
+Epoch:[1/2](38500/56608), loss: 1.6948, logits_loss: 1.6908, aux_loss: 0.0040, lr: 0.00000767, epoch_time: 66.0min
+Epoch:[1/2](38600/56608), loss: 1.6860, logits_loss: 1.6820, aux_loss: 0.0040, lr: 0.00000766, epoch_time: 65.0min
+Epoch:[1/2](38700/56608), loss: 1.9227, logits_loss: 1.9187, aux_loss: 0.0040, lr: 0.00000765, epoch_time: 65.0min
+Epoch:[1/2](38800/56608), loss: 1.4939, logits_loss: 1.4899, aux_loss: 0.0040, lr: 0.00000763, epoch_time: 65.0min
+Epoch:[1/2](38900/56608), loss: 1.6601, logits_loss: 1.6561, aux_loss: 0.0040, lr: 0.00000762, epoch_time: 64.0min
+Epoch:[1/2](39000/56608), loss: 1.7379, logits_loss: 1.7339, aux_loss: 0.0040, lr: 0.00000761, epoch_time: 64.0min
+Epoch:[1/2](39100/56608), loss: 1.7487, logits_loss: 1.7447, aux_loss: 0.0040, lr: 0.00000760, epoch_time: 64.0min
+Epoch:[1/2](39200/56608), loss: 1.6601, logits_loss: 1.6561, aux_loss: 0.0040, lr: 0.00000759, epoch_time: 63.0min
+Epoch:[1/2](39300/56608), loss: 1.5718, logits_loss: 1.5678, aux_loss: 0.0040, lr: 0.00000758, epoch_time: 63.0min
+Epoch:[1/2](39400/56608), loss: 1.7275, logits_loss: 1.7235, aux_loss: 0.0040, lr: 0.00000757, epoch_time: 63.0min
+Epoch:[1/2](39500/56608), loss: 1.5235, logits_loss: 1.5195, aux_loss: 0.0040, lr: 0.00000756, epoch_time: 62.0min
+Epoch:[1/2](39600/56608), loss: 1.6852, logits_loss: 1.6812, aux_loss: 0.0040, lr: 0.00000755, epoch_time: 62.0min
+Epoch:[1/2](39700/56608), loss: 1.9335, logits_loss: 1.9295, aux_loss: 0.0040, lr: 0.00000753, epoch_time: 62.0min
+Epoch:[1/2](39800/56608), loss: 1.6704, logits_loss: 1.6664, aux_loss: 0.0040, lr: 0.00000752, epoch_time: 61.0min
+Epoch:[1/2](39900/56608), loss: 1.8252, logits_loss: 1.8212, aux_loss: 0.0040, lr: 0.00000751, epoch_time: 61.0min
+Epoch:[1/2](40000/56608), loss: 1.7237, logits_loss: 1.7197, aux_loss: 0.0040, lr: 0.00000750, epoch_time: 61.0min
+Epoch:[1/2](40100/56608), loss: 1.8420, logits_loss: 1.8380, aux_loss: 0.0040, lr: 0.00000749, epoch_time: 60.0min
+Epoch:[1/2](40200/56608), loss: 1.7236, logits_loss: 1.7196, aux_loss: 0.0040, lr: 0.00000748, epoch_time: 60.0min
+Epoch:[1/2](40300/56608), loss: 1.5652, logits_loss: 1.5612, aux_loss: 0.0040, lr: 0.00000747, epoch_time: 60.0min
+Epoch:[1/2](40400/56608), loss: 1.5623, logits_loss: 1.5583, aux_loss: 0.0040, lr: 0.00000746, epoch_time: 59.0min
+Epoch:[1/2](40500/56608), loss: 1.6983, logits_loss: 1.6943, aux_loss: 0.0040, lr: 0.00000745, epoch_time: 59.0min
+Epoch:[1/2](40600/56608), loss: 1.6483, logits_loss: 1.6443, aux_loss: 0.0040, lr: 0.00000743, epoch_time: 58.0min
+Epoch:[1/2](40700/56608), loss: 1.5770, logits_loss: 1.5730, aux_loss: 0.0040, lr: 0.00000742, epoch_time: 58.0min
+Epoch:[1/2](40800/56608), loss: 1.6465, logits_loss: 1.6425, aux_loss: 0.0040, lr: 0.00000741, epoch_time: 58.0min
+Epoch:[1/2](40900/56608), loss: 1.7819, logits_loss: 1.7779, aux_loss: 0.0040, lr: 0.00000740, epoch_time: 57.0min
+Epoch:[1/2](41000/56608), loss: 1.5056, logits_loss: 1.5016, aux_loss: 0.0040, lr: 0.00000739, epoch_time: 57.0min
+Epoch:[1/2](41100/56608), loss: 1.5893, logits_loss: 1.5853, aux_loss: 0.0040, lr: 0.00000738, epoch_time: 57.0min
+Epoch:[1/2](41200/56608), loss: 1.5439, logits_loss: 1.5399, aux_loss: 0.0040, lr: 0.00000737, epoch_time: 56.0min
+Epoch:[1/2](41300/56608), loss: 1.8134, logits_loss: 1.8093, aux_loss: 0.0040, lr: 0.00000735, epoch_time: 56.0min
+Epoch:[1/2](41400/56608), loss: 1.6103, logits_loss: 1.6063, aux_loss: 0.0040, lr: 0.00000734, epoch_time: 56.0min
+Epoch:[1/2](41500/56608), loss: 1.7698, logits_loss: 1.7658, aux_loss: 0.0040, lr: 0.00000733, epoch_time: 55.0min
+Epoch:[1/2](41600/56608), loss: 1.7599, logits_loss: 1.7559, aux_loss: 0.0040, lr: 0.00000732, epoch_time: 55.0min
+Epoch:[1/2](41700/56608), loss: 1.5787, logits_loss: 1.5747, aux_loss: 0.0040, lr: 0.00000731, epoch_time: 55.0min
+Epoch:[1/2](41800/56608), loss: 1.6821, logits_loss: 1.6781, aux_loss: 0.0040, lr: 0.00000730, epoch_time: 54.0min
+Epoch:[1/2](41900/56608), loss: 1.7464, logits_loss: 1.7424, aux_loss: 0.0040, lr: 0.00000729, epoch_time: 54.0min
+Epoch:[1/2](42000/56608), loss: 1.5891, logits_loss: 1.5851, aux_loss: 0.0040, lr: 0.00000727, epoch_time: 54.0min
+Epoch:[1/2](42100/56608), loss: 1.4603, logits_loss: 1.4563, aux_loss: 0.0040, lr: 0.00000726, epoch_time: 53.0min
+Epoch:[1/2](42200/56608), loss: 1.7344, logits_loss: 1.7304, aux_loss: 0.0040, lr: 0.00000725, epoch_time: 53.0min
+Epoch:[1/2](42300/56608), loss: 1.7913, logits_loss: 1.7873, aux_loss: 0.0040, lr: 0.00000724, epoch_time: 53.0min
+Epoch:[1/2](42400/56608), loss: 1.6488, logits_loss: 1.6448, aux_loss: 0.0040, lr: 0.00000723, epoch_time: 52.0min
+Epoch:[1/2](42500/56608), loss: 1.7406, logits_loss: 1.7366, aux_loss: 0.0040, lr: 0.00000722, epoch_time: 52.0min
+Epoch:[1/2](42600/56608), loss: 1.7106, logits_loss: 1.7066, aux_loss: 0.0040, lr: 0.00000721, epoch_time: 51.0min
+Epoch:[1/2](42700/56608), loss: 1.7435, logits_loss: 1.7395, aux_loss: 0.0040, lr: 0.00000719, epoch_time: 51.0min
+Epoch:[1/2](42800/56608), loss: 1.7037, logits_loss: 1.6997, aux_loss: 0.0040, lr: 0.00000718, epoch_time: 51.0min
+Epoch:[1/2](42900/56608), loss: 1.7960, logits_loss: 1.7920, aux_loss: 0.0040, lr: 0.00000717, epoch_time: 50.0min
+Epoch:[1/2](43000/56608), loss: 1.7444, logits_loss: 1.7404, aux_loss: 0.0040, lr: 0.00000716, epoch_time: 50.0min
+Epoch:[1/2](43100/56608), loss: 1.5637, logits_loss: 1.5597, aux_loss: 0.0040, lr: 0.00000715, epoch_time: 50.0min
+Epoch:[1/2](43200/56608), loss: 1.6796, logits_loss: 1.6756, aux_loss: 0.0040, lr: 0.00000714, epoch_time: 49.0min
+Epoch:[1/2](43300/56608), loss: 1.5481, logits_loss: 1.5441, aux_loss: 0.0040, lr: 0.00000712, epoch_time: 49.0min
+Epoch:[1/2](43400/56608), loss: 1.7266, logits_loss: 1.7226, aux_loss: 0.0040, lr: 0.00000711, epoch_time: 49.0min
+Epoch:[1/2](43500/56608), loss: 1.6248, logits_loss: 1.6208, aux_loss: 0.0040, lr: 0.00000710, epoch_time: 48.0min
+Epoch:[1/2](43600/56608), loss: 1.8525, logits_loss: 1.8485, aux_loss: 0.0040, lr: 0.00000709, epoch_time: 48.0min
+Epoch:[1/2](43700/56608), loss: 1.5715, logits_loss: 1.5675, aux_loss: 0.0040, lr: 0.00000708, epoch_time: 48.0min
+Epoch:[1/2](43800/56608), loss: 1.7919, logits_loss: 1.7879, aux_loss: 0.0040, lr: 0.00000707, epoch_time: 47.0min
+Epoch:[1/2](43900/56608), loss: 1.5375, logits_loss: 1.5335, aux_loss: 0.0040, lr: 0.00000705, epoch_time: 47.0min
+Epoch:[1/2](44000/56608), loss: 1.9594, logits_loss: 1.9554, aux_loss: 0.0040, lr: 0.00000704, epoch_time: 46.0min
+Epoch:[1/2](44100/56608), loss: 1.5218, logits_loss: 1.5178, aux_loss: 0.0040, lr: 0.00000703, epoch_time: 46.0min
+Epoch:[1/2](44200/56608), loss: 1.6806, logits_loss: 1.6766, aux_loss: 0.0040, lr: 0.00000702, epoch_time: 46.0min
+Epoch:[1/2](44300/56608), loss: 1.7878, logits_loss: 1.7838, aux_loss: 0.0040, lr: 0.00000701, epoch_time: 45.0min
+Epoch:[1/2](44400/56608), loss: 1.6464, logits_loss: 1.6424, aux_loss: 0.0040, lr: 0.00000700, epoch_time: 45.0min
+Epoch:[1/2](44500/56608), loss: 1.5566, logits_loss: 1.5526, aux_loss: 0.0040, lr: 0.00000698, epoch_time: 45.0min
+Epoch:[1/2](44600/56608), loss: 1.7614, logits_loss: 1.7574, aux_loss: 0.0040, lr: 0.00000697, epoch_time: 44.0min
+Epoch:[1/2](44700/56608), loss: 1.6721, logits_loss: 1.6681, aux_loss: 0.0040, lr: 0.00000696, epoch_time: 44.0min
+Epoch:[1/2](44800/56608), loss: 1.4963, logits_loss: 1.4923, aux_loss: 0.0040, lr: 0.00000695, epoch_time: 44.0min
+Epoch:[1/2](44900/56608), loss: 1.4529, logits_loss: 1.4489, aux_loss: 0.0040, lr: 0.00000694, epoch_time: 43.0min
+Epoch:[1/2](45000/56608), loss: 1.4461, logits_loss: 1.4421, aux_loss: 0.0040, lr: 0.00000692, epoch_time: 43.0min
+Epoch:[1/2](45100/56608), loss: 1.4909, logits_loss: 1.4869, aux_loss: 0.0040, lr: 0.00000691, epoch_time: 42.0min
+Epoch:[1/2](45200/56608), loss: 1.7655, logits_loss: 1.7615, aux_loss: 0.0040, lr: 0.00000690, epoch_time: 42.0min
+Epoch:[1/2](45300/56608), loss: 1.4288, logits_loss: 1.4248, aux_loss: 0.0040, lr: 0.00000689, epoch_time: 42.0min
+Epoch:[1/2](45400/56608), loss: 1.7187, logits_loss: 1.7147, aux_loss: 0.0040, lr: 0.00000688, epoch_time: 41.0min
+Epoch:[1/2](45500/56608), loss: 1.6552, logits_loss: 1.6512, aux_loss: 0.0040, lr: 0.00000687, epoch_time: 41.0min
+Epoch:[1/2](45600/56608), loss: 1.8231, logits_loss: 1.8191, aux_loss: 0.0040, lr: 0.00000685, epoch_time: 41.0min
+Epoch:[1/2](45700/56608), loss: 1.8356, logits_loss: 1.8316, aux_loss: 0.0040, lr: 0.00000684, epoch_time: 40.0min
+Epoch:[1/2](45800/56608), loss: 1.6442, logits_loss: 1.6402, aux_loss: 0.0040, lr: 0.00000683, epoch_time: 40.0min
+Epoch:[1/2](45900/56608), loss: 1.4342, logits_loss: 1.4302, aux_loss: 0.0040, lr: 0.00000682, epoch_time: 40.0min
+Epoch:[1/2](46000/56608), loss: 1.6806, logits_loss: 1.6766, aux_loss: 0.0040, lr: 0.00000681, epoch_time: 39.0min
+Epoch:[1/2](46100/56608), loss: 1.7125, logits_loss: 1.7085, aux_loss: 0.0040, lr: 0.00000679, epoch_time: 39.0min
+Epoch:[1/2](46200/56608), loss: 1.5938, logits_loss: 1.5898, aux_loss: 0.0040, lr: 0.00000678, epoch_time: 38.0min
+Epoch:[1/2](46300/56608), loss: 1.7164, logits_loss: 1.7124, aux_loss: 0.0040, lr: 0.00000677, epoch_time: 38.0min
+Epoch:[1/2](46400/56608), loss: 1.5845, logits_loss: 1.5805, aux_loss: 0.0040, lr: 0.00000676, epoch_time: 38.0min
+Epoch:[1/2](46500/56608), loss: 1.4117, logits_loss: 1.4077, aux_loss: 0.0040, lr: 0.00000675, epoch_time: 37.0min
+Epoch:[1/2](46600/56608), loss: 1.6747, logits_loss: 1.6707, aux_loss: 0.0040, lr: 0.00000673, epoch_time: 37.0min
+Epoch:[1/2](46700/56608), loss: 1.6410, logits_loss: 1.6370, aux_loss: 0.0040, lr: 0.00000672, epoch_time: 37.0min
+Epoch:[1/2](46800/56608), loss: 1.5677, logits_loss: 1.5637, aux_loss: 0.0040, lr: 0.00000671, epoch_time: 36.0min
+Epoch:[1/2](46900/56608), loss: 1.7073, logits_loss: 1.7033, aux_loss: 0.0040, lr: 0.00000670, epoch_time: 36.0min
+Epoch:[1/2](47000/56608), loss: 1.7135, logits_loss: 1.7095, aux_loss: 0.0040, lr: 0.00000669, epoch_time: 36.0min
+Epoch:[1/2](47100/56608), loss: 1.8843, logits_loss: 1.8803, aux_loss: 0.0040, lr: 0.00000667, epoch_time: 35.0min
+Epoch:[1/2](47200/56608), loss: 1.5482, logits_loss: 1.5442, aux_loss: 0.0040, lr: 0.00000666, epoch_time: 35.0min
+Epoch:[1/2](47300/56608), loss: 1.6654, logits_loss: 1.6614, aux_loss: 0.0040, lr: 0.00000665, epoch_time: 34.0min
+Epoch:[1/2](47400/56608), loss: 1.7723, logits_loss: 1.7683, aux_loss: 0.0040, lr: 0.00000664, epoch_time: 34.0min
+Epoch:[1/2](47500/56608), loss: 1.7299, logits_loss: 1.7259, aux_loss: 0.0040, lr: 0.00000663, epoch_time: 34.0min
+Epoch:[1/2](47600/56608), loss: 1.4988, logits_loss: 1.4948, aux_loss: 0.0040, lr: 0.00000661, epoch_time: 33.0min
+Epoch:[1/2](47700/56608), loss: 1.5610, logits_loss: 1.5570, aux_loss: 0.0040, lr: 0.00000660, epoch_time: 33.0min
+Epoch:[1/2](47800/56608), loss: 1.5503, logits_loss: 1.5463, aux_loss: 0.0040, lr: 0.00000659, epoch_time: 33.0min
+Epoch:[1/2](47900/56608), loss: 1.5726, logits_loss: 1.5686, aux_loss: 0.0040, lr: 0.00000658, epoch_time: 32.0min
+Epoch:[1/2](48000/56608), loss: 1.7165, logits_loss: 1.7125, aux_loss: 0.0040, lr: 0.00000656, epoch_time: 32.0min
+Epoch:[1/2](48100/56608), loss: 1.5789, logits_loss: 1.5749, aux_loss: 0.0040, lr: 0.00000655, epoch_time: 32.0min
+Epoch:[1/2](48200/56608), loss: 1.7843, logits_loss: 1.7803, aux_loss: 0.0040, lr: 0.00000654, epoch_time: 31.0min
+Epoch:[1/2](48300/56608), loss: 1.6031, logits_loss: 1.5991, aux_loss: 0.0040, lr: 0.00000653, epoch_time: 31.0min
+Epoch:[1/2](48400/56608), loss: 1.6607, logits_loss: 1.6567, aux_loss: 0.0040, lr: 0.00000652, epoch_time: 30.0min
+Epoch:[1/2](48500/56608), loss: 1.4092, logits_loss: 1.4052, aux_loss: 0.0040, lr: 0.00000650, epoch_time: 30.0min
+Epoch:[1/2](48600/56608), loss: 1.4811, logits_loss: 1.4771, aux_loss: 0.0040, lr: 0.00000649, epoch_time: 30.0min
+Epoch:[1/2](48700/56608), loss: 1.3630, logits_loss: 1.3590, aux_loss: 0.0040, lr: 0.00000648, epoch_time: 29.0min
+Epoch:[1/2](48800/56608), loss: 1.6611, logits_loss: 1.6571, aux_loss: 0.0040, lr: 0.00000647, epoch_time: 29.0min
+Epoch:[1/2](48900/56608), loss: 1.5220, logits_loss: 1.5180, aux_loss: 0.0040, lr: 0.00000646, epoch_time: 29.0min
+Epoch:[1/2](49000/56608), loss: 1.5760, logits_loss: 1.5720, aux_loss: 0.0040, lr: 0.00000644, epoch_time: 28.0min
+Epoch:[1/2](49100/56608), loss: 1.7811, logits_loss: 1.7771, aux_loss: 0.0040, lr: 0.00000643, epoch_time: 28.0min
+Epoch:[1/2](49200/56608), loss: 1.6569, logits_loss: 1.6529, aux_loss: 0.0040, lr: 0.00000642, epoch_time: 27.0min
+Epoch:[1/2](49300/56608), loss: 1.6519, logits_loss: 1.6479, aux_loss: 0.0040, lr: 0.00000641, epoch_time: 27.0min
+Epoch:[1/2](49400/56608), loss: 1.6878, logits_loss: 1.6838, aux_loss: 0.0040, lr: 0.00000639, epoch_time: 27.0min
+Epoch:[1/2](49500/56608), loss: 1.6287, logits_loss: 1.6247, aux_loss: 0.0040, lr: 0.00000638, epoch_time: 26.0min
+Epoch:[1/2](49600/56608), loss: 1.7782, logits_loss: 1.7742, aux_loss: 0.0040, lr: 0.00000637, epoch_time: 26.0min
+Epoch:[1/2](49700/56608), loss: 1.5455, logits_loss: 1.5415, aux_loss: 0.0040, lr: 0.00000636, epoch_time: 26.0min
+Epoch:[1/2](49800/56608), loss: 1.7085, logits_loss: 1.7045, aux_loss: 0.0040, lr: 0.00000635, epoch_time: 25.0min
+Epoch:[1/2](49900/56608), loss: 1.5468, logits_loss: 1.5428, aux_loss: 0.0040, lr: 0.00000633, epoch_time: 25.0min
+Epoch:[1/2](50000/56608), loss: 1.5843, logits_loss: 1.5803, aux_loss: 0.0040, lr: 0.00000632, epoch_time: 24.0min
+Epoch:[1/2](50100/56608), loss: 1.6624, logits_loss: 1.6584, aux_loss: 0.0040, lr: 0.00000631, epoch_time: 24.0min
+Epoch:[1/2](50200/56608), loss: 1.6325, logits_loss: 1.6285, aux_loss: 0.0040, lr: 0.00000630, epoch_time: 24.0min
+Epoch:[1/2](50300/56608), loss: 1.4087, logits_loss: 1.4047, aux_loss: 0.0040, lr: 0.00000628, epoch_time: 23.0min
+Epoch:[1/2](50400/56608), loss: 1.6984, logits_loss: 1.6944, aux_loss: 0.0040, lr: 0.00000627, epoch_time: 23.0min
+Epoch:[1/2](50500/56608), loss: 1.6278, logits_loss: 1.6238, aux_loss: 0.0040, lr: 0.00000626, epoch_time: 23.0min
+Epoch:[1/2](50600/56608), loss: 1.5083, logits_loss: 1.5043, aux_loss: 0.0040, lr: 0.00000625, epoch_time: 22.0min
+Epoch:[1/2](50700/56608), loss: 1.7365, logits_loss: 1.7325, aux_loss: 0.0040, lr: 0.00000623, epoch_time: 22.0min
+Epoch:[1/2](50800/56608), loss: 1.5816, logits_loss: 1.5776, aux_loss: 0.0040, lr: 0.00000622, epoch_time: 22.0min
+Epoch:[1/2](50900/56608), loss: 1.5939, logits_loss: 1.5899, aux_loss: 0.0040, lr: 0.00000621, epoch_time: 21.0min
+Epoch:[1/2](51000/56608), loss: 1.5048, logits_loss: 1.5008, aux_loss: 0.0040, lr: 0.00000620, epoch_time: 21.0min
+Epoch:[1/2](51100/56608), loss: 1.7241, logits_loss: 1.7201, aux_loss: 0.0040, lr: 0.00000619, epoch_time: 20.0min
+Epoch:[1/2](51200/56608), loss: 1.6020, logits_loss: 1.5980, aux_loss: 0.0040, lr: 0.00000617, epoch_time: 20.0min
+Epoch:[1/2](51300/56608), loss: 1.5619, logits_loss: 1.5579, aux_loss: 0.0040, lr: 0.00000616, epoch_time: 20.0min
+Epoch:[1/2](51400/56608), loss: 1.6425, logits_loss: 1.6385, aux_loss: 0.0040, lr: 0.00000615, epoch_time: 19.0min
+Epoch:[1/2](51500/56608), loss: 1.5484, logits_loss: 1.5444, aux_loss: 0.0040, lr: 0.00000614, epoch_time: 19.0min
+Epoch:[1/2](51600/56608), loss: 1.4453, logits_loss: 1.4413, aux_loss: 0.0040, lr: 0.00000612, epoch_time: 19.0min
+Epoch:[1/2](51700/56608), loss: 1.4724, logits_loss: 1.4684, aux_loss: 0.0040, lr: 0.00000611, epoch_time: 18.0min
+Epoch:[1/2](51800/56608), loss: 1.6153, logits_loss: 1.6113, aux_loss: 0.0040, lr: 0.00000610, epoch_time: 18.0min
+Epoch:[1/2](51900/56608), loss: 1.6978, logits_loss: 1.6938, aux_loss: 0.0040, lr: 0.00000609, epoch_time: 17.0min
+Epoch:[1/2](52000/56608), loss: 1.5988, logits_loss: 1.5948, aux_loss: 0.0040, lr: 0.00000607, epoch_time: 17.0min
+Epoch:[1/2](52100/56608), loss: 1.4122, logits_loss: 1.4082, aux_loss: 0.0040, lr: 0.00000606, epoch_time: 17.0min
+Epoch:[1/2](52200/56608), loss: 1.5403, logits_loss: 1.5363, aux_loss: 0.0040, lr: 0.00000605, epoch_time: 16.0min
+Epoch:[1/2](52300/56608), loss: 1.6958, logits_loss: 1.6918, aux_loss: 0.0040, lr: 0.00000604, epoch_time: 16.0min
+Epoch:[1/2](52400/56608), loss: 1.5863, logits_loss: 1.5823, aux_loss: 0.0040, lr: 0.00000602, epoch_time: 16.0min
+Epoch:[1/2](52500/56608), loss: 1.6126, logits_loss: 1.6086, aux_loss: 0.0040, lr: 0.00000601, epoch_time: 15.0min
+Epoch:[1/2](52600/56608), loss: 1.4566, logits_loss: 1.4526, aux_loss: 0.0040, lr: 0.00000600, epoch_time: 15.0min
+Epoch:[1/2](52700/56608), loss: 1.6932, logits_loss: 1.6892, aux_loss: 0.0040, lr: 0.00000599, epoch_time: 14.0min
+Epoch:[1/2](52800/56608), loss: 1.7886, logits_loss: 1.7846, aux_loss: 0.0040, lr: 0.00000597, epoch_time: 14.0min
+Epoch:[1/2](52900/56608), loss: 1.7558, logits_loss: 1.7518, aux_loss: 0.0040, lr: 0.00000596, epoch_time: 14.0min
+Epoch:[1/2](53000/56608), loss: 1.7962, logits_loss: 1.7922, aux_loss: 0.0040, lr: 0.00000595, epoch_time: 13.0min
+Epoch:[1/2](53100/56608), loss: 1.6108, logits_loss: 1.6068, aux_loss: 0.0040, lr: 0.00000594, epoch_time: 13.0min
+Epoch:[1/2](53200/56608), loss: 1.7028, logits_loss: 1.6988, aux_loss: 0.0040, lr: 0.00000592, epoch_time: 12.0min
+Epoch:[1/2](53300/56608), loss: 1.6088, logits_loss: 1.6048, aux_loss: 0.0040, lr: 0.00000591, epoch_time: 12.0min
+Epoch:[1/2](53400/56608), loss: 1.5414, logits_loss: 1.5374, aux_loss: 0.0040, lr: 0.00000590, epoch_time: 12.0min
+Epoch:[1/2](53500/56608), loss: 1.6100, logits_loss: 1.6060, aux_loss: 0.0040, lr: 0.00000589, epoch_time: 11.0min
+Epoch:[1/2](53600/56608), loss: 1.6403, logits_loss: 1.6363, aux_loss: 0.0040, lr: 0.00000588, epoch_time: 11.0min
+Epoch:[1/2](53700/56608), loss: 1.5788, logits_loss: 1.5748, aux_loss: 0.0040, lr: 0.00000586, epoch_time: 11.0min
+Epoch:[1/2](53800/56608), loss: 1.4600, logits_loss: 1.4560, aux_loss: 0.0040, lr: 0.00000585, epoch_time: 10.0min
+Epoch:[1/2](53900/56608), loss: 1.5650, logits_loss: 1.5610, aux_loss: 0.0040, lr: 0.00000584, epoch_time: 10.0min
+Epoch:[1/2](54000/56608), loss: 1.6244, logits_loss: 1.6204, aux_loss: 0.0040, lr: 0.00000583, epoch_time: 9.0min
+Epoch:[1/2](54100/56608), loss: 1.5055, logits_loss: 1.5015, aux_loss: 0.0040, lr: 0.00000581, epoch_time: 9.0min
+Epoch:[1/2](54200/56608), loss: 1.6840, logits_loss: 1.6800, aux_loss: 0.0040, lr: 0.00000580, epoch_time: 9.0min
+Epoch:[1/2](54300/56608), loss: 1.5543, logits_loss: 1.5503, aux_loss: 0.0040, lr: 0.00000579, epoch_time: 8.0min
+Epoch:[1/2](54400/56608), loss: 1.5835, logits_loss: 1.5795, aux_loss: 0.0040, lr: 0.00000578, epoch_time: 8.0min
+Epoch:[1/2](54500/56608), loss: 1.5306, logits_loss: 1.5266, aux_loss: 0.0040, lr: 0.00000576, epoch_time: 8.0min
+Epoch:[1/2](54600/56608), loss: 1.5300, logits_loss: 1.5260, aux_loss: 0.0040, lr: 0.00000575, epoch_time: 7.0min
+Epoch:[1/2](54700/56608), loss: 1.4675, logits_loss: 1.4635, aux_loss: 0.0040, lr: 0.00000574, epoch_time: 7.0min
+Epoch:[1/2](54800/56608), loss: 1.8355, logits_loss: 1.8315, aux_loss: 0.0040, lr: 0.00000573, epoch_time: 6.0min
+Epoch:[1/2](54900/56608), loss: 1.6080, logits_loss: 1.6040, aux_loss: 0.0040, lr: 0.00000571, epoch_time: 6.0min
+Epoch:[1/2](55000/56608), loss: 1.5660, logits_loss: 1.5620, aux_loss: 0.0040, lr: 0.00000570, epoch_time: 6.0min
+Epoch:[1/2](55100/56608), loss: 1.4888, logits_loss: 1.4848, aux_loss: 0.0040, lr: 0.00000569, epoch_time: 5.0min
+Epoch:[1/2](55200/56608), loss: 1.6010, logits_loss: 1.5970, aux_loss: 0.0040, lr: 0.00000568, epoch_time: 5.0min
+Epoch:[1/2](55300/56608), loss: 1.5578, logits_loss: 1.5538, aux_loss: 0.0040, lr: 0.00000566, epoch_time: 5.0min
+Epoch:[1/2](55400/56608), loss: 1.4871, logits_loss: 1.4831, aux_loss: 0.0040, lr: 0.00000565, epoch_time: 4.0min
+Epoch:[1/2](55500/56608), loss: 1.7564, logits_loss: 1.7524, aux_loss: 0.0040, lr: 0.00000564, epoch_time: 4.0min
+Epoch:[1/2](55600/56608), loss: 1.6599, logits_loss: 1.6559, aux_loss: 0.0040, lr: 0.00000563, epoch_time: 3.0min
+Epoch:[1/2](55700/56608), loss: 1.5255, logits_loss: 1.5215, aux_loss: 0.0040, lr: 0.00000561, epoch_time: 3.0min
+Epoch:[1/2](55800/56608), loss: 1.6579, logits_loss: 1.6539, aux_loss: 0.0040, lr: 0.00000560, epoch_time: 3.0min
+Epoch:[1/2](55900/56608), loss: 1.6148, logits_loss: 1.6108, aux_loss: 0.0040, lr: 0.00000559, epoch_time: 2.0min
+Epoch:[1/2](56000/56608), loss: 1.8318, logits_loss: 1.8278, aux_loss: 0.0040, lr: 0.00000558, epoch_time: 2.0min
+Epoch:[1/2](56100/56608), loss: 1.6416, logits_loss: 1.6376, aux_loss: 0.0040, lr: 0.00000556, epoch_time: 1.0min
+Epoch:[1/2](56200/56608), loss: 1.5777, logits_loss: 1.5737, aux_loss: 0.0040, lr: 0.00000555, epoch_time: 1.0min
+Epoch:[1/2](56300/56608), loss: 1.6800, logits_loss: 1.6760, aux_loss: 0.0040, lr: 0.00000554, epoch_time: 1.0min
+Epoch:[1/2](56400/56608), loss: 1.6151, logits_loss: 1.6111, aux_loss: 0.0040, lr: 0.00000553, epoch_time: 0.0min
+Epoch:[1/2](56500/56608), loss: 1.4907, logits_loss: 1.4867, aux_loss: 0.0040, lr: 0.00000551, epoch_time: 0.0min
+Epoch:[1/2](56600/56608), loss: 1.7609, logits_loss: 1.7569, aux_loss: 0.0040, lr: 0.00000550, epoch_time: 0.0min
+Epoch:[1/2](56608/56608), loss: 1.6037, logits_loss: 1.5997, aux_loss: 0.0040, lr: 0.00000550, epoch_time: 0.0min
+Epoch:[2/2](100/56608), loss: 1.4741, logits_loss: 1.4701, aux_loss: 0.0040, lr: 0.00000549, epoch_time: 741.0min
+Epoch:[2/2](200/56608), loss: 1.5289, logits_loss: 1.5249, aux_loss: 0.0040, lr: 0.00000548, epoch_time: 486.0min
+Epoch:[2/2](300/56608), loss: 1.3846, logits_loss: 1.3806, aux_loss: 0.0040, lr: 0.00000546, epoch_time: 401.0min
+Epoch:[2/2](400/56608), loss: 1.6843, logits_loss: 1.6803, aux_loss: 0.0040, lr: 0.00000545, epoch_time: 359.0min
+Epoch:[2/2](500/56608), loss: 1.6670, logits_loss: 1.6630, aux_loss: 0.0040, lr: 0.00000544, epoch_time: 333.0min
+Epoch:[2/2](600/56608), loss: 1.6218, logits_loss: 1.6178, aux_loss: 0.0040, lr: 0.00000543, epoch_time: 315.0min
+Epoch:[2/2](700/56608), loss: 1.5912, logits_loss: 1.5872, aux_loss: 0.0040, lr: 0.00000541, epoch_time: 304.0min
+Epoch:[2/2](800/56608), loss: 1.4583, logits_loss: 1.4543, aux_loss: 0.0040, lr: 0.00000540, epoch_time: 294.0min
+Epoch:[2/2](900/56608), loss: 1.7067, logits_loss: 1.7027, aux_loss: 0.0040, lr: 0.00000539, epoch_time: 286.0min
+Epoch:[2/2](1000/56608), loss: 1.5208, logits_loss: 1.5168, aux_loss: 0.0040, lr: 0.00000538, epoch_time: 281.0min
+Epoch:[2/2](1100/56608), loss: 1.6264, logits_loss: 1.6224, aux_loss: 0.0040, lr: 0.00000536, epoch_time: 279.0min
+Epoch:[2/2](1200/56608), loss: 1.7072, logits_loss: 1.7032, aux_loss: 0.0040, lr: 0.00000535, epoch_time: 274.0min
+Epoch:[2/2](1300/56608), loss: 1.5400, logits_loss: 1.5360, aux_loss: 0.0040, lr: 0.00000534, epoch_time: 272.0min
+Epoch:[2/2](1400/56608), loss: 1.5296, logits_loss: 1.5256, aux_loss: 0.0040, lr: 0.00000533, epoch_time: 270.0min
+Epoch:[2/2](1500/56608), loss: 1.4764, logits_loss: 1.4724, aux_loss: 0.0040, lr: 0.00000531, epoch_time: 266.0min
+Epoch:[2/2](1600/56608), loss: 1.5016, logits_loss: 1.4976, aux_loss: 0.0040, lr: 0.00000530, epoch_time: 263.0min
+Epoch:[2/2](1700/56608), loss: 1.4658, logits_loss: 1.4618, aux_loss: 0.0040, lr: 0.00000529, epoch_time: 260.0min
+Epoch:[2/2](1800/56608), loss: 1.5016, logits_loss: 1.4976, aux_loss: 0.0040, lr: 0.00000528, epoch_time: 258.0min
+Epoch:[2/2](1900/56608), loss: 1.4220, logits_loss: 1.4180, aux_loss: 0.0040, lr: 0.00000526, epoch_time: 255.0min
+Epoch:[2/2](2000/56608), loss: 1.8318, logits_loss: 1.8278, aux_loss: 0.0040, lr: 0.00000525, epoch_time: 253.0min
+Epoch:[2/2](2100/56608), loss: 1.6936, logits_loss: 1.6896, aux_loss: 0.0040, lr: 0.00000524, epoch_time: 253.0min
+Epoch:[2/2](2200/56608), loss: 1.7243, logits_loss: 1.7203, aux_loss: 0.0040, lr: 0.00000523, epoch_time: 251.0min
+Epoch:[2/2](2300/56608), loss: 1.5569, logits_loss: 1.5529, aux_loss: 0.0040, lr: 0.00000521, epoch_time: 250.0min
+Epoch:[2/2](2400/56608), loss: 1.5237, logits_loss: 1.5197, aux_loss: 0.0040, lr: 0.00000520, epoch_time: 248.0min
+Epoch:[2/2](2500/56608), loss: 1.6442, logits_loss: 1.6402, aux_loss: 0.0040, lr: 0.00000519, epoch_time: 246.0min
+Epoch:[2/2](2600/56608), loss: 1.7315, logits_loss: 1.7275, aux_loss: 0.0040, lr: 0.00000518, epoch_time: 245.0min
+Epoch:[2/2](2700/56608), loss: 1.5351, logits_loss: 1.5311, aux_loss: 0.0040, lr: 0.00000516, epoch_time: 243.0min
+Epoch:[2/2](2800/56608), loss: 1.6508, logits_loss: 1.6468, aux_loss: 0.0040, lr: 0.00000515, epoch_time: 242.0min
+Epoch:[2/2](2900/56608), loss: 1.4236, logits_loss: 1.4196, aux_loss: 0.0040, lr: 0.00000514, epoch_time: 241.0min
+Epoch:[2/2](3000/56608), loss: 1.4655, logits_loss: 1.4615, aux_loss: 0.0040, lr: 0.00000513, epoch_time: 240.0min
+Epoch:[2/2](3100/56608), loss: 1.6150, logits_loss: 1.6110, aux_loss: 0.0040, lr: 0.00000511, epoch_time: 240.0min
+Epoch:[2/2](3200/56608), loss: 1.5806, logits_loss: 1.5766, aux_loss: 0.0040, lr: 0.00000510, epoch_time: 239.0min
+Epoch:[2/2](3300/56608), loss: 1.7168, logits_loss: 1.7128, aux_loss: 0.0040, lr: 0.00000509, epoch_time: 238.0min
+Epoch:[2/2](3400/56608), loss: 1.6072, logits_loss: 1.6032, aux_loss: 0.0040, lr: 0.00000508, epoch_time: 237.0min
+Epoch:[2/2](3500/56608), loss: 1.6183, logits_loss: 1.6143, aux_loss: 0.0040, lr: 0.00000506, epoch_time: 236.0min
+Epoch:[2/2](3600/56608), loss: 1.6947, logits_loss: 1.6907, aux_loss: 0.0040, lr: 0.00000505, epoch_time: 235.0min
+Epoch:[2/2](3700/56608), loss: 1.4854, logits_loss: 1.4814, aux_loss: 0.0040, lr: 0.00000504, epoch_time: 234.0min
+Epoch:[2/2](3800/56608), loss: 1.5209, logits_loss: 1.5169, aux_loss: 0.0040, lr: 0.00000503, epoch_time: 233.0min
+Epoch:[2/2](3900/56608), loss: 1.6107, logits_loss: 1.6067, aux_loss: 0.0040, lr: 0.00000501, epoch_time: 232.0min
+Epoch:[2/2](4000/56608), loss: 1.6273, logits_loss: 1.6233, aux_loss: 0.0040, lr: 0.00000500, epoch_time: 231.0min
+Epoch:[2/2](4100/56608), loss: 1.5898, logits_loss: 1.5858, aux_loss: 0.0040, lr: 0.00000499, epoch_time: 230.0min
+Epoch:[2/2](4200/56608), loss: 1.7507, logits_loss: 1.7467, aux_loss: 0.0040, lr: 0.00000498, epoch_time: 230.0min
+Epoch:[2/2](4300/56608), loss: 1.3890, logits_loss: 1.3850, aux_loss: 0.0040, lr: 0.00000496, epoch_time: 229.0min
+Epoch:[2/2](4400/56608), loss: 1.4794, logits_loss: 1.4754, aux_loss: 0.0040, lr: 0.00000495, epoch_time: 228.0min
+Epoch:[2/2](4500/56608), loss: 1.4261, logits_loss: 1.4221, aux_loss: 0.0040, lr: 0.00000494, epoch_time: 227.0min
+Epoch:[2/2](4600/56608), loss: 1.7601, logits_loss: 1.7561, aux_loss: 0.0040, lr: 0.00000493, epoch_time: 226.0min
+Epoch:[2/2](4700/56608), loss: 1.5909, logits_loss: 1.5869, aux_loss: 0.0040, lr: 0.00000491, epoch_time: 225.0min
+Epoch:[2/2](4800/56608), loss: 1.7244, logits_loss: 1.7204, aux_loss: 0.0040, lr: 0.00000490, epoch_time: 224.0min
+Epoch:[2/2](4900/56608), loss: 1.0945, logits_loss: 1.0905, aux_loss: 0.0040, lr: 0.00000489, epoch_time: 224.0min
+Epoch:[2/2](5000/56608), loss: 1.3426, logits_loss: 1.3386, aux_loss: 0.0040, lr: 0.00000488, epoch_time: 223.0min
+Epoch:[2/2](5100/56608), loss: 1.5777, logits_loss: 1.5737, aux_loss: 0.0040, lr: 0.00000487, epoch_time: 223.0min
+Epoch:[2/2](5200/56608), loss: 1.4211, logits_loss: 1.4171, aux_loss: 0.0040, lr: 0.00000485, epoch_time: 222.0min
+Epoch:[2/2](5300/56608), loss: 1.5864, logits_loss: 1.5824, aux_loss: 0.0040, lr: 0.00000484, epoch_time: 221.0min
+Epoch:[2/2](5400/56608), loss: 1.5775, logits_loss: 1.5735, aux_loss: 0.0040, lr: 0.00000483, epoch_time: 221.0min
+Epoch:[2/2](5500/56608), loss: 1.5092, logits_loss: 1.5052, aux_loss: 0.0040, lr: 0.00000482, epoch_time: 220.0min
+Epoch:[2/2](5600/56608), loss: 1.5846, logits_loss: 1.5806, aux_loss: 0.0040, lr: 0.00000480, epoch_time: 219.0min
+Epoch:[2/2](5700/56608), loss: 1.7154, logits_loss: 1.7114, aux_loss: 0.0040, lr: 0.00000479, epoch_time: 219.0min
+Epoch:[2/2](5800/56608), loss: 1.5833, logits_loss: 1.5793, aux_loss: 0.0040, lr: 0.00000478, epoch_time: 218.0min
+Epoch:[2/2](5900/56608), loss: 1.6259, logits_loss: 1.6219, aux_loss: 0.0040, lr: 0.00000477, epoch_time: 217.0min
+Epoch:[2/2](6000/56608), loss: 1.6850, logits_loss: 1.6810, aux_loss: 0.0040, lr: 0.00000475, epoch_time: 217.0min
+Epoch:[2/2](6100/56608), loss: 1.5737, logits_loss: 1.5697, aux_loss: 0.0040, lr: 0.00000474, epoch_time: 216.0min
+Epoch:[2/2](6200/56608), loss: 1.6030, logits_loss: 1.5990, aux_loss: 0.0040, lr: 0.00000473, epoch_time: 216.0min
+Epoch:[2/2](6300/56608), loss: 1.5780, logits_loss: 1.5740, aux_loss: 0.0040, lr: 0.00000472, epoch_time: 215.0min
+Epoch:[2/2](6400/56608), loss: 1.6170, logits_loss: 1.6130, aux_loss: 0.0040, lr: 0.00000471, epoch_time: 214.0min
+Epoch:[2/2](6500/56608), loss: 1.6156, logits_loss: 1.6116, aux_loss: 0.0040, lr: 0.00000469, epoch_time: 214.0min
+Epoch:[2/2](6600/56608), loss: 1.5288, logits_loss: 1.5248, aux_loss: 0.0040, lr: 0.00000468, epoch_time: 213.0min
+Epoch:[2/2](6700/56608), loss: 1.8763, logits_loss: 1.8723, aux_loss: 0.0040, lr: 0.00000467, epoch_time: 212.0min
+Epoch:[2/2](6800/56608), loss: 1.6895, logits_loss: 1.6855, aux_loss: 0.0040, lr: 0.00000466, epoch_time: 212.0min
+Epoch:[2/2](6900/56608), loss: 1.4481, logits_loss: 1.4441, aux_loss: 0.0040, lr: 0.00000464, epoch_time: 211.0min
+Epoch:[2/2](7000/56608), loss: 1.6855, logits_loss: 1.6815, aux_loss: 0.0040, lr: 0.00000463, epoch_time: 210.0min
+Epoch:[2/2](7100/56608), loss: 1.4931, logits_loss: 1.4891, aux_loss: 0.0040, lr: 0.00000462, epoch_time: 210.0min
+Epoch:[2/2](7200/56608), loss: 1.5354, logits_loss: 1.5314, aux_loss: 0.0040, lr: 0.00000461, epoch_time: 210.0min
+Epoch:[2/2](7300/56608), loss: 1.5920, logits_loss: 1.5880, aux_loss: 0.0040, lr: 0.00000459, epoch_time: 209.0min
+Epoch:[2/2](7400/56608), loss: 1.3368, logits_loss: 1.3328, aux_loss: 0.0040, lr: 0.00000458, epoch_time: 208.0min
+Epoch:[2/2](7500/56608), loss: 1.4747, logits_loss: 1.4707, aux_loss: 0.0040, lr: 0.00000457, epoch_time: 208.0min
+Epoch:[2/2](7600/56608), loss: 1.4356, logits_loss: 1.4316, aux_loss: 0.0040, lr: 0.00000456, epoch_time: 207.0min
+Epoch:[2/2](7700/56608), loss: 1.7842, logits_loss: 1.7802, aux_loss: 0.0040, lr: 0.00000455, epoch_time: 207.0min
+Epoch:[2/2](7800/56608), loss: 1.4122, logits_loss: 1.4082, aux_loss: 0.0040, lr: 0.00000453, epoch_time: 206.0min
+Epoch:[2/2](7900/56608), loss: 1.6597, logits_loss: 1.6557, aux_loss: 0.0040, lr: 0.00000452, epoch_time: 206.0min
+Epoch:[2/2](8000/56608), loss: 1.4670, logits_loss: 1.4630, aux_loss: 0.0040, lr: 0.00000451, epoch_time: 206.0min
+Epoch:[2/2](8100/56608), loss: 1.5261, logits_loss: 1.5221, aux_loss: 0.0040, lr: 0.00000450, epoch_time: 205.0min
+Epoch:[2/2](8200/56608), loss: 1.6596, logits_loss: 1.6556, aux_loss: 0.0040, lr: 0.00000448, epoch_time: 205.0min
+Epoch:[2/2](8300/56608), loss: 1.6465, logits_loss: 1.6425, aux_loss: 0.0040, lr: 0.00000447, epoch_time: 205.0min
+Epoch:[2/2](8400/56608), loss: 1.6574, logits_loss: 1.6534, aux_loss: 0.0040, lr: 0.00000446, epoch_time: 204.0min
+Epoch:[2/2](8500/56608), loss: 1.5683, logits_loss: 1.5643, aux_loss: 0.0040, lr: 0.00000445, epoch_time: 204.0min
+Epoch:[2/2](8600/56608), loss: 1.7075, logits_loss: 1.7035, aux_loss: 0.0040, lr: 0.00000444, epoch_time: 203.0min
+Epoch:[2/2](8700/56608), loss: 1.6505, logits_loss: 1.6465, aux_loss: 0.0040, lr: 0.00000442, epoch_time: 203.0min
+Epoch:[2/2](8800/56608), loss: 1.6759, logits_loss: 1.6719, aux_loss: 0.0040, lr: 0.00000441, epoch_time: 203.0min
+Epoch:[2/2](8900/56608), loss: 1.5826, logits_loss: 1.5785, aux_loss: 0.0040, lr: 0.00000440, epoch_time: 202.0min
+forrtl: error (200): program aborting due to window-CLOSE event
+Image              PC                Routine            Line        Source             
+KERNELBASE.dll     00007FF90D6D3E3D  Unknown               Unknown  Unknown
+KERNEL32.DLL       00007FF90ECDE957  Unknown               Unknown  Unknown
+ntdll.dll          00007FF90FF2AD6C  Unknown               Unknown  Unknown
+forrtl: error (200): program aborting due to window-CLOSE event
+Image              PC                Routine            Line        Source             
+KERNELBASE.dll     00007FF90D6D3E3D  Unknown               Unknown  Unknown
+KERNEL32.DLL       00007FF90ECDE957  Unknown               Unknown  Unknown
+ntdll.dll          00007FF90FF2AD6C  Unknown               Unknown  Unknown
+forrtl: error (200): program aborting due to window-CLOSE event
+Image              PC                Routine            Line        Source             
+KERNELBASE.dll     00007FF90D6D3E3D  Unknown               Unknown  Unknown
+KERNEL32.DLL       00007FF90ECDE957  Unknown               Unknown  Unknown
+ntdll.dll          00007FF90FF2AD6C  Unknown               Unknown  Unknown
+forrtl: error (200): program aborting due to window-CLOSE event
+Image              PC                Routine            Line        Source             
+KERNELBASE.dll     00007FF90D6D3E3D  Unknown               Unknown  Unknown
+KERNEL32.DLL       00007FF90ECDE957  Unknown               Unknown  Unknown
+ntdll.dll          00007FF90FF2AD6C  Unknown               Unknown  Unknown
+forrtl: error (200): program aborting due to window-CLOSE event
+Image              PC                Routine            Line        Source             
+KERNELBASE.dll     00007FF90D6D3E3D  Unknown               Unknown  Unknown
+KERNEL32.DLL       00007FF90ECDE957  Unknown               Unknown  Unknown
+ntdll.dll          00007FF90FF2AD6C  Unknown               Unknown  Unknown
+forrtl: error (200): program aborting due to window-CLOSE event
+Image              PC                Routine            Line        Source             
+KERNELBASE.dll     00007FF90D6D3E3D  Unknown               Unknown  Unknown
+KERNEL32.DLL       00007FF90ECDE957  Unknown               Unknown  Unknown
+ntdll.dll          00007FF90FF2AD6C  Unknown               Unknown  Unknown
+forrtl: error (200): program aborting due to window-CLOSE event
+Image              PC                Routine            Line        Source             
+KERNELBASE.dll     00007FF90D6D3E3D  Unknown               Unknown  Unknown
+KERNEL32.DLL       00007FF90ECDE957  Unknown               Unknown  Unknown
+ntdll.dll          00007FF90FF2AD6C  Unknown               Unknown  Unknown
+forrtl: error (200): program aborting due to window-CLOSE event
+Image              PC                Routine            Line        Source             
+KERNELBASE.dll     00007FF90D6D3E3D  Unknown               Unknown  Unknown
+KERNEL32.DLL       00007FF90ECDE957  Unknown               Unknown  Unknown
+ntdll.dll          00007FF90FF2AD6C  Unknown               Unknown  Unknown
+forrtl: error (200): program aborting due to window-CLOSE event
+Image              PC                Routine            Line        Source             
+KERNELBASE.dll     00007FF90D6D3E3D  Unknown               Unknown  Unknown
+KERNEL32.DLL       00007FF90ECDE957  Unknown               Unknown  Unknown
+ntdll.dll          00007FF90FF2AD6C  Unknown               Unknown  Unknown

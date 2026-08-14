@@ -1,0 +1,58 @@
+Model Params: 198.49M-A64.01M
+Trainable Params: 198.494M
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 70908 examples [00:00, 596392.70 examples/s]Generating train split: 200536 examples [00:00, 836815.53 examples/s]Generating train split: 300555 examples [00:00, 860848.95 examples/s]Generating train split: 408447 examples [00:00, 900249.55 examples/s]Generating train split: 514104 examples [00:00, 636455.64 examples/s]Generating train split: 603987 examples [00:00, 657130.76 examples/s]Generating train split: 695507 examples [00:01, 585226.79 examples/s]Generating train split: 766321 examples [00:01, 387279.18 examples/s]Generating train split: 819451 examples [00:01, 395145.49 examples/s]Generating train split: 876133 examples [00:01, 404042.79 examples/s]Generating train split: 936093 examples [00:01, 416747.66 examples/s]Generating train split: 1002786 examples [00:01, 441644.56 examples/s]Generating train split: 1054446 examples [00:02, 379849.23 examples/s]Generating train split: 1120539 examples [00:02, 200205.22 examples/s]Generating train split: 1183715 examples [00:02, 245697.50 examples/s]Generating train split: 1232066 examples [00:03, 270546.78 examples/s]Generating train split: 1270238 examples [00:03, 384222.63 examples/s]
+Traceback (most recent call last):
+  File "D:\AI\minimind-master\scripts\..\trainer\train_pretrain.py", line 197, in <module>
+    train_epoch(epoch, loader, len(loader), 0, wandb)
+  File "D:\AI\minimind-master\scripts\..\trainer\train_pretrain.py", line 36, in train_epoch
+    res = model(input_ids, labels=labels, early_exit=bool(args.early_exit))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\miniconda3\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\miniconda3\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\AI\minimind-master\model\model_looped_minimind.py", line 411, in forward
+    loss_dict = self.model(
+                ^^^^^^^^^^^
+  File "E:\miniconda3\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\miniconda3\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\AI\minimind-master\model\model_looped_minimind.py", line 277, in forward
+    h, _, loop_aux = self._run_layers(
+                     ^^^^^^^^^^^^^^^^^
+  File "D:\AI\minimind-master\model\model_looped_minimind.py", line 207, in _run_layers
+    hidden, present = layer(
+                      ^^^^^^
+  File "E:\miniconda3\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\miniconda3\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\AI\minimind-master\model\model_minimind.py", line 191, in forward
+    hidden_states, present_key_value = self.self_attn(
+                                       ^^^^^^^^^^^^^^^
+  File "E:\miniconda3\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\miniconda3\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\AI\minimind-master\model\model_minimind.py", line 120, in forward
+    xq, xk = self.q_norm(xq), self.k_norm(xk)
+             ^^^^^^^^^^^^^^^
+  File "E:\miniconda3\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\miniconda3\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\AI\minimind-master\model\model_minimind.py", line 63, in forward
+    return (self.weight * self.norm(x.float())).type_as(x)
+            ~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 32.00 MiB. GPU 0 has a total capacity of 15.92 GiB of which 0 bytes is free. Of the allocated memory 44.84 GiB is allocated by PyTorch, and 614.06 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

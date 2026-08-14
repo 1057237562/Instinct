@@ -1,0 +1,1292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiniMind — Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #FFFFFF;
+    --fg: #111827;
+    --primary: #3B82F6;
+    --secondary: #10B981;
+    --accent: #F59E0B;
+    --muted: #F3F4F6;
+    --border: #E5E7EB;
+    --font: 'Outfit', sans-serif;
+  }
+
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: var(--font);
+    color: var(--fg);
+    background: var(--bg);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Container ── */
+  .container { max-width: 1280px; margin: 0 auto; padding: 0 24px; }
+
+  /* ── Typography ── */
+  h1, h2, h3, h4 { letter-spacing: -0.02em; }
+  .heading-xl { font-size: clamp(2.5rem, 6vw, 4.5rem); font-weight: 800; line-height: 1.05; }
+  .heading-lg { font-size: clamp(2rem, 4vw, 3.25rem); font-weight: 700; line-height: 1.1; }
+  .heading-md { font-size: clamp(1.25rem, 2.5vw, 1.75rem); font-weight: 700; }
+  .label-sm { font-size: 0.8125rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+
+  /* ── Buttons ── */
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; padding: 0 32px;
+    height: 56px; border-radius: 8px; font-weight: 600; font-size: 0.9375rem;
+    font-family: var(--font); text-decoration: none; cursor: pointer;
+    transition: all 0.2s ease; border: none; letter-spacing: -0.01em;
+  }
+  .btn-primary   { background: var(--primary); color: #fff; }
+  .btn-primary:hover { background: #2563EB; transform: scale(1.05); }
+  .btn-secondary { background: var(--muted); color: var(--fg); }
+  .btn-secondary:hover { background: #E5E7EB; transform: scale(1.05); }
+  .btn-outline {
+    background: transparent; color: var(--fg);
+    border: 4px solid var(--fg);
+  }
+  .btn-outline:hover { background: var(--fg); color: #fff; transform: scale(1.05); }
+  .btn-outline-light {
+    background: transparent; color: #fff;
+    border: 4px solid rgba(255,255,255,0.4);
+  }
+  .btn-outline-light:hover { border-color: #fff; transform: scale(1.05); }
+
+  /* ── Section block ── */
+  .section { padding: 100px 0; position: relative; overflow: hidden; }
+  .section-blue  { background: var(--primary); color: #fff; }
+  .section-white { background: var(--bg); }
+  .section-muted { background: var(--muted); }
+  .section-emerald { background: var(--secondary); color: #fff; }
+  .section-amber { background: var(--accent); color: #111827; }
+  .section-dark  { background: #111827; color: #fff; }
+
+  /* ── Decorative shapes ── */
+  .geo-circle {
+    position: absolute; border-radius: 50%; pointer-events: none;
+  }
+  .geo-square {
+    position: absolute; pointer-events: none;
+  }
+
+  /* ── Cards (Color Block) ── */
+  .card {
+    border-radius: 12px; padding: 32px; background: #fff;
+    transition: all 0.2s ease;
+  }
+  .card-tint-blue   { background: #EFF6FF; }
+  .card-tint-green  { background: #ECFDF5; }
+  .card-tint-amber  { background: #FFFBEB; }
+  .card-hover:hover { transform: scale(1.02); }
+  .card-dark { background: rgba(255,255,255,0.06); color: #fff; }
+
+  /* ── Icon circle ── */
+  .icon-circle {
+    display: flex; align-items: center; justify-content: center;
+    width: 56px; height: 56px; border-radius: 50%; flex-shrink: 0;
+    transition: transform 0.2s ease;
+  }
+  .icon-circle-blue  { background: #fff; color: var(--primary); }
+  .icon-circle-green { background: #fff; color: var(--secondary); }
+  .icon-circle-amber { background: #fff; color: var(--accent); }
+  .icon-circle-dark  { background: rgba(255,255,255,0.12); color: #fff; }
+
+  /* ── Pipeline step ── */
+  .pipeline-step {
+    display: flex; align-items: flex-start; gap: 24px; padding: 28px 32px;
+    border-radius: 12px; background: rgba(255,255,255,0.08);
+    transition: transform 0.2s ease;
+  }
+  .pipeline-step:hover { transform: scale(1.02); }
+  .step-number {
+    width: 52px; height: 52px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.5rem; font-weight: 800; flex-shrink: 0;
+  }
+
+  /* ── Stat number ── */
+  .stat-value {
+    font-size: clamp(2.5rem, 5vw, 4rem); font-weight: 800;
+    line-height: 1; letter-spacing: -0.03em;
+  }
+
+  /* ── Code block ── */
+  .code-block {
+    background: rgba(255,255,255,0.08); border-radius: 10px;
+    padding: 20px 24px; font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.875rem; line-height: 1.7; overflow-x: auto;
+  }
+
+  /* ── Grid ── */
+  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; }
+
+  /* ── Section header ── */
+  .section-header { text-align: center; margin-bottom: 64px; }
+  .section-header .label-sm { display: inline-block; margin-bottom: 12px; opacity: 0.7; }
+
+  /* ── Focus ── */
+  a:focus-visible, button:focus-visible, .btn:focus-visible {
+    outline: none; ring: 2px solid var(--primary); ring-offset: 2px;
+  }
+  .section-blue a:focus-visible, .section-dark a:focus-visible {
+    ring-color: #fff;
+  }
+
+  /* ── Tag ── */
+  .tag {
+    display: inline-block; padding: 4px 14px; border-radius: 6px;
+    font-size: 0.8125rem; font-weight: 600; letter-spacing: 0.04em;
+  }
+  .tag-blue  { background: var(--primary); color: #fff; }
+  .tag-green { background: var(--secondary); color: #fff; }
+
+  /* ── Responsive ── */
+  @media (max-width: 768px) {
+    .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+    .section { padding: 64px 0; }
+    .pipeline-step { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════ HERO ══════════════════════════════════════════ -->
+<section class="section section-blue" style="padding: 140px 0 120px;">
+  <!-- Decorative geometry -->
+  <div class="geo-circle" style="width:500px;height:500px;background:rgba(255,255,255,0.04);top:-120px;right:-80px;"></div>
+  <div class="geo-circle" style="width:340px;height:340px;background:rgba(255,255,255,0.05);bottom:-60px;left:-40px;"></div>
+  <div class="geo-square" style="width:180px;height:180px;background:rgba(255,255,255,0.04);border-radius:24px;top:80px;left:10%;transform:rotate(15deg);"></div>
+  <div class="geo-square" style="width:120px;height:120px;background:rgba(255,255,255,0.05);border-radius:20px;bottom:100px;right:12%;transform:rotate(-12deg);"></div>
+
+  <div class="container" style="position:relative;z-index:1;">
+    <span class="tag" style="background:rgba(255,255,255,0.15);color:#fff;margin-bottom:20px;display:inline-block;">ARCHITECTURE OVERVIEW</span>
+    <h1 class="heading-xl" style="margin-bottom:24px;">
+      MiniMind<br>
+      <span style="opacity:0.7;font-weight:600;">~64M LLM from Scratch</span>
+    </h1>
+    <p style="font-size:1.25rem;opacity:0.85;max-width:640px;margin-bottom:40px;line-height:1.65;">
+      A pure PyTorch implementation of a Transformer Decoder-Only language model.
+      Train in ~2 hours on a single NVIDIA 3090. No &lt;code&gt;trl&lt;/code&gt;, no &lt;code&gt;peft&lt;/code&gt; — just raw, readable code.
+    </p>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;">
+      <a href="#arch" class="btn btn-outline-light">Explore Architecture</a>
+      <a href="architecture-diagram.html" class="btn btn-outline-light">See Diagram</a>
+      <a href="https://github.com/jingyaogong/minimind" class="btn" style="background:#fff;color:var(--primary);">View on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ MODEL VARIANTS ══════════════════════════════════════════ -->
+<section id="arch" class="section section-white">
+  <div class="geo-square" style="width:260px;height:260px;background:var(--muted);border-radius:32px;top:40px;right:-60px;transform:rotate(20deg);"></div>
+  <div class="geo-circle" style="width:180px;height:180px;background:rgba(59,130,246,0.05);bottom:20px;left:-40px;"></div>
+
+  <div class="container" style="position:relative;z-index:1;">
+    <div class="section-header">
+      <span class="label-sm" style="color:var(--primary);">Model Variants</span>
+      <h2 class="heading-lg">Dense · MoE · Linear Attention</h2>
+      <p style="color:#6B7280;font-size:1.0625rem;max-width:600px;margin:16px auto 0;">
+        Three architectures sharing the same foundation — aligned to the Qwen3 ecosystem.
+      </p>
+    </div>
+
+    <div class="grid-3">
+      <!-- Dense Card -->
+      <div class="card card-tint-blue card-hover" style="position:relative;overflow:hidden;">
+        <div class="geo-square" style="width:100px;height:100px;background:rgba(59,130,246,0.06);border-radius:16px;top:-10px;right:-10px;"></div>
+        <div style="position:relative;z-index:1;">
+          <div class="icon-circle icon-circle-blue" style="margin-bottom:20px;">
+            <i data-lucide="layers" style="width:24px;height:24px;"></i>
+          </div>
+          <span class="tag tag-blue" style="margin-bottom:16px;">Dense</span>
+          <h3 class="heading-md" style="margin:12px 0 8px;">MiniMind Dense</h3>
+          <p style="color:#4B5563;margin-bottom:24px;line-height:1.65;">
+            Compact Transformer Decoder-Only with SwiGLU activations, RMSNorm, and Rotary Position Embeddings.
+          </p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Parameters</div><div style="font-weight:700;font-size:1.125rem;">64 M</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Layers</div><div style="font-weight:700;font-size:1.125rem;">8</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Hidden Dim</div><div style="font-weight:700;font-size:1.125rem;">768</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Vocab Size</div><div style="font-weight:700;font-size:1.125rem;">6,400</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Q-Heads</div><div style="font-weight:700;font-size:1.125rem;">8</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">KV-Heads</div><div style="font-weight:700;font-size:1.125rem;">4</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MoE Card -->
+      <div class="card card-tint-green card-hover" style="position:relative;overflow:hidden;">
+        <div class="geo-square" style="width:100px;height:100px;background:rgba(16,185,129,0.06);border-radius:16px;top:-10px;right:-10px;"></div>
+        <div style="position:relative;z-index:1;">
+          <div class="icon-circle icon-circle-green" style="margin-bottom:20px;">
+            <i data-lucide="network" style="width:24px;height:24px;"></i>
+          </div>
+          <span class="tag tag-green" style="margin-bottom:16px;">MoE</span>
+          <h3 class="heading-md" style="margin:12px 0 8px;">MiniMind MoE</h3>
+          <p style="color:#4B5563;margin-bottom:24px;line-height:1.65;">
+            Dense base extended with 4 expert FFN layers and top-1 routing. Higher capacity with minimal activation overhead.
+          </p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Total Params</div><div style="font-weight:700;font-size:1.125rem;">198 M</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Active Params</div><div style="font-weight:700;font-size:1.125rem;">64 M</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Experts</div><div style="font-weight:700;font-size:1.125rem;">4</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Routing</div><div style="font-weight:700;font-size:1.125rem;">Top‑1</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Aux Loss</div><div style="font-weight:700;font-size:1.125rem;">5e‑4</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">No Shared</div><div style="font-weight:700;font-size:1.125rem;">Expert</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Linear Card -->
+      <div class="card card-tint-amber card-hover" style="position:relative;overflow:hidden;">
+        <div class="geo-square" style="width:100px;height:100px;background:rgba(245,158,11,0.06);border-radius:16px;top:-10px;right:-10px;"></div>
+        <div style="position:relative;z-index:1;">
+          <div class="icon-circle icon-circle-amber" style="margin-bottom:20px;">
+            <i data-lucide="activity" style="width:24px;height:24px;"></i>
+          </div>
+          <span class="tag tag-green" style="margin-bottom:16px;">Experimental</span>
+          <h3 class="heading-md" style="margin:12px 0 8px;">MiniMind Linear</h3>
+          <p style="color:#4B5563;margin-bottom:24px;line-height:1.65;">
+            GatedDeltaNet replaces softmax attention with O(T) linear complexity. Hybrid design: 6 linear + 2 full-attention layers. Chunked training with recurrent inference.
+          </p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Parameters</div><div style="font-weight:700;font-size:1.125rem;">71 M</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Layers</div><div style="font-weight:700;font-size:1.125rem;">8</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Linear Layers</div><div style="font-weight:700;font-size:1.125rem;">6</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Full Attn Layers</div><div style="font-weight:700;font-size:1.125rem;">2</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Conv Kernel</div><div style="font-weight:700;font-size:1.125rem;">4</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Q/K Norm</div><div style="font-weight:700;font-size:1.125rem;">L2 Norm</div></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ ARCHITECTURE DEEP-DIVE ══════════════════════════════════════════ -->
+<section class="section section-muted">
+  <div class="geo-circle" style="width:280px;height:280px;background:rgba(16,185,129,0.06);top:60px;left:-80px;"></div>
+  <div class="geo-square" style="width:160px;height:160px;background:rgba(245,158,11,0.08);border-radius:24px;bottom:40px;right:-40px;transform:rotate(25deg);"></div>
+
+  <div class="container" style="position:relative;z-index:1;">
+    <div class="section-header">
+      <span class="label-sm" style="color:var(--secondary);">Internals</span>
+      <h2 class="heading-lg">Core Components</h2>
+      <p style="color:#6B7280;font-size:1.0625rem;max-width:600px;margin:16px auto 0;">
+        Every piece implemented from scratch in pure PyTorch — no high-level abstractions.
+      </p>
+    </div>
+
+    <div class="grid-2">
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-blue" style="margin-bottom:16px;">
+          <i data-lucide="waves" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:8px;">RMSNorm</h3>
+        <p style="color:#6B7280;line-height:1.65;">
+          Pre-Norm architecture. Root Mean Square normalization without re-centering — faster than LayerNorm with comparable stability.
+        </p>
+      </div>
+
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-green" style="margin-bottom:16px;">
+          <i data-lucide="rotate-ccw" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:8px;">RoPE (θ=1e6)</h3>
+        <p style="color:#6B7280;line-height:1.65;">
+          Rotary Position Embeddings encode relative positions through rotation matrices. Supports YaRN extrapolation for context lengths beyond 32K.
+        </p>
+      </div>
+
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-amber" style="margin-bottom:16px;">
+          <i data-lucide="zap" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:8px;">SwiGLU Activation</h3>
+        <p style="color:#6B7280;line-height:1.65;">
+          Gated Linear Unit with Swish activation. Intermediate size = <code>ceil(dim × π / 64) × 64</code> — data-driven sizing.
+        </p>
+      </div>
+
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-blue" style="margin-bottom:16px;">
+          <i data-lucide="git-branch" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:8px;">GQA + GatedDeltaNet</h3>
+        <p style="color:#6B7280;line-height:1.65;">
+          Two attention mechanisms in one model. Full-attention layers use 8 Q-heads / 4 KV-heads with Flash Attention. Linear layers use GatedDeltaNet with L2-normed Q/K, short convolution, and O(1) state updates.
+        </p>
+      </div>
+    </div>
+
+    <!-- MoE detail card -->
+    <div class="card card-tint-green card-hover" style="margin-top:24px;position:relative;overflow:hidden;">
+      <div class="geo-square" style="width:140px;height:140px;background:rgba(16,185,129,0.06);border-radius:20px;bottom:-20px;right:-20px;"></div>
+      <div style="position:relative;z-index:1;">
+        <h3 class="heading-md" style="margin-bottom:12px;">
+          <span style="display:inline-flex;align-items:center;gap:10px;">
+            <span class="icon-circle icon-circle-green" style="width:40px;height:40px;"><i data-lucide="cpu" style="width:18px;height:18px;"></i></span>
+            MoE Routing
+          </span>
+        </h3>
+        <p style="color:#4B5563;line-height:1.65;margin-bottom:16px;">
+          Each token is routed to exactly 1 expert via a learned router with load-balancing auxiliary loss. No shared expert — aligned with Qwen3-MoE style. At inference, only 64M of 198M parameters are active.
+        </p>
+        <div class="code-block">
+<span style="color:#6B7280;"># Router gate for top-1 expert selection</span>
+<span style="color:var(--secondary);">scores</span> = <span style="color:var(--primary);">router</span>(hidden_states)        <span style="color:#6B7280;"># (batch, seq, n_experts)</span>
+<span style="color:var(--secondary);">weights</span>, <span style="color:var(--secondary);">indices</span> = scores.topk(k=<span style="color:var(--accent);">1</span>, dim=-<span style="color:var(--accent);">1</span>)
+<span style="color:var(--secondary);">weights</span> = weights.softmax(dim=-<span style="color:var(--accent);">1</span>)
+<span style="color:var(--secondary);">output</span> = <span style="color:var(--primary);">dispatch_and_combine</span>(hidden_states, weights, indices)
+        </div>
+        <div style="display:flex;gap:16px;margin-top:16px;flex-wrap:wrap;">
+          <span class="tag" style="background:var(--muted);color:var(--fg);">4 Experts</span>
+          <span class="tag" style="background:var(--muted);color:var(--fg);">Top‑1 Gating</span>
+          <span class="tag" style="background:var(--muted);color:var(--fg);">Load Balance Loss</span>
+          <span class="tag" style="background:var(--muted);color:var(--fg);">No Shared Expert</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ EARLY EXIT ══════════════════════════════════════════ -->
+<section class="section section-amber">
+  <div class="geo-circle" style="width:260px;height:260px;background:rgba(255,255,255,0.05);top:-40px;right:-60px;"></div>
+  <div class="geo-square" style="width:160px;height:160px;background:rgba(255,255,255,0.04);border-radius:24px;bottom:30px;left:-30px;transform:rotate(-18deg);"></div>
+
+  <div class="container" style="position:relative;z-index:1;">
+    <div class="section-header">
+      <span class="label-sm" style="opacity:0.8;">Inference Optimization</span>
+      <h2 class="heading-lg">Early Exit (LayerSkip)</h2>
+      <p style="opacity:0.85;font-size:1.0625rem;max-width:700px;margin:16px auto 0;">
+        Dynamic per-token exit via shared LM head — zero auxiliary parameters. Stop decoding at intermediate layers when the model is confident.
+      </p>
+    </div>
+
+    <div class="grid-2">
+      <div class="card card-dark card-hover">
+        <h3 class="heading-md" style="margin-bottom:8px;color:var(--accent);">Per-layer exit with callback</h3>
+        <p style="opacity:0.8;line-height:1.65;margin-bottom:16px;">
+          <code>MiniMindModel.forward()</code> accepts an <code>exit_check_fn</code> callback. At each layer, the model calls it with the current hidden state. If it returns True, the model stops — zero-padding KV for skipped layers. The callback is injected by <code>MiniMindForCausalLM</code>, which has access to the shared LM head.
+        </p>
+        <div class="code-block" style="margin-bottom:12px;">
+<span style="color:#6B7280;"># In MiniMindModel.forward():</span>
+<span style="color:var(--accent);">for</span> layer <span style="color:var(--accent);">in</span> blocks:
+    h = layer(h, past_kv=pkvs[i])
+    <span style="color:var(--accent);">if</span> exit_check_fn <span style="color:var(--accent);">is not None</span>:
+        normed = <span style="color:#93C5FD;">rmsnorm</span>(h)
+        <span style="color:var(--accent);">if</span> exit_check_fn(len(presents), normed):
+            presents += [<span style="color:#F87171;">None</span>] * remaining  <span style="color:#6B7280;"># zero-pad KV</span>
+            <span style="color:var(--accent);">return</span> normed, presents  <span style="color:#6B7280;"># stop early</span>
+
+<span style="color:#6B7280;"># In MiniMindForCausalLM.forward():</span>
+<span style="color:var(--accent);">def</span> check(layer, normed):
+    <span style="color:var(--accent);">if</span> layer <span style="color:var(--accent);">not in</span> exit_layers: <span style="color:var(--accent);">return False</span>
+    probs = <span style="color:#93C5FD;">softmax</span>(<span style="color:#93C5FD;">lm_head</span>(normed))
+    <span style="color:var(--accent);">return</span> probs.max() <span style="color:#FCD34D;">&ge;</span> threshold
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <span class="tag" style="background:rgba(255,255,255,0.1);color:#fff;">CALM-style confidence</span>
+          <span class="tag" style="background:rgba(255,255,255,0.1);color:#fff;">Shared LM head</span>
+          <span class="tag" style="background:rgba(255,255,255,0.1);color:#fff;">Zero extra params</span>
+        </div>
+      </div>
+
+      <div class="card card-dark card-hover">
+        <h3 class="heading-md" style="margin-bottom:8px;color:var(--accent);">Three forward() branches</h3>
+        <div style="display:flex;flex-direction:column;gap:14px;">
+          <div style="background:rgba(255,255,255,0.06);border-radius:8px;padding:12px;">
+            <span class="tag tag-blue" style="margin-bottom:4px;display:inline-block;">Training</span>
+            <p style="opacity:0.8;font-size:0.8125rem;line-height:1.5;">
+              <code>early_exit=True + labels</code> — runs all 8 layers, computes CE loss at layers 4-7 via shared LM head. Teaches early layers to produce good logits. Weighted by <code>early_exit_loss_weight</code> (0.3).
+            </p>
+          </div>
+          <div style="background:rgba(255,255,255,0.06);border-radius:8px;padding:12px;">
+            <span class="tag tag-green" style="margin-bottom:4px;display:inline-block;">Dynamic Exit</span>
+            <p style="opacity:0.8;font-size:0.8125rem;line-height:1.5;">
+              <code>early_exit=True + no labels</code> — injects exit_check_fn into model loop. Stops at first layer where <code>max(softmax(lm_head(h))) &ge; threshold</code>. Real compute savings — skipped layers never run.
+            </p>
+          </div>
+          <div style="background:rgba(255,255,255,0.06);border-radius:8px;padding:12px;">
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;margin-bottom:4px;display:inline-block;">Normal</span>
+            <p style="opacity:0.8;font-size:0.8125rem;line-height:1.5;">
+              <code>early_exit=False</code> — standard 8-layer forward pass (unchanged).
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Token-level exit example -->
+    <div style="max-width:780px;margin:32px auto 0;">
+      <h3 class="heading-md" style="text-align:center;margin-bottom:16px;color:#fff;">Per-token exit (threshold = 0.9)</h3>
+      <div class="card card-dark">
+        <table style="width:100%;border-collapse:collapse;font-size:0.8125rem;color:#E5E7EB;">
+          <tr style="border-bottom:1px solid rgba(255,255,255,0.1);">
+            <th style="text-align:left;padding:10px 14px;color:var(--accent);">Token</th>
+            <th style="text-align:left;padding:10px 14px;color:var(--accent);">Layer 4</th>
+            <th style="text-align:left;padding:10px 14px;color:var(--accent);">Layer 5</th>
+            <th style="text-align:left;padding:10px 14px;color:var(--accent);">Layer 6</th>
+            <th style="text-align:left;padding:10px 14px;color:var(--accent);">Layer 7</th>
+            <th style="text-align:left;padding:10px 14px;color:var(--accent);">Exit</th>
+            <th style="text-align:left;padding:10px 14px;color:var(--accent);">Saved</th>
+          </tr>
+          <tr style="border-bottom:1px solid rgba(255,255,255,0.06);">
+            <td style="padding:8px 14px;font-family:monospace;">"The"</td>
+            <td style="padding:8px 14px;opacity:0.4;">0.45</td>
+            <td style="padding:8px 14px;color:var(--secondary);font-weight:600;">0.93 ✓</td>
+            <td style="padding:8px 14px;opacity:0.3;">—</td>
+            <td style="padding:8px 14px;opacity:0.3;">—</td>
+            <td style="padding:8px 14px;color:var(--secondary);">5</td>
+            <td style="padding:8px 14px;">37.5%</td>
+          </tr>
+          <tr style="border-bottom:1px solid rgba(255,255,255,0.06);">
+            <td style="padding:8px 14px;font-family:monospace;">"sky"</td>
+            <td style="padding:8px 14px;color:var(--secondary);font-weight:600;">0.91 ✓</td>
+            <td style="padding:8px 14px;opacity:0.3;">—</td>
+            <td style="padding:8px 14px;opacity:0.3;">—</td>
+            <td style="padding:8px 14px;opacity:0.3;">—</td>
+            <td style="padding:8px 14px;color:var(--secondary);">4</td>
+            <td style="padding:8px 14px;">50.0%</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 14px;font-family:monospace;">"photosynthesis"</td>
+            <td style="padding:8px 14px;opacity:0.4;">0.38</td>
+            <td style="padding:8px 14px;opacity:0.4;">0.52</td>
+            <td style="padding:8px 14px;opacity:0.4;">0.71</td>
+            <td style="padding:8px 14px;color:var(--secondary);font-weight:600;">0.96 ✓</td>
+            <td style="padding:8px 14px;color:var(--secondary);">7</td>
+            <td style="padding:8px 14px;">12.5%</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- Exit signal -->
+    <div style="max-width:780px;margin:32px auto 0;">
+      <h3 class="heading-md" style="text-align:center;margin-bottom:16px;color:#fff;">Exit signal: confidence-gated (CALM-style)</h3>
+      <div class="card card-dark" style="overflow-x:auto;">
+        <table style="width:100%;border-collapse:collapse;font-size:0.8125rem;color:#E5E7EB;">
+          <tr style="border-bottom:1px solid rgba(255,255,255,0.1);">
+            <th style="text-align:left;padding:10px 14px;color:var(--accent);">Signal</th>
+            <th style="text-align:left;padding:10px 14px;color:var(--accent);">Formula</th>
+            <th style="text-align:left;padding:10px 14px;color:var(--accent);">Extra Params</th>
+            <th style="text-align:left;padding:10px 14px;color:var(--accent);">Status</th>
+          </tr>
+          <tr style="border-bottom:1px solid rgba(255,255,255,0.06);">
+            <td style="padding:10px 14px;font-weight:600;">Confidence</td>
+            <td style="padding:10px 14px;font-family:monospace;font-size:0.75rem;">max(softmax(lm_head(h))) &ge; &tau;</td>
+            <td style="padding:10px 14px;color:var(--secondary);">0</td>
+            <td style="padding:10px 14px;"><span class="tag tag-green">implemented</span></td>
+          </tr>
+          <tr>
+            <td style="padding:10px 14px;font-weight:600;">Entropy</td>
+            <td style="padding:10px 14px;font-family:monospace;font-size:0.75rem;">&minus;&Sigma; p&middot;log(p) &le; &tau;</td>
+            <td style="padding:10px 14px;color:var(--secondary);">0</td>
+            <td style="padding:10px 14px;opacity:0.5;">future option</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- KV cache strategy -->
+    <div style="max-width:780px;margin:24px auto 0;">
+      <h3 class="heading-md" style="text-align:center;margin-bottom:16px;color:#fff;">KV cache: None-padded for skipped layers</h3>
+      <div class="card card-dark">
+        <p style="opacity:0.8;line-height:1.65;margin-bottom:12px;">
+          When a token exits at layer <em>k</em>, layers <em>k+1</em> through 8 are skipped. Their KV entries are set to <code>None</code>. On the next token, those layers see <code>past_key_value=None</code> and compute fresh KV — attending to previously early-exited tokens via their newly generated (fresh) key/value projections, not cached ones from the skipped pass.
+        </p>
+        <div class="code-block">
+<span style="color:#6B7280;"># Token exits at layer 5 → KV cache has 8 entries:</span>
+<span style="color:var(--accent);">presents</span> = [kv<sub>1</sub>, kv<sub>2</sub>, kv<sub>3</sub>, kv<sub>4</sub>, kv<sub>5</sub>, <span style="color:#F87171;">None</span>, <span style="color:#F87171;">None</span>, <span style="color:#F87171;">None</span>]
+<span style="color:#6B7280;"># Next token: layers 6-8 see None → compute fresh</span>
+        </div>
+      </div>
+    </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Usage -->
+    <div style="max-width:780px;margin:24px auto 0;text-align:center;">
+      <div class="code-block" style="display:inline-block;text-align:left;padding:16px 24px;">
+<span style="color:#6B7280;"># Training: add early exit loss to teach early layers</span>
+python train_pretrain.py <span style="color:var(--accent);">--early_exit 1</span>
+
+<span style="color:#6B7280;"># Inference: dynamic per-token exit (real speedup)</span>
+python eval_llm.py --weight full_sft <span style="color:var(--accent);">--early_exit 1 --exit_threshold 0.9</span>
+
+<span style="color:#6B7280;"># Aggressive mode (more speed, less quality)</span>
+python eval_llm.py --weight full_sft <span style="color:var(--accent);">--early_exit 1 --exit_threshold 0.7</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ TRAINING PIPELINE ══════════════════════════════════════════ -->
+<section class="section section-emerald">
+  <div class="geo-circle" style="width:360px;height:360px;background:rgba(255,255,255,0.05);top:-80px;right:-60px;"></div>
+  <div class="geo-square" style="width:200px;height:200px;background:rgba(255,255,255,0.04);border-radius:28px;bottom:40px;left:-40px;transform:rotate(-15deg);"></div>
+
+  <div class="container" style="position:relative;z-index:1;">
+    <div class="section-header">
+      <span class="label-sm" style="opacity:0.8;">Training Pipeline</span>
+      <h2 class="heading-lg">From Zero to RL in 3 Stages</h2>
+      <p style="opacity:0.85;font-size:1.0625rem;max-width:600px;margin:16px auto 0;">
+        Every stage uses pure PyTorch. Checkpoint-resume at any point.
+      </p>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:20px;max-width:780px;margin:0 auto;">
+      <!-- Step 1 -->
+      <div class="pipeline-step">
+        <div class="step-number" style="background:rgba(255,255,255,0.15);color:#fff;">1</div>
+        <div style="flex:1;">
+          <h3 class="heading-md" style="margin-bottom:4px;">Pretrain</h3>
+          <p style="opacity:0.8;font-size:0.9375rem;margin-bottom:10px;">
+            Next-token prediction on <code>pretrain_t2t.jsonl</code>. Builds world knowledge and language patterns from scratch.
+          </p>
+          <div class="code-block">
+python train_pretrain.py --from_weight none   <span style="color:rgba(255,255,255,0.4);"># or: torchrun --nproc_per_node N</span>
+          </div>
+          <div style="display:flex;gap:12px;margin-top:10px;">
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">pretrain_768.pth</span>
+            <span style="opacity:0.6;font-size:0.875rem;">~1.2h on 3090</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 2 -->
+      <div class="pipeline-step">
+        <div class="step-number" style="background:rgba(255,255,255,0.2);color:#fff;">2</div>
+        <div style="flex:1;">
+          <h3 class="heading-md" style="margin-bottom:4px;">Supervised Fine-Tuning</h3>
+          <p style="opacity:0.8;font-size:0.9375rem;margin-bottom:10px;">
+            Instruction-tuning on <code>sft_t2t.jsonl</code>. Teaches chat formatting, tool calling, and assistant behavior.
+          </p>
+          <div class="code-block">
+python train_full_sft.py --from_weight pretrain   <span style="color:rgba(255,255,255,0.4);"># MUST load pretrained</span>
+          </div>
+          <div style="display:flex;gap:12px;margin-top:10px;">
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">full_sft_768.pth</span>
+            <span style="opacity:0.6;font-size:0.875rem;">~1.1h on 3090</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 3 -->
+      <div class="pipeline-step">
+        <div class="step-number" style="background:rgba(255,255,255,0.3);color:#fff;">3</div>
+        <div style="flex:1;">
+          <h3 class="heading-md" style="margin-bottom:4px;">Post-Training (Optional)</h3>
+          <p style="opacity:0.8;font-size:0.9375rem;">
+            LoRA · DPO · PPO · GRPO · CISPO · Agentic RL · Knowledge Distillation
+          </p>
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">lora_768.pth</span>
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">dpo_768.pth</span>
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">ppo_actor_768.pth</span>
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">grpo_768.pth</span>
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">agent_768.pth</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Checkpoint note -->
+    <div style="text-align:center;margin-top:32px;">
+      <p style="opacity:0.7;font-size:0.9375rem;">
+        Resume from any checkpoint:
+        <code style="background:rgba(255,255,255,0.12);padding:4px 10px;border-radius:6px;">--from_resume 1</code>
+        &nbsp;— handles GPU count changes automatically
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ PARAMETER CALCULATOR ══════════════════════════════════════════ -->
+<section class="section section-muted" style="padding: 80px 0;">
+  <div class="geo-square" style="width:200px;height:200px;background:rgba(59,130,246,0.04);border-radius:28px;top:30px;right:-50px;transform:rotate(15deg);"></div>
+  <div class="container" style="position:relative;z-index:1;">
+    <div class="section-header">
+      <span class="label-sm" style="color:var(--primary);">Calculator</span>
+      <h2 class="heading-lg">Parameter Calculator</h2>
+      <p style="color:#6B7280;font-size:1.0625rem;max-width:560px;margin:16px auto 0;">
+        Adjust the config and see real-time parameter counts.
+      </p>
+    </div>
+
+    <div style="max-width:640px;margin:0 auto;">
+      <div class="card card-hover" style="padding:36px 40px;">
+        <!-- Sliders -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:28px;">
+          <div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+              <label style="font-weight:600;font-size:0.875rem;">Hidden Dim</label>
+              <span id="val-dim" style="font-family:monospace;color:var(--primary);font-weight:700;">768</span>
+            </div>
+            <input type="range" id="slider-dim" min="256" max="2048" value="768" step="64" style="width:100%;accent-color:var(--primary);" oninput="recalc()">
+          </div>
+          <div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+              <label style="font-weight:600;font-size:0.875rem;">Layers</label>
+              <span id="val-layers" style="font-family:monospace;color:var(--primary);font-weight:700;">8</span>
+            </div>
+            <input type="range" id="slider-layers" min="2" max="24" value="8" step="1" style="width:100%;accent-color:var(--primary);" oninput="recalc()">
+          </div>
+          <div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+              <label style="font-weight:600;font-size:0.875rem;">Vocab Size</label>
+              <span id="val-vocab" style="font-family:monospace;color:var(--primary);font-weight:700;">6400</span>
+            </div>
+            <input type="range" id="slider-vocab" min="1000" max="32000" value="6400" step="200" style="width:100%;accent-color:var(--primary);" oninput="recalc()">
+          </div>
+          <div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+              <label style="font-weight:600;font-size:0.875rem;">Q-Heads</label>
+              <span id="val-qheads" style="font-family:monospace;color:var(--primary);font-weight:700;">8</span>
+            </div>
+            <input type="range" id="slider-qheads" min="2" max="32" value="8" step="2" style="width:100%;accent-color:var(--primary);" oninput="recalc()">
+          </div>
+          <div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+              <label style="font-weight:600;font-size:0.875rem;">KV-Heads</label>
+              <span id="val-kvheads" style="font-family:monospace;color:var(--primary);font-weight:700;">4</span>
+            </div>
+            <input type="range" id="slider-kvheads" min="1" max="16" value="4" step="1" style="width:100%;accent-color:var(--primary);" oninput="recalc()">
+          </div>
+          <div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+              <label style="font-weight:600;font-size:0.875rem;">MoE</label>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                <input type="checkbox" id="toggle-moe" onchange="onVariantChange('moe')" style="accent-color:var(--secondary);width:16px;height:16px;">
+                <span style="font-size:0.8125rem;color:#6B7280;">Enable</span>
+              </label>
+            </div>
+            <div id="moe-opts" style="display:none;">
+              <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+                <label style="font-weight:600;font-size:0.875rem;">Experts</label>
+                <span id="val-experts" style="font-family:monospace;color:var(--secondary);font-weight:700;">4</span>
+              </div>
+              <input type="range" id="slider-experts" min="2" max="16" value="4" step="1" style="width:100%;accent-color:var(--secondary);" oninput="recalc()">
+            </div>
+          </div>
+          <div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+              <label style="font-weight:600;font-size:0.875rem;">Linear</label>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                <input type="checkbox" id="toggle-linear" onchange="onVariantChange('linear')" style="accent-color:#8B5CF6;width:16px;height:16px;">
+                <span style="font-size:0.8125rem;color:#6B7280;">GatedDeltaNet</span>
+              </label>
+            </div>
+            <div id="linear-opts" style="display:none;">
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                <label style="font-weight:600;font-size:0.75rem;">Full Attn Interval</label>
+                <span id="val-attn-int" style="font-family:monospace;color:#8B5CF6;font-weight:700;">4</span>
+              </div>
+              <input type="range" id="slider-attn-int" min="1" max="8" value="4" step="1" style="width:100%;accent-color:#8B5CF6;margin-bottom:8px;" oninput="recalc()">
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                <label style="font-weight:600;font-size:0.75rem;">Conv Kernel</label>
+                <span id="val-conv-k" style="font-family:monospace;color:#8B5CF6;font-weight:700;">4</span>
+              </div>
+              <input type="range" id="slider-conv-k" min="2" max="8" value="4" step="1" style="width:100%;accent-color:#8B5CF6;" oninput="recalc()">
+            </div>
+          </div>
+        </div>
+
+        <!-- Result -->
+        <div style="background:var(--muted);border-radius:10px;padding:24px;text-align:center;">
+          <div style="font-size:0.8125rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:4px;">Total Parameters</div>
+          <div style="font-size:2.5rem;font-weight:800;letter-spacing:-0.03em;color:var(--fg);" id="result-total">64.1 M</div>
+          <div style="display:flex;gap:20px;justify-content:center;margin-top:8px;flex-wrap:wrap;">
+            <div><span style="font-size:0.8125rem;color:#6B7280;">Embedding: </span><span id="result-emb" style="font-family:monospace;font-weight:600;">4.9M</span></div>
+            <div><span style="font-size:0.8125rem;color:#6B7280;">Per Layer: </span><span id="result-layer" style="font-family:monospace;font-weight:600;">7.1M</span></div>
+            <div><span style="font-size:0.8125rem;color:#6B7280;">LM Head: </span><span id="result-head" style="font-family:monospace;font-weight:600;">4.9M</span></div>
+          </div>
+          <div id="result-moe" style="margin-top:6px;display:none;">
+            <span style="font-size:0.8125rem;color:var(--secondary);font-weight:600;">Active: </span><span id="result-active" style="font-family:monospace;font-weight:700;color:var(--secondary);"></span>
+          </div>
+          <div id="result-linear" style="margin-top:6px;display:none;">
+            <span style="font-size:0.8125rem;color:#8B5CF6;font-weight:600;">Linear layers: </span><span id="result-n-linear" style="font-family:monospace;font-weight:700;color:#8B5CF6;"></span>
+            <span style="margin:0 6px;color:#D1D5DB;">|</span>
+            <span style="font-size:0.8125rem;color:#3B82F6;font-weight:600;">Full-Attn layers: </span><span id="result-n-full" style="font-family:monospace;font-weight:700;color:#3B82F6;"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- GPU Memory Calculator -->
+      <div class="card card-hover" style="padding:36px 40px;margin-top:24px;">
+        <h3 class="heading-md" style="margin-bottom:20px;display:flex;align-items:center;gap:10px;">
+          <span class="icon-circle icon-circle-blue" style="width:36px;height:36px;"><i data-lucide="cpu" style="width:16px;height:16px;"></i></span>
+          GPU Memory Estimator
+        </h3>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:18px;margin-bottom:24px;">
+          <div>
+            <label style="font-weight:600;font-size:0.8125rem;">Precision</label>
+            <select id="mem-precision" onchange="recalcMem()" style="width:100%;margin-top:4px;padding:8px 12px;border:2px solid var(--border);border-radius:8px;font-family:Outfit,sans-serif;font-size:0.875rem;background:#fff;">
+              <option value="4">fp32 (4 bytes)</option>
+              <option value="2" selected>fp16 / bf16 (2 bytes)</option>
+              <option value="1">int8 (1 byte)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-weight:600;font-size:0.8125rem;">Batch Size</label>
+            <input type="number" id="mem-batch" value="32" min="1" max="512" oninput="recalcMem()" style="width:100%;margin-top:4px;padding:8px 12px;border:2px solid var(--border);border-radius:8px;font-family:Outfit,sans-serif;font-size:0.875rem;">
+          </div>
+          <div>
+            <label style="font-weight:600;font-size:0.8125rem;">Train Context</label>
+            <input type="number" id="mem-train-ctx" value="512" min="64" max="32768" oninput="recalcMem()" style="width:100%;margin-top:4px;padding:8px 12px;border:2px solid var(--border);border-radius:8px;font-family:Outfit,sans-serif;font-size:0.875rem;">
+          </div>
+          <div>
+            <label style="font-weight:600;font-size:0.8125rem;">Infer Context</label>
+            <input type="number" id="mem-infer-ctx" value="2048" min="64" max="32768" oninput="recalcMem()" style="width:100%;margin-top:4px;padding:8px 12px;border:2px solid var(--border);border-radius:8px;font-family:Outfit,sans-serif;font-size:0.875rem;">
+          </div>
+        </div>
+        <div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap;margin-bottom:20px;">
+          <div>
+            <label style="font-weight:600;font-size:0.8125rem;">Target GPU</label>
+            <select id="mem-gpu" onchange="recalcMem()" style="margin-left:8px;padding:6px 10px;border:2px solid var(--border);border-radius:8px;font-family:Outfit,sans-serif;font-size:0.8125rem;background:#fff;">
+              <option value="24">RTX 3090 / 4090 (24 GB)</option>
+              <option value="48">RTX A6000 / L40S (48 GB)</option>
+              <option value="80" selected>A100 / H100 (80 GB)</option>
+              <option value="0">Custom (see total)</option>
+            </select>
+          </div>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;font-size:0.8125rem;">
+            <input type="checkbox" id="toggle-compile" onchange="recalcMem()" style="accent-color:#8B5CF6;width:16px;height:16px;">
+            torch.compile (fused silu·gate, −ffn/layer)
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;font-size:0.8125rem;">
+            <input type="checkbox" id="toggle-ckpt" onchange="recalcMem()" style="accent-color:var(--secondary);width:16px;height:16px;">
+            Gradient Checkpointing (÷layers)
+          </label>
+        </div>
+
+        <div style="background:var(--muted);border-radius:10px;padding:24px;">
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;text-align:center;">
+            <div>
+              <div style="font-size:0.75rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:600;">Weights</div>
+              <div id="mem-weights" style="font-size:1.25rem;font-weight:700;color:var(--primary);">0.13 GB</div>
+            </div>
+            <div>
+              <div style="font-size:0.75rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:600;">Optimizer</div>
+              <div id="mem-optim" style="font-size:1.25rem;font-weight:700;color:var(--accent);">0.38 GB</div>
+            </div>
+            <div>
+              <div style="font-size:0.75rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:600;">Activations</div>
+              <div id="mem-act" style="font-size:1.25rem;font-weight:700;color:var(--secondary);">0.32 GB</div>
+            </div>
+            <div>
+              <div style="font-size:0.75rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.05em;font-weight:600;">KV Cache <span id="mem-kv-label"></span></div>
+              <div id="mem-kv" style="font-size:1.25rem;font-weight:700;color:#8B5CF6;">0.05 GB</div>
+            </div>
+          </div>
+          <div style="margin-top:16px;padding-top:16px;border-top:2px solid var(--border);text-align:center;">
+            <span style="font-size:0.8125rem;color:#6B7280;font-weight:600;">Training Total: </span>
+            <span id="mem-train" style="font-size:1.5rem;font-weight:800;color:var(--fg);">0.88 GB</span>
+            <span style="margin:0 12px;color:var(--border);">|</span>
+            <span style="font-size:0.8125rem;color:#6B7280;font-weight:600;">Inference Total: </span>
+            <span id="mem-infer" style="font-size:1.5rem;font-weight:800;color:var(--fg);">0.13 GB</span>
+          </div>
+          <div id="max-ctx-row" style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border);text-align:center;">
+            <span style="font-size:0.8125rem;color:#6B7280;font-weight:600;">Max Trainable Context: </span>
+            <span id="max-train-ctx" style="font-family:monospace;font-weight:700;color:var(--secondary);font-size:1.125rem;"></span>
+            <span style="font-size:0.75rem;color:#9CA3AF;margin-left:6px;" id="max-ctx-note"></span>
+          </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Linear Card -->
+      <div class="card card-tint-amber card-hover" style="position:relative;overflow:hidden;">
+        <div class="geo-square" style="width:100px;height:100px;background:rgba(245,158,11,0.06);border-radius:16px;top:-10px;right:-10px;"></div>
+        <div style="position:relative;z-index:1;">
+          <div class="icon-circle icon-circle-amber" style="margin-bottom:20px;">
+            <i data-lucide="activity" style="width:24px;height:24px;"></i>
+          </div>
+          <span class="tag tag-green" style="margin-bottom:16px;">Experimental</span>
+          <h3 class="heading-md" style="margin:12px 0 8px;">MiniMind Linear</h3>
+          <p style="color:#4B5563;margin-bottom:24px;line-height:1.65;">
+            GatedDeltaNet replaces softmax attention with O(T) linear complexity. Hybrid design: 6 linear + 2 full-attention layers. Chunked training with recurrent inference.
+          </p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Parameters</div><div style="font-weight:700;font-size:1.125rem;">71 M</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Layers</div><div style="font-weight:700;font-size:1.125rem;">8</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Linear Layers</div><div style="font-weight:700;font-size:1.125rem;">6</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Full Attn Layers</div><div style="font-weight:700;font-size:1.125rem;">2 (every 4th)</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Conv Kernel</div><div style="font-weight:700;font-size:1.125rem;">4</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Q/K Norm</div><div style="font-weight:700;font-size:1.125rem;">L2 Norm</div></div>
+          </div>
+        </div>
+    </div>
+
+    <!-- Linear Attention detail card -->
+    <div class="card card-tint-amber card-hover" style="margin-top:24px;position:relative;overflow:hidden;">
+      <div class="geo-square" style="width:140px;height:140px;background:rgba(245,158,11,0.06);border-radius:20px;bottom:-20px;right:-20px;"></div>
+      <div style="position:relative;z-index:1;">
+        <h3 class="heading-md" style="margin-bottom:12px;">
+          <span style="display:inline-flex;align-items:center;gap:10px;">
+            <span class="icon-circle icon-circle-amber" style="width:40px;height:40px;"><i data-lucide="activity" style="width:18px;height:18px;"></i></span>
+            GatedDeltaNet — Linear Attention
+          </span>
+        </h3>
+        <p style="color:#4B5563;line-height:1.65;margin-bottom:16px;">
+          Replaces the softmax bottleneck with a fixed-size state matrix S. Each token updates S via S ← g·S + β·k·vᵀ, and reads output via o = qᵀ·S. Training uses chunked parallelism (chunk size 128), while inference uses recurrent O(1) per-token updates — no KV cache needed for linear layers.
+        </p>
+        <div class="code-block">
+<span style="color:#6B7280;"># GatedDeltaNet — O(T) linear attention</span>
+<span style="color:var(--secondary);">S</span> = <span style="color:var(--accent);">g</span> * <span style="color:var(--secondary);">S</span> + <span style="color:var(--accent);">β</span> * <span style="color:var(--secondary);">k</span> @ <span style="color:var(--secondary);">v</span>.T    <span style="color:#6B7280;"># state update</span>
+<span style="color:var(--secondary);">o</span> = <span style="color:var(--secondary);">q</span> @ <span style="color:var(--secondary);">S</span>                          <span style="color:#6B7280;"># read output</span>
+<span style="color:var(--secondary);">out</span> = RMSNormGated(<span style="color:var(--secondary);">o</span>, <span style="color:var(--secondary);">z</span>)           <span style="color:#6B7280;"># gated output norm</span>
+        </div>
+        <div style="display:flex;gap:16px;margin-top:16px;flex-wrap:wrap;">
+          <span class="tag" style="background:var(--muted);color:var(--fg);">L2 Norm Q/K</span>
+          <span class="tag" style="background:var(--muted);color:var(--fg);">Short Conv (k=4)</span>
+          <span class="tag" style="background:var(--muted);color:var(--fg);">Chunked Training</span>
+          <span class="tag" style="background:var(--muted);color:var(--fg);">Recurrent Inference</span>
+          <span class="tag" style="background:var(--muted);color:var(--fg);">No KV Cache</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ PROJECT LAYOUT ══════════════════════════════════════════ -->
+<section class="section section-white">
+  <div class="container">
+    <div class="section-header">
+      <span class="label-sm" style="color:var(--primary);">Code Structure</span>
+      <h2 class="heading-lg">Project Layout</h2>
+    </div>
+
+    <div class="grid-2">
+      <div class="card card-tint-blue card-hover">
+        <div class="icon-circle icon-circle-blue" style="margin-bottom:12px;">
+          <i data-lucide="box" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">model/</h3>
+        <p style="color:#6B7280;line-height:1.65;">
+          <code>model_minimind.py</code> — MiniMindConfig, MiniMindForCausalLM, RMSNorm, RoPE, MoE blocks.<br>
+          <code>model_lora.py</code> — Pure PyTorch LoRA implementation.<br>
+          <code>model_minimind_linear.py</code> — GatedDeltaNet linear attention variant.<br>
+          <code>tokenizer.json</code> — BPE + ByteLevel tokenizer (6,400 vocab).
+        </p>
+      </div>
+
+      <div class="card card-tint-green card-hover">
+        <div class="icon-circle icon-circle-green" style="margin-bottom:12px;">
+          <i data-lucide="play" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">trainer/</h3>
+        <p style="color:#6B7280;line-height:1.65;">
+          <code>train_pretrain.py</code> · <code>train_full_sft.py</code> · <code>train_lora.py</code> · <code>train_dpo.py</code><br>
+          <code>train_ppo.py</code> · <code>train_grpo.py</code> · <code>train_agent.py</code> · <code>train_distillation.py</code><br>
+          ⚠️ Must run from this directory. Uses <code>__package__</code> hack for imports.
+        </p>
+      </div>
+
+      <div class="card card-tint-amber card-hover">
+        <div class="icon-circle icon-circle-amber" style="margin-bottom:12px;">
+          <i data-lucide="database" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">dataset/</h3>
+        <p style="color:#6B7280;line-height:1.65;">
+          <code>lm_dataset.py</code> — PretrainDataset, SFTDataset, RLAIFDataset.<br>
+          Supports JSONL with OpenAI chat format for SFT/RLAIF.
+        </p>
+      </div>
+
+      <div class="card card-tint-blue card-hover">
+        <div class="icon-circle icon-circle-blue" style="margin-bottom:12px;">
+          <i data-lucide="terminal" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">scripts/</h3>
+        <p style="color:#6B7280;line-height:1.65;">
+          <code>serve_openai_api.py</code> — OpenAI-compatible API server (port 8998).<br>
+          <code>web_demo.py</code> — Streamlit chat UI with tool call support.<br>
+          <code>convert_model.py</code> — torch ↔ transformers format conversion.<br>
+          <code>run_linear.py</code> (root) — wrapper to train with linear attention via import hijacking.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ CONFIG DEFAULTS ══════════════════════════════════════════ -->
+<section class="section section-muted">
+  <div class="geo-square" style="width:220px;height:220px;background:rgba(245,158,11,0.06);border-radius:30px;top:30px;right:-50px;transform:rotate(30deg);"></div>
+
+  <div class="container" style="position:relative;z-index:1;">
+    <div class="section-header">
+      <span class="label-sm" style="color:var(--accent);">Configuration</span>
+      <h2 class="heading-lg">MiniMindConfig Defaults</h2>
+    </div>
+
+    <div class="grid-4">
+      <div style="text-align:center;">
+        <div class="stat-value" style="color:var(--primary);">8</div>
+        <div style="font-weight:600;margin-top:4px;">Layers</div>
+        <div style="font-size:0.8125rem;color:#6B7280;">num_hidden_layers</div>
+      </div>
+      <div style="text-align:center;">
+        <div class="stat-value" style="color:var(--secondary);">768</div>
+        <div style="font-weight:600;margin-top:4px;">Hidden Dim</div>
+        <div style="font-size:0.8125rem;color:#6B7280;">hidden_size</div>
+      </div>
+      <div style="text-align:center;">
+        <div class="stat-value" style="color:var(--accent);">6.4K</div>
+        <div style="font-weight:600;margin-top:4px;">Vocab</div>
+        <div style="font-size:0.8125rem;color:#6B7280;">vocab_size</div>
+      </div>
+      <div style="text-align:center;">
+        <div class="stat-value" style="color:#8B5CF6;">32K</div>
+        <div style="font-weight:600;margin-top:4px;">Max Pos</div>
+        <div style="font-size:0.8125rem;color:#6B7280;">max_position_embeddings</div>
+      </div>
+    </div>
+
+    <div style="max-width:700px;margin:48px auto 0;">
+      <div class="card card-hover">
+        <pre style="font-family:'SF Mono','Fira Code',monospace;font-size:0.8125rem;line-height:1.8;color:var(--fg);overflow-x:auto;">
+
+<span style="color:var(--primary);">class</span> <span style="color:var(--secondary);">MiniMindConfig</span>(PretrainedConfig):
+    model_type = <span style="color:var(--accent);">"minimind"</span>
+    hidden_size            = <span style="color:#8B5CF6;">768</span>
+    num_hidden_layers      = <span style="color:#8B5CF6;">8</span>
+    vocab_size             = <span style="color:#8B5CF6;">6400</span>
+    num_attention_heads    = <span style="color:#8B5CF6;">8</span>
+    num_key_value_heads    = <span style="color:#8B5CF6;">4</span>      <span style="color:#6B7280;"># Grouped Query Attention</span>
+    max_position_embeddings= <span style="color:#8B5CF6;">32768</span>
+    rope_theta             = <span style="color:#8B5CF6;">1e6</span>
+    hidden_act             = <span style="color:var(--accent);">"silu"</span>    <span style="color:#6B7280;"># SwiGLU</span>
+    rms_norm_eps           = <span style="color:#8B5CF6;">1e-6</span>
+    tie_word_embeddings    = <span style="color:#8B5CF6;">True</span>
+    flash_attn             = <span style="color:#8B5CF6;">True</span>
+     <span style="color:#6B7280;"># MoE (when use_moe=True)</span>
+     num_experts            = <span style="color:#8B5CF6;">4</span>
+      num_experts_per_tok    = <span style="color:#8B5CF6;">1</span>       <span style="color:#6B7280;"># Top-1 routing</span>
+      router_aux_loss_coef   = <span style="color:#8B5CF6;">5e-4</span>
+      <span style="color:#6B7280;"># Early Exit (LayerSkip-style)</span>
+     early_exit_layers      = <span style="color:#8B5CF6;">[4, 5, 6, 7]</span>
+      early_exit_loss_weight  = <span style="color:#8B5CF6;">0.3</span>
+      <span style="color:#6B7280;"># Linear Attention (GatedDeltaNet)</span>
+     full_attention_interval = <span style="color:#8B5CF6;">4</span>      <span style="color:#6B7280;"># every Nth layer = full attn</span>
+     linear_conv_kernel_dim  = <span style="color:#8B5CF6;">4</span>      <span style="color:#6B7280;"># short conv kernel size</span>
+        </pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ ECOSYSTEM ══════════════════════════════════════════ -->
+<section class="section section-amber">
+  <div class="geo-circle" style="width:300px;height:300px;background:rgba(0,0,0,0.04);top:-40px;left:-60px;"></div>
+  <div class="geo-square" style="width:160px;height:160px;background:rgba(0,0,0,0.04);border-radius:22px;bottom:30px;right:-30px;transform:rotate(10deg);"></div>
+
+  <div class="container" style="position:relative;z-index:1;">
+    <div class="section-header">
+      <span class="label-sm" style="opacity:0.8;">Ecosystem</span>
+      <h2 class="heading-lg">Qwen3 Compatible</h2>
+      <p style="opacity:0.85;font-size:1.0625rem;max-width:600px;margin:16px auto 0;">
+        Convert seamlessly between formats and deploy anywhere.
+      </p>
+    </div>
+
+    <div class="grid-4" style="text-align:center;">
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-amber" style="margin:0 auto 16px;">
+          <i data-lucide="brain" style="width:24px;height:24px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">transformers</h3>
+        <p style="font-size:0.875rem;opacity:0.7;">
+          AutoModelForCausalLM<br>GenerationMixin
+        </p>
+      </div>
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-amber" style="margin:0 auto 16px;">
+          <i data-lucide="zap" style="width:24px;height:24px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">vllm</h3>
+        <p style="font-size:0.875rem;opacity:0.7;">
+          High-throughput<br>inference server
+        </p>
+      </div>
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-amber" style="margin:0 auto 16px;">
+          <i data-lucide="cpu" style="width:24px;height:24px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">llama.cpp</h3>
+        <p style="font-size:0.875rem;opacity:0.7;">
+          GGUF conversion<br>Q8_0 quantization
+        </p>
+      </div>
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-amber" style="margin:0 auto 16px;">
+          <i data-lucide="cloud" style="width:24px;height:24px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">ollama</h3>
+        <p style="font-size:0.875rem;opacity:0.7;">
+          <code>ollama run</code><br>jingyaogong/minimind-3
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ FOOTER ══════════════════════════════════════════ -->
+<footer class="section section-dark">
+  <div class="container">
+    <div style="text-align:center;">
+      <h2 class="heading-lg" style="margin-bottom:16px;">MiniMind</h2>
+      <p style="opacity:0.5;font-size:0.9375rem;max-width:480px;margin:0 auto 24px;">
+        Pure PyTorch · ~64M–71M params · Dense / MoE / Linear · 100% open source under Apache 2.0
+      </p>
+      <a href="https://github.com/jingyaogong/minimind" class="btn btn-outline-light">
+        <i data-lucide="github" style="width:18px;height:18px;"></i>
+        Star on GitHub
+      </a>
+    </div>
+  </div>
+</footer>
+
+<script>
+lucide.createIcons();
+
+function onVariantChange(variant) {
+  var moeCb    = document.getElementById('toggle-moe');
+  var linearCb = document.getElementById('toggle-linear');
+  if (variant === 'moe' && moeCb.checked) linearCb.checked = false;
+  if (variant === 'linear' && linearCb.checked) moeCb.checked = false;
+  recalc();
+}
+
+function recalc() {
+  var dim    = +document.getElementById('slider-dim').value;
+  var layers = +document.getElementById('slider-layers').value;
+  var vocab  = +document.getElementById('slider-vocab').value;
+  var q      = +document.getElementById('slider-qheads').value;
+  var kv     = +document.getElementById('slider-kvheads').value;
+  var moe    = document.getElementById('toggle-moe').checked;
+  var linear = document.getElementById('toggle-linear').checked;
+  var experts= +document.getElementById('slider-experts').value;
+  var attnInt= +document.getElementById('slider-attn-int').value;
+  var convK  = +document.getElementById('slider-conv-k').value;
+
+  // Sync labels
+  document.getElementById('val-dim').textContent    = dim;
+  document.getElementById('val-layers').textContent = layers;
+  document.getElementById('val-vocab').textContent  = vocab;
+  document.getElementById('val-qheads').textContent = q;
+  document.getElementById('val-kvheads').textContent= kv;
+  document.getElementById('val-experts').textContent= experts;
+  document.getElementById('val-attn-int').textContent = attnInt;
+  document.getElementById('val-conv-k').textContent   = convK;
+  document.getElementById('moe-opts').style.display    = moe ? 'block' : 'none';
+  document.getElementById('linear-opts').style.display = linear ? 'block' : 'none';
+
+  // Head dim
+  var dh = dim / q;
+  // FFN intermediate: ceil(dim * pi / 64) * 64
+  var ffn = Math.ceil(dim * Math.PI / 64) * 64;
+
+  // Embedding (tied, shared)
+  var emb = vocab * dim;
+
+  // Standard attention layer
+  var attn = dim*dim + 2 * dim*dh*kv + dim*dim;
+  // FFN: gate, up, down
+  var ffn_params = 3 * dim * ffn;
+  // RMSNorm: 2 per layer
+  var norms = 2 * dim;
+  var perLayer = attn + ffn_params + norms;
+
+  // Final RMSNorm + LM head (tied = already counted in emb)
+  var finalNorm = dim;
+  var total;
+
+  if (linear) {
+    // GatedDeltaNet linear attention
+    // key_dim = value_dim = q * dh = dim (default config)
+    var key_dim = dim, value_dim = dim;
+    var conv_dim = key_dim * 2 + value_dim; // 3 * dim
+    // Linear attention: in_proj_qkv + in_proj_z + in_proj_b + in_proj_a + conv1d + dt_bias + A_log + norm + out_proj
+    var attn_linear = dim * conv_dim       // in_proj_qkv: dim -> conv_dim
+                    + dim * value_dim      // in_proj_z: dim -> value_dim
+                    + dim * q              // in_proj_b: dim -> q
+                    + dim * q              // in_proj_a: dim -> q
+                    + conv_dim * convK     // conv1d (depthwise, groups=conv_dim)
+                    + q + q               // dt_bias + A_log
+                    + dh                  // RMSNormGated weight
+                    + value_dim * dim;    // out_proj: value_dim -> dim
+
+    var n_full   = Math.floor(layers / attnInt);
+    var n_linear = layers - n_full;
+
+    total = emb + n_linear * (attn_linear + ffn_params + norms)
+                + n_full   * perLayer
+                + finalNorm;
+
+    var resultLinear = document.getElementById('result-linear');
+    resultLinear.style.display = 'block';
+    document.getElementById('result-n-linear').textContent = n_linear;
+    document.getElementById('result-n-full').textContent   = n_full;
+    document.getElementById('result-moe').style.display    = 'none';
+    document.getElementById('result-layer').textContent    = fmt(attn_linear + ffn_params + norms) + ' (linear)';
+  } else if (moe) {
+    var gate = dim * experts;
+    var expertFfn = 3 * dim * ffn;
+    var moeLayer = attn + norms + gate + experts * expertFfn;
+    total = emb + layers * moeLayer + finalNorm;
+    // Active: one expert
+    var active = emb + layers * (attn + norms + gate + expertFfn) + finalNorm;
+    document.getElementById('result-moe').style.display = 'block';
+    document.getElementById('result-active').textContent = fmt(active) + ' active';
+    document.getElementById('result-linear').style.display = 'none';
+    document.getElementById('result-layer').textContent = fmt(moeLayer);
+  } else {
+    total = emb + layers * perLayer + finalNorm;
+    document.getElementById('result-moe').style.display    = 'none';
+    document.getElementById('result-linear').style.display = 'none';
+    document.getElementById('result-layer').textContent    = fmt(perLayer);
+  }
+
+  document.getElementById('result-total').textContent = fmt(total);
+  document.getElementById('result-emb').textContent    = fmt(emb);
+  document.getElementById('result-head').textContent   = fmt(emb);
+  recalcMem();
+}
+
+function fmt(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + ' B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + ' M';
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + ' K';
+  return n.toString();
+}
+
+function getTotalParams() {
+  var dim     = +document.getElementById('slider-dim').value;
+  var layers  = +document.getElementById('slider-layers').value;
+  var vocab   = +document.getElementById('slider-vocab').value;
+  var q       = +document.getElementById('slider-qheads').value;
+  var kv      = +document.getElementById('slider-kvheads').value;
+  var moe     = document.getElementById('toggle-moe').checked;
+  var linear  = document.getElementById('toggle-linear').checked;
+  var experts = +document.getElementById('slider-experts').value;
+  var dh = dim / q;
+  var ffn = Math.ceil(dim * Math.PI / 64) * 64;
+  var attn = 2*dim*dim + 2*dim*dh*kv;
+  var perLayer = attn + 3*dim*ffn + 2*dim;
+  if (linear) {
+    var key_dim = dim, value_dim = dim;
+    var conv_dim = key_dim * 2 + value_dim;
+    var attnK = +document.getElementById('slider-conv-k').value;
+    var attn_linear = dim*conv_dim + dim*value_dim + dim*q + dim*q + conv_dim*attnK + q + q + dh + value_dim*dim;
+    var attnInt = +document.getElementById('slider-attn-int').value;
+    var n_full = Math.floor(layers / attnInt);
+    var n_linear = layers - n_full;
+    return vocab*dim + n_linear*(attn_linear + 3*dim*ffn + 2*dim) + n_full*perLayer + dim;
+  }
+  if (moe) {
+    perLayer = attn + 2*dim + dim*experts + experts*3*dim*ffn;
+  }
+  return vocab*dim + layers*perLayer + dim;
+}
+
+function recalcMem() {
+  var params = getTotalParams();
+  var bytes = +document.getElementById('mem-precision').value;
+  var batch = +document.getElementById('mem-batch').value;
+  var trainCtx = +document.getElementById('mem-train-ctx').value;
+  var inferCtx = +document.getElementById('mem-infer-ctx').value;
+  var dim   = +document.getElementById('slider-dim').value;
+  var layers= +document.getElementById('slider-layers').value;
+  var kv    = +document.getElementById('slider-kvheads').value;
+  var q     = +document.getElementById('slider-qheads').value;
+  var dh    = dim / q;
+  var linear= document.getElementById('toggle-linear').checked;
+  var attnInt = +document.getElementById('slider-attn-int').value;
+  var ffn    = Math.ceil(dim * Math.PI / 64) * 64;
+  var conv_dim = dim * 2 + dim;
+  var compile = document.getElementById('toggle-compile').checked;
+  var ckpt    = document.getElementById('toggle-ckpt').checked;
+
+  var w = params * bytes;
+  // Optimizer: AdamW stores fp32 master + momentum + variance = 3×4 = 12 bytes per param
+  var opt = params * 12;
+  // Per-layer activations stored for autograd backward
+  var el_full   = dim + (dim*kv/q) + (dim*kv/q) + (dim + dim*kv/q) + dim + dim + 3*ffn + dim + dim;
+  var el_linear = conv_dim + dim + conv_dim + 3*dim + 2*dim + dim + dim + dim + 3*ffn + dim + dim;
+  // Eager mode (no compile): silu(gate) creates an extra intermediate before multiply
+  if (!compile) { el_full += ffn; el_linear += ffn; }
+  var n_full   = linear ? Math.floor(layers / attnInt) : layers;
+  var n_linear = linear ? layers - n_full : 0;
+  var act_fwd;
+  if (ckpt) {
+    // Gradient checkpointing: store all checkpoint inputs + 1 layer's intermediates during recompute
+    act_fwd = batch * trainCtx * (layers * dim + Math.max(el_full, el_linear));
+  } else {
+    act_fwd = batch * trainCtx * (n_full * el_full + n_linear * el_linear);
+  }
+  var act = act_fwd * bytes;
+  // KV cache (inference): only for full-attention layers
+  var kvLayers = linear ? n_full : layers;
+  var kvc = 2 * batch * inferCtx * kvLayers * kv * dh * bytes;
+
+  var kvLabel = document.getElementById('mem-kv-label');
+  kvLabel.textContent = kvLayers < layers ? '(' + kvLayers + ' of ' + layers + ' layers)' : '';
+
+  document.getElementById('mem-weights').textContent = gb(w);
+  document.getElementById('mem-optim').textContent  = gb(opt);
+  document.getElementById('mem-act').textContent    = gb(act);
+  document.getElementById('mem-kv').textContent     = gb(kvc);
+  document.getElementById('mem-train').textContent  = gb(w + opt + act);
+  document.getElementById('mem-infer').textContent  = gb(w + kvc);
+
+  // Max trainable context for selected GPU
+  var gpuVRAM = +document.getElementById('mem-gpu').value;
+  var maxCtxRow = document.getElementById('max-ctx-row');
+  var maxCtxEl  = document.getElementById('max-train-ctx');
+  var maxCtxNote= document.getElementById('max-ctx-note');
+  if (gpuVRAM > 0) {
+    var overhead = 1.5e9; // ~1.5 GB CUDA context + buffers
+    var actPerToken = ckpt
+      ? batch * (layers * dim + Math.max(el_full, el_linear)) * bytes
+      : batch * (n_full * el_full + n_linear * el_linear) * bytes;
+    var avail = gpuVRAM * 1e9 - overhead - w - opt;
+    var tMax = Math.floor(avail / actPerToken);
+    tMax = Math.max(64, Math.min(tMax, 32768));
+    maxCtxRow.style.display = 'block';
+    maxCtxEl.textContent = tMax.toLocaleString() + ' tokens';
+    if (tMax >= 32768) maxCtxNote.textContent = '(capped at max_position_embeddings)';
+    else if (tMax <= 64) maxCtxNote.textContent = '(increase GPU or enable ckpt)';
+    else maxCtxNote.textContent = '';
+  } else {
+    maxCtxRow.style.display = 'none';
+  }
+}
+
+function gb(bytes) {
+  return (bytes / 1e9).toFixed(2) + ' GB';
+}
+
+recalc();
+</script>
+</body>
+</html>

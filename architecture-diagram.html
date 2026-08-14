@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiniMind — Model Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    font-family:'Outfit',sans-serif;background:#F3F4F6;color:#111827;
+    min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:16px
+  }
+  .page{
+    width:75vw;background:#fff;border-radius:16px;
+    padding:24px 16px;position:relative;
+  }
+  .page::before{
+    content:'';position:absolute;top:-60px;right:-60px;
+    width:260px;height:260px;background:rgba(59,130,246,.04);border-radius:50%;pointer-events:none
+  }
+  .page::after{
+    content:'';position:absolute;bottom:-40px;left:-40px;
+    width:180px;height:180px;background:rgba(16,185,129,.05);border-radius:28px;
+    transform:rotate(20deg);pointer-events:none
+  }
+  .header{position:relative;z-index:1;margin-bottom:36px}
+  .header .tag{
+    display:inline-block;background:#3B82F6;color:#fff;padding:4px 14px;
+    border-radius:6px;font-size:.75rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-bottom:12px
+  }
+  .header h1{font-size:2rem;font-weight:800;letter-spacing:-.02em;line-height:1.1}
+  .header h1 span{color:#3B82F6}
+  .header p{color:#6B7280;font-size:.9375rem;margin-top:6px}
+  .diagram-wrap{
+    position:relative;z-index:1;background:#FAFAFA;
+    border-radius:12px;overflow-x:auto;border:2px solid #E5E7EB
+  }
+  svg{display:block;min-width:780px}
+  .toggle-row{
+    position:relative;z-index:1;display:flex;align-items:center;gap:12px;
+    margin-top:28px;padding:16px 20px;background:#F3F4F6;border-radius:10px;flex-wrap:wrap
+  }
+  .toggle-row .label-text{
+    font-size:.8125rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#6B7280
+  }
+  .toggle-pill{display:inline-flex;border-radius:24px;overflow:hidden;border:3px solid #E5E7EB}
+  .toggle-pill button{
+    font-family:'Outfit',sans-serif;font-size:.8125rem;font-weight:600;
+    padding:8px 22px;border:none;cursor:pointer;background:#fff;color:#6B7280;
+    transition:all .2s ease;letter-spacing:.03em
+  }
+  .toggle-pill button.active{background:#3B82F6;color:#fff}
+  .toggle-pill button:first-child{border-radius:20px 0 0 20px}
+  .toggle-pill button:last-child{border-radius:0 20px 20px 0}
+  .legend{
+    position:relative;z-index:1;display:flex;gap:20px;flex-wrap:wrap;margin-top:20px
+  }
+  .legend-item{display:flex;align-items:center;gap:8px;font-size:.8125rem;color:#4B5563}
+  .legend-swatch{width:12px;height:12px;border-radius:3px;flex-shrink:0}
+
+  /* SVG show/hide: use visibility for clean toggle */
+  .ffn-dense-block, .ffn-moe-block, .aux-loss-block,
+  .attn-vanilla-block, .attn-linear-block{transition:visibility 0s}
+  .ffn-dense-block.hide, .ffn-moe-block.hide, .aux-loss-block.hide,
+  .attn-vanilla-block.hide, .attn-linear-block.hide, .ee-block.hide{visibility:hidden}
+
+  @media(max-width:840px){.page{padding:24px 16px}}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <span class="tag">Architecture</span>
+    <h1>MiniMind <span>Transformer</span> Decoder‑Only</h1>
+    <p>8 layers · dim=768 · 8 Q‑heads / 4 KV‑heads · SwiGLU · RMSNorm · RoPE θ=1e6</p>
+  </div>
+
+  <div class="diagram-wrap">
+    <svg viewBox="0 0 860 1080" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="a" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#9CA3AF"/>
+        </marker>
+        <marker id="ar" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#D1D5DB"/>
+        </marker>
+      </defs>
+
+      <g transform="scale(1.0)">
+
+      <!-- ═══════ BACKGROUND DECORATION ═══════ -->
+      <circle cx="730" cy="100" r="50" fill="rgba(59,130,246,0.03)"/>
+      <rect x="20" y="580" width="80" height="80" rx="14" fill="rgba(16,185,129,0.04)" transform="rotate(15 60 620)"/>
+
+      <!-- ═══════ INPUT ═══════ -->
+      <!-- Input tokens row -->
+      <rect x="230" y="28" width="340" height="36" rx="7" fill="#F3F4F6" stroke="#D1D5DB" stroke-width="1.5"/>
+      <text x="400" y="51" text-anchor="middle" font-family="Outfit" font-weight="600" font-size="12" fill="#374151">Token IDs  [B, T]</text>
+      <text x="210" y="52" text-anchor="end" font-family="monospace" font-size="9" fill="#9CA3AF">bos=1</text>
+      <text x="590" y="52" text-anchor="start" font-family="monospace" font-size="9" fill="#9CA3AF">eos=2</text>
+
+      <line x1="400" y1="64" x2="400" y2="96" stroke="#9CA3AF" stroke-width="1.8" marker-end="url(#a)"/>
+
+      <!-- ═══════ EMBEDDING ═══════ -->
+      <rect x="230" y="100" width="340" height="48" rx="8" fill="#DBEAFE" stroke="#93C5FD" stroke-width="2"/>
+      <text x="400" y="120" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="12" fill="#1E40AF">Token Embedding</text>
+      <text x="400" y="138" text-anchor="middle" font-family="monospace" font-size="10" fill="#3B82F6">nn.Embedding(6400, 768)  →  [B, T, 768]</text>
+
+      <line x1="400" y1="148" x2="400" y2="182" stroke="#9CA3AF" stroke-width="1.8" marker-end="url(#a)"/>
+
+      <!-- RoPE callout — anchored to right of arrow -->
+      <line x1="400" y1="162" x2="460" y2="162" stroke="#FCD34D" stroke-width="1.2"/>
+      <rect x="465" y="150" width="210" height="24" rx="5" fill="#FEF3C7" stroke="#FCD34D" stroke-width="1.5"/>
+      <text x="570" y="166" text-anchor="middle" font-family="Outfit" font-weight="600" font-size="10" fill="#92400E">RoPE θ=1e6 → applied in Attention</text>
+
+      <!-- ═══════ TRANSFORMER BLOCK ═══════ -->
+      <!-- Outer box -->
+      <rect x="60" y="188" width="680" height="630" rx="12" fill="#F9FAFB" stroke="#E5E7EB" stroke-width="2"/>
+
+      <!-- Block header bar -->
+      <rect x="60" y="188" width="680" height="32" rx="12" fill="#E5E7EB"/>
+      <rect x="60" y="208" width="680" height="12" fill="#E5E7EB"/>
+      <text x="400" y="209" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="12" fill="#374151">Transformer Block  (×8)</text>
+      <text x="725" y="209" text-anchor="end" font-family="Outfit" font-weight="500" font-size="10" fill="#9CA3AF">x8</text>
+
+      <!-- Residual backbone (left spine) -->
+      <line x1="103" y1="224" x2="103" y2="810" stroke="#D1D5DB" stroke-width="2.5" stroke-dasharray="7,5"/>
+
+      <!-- ── Entry into block ── -->
+      <line x1="400" y1="224" x2="400" y2="246" stroke="#9CA3AF" stroke-width="1.6" marker-end="url(#a)"/>
+
+      <!-- ── RMSNorm 1 ── -->
+      <rect x="280" y="250" width="240" height="30" rx="6" fill="#F3F4F6" stroke="#D1D5DB" stroke-width="1.5"/>
+      <text x="400" y="270" text-anchor="middle" font-family="Outfit" font-weight="600" font-size="11" fill="#374151">RMSNorm</text>
+      <line x1="400" y1="280" x2="400" y2="306" stroke="#9CA3AF" stroke-width="1.5" marker-end="url(#a)"/>
+
+      <!-- ── ATTENTION block (vanilla) ── -->
+      <g id="attn-vanilla-block" class="attn-vanilla-block">
+      <rect x="180" y="310" width="440" height="88" rx="8" fill="#DBEAFE" stroke="#93C5FD" stroke-width="2"/>
+      <text x="400" y="332" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="12" fill="#1E40AF">Multi‑Head Self‑Attention  (GQA)</text>
+
+      <!-- Q box -->
+      <rect x="200" y="346" width="95" height="40" rx="5" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1.5"/>
+      <text x="247" y="362" text-anchor="middle" font-family="monospace" font-size="10" fill="#2563EB">Q (8 heads)</text>
+      <text x="247" y="378" text-anchor="middle" font-family="monospace" font-size="9" fill="#60A5FA">d/h = 96</text>
+      <rect x="200" y="339" width="42" height="12" rx="3" fill="#FBBF24"/>
+      <text x="221" y="348" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="7" fill="#78350F">RoPE</text>
+
+      <!-- K box -->
+      <rect x="305" y="346" width="95" height="40" rx="5" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1.5"/>
+      <text x="352" y="362" text-anchor="middle" font-family="monospace" font-size="10" fill="#2563EB">K (4 heads)</text>
+      <text x="352" y="378" text-anchor="middle" font-family="monospace" font-size="9" fill="#60A5FA">d/h = 96</text>
+      <rect x="305" y="339" width="42" height="12" rx="3" fill="#FBBF24"/>
+      <text x="326" y="348" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="7" fill="#78350F">RoPE</text>
+
+      <!-- V box -->
+      <rect x="410" y="346" width="95" height="40" rx="5" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1.5"/>
+      <text x="457" y="362" text-anchor="middle" font-family="monospace" font-size="10" fill="#2563EB">V (4 heads)</text>
+      <text x="457" y="378" text-anchor="middle" font-family="monospace" font-size="9" fill="#60A5FA">d/h = 96</text>
+
+      <!-- O proj -->
+      <rect x="522" y="346" width="78" height="40" rx="5" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1.5"/>
+      <text x="561" y="364" text-anchor="middle" font-family="monospace" font-size="10" fill="#2563EB">O proj</text>
+      <text x="561" y="379" text-anchor="middle" font-family="monospace" font-size="9" fill="#60A5FA">768 &rarr; 768</text>
+
+      <!-- FlashAttn badge -->
+      <rect x="522" y="338" width="78" height="13" rx="3" fill="#3B82F6"/>
+      <text x="561" y="348" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="8" fill="#fff">FlashAttn</text>
+      </g>
+
+      <!-- ── ATTENTION block (linear) ── -->
+      <g id="attn-linear-block" class="attn-linear-block hide">
+      <rect x="120" y="310" width="540" height="110" rx="8" fill="#EDE9FE" stroke="#A78BFA" stroke-width="2"/>
+      <text x="390" y="332" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="12" fill="#5B21B6">GatedDeltaNet  ·  Chunked Training / Recurrent Inference</text>
+
+      <!-- Short Conv -->
+      <rect x="140" y="342" width="160" height="24" rx="4" fill="#F5F3FF" stroke="#C4B5FD" stroke-width="1.2"/>
+      <text x="220" y="358" text-anchor="middle" font-family="monospace" font-size="9" fill="#7C3AED">conv1d(k=4, groups=dim) + SiLU</text>
+
+      <!-- Q, K heads -->
+      <rect x="320" y="342" width="75" height="32" rx="4" fill="#F5F3FF" stroke="#C4B5FD" stroke-width="1.2"/>
+      <text x="357" y="356" text-anchor="middle" font-family="monospace" font-size="9" fill="#7C3AED">Q (8h)</text>
+      <text x="357" y="370" text-anchor="middle" font-family="monospace" font-size="8" fill="#A78BFA">L2 Norm</text>
+
+      <rect x="405" y="342" width="75" height="32" rx="4" fill="#F5F3FF" stroke="#C4B5FD" stroke-width="1.2"/>
+      <text x="442" y="356" text-anchor="middle" font-family="monospace" font-size="9" fill="#7C3AED">K (8h)</text>
+      <text x="442" y="370" text-anchor="middle" font-family="monospace" font-size="8" fill="#A78BFA">L2 Norm</text>
+
+      <rect x="490" y="342" width="55" height="32" rx="4" fill="#F5F3FF" stroke="#C4B5FD" stroke-width="1.2"/>
+      <text x="517" y="362" text-anchor="middle" font-family="monospace" font-size="9" fill="#7C3AED">V (8h)</text>
+
+      <!-- O proj -->
+      <rect x="555" y="342" width="60" height="32" rx="4" fill="#F5F3FF" stroke="#C4B5FD" stroke-width="1.2"/>
+      <text x="585" y="358" text-anchor="middle" font-family="monospace" font-size="8" fill="#7C3AED">O proj</text>
+      <text x="585" y="371" text-anchor="middle" font-family="monospace" font-size="7" fill="#A78BFA">768→768</text>
+
+      <!-- Gates -->
+      <rect x="140" y="376" width="62" height="20" rx="3" fill="#FCE7F3" stroke="#F9A8D4" stroke-width="1"/>
+      <text x="171" y="390" text-anchor="middle" font-family="monospace" font-size="8" fill="#BE185D">β (sigmoid)</text>
+
+      <rect x="210" y="376" width="62" height="20" rx="3" fill="#FCE7F3" stroke="#F9A8D4" stroke-width="1"/>
+      <text x="241" y="390" text-anchor="middle" font-family="monospace" font-size="8" fill="#BE185D">g (decay)</text>
+
+      <!-- Delta Rule core -->
+      <rect x="285" y="372" width="240" height="26" rx="4" fill="#DDD6FE" stroke="#A78BFA" stroke-width="1"/>
+      <text x="405" y="387" text-anchor="middle" font-family="monospace" font-size="8" fill="#5B21B6">S ← g·S + β·k·v</text>
+      <text x="405" y="395" text-anchor="middle" font-family="monospace" font-size="7" fill="#7C3AED">o = q·S  |  RMSNormGated → output</text>
+
+      <!-- Hybrid note -->
+      <rect x="120" y="402" width="540" height="16" rx="3" fill="#F3E8FF" stroke="#D8B4FE" stroke-width="0.8"/>
+      <text x="390" y="414" text-anchor="middle" font-family="monospace" font-size="8" fill="#9333EA">6 linear layers + 2 full-attention layers (every 4th) = hybrid design</text>
+      </g>
+
+      <!-- Down arrow from Attention — stops at circle top -->
+      <line x1="400" y1="398" x2="400" y2="410" stroke="#9CA3AF" stroke-width="1.5" marker-end="url(#a)"/>
+
+      <!-- Residual add point (1) — circle sits BETWEEN arrows -->
+      <circle cx="400" cy="424" r="14" fill="#F3F4F6" stroke="#D1D5DB" stroke-width="2"/>
+      <text x="400" y="430" text-anchor="middle" font-family="monospace" font-size="15" fill="#9CA3AF" font-weight="700">+</text>
+      <line x1="103" y1="250" x2="103" y2="424" stroke="#D1D5DB" stroke-width="1.3" stroke-dasharray="4,3"/>
+      <line x1="103" y1="424" x2="386" y2="424" stroke="#D1D5DB" stroke-width="1.3" marker-end="url(#ar)"/>
+
+      <!-- Arrow from circle bottom to RMSNorm 2 -->
+      <line x1="400" y1="438" x2="400" y2="450" stroke="#9CA3AF" stroke-width="1.5" marker-end="url(#a)"/>
+
+      <!-- ── RMSNorm 2 ── -->
+      <rect x="280" y="454" width="240" height="30" rx="6" fill="#F3F4F6" stroke="#D1D5DB" stroke-width="1.5"/>
+      <text x="400" y="474" text-anchor="middle" font-family="Outfit" font-weight="600" font-size="11" fill="#374151">RMSNorm</text>
+      <line x1="400" y1="484" x2="400" y2="510" stroke="#9CA3AF" stroke-width="1.5" marker-end="url(#a)"/>
+
+      <!-- ── FFN: DENSE ═══════════════════════ -->
+      <g id="ffn-dense-block" class="ffn-dense-block">
+        <rect x="180" y="514" width="440" height="190" rx="8" fill="#D1FAE5" stroke="#6EE7B7" stroke-width="2"/>
+        <text x="400" y="536" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="13" fill="#065F46">Feed‑Forward Network  —  SwiGLU</text>
+
+        <!-- 3-stage pipeline: gate+up → activation → down -->
+        <!-- Stage 1: projections -->
+        <rect x="235" y="544" width="130" height="32" rx="6" fill="#ECFDF5" stroke="#A7F3D0" stroke-width="1.5"/>
+        <text x="300" y="557" text-anchor="middle" font-family="Outfit" font-weight="600" font-size="10" fill="#047857">W_gate</text>
+        <text x="300" y="571" text-anchor="middle" font-family="monospace" font-size="9" fill="#059669">768 → 1920</text>
+
+        <rect x="435" y="544" width="130" height="32" rx="6" fill="#ECFDF5" stroke="#A7F3D0" stroke-width="1.5"/>
+        <text x="500" y="557" text-anchor="middle" font-family="Outfit" font-weight="600" font-size="10" fill="#047857">W_up</text>
+        <text x="500" y="571" text-anchor="middle" font-family="monospace" font-size="9" fill="#059669">768 → 1920</text>
+
+        <!-- Arrows from projections to activation -->
+        <line x1="300" y1="576" x2="375" y2="594" stroke="#34D399" stroke-width="1.8" marker-end="url(#a)"/>
+        <line x1="500" y1="576" x2="425" y2="594" stroke="#34D399" stroke-width="1.8" marker-end="url(#a)"/>
+
+        <!-- Stage 2: activation -->
+        <rect x="315" y="596" width="170" height="32" rx="6" fill="#A7F3D0" stroke="#6EE7B7" stroke-width="1.5"/>
+        <text x="400" y="611" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="11" fill="#047857">gate(x)  ⊗  silu(up(x))</text>
+        <text x="400" y="624" text-anchor="middle" font-family="monospace" font-size="8" fill="#059669">dim = 1920</text>
+
+        <!-- Arrow to down projection -->
+        <line x1="400" y1="628" x2="400" y2="644" stroke="#34D399" stroke-width="1.8" marker-end="url(#a)"/>
+
+        <!-- Stage 3: down projection -->
+        <rect x="310" y="646" width="180" height="34" rx="6" fill="#ECFDF5" stroke="#A7F3D0" stroke-width="1.5"/>
+        <text x="400" y="660" text-anchor="middle" font-family="Outfit" font-weight="600" font-size="10" fill="#047857">W_down</text>
+        <text x="400" y="675" text-anchor="middle" font-family="monospace" font-size="9" fill="#059669">1920 → 768</text>
+      </g>
+
+      <!-- ── FFN: MOE ═══════════════════════ -->
+      <g id="ffn-moe-block" class="ffn-moe-block hide">
+        <rect x="180" y="514" width="440" height="190" rx="8" fill="#FEF3C7" stroke="#FCD34D" stroke-width="2"/>
+
+        <!-- Stage 1: Router (top row) -->
+        <rect x="250" y="520" width="300" height="40" rx="7" fill="#FFFBEB" stroke="#FDE68A" stroke-width="1.5"/>
+        <text x="400" y="535" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="11" fill="#92400E">Router  —  softmax(scores)  →  pick top‑1 expert per token</text>
+        <text x="400" y="552" text-anchor="middle" font-family="monospace" font-size="8" fill="#D97706">load‑balanced with aux loss  (coef = 5e‑4)</text>
+
+        <!-- Arrow from router to experts -->
+        <line x1="290" y1="560" x2="241" y2="575" stroke="#F59E0B" stroke-width="1.5" marker-end="url(#a)"/>
+        <line x1="370" y1="560" x2="343" y2="575" stroke="#F59E0B" stroke-width="1.5" marker-end="url(#a)"/>
+        <line x1="450" y1="560" x2="445" y2="575" stroke="#F59E0B" stroke-width="1.5" marker-end="url(#a)"/>
+        <line x1="510" y1="560" x2="547" y2="575" stroke="#F59E0B" stroke-width="1.5" marker-end="url(#a)"/>
+
+        <!-- Stage 2: 4 Expert mini-pipelines -->
+        <!-- Expert 0 -->
+        <rect x="195" y="578" width="92" height="94" rx="7" fill="#FFFBEB" stroke="#FDE68A" stroke-width="1.5"/>
+        <text x="241" y="594" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="9" fill="#B45309">Expert 0</text>
+        <rect x="202" y="602" width="78" height="18" rx="4" fill="#FFF7ED" stroke="#FED7AA" stroke-width="1"/>
+        <text x="241" y="615" text-anchor="middle" font-family="monospace" font-size="7" fill="#C2410C">gate: 768→1920</text>
+        <rect x="202" y="623" width="78" height="18" rx="4" fill="#FFF7ED" stroke="#FED7AA" stroke-width="1"/>
+        <text x="241" y="636" text-anchor="middle" font-family="monospace" font-size="7" fill="#C2410C">up: 768→1920</text>
+        <text x="241" y="646" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="8" fill="#EA580C">⊗ silu</text>
+        <rect x="202" y="652" width="78" height="16" rx="4" fill="#FFF7ED" stroke="#FED7AA" stroke-width="1"/>
+        <text x="241" y="664" text-anchor="middle" font-family="monospace" font-size="7" fill="#C2410C">down: 1920→768</text>
+
+        <!-- Expert 1 -->
+        <rect x="297" y="578" width="92" height="94" rx="7" fill="#FFFBEB" stroke="#FDE68A" stroke-width="1.5"/>
+        <text x="343" y="594" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="9" fill="#B45309">Expert 1</text>
+        <rect x="304" y="602" width="78" height="18" rx="4" fill="#FFF7ED" stroke="#FED7AA" stroke-width="1"/>
+        <text x="343" y="615" text-anchor="middle" font-family="monospace" font-size="7" fill="#C2410C">gate: 768→1920</text>
+        <rect x="304" y="623" width="78" height="18" rx="4" fill="#FFF7ED" stroke="#FED7AA" stroke-width="1"/>
+        <text x="343" y="636" text-anchor="middle" font-family="monospace" font-size="7" fill="#C2410C">up: 768→1920</text>
+        <text x="343" y="646" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="8" fill="#EA580C">⊗ silu</text>
+        <rect x="304" y="652" width="78" height="16" rx="4" fill="#FFF7ED" stroke="#FED7AA" stroke-width="1"/>
+        <text x="343" y="664" text-anchor="middle" font-family="monospace" font-size="7" fill="#C2410C">down: 1920→768</text>
+
+        <!-- Expert 2 -->
+        <rect x="399" y="578" width="92" height="94" rx="7" fill="#FFFBEB" stroke="#FDE68A" stroke-width="1.5"/>
+        <text x="445" y="594" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="9" fill="#B45309">Expert 2</text>
+        <rect x="406" y="602" width="78" height="18" rx="4" fill="#FFF7ED" stroke="#FED7AA" stroke-width="1"/>
+        <text x="445" y="615" text-anchor="middle" font-family="monospace" font-size="7" fill="#C2410C">gate: 768→1920</text>
+        <rect x="406" y="623" width="78" height="18" rx="4" fill="#FFF7ED" stroke="#FED7AA" stroke-width="1"/>
+        <text x="445" y="636" text-anchor="middle" font-family="monospace" font-size="7" fill="#C2410C">up: 768→1920</text>
+        <text x="445" y="646" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="8" fill="#EA580C">⊗ silu</text>
+        <rect x="406" y="652" width="78" height="16" rx="4" fill="#FFF7ED" stroke="#FED7AA" stroke-width="1"/>
+        <text x="445" y="664" text-anchor="middle" font-family="monospace" font-size="7" fill="#C2410C">down: 1920→768</text>
+
+        <!-- Expert 3 -->
+        <rect x="501" y="578" width="92" height="94" rx="7" fill="#FFFBEB" stroke="#FDE68A" stroke-width="1.5"/>
+        <text x="547" y="594" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="9" fill="#B45309">Expert 3</text>
+        <rect x="508" y="602" width="78" height="18" rx="4" fill="#FFF7ED" stroke="#FED7AA" stroke-width="1"/>
+        <text x="547" y="615" text-anchor="middle" font-family="monospace" font-size="7" fill="#C2410C">gate: 768→1920</text>
+        <rect x="508" y="623" width="78" height="18" rx="4" fill="#FFF7ED" stroke="#FED7AA" stroke-width="1"/>
+        <text x="547" y="636" text-anchor="middle" font-family="monospace" font-size="7" fill="#C2410C">up: 768→1920</text>
+        <text x="547" y="646" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="8" fill="#EA580C">⊗ silu</text>
+        <rect x="508" y="652" width="78" height="16" rx="4" fill="#FFF7ED" stroke="#FED7AA" stroke-width="1"/>
+        <text x="547" y="664" text-anchor="middle" font-family="monospace" font-size="7" fill="#C2410C">down: 1920→768</text>
+
+        <!-- Stage 3: Combine -->
+        <rect x="300" y="676" width="200" height="26" rx="6" fill="#FDE68A" stroke="#F59E0B" stroke-width="1.5"/>
+        <text x="400" y="694" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="11" fill="#92400E">Combine:  weighted sum of expert outputs</text>
+        <line x1="280" y1="684" x2="300" y2="684" stroke="#F59E0B" stroke-width="1"/>
+        <line x1="540" y1="684" x2="520" y2="684" stroke="#F59E0B" stroke-width="1"/>
+      </g>
+
+      <!-- Down arrow from FFN — stops at circle top -->
+      <line x1="400" y1="704" x2="400" y2="720" stroke="#9CA3AF" stroke-width="1.5" marker-end="url(#a)"/>
+
+      <!-- Residual add point (2) — circle sits BETWEEN arrows -->
+      <circle cx="400" cy="734" r="14" fill="#F3F4F6" stroke="#D1D5DB" stroke-width="2"/>
+      <text x="400" y="740" text-anchor="middle" font-family="monospace" font-size="15" fill="#9CA3AF" font-weight="700">+</text>
+      <line x1="103" y1="500" x2="103" y2="734" stroke="#D1D5DB" stroke-width="1.3" stroke-dasharray="4,3"/>
+      <line x1="103" y1="734" x2="386" y2="734" stroke="#D1D5DB" stroke-width="1.3" marker-end="url(#ar)"/>
+
+      <!-- Arrow from circle bottom toward exit -->
+      <line x1="400" y1="748" x2="400" y2="764" stroke="#9CA3AF" stroke-width="1.5"/>
+
+      <!-- Layer index badge -->
+      <rect x="628" y="310" width="100" height="36" rx="6" fill="#F3F4F6" stroke="#E5E7EB" stroke-width="1.5"/>
+      <text x="678" y="325" text-anchor="middle" font-family="Outfit" font-weight="600" font-size="10" fill="#6B7280">Layer index</text>
+      <text x="678" y="340" text-anchor="middle" font-family="monospace" font-size="9" fill="#3B82F6">n ∈ {0 … 7}</text>
+
+      <!-- Exit from transformer block -->
+      <line x1="400" y1="818" x2="400" y2="854" stroke="#9CA3AF" stroke-width="1.8" marker-end="url(#a)"/>
+
+      <!-- ── EARLY EXIT (LayerSkip) ── -->
+      <g id="ee-block" class="ee-block hide">
+        <line x1="400" y1="760" x2="540" y2="760" stroke="#F59E0B" stroke-width="2" stroke-dasharray="6,4"/>
+        <rect x="544" y="742" width="148" height="36" rx="7" fill="#FFFBEB" stroke="#FCD34D" stroke-width="2"/>
+        <text x="618" y="757" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="10" fill="#92400E">Early Exit</text>
+        <text x="618" y="772" text-anchor="middle" font-family="monospace" font-size="8" fill="#D97706">layers 4–7 → LM Head</text>
+        <text x="705" y="814" font-family="Outfit" font-weight="500" font-size="9" fill="#B45309">CE Loss</text>
+        <text x="705" y="826" font-family="monospace" font-size="8" fill="#D97706">weight × 0.3</text>
+        <line x1="618" y1="780" x2="618" y2="802" stroke="#FCD34D" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#a)"/>
+      </g>
+
+      <!-- FINAL RMSNORM -->
+      <rect x="280" y="858" width="240" height="34" rx="7" fill="#DBEAFE" stroke="#93C5FD" stroke-width="2"/>
+      <text x="400" y="880" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="12" fill="#1E40AF">RMSNorm (Final)</text>
+      <line x1="400" y1="892" x2="400" y2="922" stroke="#9CA3AF" stroke-width="1.8" marker-end="url(#a)"/>
+
+      <!-- LM HEAD -->
+      <rect x="260" y="926" width="280" height="54" rx="8" fill="#1E40AF"/>
+      <text x="400" y="950" text-anchor="middle" font-family="Outfit" font-weight="700" font-size="13" fill="#fff">LM Head</text>
+      <text x="400" y="970" text-anchor="middle" font-family="monospace" font-size="10" fill="#93C5FD">nn.Linear(768, 6400)  —  tied with embedding</text>
+      <line x1="400" y1="980" x2="400" y2="1010" stroke="#9CA3AF" stroke-width="1.8" marker-end="url(#a)"/>
+
+      <!-- OUTPUT -->
+      <rect x="260" y="1014" width="280" height="38" rx="7" fill="#F3F4F6" stroke="#D1D5DB" stroke-width="2"/>
+      <text x="400" y="1031" text-anchor="middle" font-family="Outfit" font-weight="600" font-size="12" fill="#374151">Output Logits  [B, T, 6400]</text>
+      <text x="400" y="1046" text-anchor="middle" font-family="monospace" font-size="9" fill="#9CA3AF">softmax → next-token distribution</text>
+
+      <!-- CE Loss -->
+      <line x1="540" y1="953" x2="600" y2="953" stroke="#FCA5A5" stroke-width="1.5" stroke-dasharray="4,3"/>
+      <rect x="604" y="938" width="148" height="30" rx="5" fill="#FEF2F2" stroke="#FECACA" stroke-width="1"/>
+      <text x="678" y="950" text-anchor="middle" font-family="Outfit" font-weight="600" font-size="9" fill="#991B1B">CE Loss</text>
+      <text x="678" y="963" text-anchor="middle" font-family="monospace" font-size="8" fill="#DC2626">CrossEntropy(logits, labels)</text>
+
+      <!-- Aux Loss (MoE only) -->
+      <g id="aux-loss-block" class="aux-loss-block hide">
+        <line x1="540" y1="986" x2="600" y2="986" stroke="#FCD34D" stroke-width="1.5" stroke-dasharray="4,3"/>
+        <rect x="604" y="976" width="148" height="30" rx="5" fill="#FFFBEB" stroke="#FDE68A" stroke-width="1"/>
+        <text x="678" y="988" text-anchor="middle" font-family="Outfit" font-weight="600" font-size="9" fill="#92400E">Aux Loss (MoE only)</text>
+        <text x="678" y="1001" text-anchor="middle" font-family="monospace" font-size="8" fill="#D97706">router_aux_loss × 5e-4</text>
+      </g>
+
+      <!-- Position labels -->
+      <text x="810" y="118" text-anchor="end" font-family="Outfit" font-weight="600" font-size="9" fill="#9CA3AF">INPUT</text>
+      <text x="810" y="356" text-anchor="end" font-family="Outfit" font-weight="600" font-size="9" fill="#9CA3AF">ATTENTION</text>
+      <text x="810" y="618" text-anchor="end" font-family="Outfit" font-weight="600" font-size="9" fill="#9CA3AF">FEED‑FORWARD</text>
+      <text x="810" y="958" text-anchor="end" font-family="Outfit" font-weight="600" font-size="9" fill="#9CA3AF">OUTPUT</text>
+
+      </g>
+    </svg>
+  </div>
+
+  <!-- Toggle -->
+  <div class="toggle-row">
+    <span class="label-text">Attention / FFN variant:</span>
+    <div class="toggle-pill">
+      <button id="btn-dense" class="active" onclick="switchMode('dense')">Dense · SwiGLU</button>
+      <button id="btn-moe"            onclick="switchMode('moe')">MoE · 4 Experts</button>
+      <button id="btn-linear"         onclick="switchMode('linear')">Linear · GatedDeltaNet</button>
+    </div>
+    <span style="font-size:.8125rem;color:#6B7280;font-weight:500;margin-left:4px;">
+      → <span id="param-disp">64M params</span>
+    </span>
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-left:12px;
+      font-family:Outfit,sans-serif;font-size:.8125rem;font-weight:600;color:#6B7280;">
+      <input type="checkbox" id="toggle-ee" onchange="switchMode(document.getElementById('btn-dense').classList.contains('active')?'dense':document.getElementById('btn-moe').classList.contains('active')?'moe':'linear')" style="accent-color:#F59E0B;width:15px;height:15px;">
+      Show Early Exit
+    </label>
+  </div>
+
+  <!-- Legend -->
+  <div class="legend">
+    <div class="legend-item"><span class="legend-swatch" style="background:#DBEAFE;"></span>Embedding / Norm</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#BFDBFE;"></span>Attention (MHA + GQA)</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#C4B5FD;"></span>Linear Attention (GatedDeltaNet)</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#A7F3D0;"></span>FFN Dense (SwiGLU)</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#FDE68A;"></span>FFN MoE (4 Experts)</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#E5E7EB;"></span>Norm / Residual</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#1E40AF;"></span>LM Head</div>
+  </div>
+</div>
+
+<script>
+function switchMode(mode) {
+  var denseEl  = document.getElementById('ffn-dense-block');
+  var moeEl    = document.getElementById('ffn-moe-block');
+  var auxEl    = document.getElementById('aux-loss-block');
+  var attnV    = document.getElementById('attn-vanilla-block');
+  var attnL    = document.getElementById('attn-linear-block');
+  var eeEl     = document.getElementById('ee-block');
+  var btnD     = document.getElementById('btn-dense');
+  var btnM     = document.getElementById('btn-moe');
+  var btnL     = document.getElementById('btn-linear');
+  var eeTog    = document.getElementById('toggle-ee');
+  var disp     = document.getElementById('param-disp');
+
+  if (mode === 'dense') {
+    denseEl.classList.remove('hide'); moeEl.classList.add('hide'); auxEl.classList.add('hide');
+    attnV.classList.remove('hide');   attnL.classList.add('hide');
+    btnD.classList.add('active');     btnM.classList.remove('active'); btnL.classList.remove('active');
+    disp.textContent = '64M params';
+  } else if (mode === 'moe') {
+    denseEl.classList.add('hide');    moeEl.classList.remove('hide'); auxEl.classList.remove('hide');
+    attnV.classList.remove('hide');   attnL.classList.add('hide');
+    btnM.classList.add('active');     btnD.classList.remove('active'); btnL.classList.remove('active');
+    disp.textContent = '198M total  /  64M active params';
+  } else {
+    denseEl.classList.remove('hide'); moeEl.classList.add('hide'); auxEl.classList.add('hide');
+    attnV.classList.add('hide');      attnL.classList.remove('hide');
+    btnL.classList.add('active');     btnD.classList.remove('active'); btnM.classList.remove('active');
+    disp.textContent = '71M params  ·  6 linear + 2 full-attn layers';
+  }
+
+  if (eeTog.checked) { eeEl.classList.remove('hide'); } else { eeEl.classList.add('hide'); }
+}
+</script>
+</body>
+</html>
