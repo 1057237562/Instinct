@@ -7,7 +7,7 @@ if exist ".venv\Scripts\activate.bat" (
 )
 
 cd scripts
-echo Starting MiniMind Chat WebUI...
+echo Starting Instinct Chat WebUI...
 echo Open http://localhost:8502 in your browser
 echo Press Ctrl+C to stop
 echo.

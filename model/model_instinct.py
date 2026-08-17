@@ -5,10 +5,10 @@ from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 
 # 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
-#                                     MiniMind Config
+#                                     Instinct Config
 # 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
-class MiniMindConfig(PretrainedConfig):
-    model_type = "minimind"
+class InstinctConfig(PretrainedConfig):
+    model_type = "instinct"
     def __init__(self, hidden_size=768, num_hidden_layers=8, use_moe=False, **kwargs):
         super().__init__(**kwargs)
         self.hidden_size = hidden_size
@@ -48,7 +48,7 @@ class MiniMindConfig(PretrainedConfig):
         self.router_aux_loss_coef = kwargs.get("router_aux_loss_coef", 5e-4)
 
 # 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
-#                                     MiniMind Model
+#                                     Instinct Model
 # 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-5):
@@ -92,7 +92,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     return (x[:, :, :, None, :].expand(bs, slen, num_key_value_heads, n_rep, head_dim).reshape(bs, slen, num_key_value_heads * n_rep, head_dim))
 
 class Attention(nn.Module):
-    def __init__(self, config: MiniMindConfig):
+    def __init__(self, config: InstinctConfig):
         super().__init__()
         self.num_key_value_heads = config.num_attention_heads if config.num_key_value_heads is None else config.num_key_value_heads
         self.n_local_heads = config.num_attention_heads
@@ -137,7 +137,7 @@ class Attention(nn.Module):
         return output, past_kv
 
 class FeedForward(nn.Module):
-    def __init__(self, config: MiniMindConfig, intermediate_size: int = None):
+    def __init__(self, config: InstinctConfig, intermediate_size: int = None):
         super().__init__()
         intermediate_size = intermediate_size or config.intermediate_size
         self.gate_proj = nn.Linear(config.hidden_size, intermediate_size, bias=False)
@@ -149,7 +149,7 @@ class FeedForward(nn.Module):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 class MOEFeedForward(nn.Module):
-    def __init__(self, config: MiniMindConfig):
+    def __init__(self, config: InstinctConfig):
         super().__init__()
         self.config = config
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
@@ -178,8 +178,8 @@ class MOEFeedForward(nn.Module):
             self.aux_loss = scores.new_zeros(1).squeeze()
         return y.view(batch_size, seq_len, hidden_dim)
 
-class MiniMindBlock(nn.Module):
-    def __init__(self, layer_id: int, config: MiniMindConfig):
+class InstinctBlock(nn.Module):
+    def __init__(self, layer_id: int, config: InstinctConfig):
         super().__init__()
         self.self_attn = Attention(config)
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -196,14 +196,14 @@ class MiniMindBlock(nn.Module):
         hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
         return hidden_states, present_key_value
 
-class MiniMindModel(nn.Module):
-    def __init__(self, config: MiniMindConfig):
+class InstinctModel(nn.Module):
+    def __init__(self, config: InstinctConfig):
         super().__init__()
         self.config = config
         self.vocab_size, self.num_hidden_layers = config.vocab_size, config.num_hidden_layers
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.dropout = nn.Dropout(config.dropout)
-        self.layers = nn.ModuleList([MiniMindBlock(l, config) for l in range(self.num_hidden_layers)])
+        self.layers = nn.ModuleList([InstinctBlock(l, config) for l in range(self.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         freqs_cos, freqs_sin = precompute_freqs_cis(dim=config.head_dim, end=config.max_position_embeddings, rope_base=config.rope_theta, rope_scaling=config.rope_scaling)
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
@@ -254,13 +254,13 @@ class MiniMindModel(nn.Module):
             return hidden_states, presents, aux_loss, intermediates
         return hidden_states, presents, aux_loss
 
-class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
-    config_class = MiniMindConfig
+class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
+    config_class = InstinctConfig
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
-    def __init__(self, config: MiniMindConfig = None):
-        self.config = config or MiniMindConfig()
+    def __init__(self, config: InstinctConfig = None):
+        self.config = config or InstinctConfig()
         super().__init__(self.config)
-        self.model = MiniMindModel(self.config)
+        self.model = InstinctModel(self.config)
         self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
         if self.config.tie_word_embeddings: self.model.embed_tokens.weight = self.lm_head.weight
         self.post_init()
@@ -330,7 +330,7 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
         loss = _cross_entropy_loss(logits, labels) if labels is not None else None
         return MoeCausalLMOutputWithPast(loss=loss, aux_loss=aux_loss, logits=logits, past_key_values=past_key_values, hidden_states=hidden_states)
     
-    # https://github.com/jingyaogong/minimind/discussions/611
+    # https://github.com/1057237562/Instinct/discussions/611
     @torch.inference_mode()
     def generate(self, inputs=None, attention_mask=None, max_new_tokens=8192, temperature=0.85, top_p=0.85, top_k=50, eos_token_id=2, streamer=None, use_cache=True, num_return_sequences=1, do_sample=True, repetition_penalty=1.0, **kwargs):
         input_ids = kwargs.pop("input_ids", inputs).repeat(num_return_sequences, 1)

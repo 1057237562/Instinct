@@ -23,7 +23,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from transformers import AutoTokenizer
-from model.model_minimind import MiniMindForCausalLM
+from model.model_instinct import InstinctForCausalLM
 from dataset.lm_dataset import AgentRLDataset
 from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, LMForRewardModel, config_from_args, build_optimizer
 from trainer.rollout_engine import create_rollout_engine, compute_per_token_logps
@@ -373,7 +373,7 @@ def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="MiniMind Agent RL")
+    parser = argparse.ArgumentParser(description="Instinct Agent RL")
     parser.add_argument("--save_dir", type=str, default="../out", help="模型保存目录")
     parser.add_argument('--save_weight', default='agent', type=str, help="保存权重名称")
     parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
@@ -402,7 +402,7 @@ if __name__ == "__main__":
     parser.add_argument('--from_weight', default='full_sft', type=str, help="加载预训练权重名称")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否从checkpoint恢复")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb记录")
-    parser.add_argument("--wandb_project", type=str, default="MiniMind-Agent-RL", help="wandb项目名称")
+    parser.add_argument("--wandb_project", type=str, default="Instinct-Agent-RL", help="wandb项目名称")
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile")
     parser.add_argument("--debug_mode", action="store_true", help="调试模式")
     parser.add_argument("--debug_interval", type=int, default=20, help="调试日志间隔")

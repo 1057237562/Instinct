@@ -1,7 +1,7 @@
 """
-MiniMind Config WebUI
+Instinct Config WebUI
 =======================
-Interactive configuration tool for MiniMind model parameters.
+Interactive configuration tool for Instinct model parameters.
 Streamlit-based UI with real-time parameter count estimation
 and architecture visualization. Works standalone — no model
 weights required.
@@ -22,13 +22,13 @@ import time
 # ═══════════════════════════════════════════════════════════════
 # Page config
 # ═══════════════════════════════════════════════════════════════
-st.set_page_config(page_title="MiniMind Config", layout="wide")
+st.set_page_config(page_title="Instinct Config", layout="wide")
 
 # ═══════════════════════════════════════════════════════════════
 # Preset definitions
 # ═══════════════════════════════════════════════════════════════
 PRESETS = {
-    "minimind-3": {
+    "instinct-3": {
         "hidden_size": 768,
         "num_hidden_layers": 8,
         "vocab_size": 6400,
@@ -54,7 +54,7 @@ PRESETS = {
         "flash_attn": True,
         "model_architecture": "standard",
     },
-    "minimind-3-moe": {
+    "instinct-3-moe": {
         "hidden_size": 768,
         "num_hidden_layers": 8,
         "vocab_size": 6400,
@@ -80,7 +80,7 @@ PRESETS = {
         "flash_attn": True,
         "model_architecture": "standard",
     },
-    "minimind2-small": {
+    "instinct2-small": {
         "hidden_size": 512,
         "num_hidden_layers": 8,
         "vocab_size": 6400,
@@ -106,7 +106,7 @@ PRESETS = {
         "flash_attn": True,
         "model_architecture": "standard",
     },
-    "minimind2": {
+    "instinct2": {
         "hidden_size": 768,
         "num_hidden_layers": 16,
         "vocab_size": 6400,
@@ -132,7 +132,7 @@ PRESETS = {
         "flash_attn": True,
         "model_architecture": "standard",
     },
-    "minimind-linear": {
+    "instinct-linear": {
         "hidden_size": 768,
         "num_hidden_layers": 8,
         "vocab_size": 6400,
@@ -263,7 +263,7 @@ def fmt_num(n: int) -> str:
 
 
 def compute_intermediate_size(hidden_size: int) -> int:
-    """Compute the FFN intermediate size the same way MiniMindConfig does."""
+    """Compute the FFN intermediate size the same way InstinctConfig does."""
     return math.ceil(hidden_size * math.pi / 64) * 64
 
 
@@ -549,7 +549,7 @@ def fmt_table(breakdown: dict) -> list:
 
 
 def build_config_dict() -> dict:
-    """Assemble a MiniMindConfig-compatible dict from st.session_state."""
+    """Assemble a InstinctConfig-compatible dict from st.session_state."""
     d = {
         "hidden_size": st.session_state.get("hidden_size", 768),
         "num_hidden_layers": st.session_state.get("num_hidden_layers", 8),
@@ -635,15 +635,15 @@ def build_config_dict() -> dict:
 
 
 def gen_python_code(cfg: dict) -> str:
-    """Generate MiniMindConfig instantiation code."""
+    """Generate InstinctConfig instantiation code."""
     is_linear = cfg.get("model_architecture") == "linear"
     is_looped = cfg.get("model_architecture") == "looped"
     if is_looped:
-        module = "model.model_minimind_loop"
-        cls = "MiniMindConfig"
+        module = "model.model_instinct_loop"
+        cls = "InstinctConfig"
     else:
-        module = "model.model_minimind_linear" if is_linear else "model.model_minimind"
-        cls = "MiniMindConfig"
+        module = "model.model_instinct_linear" if is_linear else "model.model_instinct"
+        cls = "InstinctConfig"
     lines = [f"from {module} import {cls}", "", f"config = {cls}("]
     params = [
         ("hidden_size", cfg["hidden_size"]),
@@ -1047,8 +1047,8 @@ def init_from_preset(preset_name: str):
 
 
 if "preset" not in st.session_state:
-    st.session_state.preset = "minimind-3"
-    init_from_preset("minimind-3")
+    st.session_state.preset = "instinct-3"
+    init_from_preset("instinct-3")
 
 if "model_architecture" not in st.session_state:
     st.session_state.model_architecture = "standard"
@@ -1061,7 +1061,7 @@ if not st.session_state.get("_config_auto_loaded"):
     if os.path.exists(default_config):
         with open(default_config, "r", encoding="utf-8") as f:
             load_config_to_session(json.load(f))
-        if st.session_state.preset != "minimind-3":
+        if st.session_state.preset != "instinct-3":
             st.rerun()
 
 # Handle deferred config load from button click (must run before any widget with the same key)
@@ -1201,7 +1201,7 @@ with st.sidebar:
         '<div style="font-size:22px; font-weight:700; letter-spacing:-0.5px; '
         'background: linear-gradient(135deg, #60a5fa, #a78bfa); '
         '-webkit-background-clip: text; -webkit-text-fill-color: transparent; '
-        'margin-bottom: 4px;">miniMind</div>',
+        'margin-bottom: 4px;">instinct</div>',
         unsafe_allow_html=True,
     )
     st.caption("Interactive Model Configurator")
@@ -1213,11 +1213,11 @@ with st.sidebar:
     # ── Model Preset ──
     with st.expander("Model Preset", expanded=True):
         preset_options = [
-            "minimind-3",
-            "minimind-3-moe",
-            "minimind2-small",
-            "minimind2",
-            "minimind-linear",
+            "instinct-3",
+            "instinct-3-moe",
+            "instinct2-small",
+            "instinct2",
+            "instinct-linear",
             "Custom",
         ]
         current_preset = st.session_state.preset
@@ -2082,7 +2082,7 @@ if st.session_state.get("train_status") != "running":
 st.markdown(
 '<div style="margin-top: 24px; font-size: 11px; color: #475569; '
 'text-align: center; border-top: 1px solid #1e293b; padding-top: 12px;">'
-"MiniMind Config WebUI &mdash; standalone, no model weights required"
+"Instinct Config WebUI &mdash; standalone, no model weights required"
 "</div>",
 unsafe_allow_html=True,
 )

@@ -3,10 +3,10 @@ Verification experiment for the paper "Dynamic Looping with Reward-Driven
 Early Exit for Small Language Models".
 
 Compares two network structures on the SAME synthetic dataset, starting from
-the SAME pretrained weights (out/pretrain_768.pth, 64M MiniMind Dense):
+the SAME pretrained weights (out/pretrain_768.pth, 64M Instinct Dense):
 
-  A) Standard MiniMind       (MiniMindForCausalLM)        — fixed 8-layer pass
-  B) Looped MiniMind         (LoopedMiniMindForCausalLM)  — dynamic loop + reward-driven exit
+  A) Standard Instinct       (InstinctForCausalLM)        — fixed 8-layer pass
+  B) Looped Instinct         (LoopedInstinctForCausalLM)  — dynamic loop + reward-driven exit
 
 Verified claims (paper §4.2/§4.3):
   1. Looped model: average loop steps decrease from ~cap towards 1.0 as
@@ -26,8 +26,8 @@ from torch import nn
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
-from model.model_looped_minimind import LoopedMiniMindConfig, LoopedMiniMindForCausalLM
+from model.model_instinct import InstinctConfig, InstinctForCausalLM
+from model.model_looped_instinct import LoopedInstinctConfig, LoopedInstinctForCausalLM
 
 from transformers import AutoTokenizer
 
@@ -74,11 +74,11 @@ def make_batch(ids, batch_size, rng):
 # model factories (load pretrained 768 weights)
 # ─────────────────────────────────────────────────────────────────────────────
 def build_standard():
-    cfg = MiniMindConfig(
+    cfg = InstinctConfig(
         hidden_size=768, num_hidden_layers=8, vocab_size=6400,
         flash_attn=False, inference_rope_scaling=False,
     )
-    model = MiniMindForCausalLM(cfg).to(DEVICE)
+    model = InstinctForCausalLM(cfg).to(DEVICE)
     sd = torch.load("out/pretrain_768.pth", map_location=DEVICE)
     if "model_state_dict" in sd:
         sd = sd["model_state_dict"]
@@ -90,7 +90,7 @@ def build_standard():
 
 
 def build_looped():
-    cfg = LoopedMiniMindConfig(
+    cfg = LoopedInstinctConfig(
         hidden_size=768, num_hidden_layers=8, vocab_size=6400,
         flash_attn=False, inference_rope_scaling=False,
         loop_encoder_layers=[0, 1],
@@ -100,7 +100,7 @@ def build_looped():
         exit_in_training=True, n_supervision=N_SUPERVISION,
         beta=BETA, depth_reward=DEPTH_REWARD,
     )
-    model = LoopedMiniMindForCausalLM(cfg).to(DEVICE)
+    model = LoopedInstinctForCausalLM(cfg).to(DEVICE)
     sd = torch.load("out/pretrain_768.pth", map_location=DEVICE)
     if "model_state_dict" in sd:
         sd = sd["model_state_dict"]
@@ -258,7 +258,7 @@ def check_depth_reward_grad(model, ids):
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     print("=" * 70)
-    print("Verification: Standard MiniMind vs Looped MiniMind")
+    print("Verification: Standard Instinct vs Looped Instinct")
     print(f"device={DEVICE}, seeds={SEEDS}, iters={ITERS}, lr={LR}, "
           f"cap={CAP}, q_th={Q_THRESHOLD}, n_sup={N_SUPERVISION}, "
           f"beta={BETA}, depth_reward={DEPTH_REWARD}")

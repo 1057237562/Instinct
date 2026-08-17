@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MiniMind — Architecture</title>
+<title>Instinct — Architecture</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -174,7 +174,7 @@
   <div class="container" style="position:relative;z-index:1;">
     <span class="tag" style="background:rgba(255,255,255,0.15);color:#fff;margin-bottom:20px;display:inline-block;">ARCHITECTURE OVERVIEW</span>
     <h1 class="heading-xl" style="margin-bottom:24px;">
-      MiniMind<br>
+      Instinct<br>
       <span style="opacity:0.7;font-weight:600;">~64M LLM from Scratch</span>
     </h1>
     <p style="font-size:1.25rem;opacity:0.85;max-width:640px;margin-bottom:40px;line-height:1.65;">
@@ -184,7 +184,7 @@
     <div style="display:flex;gap:16px;flex-wrap:wrap;">
       <a href="#arch" class="btn btn-outline-light">Explore Architecture</a>
       <a href="architecture-diagram.html" class="btn btn-outline-light">See Diagram</a>
-      <a href="https://github.com/jingyaogong/minimind" class="btn" style="background:#fff;color:var(--primary);">View on GitHub</a>
+      <a href="https://github.com/1057237562/Instinct" class="btn" style="background:#fff;color:var(--primary);">View on GitHub</a>
     </div>
   </div>
 </section>
@@ -212,7 +212,7 @@
             <i data-lucide="layers" style="width:24px;height:24px;"></i>
           </div>
           <span class="tag tag-blue" style="margin-bottom:16px;">Dense</span>
-          <h3 class="heading-md" style="margin:12px 0 8px;">MiniMind Dense</h3>
+          <h3 class="heading-md" style="margin:12px 0 8px;">Instinct Dense</h3>
           <p style="color:#4B5563;margin-bottom:24px;line-height:1.65;">
             Compact Transformer Decoder-Only with SwiGLU activations, RMSNorm, and Rotary Position Embeddings.
           </p>
@@ -235,7 +235,7 @@
             <i data-lucide="network" style="width:24px;height:24px;"></i>
           </div>
           <span class="tag tag-green" style="margin-bottom:16px;">MoE</span>
-          <h3 class="heading-md" style="margin:12px 0 8px;">MiniMind MoE</h3>
+          <h3 class="heading-md" style="margin:12px 0 8px;">Instinct MoE</h3>
           <p style="color:#4B5563;margin-bottom:24px;line-height:1.65;">
             Dense base extended with 4 expert FFN layers and top-1 routing. Higher capacity with minimal activation overhead.
           </p>
@@ -258,7 +258,7 @@
             <i data-lucide="activity" style="width:24px;height:24px;"></i>
           </div>
           <span class="tag tag-green" style="margin-bottom:16px;">Experimental</span>
-          <h3 class="heading-md" style="margin:12px 0 8px;">MiniMind Linear</h3>
+          <h3 class="heading-md" style="margin:12px 0 8px;">Instinct Linear</h3>
           <p style="color:#4B5563;margin-bottom:24px;line-height:1.65;">
             GatedDeltaNet replaces softmax attention with O(T) linear complexity. Hybrid design: 6 linear + 2 full-attention layers. Chunked training with recurrent inference.
           </p>
@@ -382,10 +382,10 @@
       <div class="card card-dark card-hover">
         <h3 class="heading-md" style="margin-bottom:8px;color:var(--accent);">Per-layer exit with callback</h3>
         <p style="opacity:0.8;line-height:1.65;margin-bottom:16px;">
-          <code>MiniMindModel.forward()</code> accepts an <code>exit_check_fn</code> callback. At each layer, the model calls it with the current hidden state. If it returns True, the model stops — zero-padding KV for skipped layers. The callback is injected by <code>MiniMindForCausalLM</code>, which has access to the shared LM head.
+          <code>InstinctModel.forward()</code> accepts an <code>exit_check_fn</code> callback. At each layer, the model calls it with the current hidden state. If it returns True, the model stops — zero-padding KV for skipped layers. The callback is injected by <code>InstinctForCausalLM</code>, which has access to the shared LM head.
         </p>
         <div class="code-block" style="margin-bottom:12px;">
-<span style="color:#6B7280;"># In MiniMindModel.forward():</span>
+<span style="color:#6B7280;"># In InstinctModel.forward():</span>
 <span style="color:var(--accent);">for</span> layer <span style="color:var(--accent);">in</span> blocks:
     h = layer(h, past_kv=pkvs[i])
     <span style="color:var(--accent);">if</span> exit_check_fn <span style="color:var(--accent);">is not None</span>:
@@ -394,7 +394,7 @@
             presents += [<span style="color:#F87171;">None</span>] * remaining  <span style="color:#6B7280;"># zero-pad KV</span>
             <span style="color:var(--accent);">return</span> normed, presents  <span style="color:#6B7280;"># stop early</span>
 
-<span style="color:#6B7280;"># In MiniMindForCausalLM.forward():</span>
+<span style="color:#6B7280;"># In InstinctForCausalLM.forward():</span>
 <span style="color:var(--accent);">def</span> check(layer, normed):
     <span style="color:var(--accent);">if</span> layer <span style="color:var(--accent);">not in</span> exit_layers: <span style="color:var(--accent);">return False</span>
     probs = <span style="color:#93C5FD;">softmax</span>(<span style="color:#93C5FD;">lm_head</span>(normed))
@@ -821,7 +821,7 @@ python train_full_sft.py --from_weight pretrain   <span style="color:rgba(255,25
             <i data-lucide="activity" style="width:24px;height:24px;"></i>
           </div>
           <span class="tag tag-green" style="margin-bottom:16px;">Experimental</span>
-          <h3 class="heading-md" style="margin:12px 0 8px;">MiniMind Linear</h3>
+          <h3 class="heading-md" style="margin:12px 0 8px;">Instinct Linear</h3>
           <p style="color:#4B5563;margin-bottom:24px;line-height:1.65;">
             GatedDeltaNet replaces softmax attention with O(T) linear complexity. Hybrid design: 6 linear + 2 full-attention layers. Chunked training with recurrent inference.
           </p>
@@ -883,9 +883,9 @@ python train_full_sft.py --from_weight pretrain   <span style="color:rgba(255,25
         </div>
         <h3 class="heading-md" style="margin-bottom:4px;">model/</h3>
         <p style="color:#6B7280;line-height:1.65;">
-          <code>model_minimind.py</code> — MiniMindConfig, MiniMindForCausalLM, RMSNorm, RoPE, MoE blocks.<br>
+          <code>model_instinct.py</code> — InstinctConfig, InstinctForCausalLM, RMSNorm, RoPE, MoE blocks.<br>
           <code>model_lora.py</code> — Pure PyTorch LoRA implementation.<br>
-          <code>model_minimind_linear.py</code> — GatedDeltaNet linear attention variant.<br>
+          <code>model_instinct_linear.py</code> — GatedDeltaNet linear attention variant.<br>
           <code>tokenizer.json</code> — BPE + ByteLevel tokenizer (6,400 vocab).
         </p>
       </div>
@@ -936,7 +936,7 @@ python train_full_sft.py --from_weight pretrain   <span style="color:rgba(255,25
   <div class="container" style="position:relative;z-index:1;">
     <div class="section-header">
       <span class="label-sm" style="color:var(--accent);">Configuration</span>
-      <h2 class="heading-lg">MiniMindConfig Defaults</h2>
+      <h2 class="heading-lg">InstinctConfig Defaults</h2>
     </div>
 
     <div class="grid-4">
@@ -966,8 +966,8 @@ python train_full_sft.py --from_weight pretrain   <span style="color:rgba(255,25
       <div class="card card-hover">
         <pre style="font-family:'SF Mono','Fira Code',monospace;font-size:0.8125rem;line-height:1.8;color:var(--fg);overflow-x:auto;">
 
-<span style="color:var(--primary);">class</span> <span style="color:var(--secondary);">MiniMindConfig</span>(PretrainedConfig):
-    model_type = <span style="color:var(--accent);">"minimind"</span>
+<span style="color:var(--primary);">class</span> <span style="color:var(--secondary);">InstinctConfig</span>(PretrainedConfig):
+    model_type = <span style="color:var(--accent);">"instinct"</span>
     hidden_size            = <span style="color:#8B5CF6;">768</span>
     num_hidden_layers      = <span style="color:#8B5CF6;">8</span>
     vocab_size             = <span style="color:#8B5CF6;">6400</span>
@@ -1043,7 +1043,7 @@ python train_full_sft.py --from_weight pretrain   <span style="color:rgba(255,25
         </div>
         <h3 class="heading-md" style="margin-bottom:4px;">ollama</h3>
         <p style="font-size:0.875rem;opacity:0.7;">
-          <code>ollama run</code><br>jingyaogong/minimind-3
+          <code>ollama run</code><br>1057237562/instinct-3
         </p>
       </div>
     </div>
@@ -1054,11 +1054,11 @@ python train_full_sft.py --from_weight pretrain   <span style="color:rgba(255,25
 <footer class="section section-dark">
   <div class="container">
     <div style="text-align:center;">
-      <h2 class="heading-lg" style="margin-bottom:16px;">MiniMind</h2>
+      <h2 class="heading-lg" style="margin-bottom:16px;">Instinct</h2>
       <p style="opacity:0.5;font-size:0.9375rem;max-width:480px;margin:0 auto 24px;">
         Pure PyTorch · ~64M–71M params · Dense / MoE / Linear · 100% open source under Apache 2.0
       </p>
-      <a href="https://github.com/jingyaogong/minimind" class="btn btn-outline-light">
+      <a href="https://github.com/1057237562/Instinct" class="btn btn-outline-light">
         <i data-lucide="github" style="width:18px;height:18px;"></i>
         Star on GitHub
       </a>

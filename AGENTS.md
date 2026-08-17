@@ -1,12 +1,12 @@
-# MiniMind Agent Instructions
+# Instinct Agent Instructions
 
 ## What this is
-MiniMind — train a ~64M LLM from scratch in ~2h on a single 3090. All core algorithms (Dense/MoE Transformer, Pretrain, SFT, LoRA, DPO, PPO, GRPO, CISPO, Agentic RL, KD) implemented in pure PyTorch — no `trl`/`peft` abstractions.
+Instinct — train a ~64M LLM from scratch in ~2h on a single 3090. All core algorithms (Dense/MoE Transformer, Pretrain, SFT, LoRA, DPO, PPO, GRPO, CISPO, Agentic RL, KD) implemented in pure PyTorch — no `trl`/`peft` abstractions.
 
 ## Project layout
 
 ```
-model/          # Model definition (MiniMindConfig, MiniMindForCausalLM, LoRA), tokenizer files
+model/          # Model definition (InstinctConfig, InstinctForCausalLM, LoRA), tokenizer files
 trainer/        # All training scripts (pretrain, SFT, LoRA, DPO, PPO, GRPO, Agent RL, KD, tokenizer)
 dataset/        # Dataset loading classes (PretrainDataset, SFTDataset, RLAIFDataset)
 scripts/        # Inference, API server, WebUI, model conversion
@@ -40,11 +40,11 @@ cd trainer && python train_pretrain.py --from_resume 1
 # Raw torch weights (from trainer output)
 python eval_llm.py --load_from model --weight full_sft
 # Transformers-format weights
-python eval_llm.py --load_from ./minimind-3
+python eval_llm.py --load_from ./instinct-3
 # With LoRA
 python eval_llm.py --weight full_sft --lora_weight lora_medical
 # With adaptive thinking
-python eval_llm.py --load_from ./minimind-3 --open_thinking 1
+python eval_llm.py --load_from ./instinct-3 --open_thinking 1
 ```
 
 ### Model conversion
@@ -62,7 +62,7 @@ cd scripts && python serve_openai_api.py
 
 ### WebUI
 ```bash
-# ⚠️ Must copy model folder into ./scripts/ first (e.g. cp -r minimind-3 ./scripts/minimind-3)
+# ⚠️ Must copy model folder into ./scripts/ first (e.g. cp -r instinct-3 ./scripts/instinct-3)
 cd scripts && streamlit run web_demo.py
 ```
 
@@ -70,7 +70,7 @@ cd scripts && streamlit run web_demo.py
 
 - **Dense**: 8 layers, dim=768, 8 q-heads, 4 kv-heads, vocab 6400, max_pos 32768, SwiGLU, RMSNorm, RoPE θ=1e6
 - **MoE**: Same base + 4 experts, top-1 routing (198M total, 64M active)
-- Config in `model/model_minimind.py` → `MiniMindConfig`. Defaults: `hidden_size=768`, `num_hidden_layers=8`, `use_moe=False`
+- Config in `model/model_instinct.py` → `InstinctConfig`. Defaults: `hidden_size=768`, `num_hidden_layers=8`, `use_moe=False`
 - Aligned to Qwen3 ecosystem — compatible with `transformers`, `llama.cpp`, `vllm`, `ollama`
 
 ## Training pipeline (must respect order)
@@ -108,10 +108,10 @@ Chinese text: ~1.5–1.7 characters per token. English: ~4–5. Recommended valu
 `web_demo.py` auto-scans `./scripts/` for subdirectories containing model weight files. The model folder must be copied there before launching.
 
 ### Reward model location (RLAIF training)
-For PPO/GRPO, the reward model (`internlm2-1_8b-reward`) must be placed **alongside** the minimind repo (sibling directory), not inside it:
+For PPO/GRPO, the reward model (`internlm2-1_8b-reward`) must be placed **alongside** the instinct repo (sibling directory), not inside it:
 ```
 parent/
-├── minimind/
+├── instinct/
 └── internlm2-1_8b-reward/
 ```
 
@@ -125,7 +125,7 @@ parent/
 | Flag | Purpose |
 |------|---------|
 | `--load_from model` | Use raw `.pth` weights |
-| `--load_from ./minimind-3` | Use transformers-format model |
+| `--load_from ./instinct-3` | Use transformers-format model |
 | `--weight full_sft` | Weight name prefix (only with `--load_from model`) |
 | `--use_moe 1` | MoE model |
 | `--lora_weight lora_medical` | Apply LoRA on top |

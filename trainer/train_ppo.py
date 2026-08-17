@@ -20,7 +20,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from model.model_minimind import MiniMindForCausalLM
+from model.model_instinct import InstinctForCausalLM
 from dataset.lm_dataset import RLAIFDataset
 from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, LMForRewardModel, config_from_args, build_optimizer
 from trainer.rollout_engine import create_rollout_engine
@@ -34,8 +34,8 @@ def rep_penalty(text, n=3, cap=0.5):
     return min(cap, (len(grams) - len(set(grams))) * cap * 2 / len(grams)) if grams else 0.0
 
 
-# 自定义的Critic模型，继承自MiniMindLM
-class CriticModel(MiniMindForCausalLM):
+# 自定义的Critic模型，继承自InstinctLM
+class CriticModel(InstinctForCausalLM):
     def __init__(self, params):
         super().__init__(params)
         # 替换lm_head为输出单一价值的线性层
@@ -295,7 +295,7 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="MiniMind PPO (Proximal Policy Optimization)")
+    parser = argparse.ArgumentParser(description="Instinct PPO (Proximal Policy Optimization)")
     parser.add_argument("--save_dir", type=str, default="../out", help="模型保存目录")
     parser.add_argument('--save_weight', default='ppo_actor', type=str, help="保存权重的前缀名")
     parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
@@ -329,7 +329,7 @@ if __name__ == "__main__":
     parser.add_argument("--reward_model_path", type=str, default="../../internlm2-1_8b-reward", help="Reward模型路径")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
-    parser.add_argument("--wandb_project", type=str, default="MiniMind-PPO", help="wandb项目名")
+    parser.add_argument("--wandb_project", type=str, default="Instinct-PPO", help="wandb项目名")
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
     parser.add_argument("--debug_mode", action="store_true", help="是否打印训练调试采样")
     parser.add_argument("--debug_interval", type=int, default=20, help="debug模式下每隔多少step打印一次采样")
@@ -362,7 +362,7 @@ if __name__ == "__main__":
         import swanlab as wandb
         wandb_id = ckp_data.get('wandb_id') if ckp_data else None
         resume = 'must' if wandb_id else None
-        wandb_run_name = f"MiniMind-PPO-Epoch-{args.epochs}-BS-{args.batch_size}-LR-{args.learning_rate}"
+        wandb_run_name = f"Instinct-PPO-Epoch-{args.epochs}-BS-{args.batch_size}-LR-{args.learning_rate}"
         wandb.init(project=args.wandb_project, name=wandb_run_name, id=wandb_id, resume=resume)
     
     # ========== 5. 初始化模型和数据 ==========

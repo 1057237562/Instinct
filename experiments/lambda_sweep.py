@@ -3,7 +3,7 @@ Lambda sweep: does the depth-reward weight lambda=0.1 over-penalize looping,
 causing premature exit + undertrained deep loop layers?
 
 For each lambda in {0, 0.01, 0.05, 0.1, 0.5, 1.0} (2 seeds):
-  - train Looped MiniMind 80 iters (same data/config as before)
+  - train Looped Instinct 80 iters (same data/config as before)
   - record dynamic exit steps / PPL / acc
   - record forced-depth curve k=1,2,4,8 (does extra looping help at this lambda?)
   - record avg steps per training iter (early-exit speed)
@@ -17,8 +17,8 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from model.model_minimind import MiniMindConfig
-from model.model_looped_minimind import LoopedMiniMindConfig, LoopedMiniMindForCausalLM
+from model.model_instinct import InstinctConfig
+from model.model_looped_instinct import LoopedInstinctConfig, LoopedInstinctForCausalLM
 from transformers import AutoTokenizer
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -54,7 +54,7 @@ def make_batch(ids, batch_size, rng):
 
 
 def build_looped(depth_reward):
-    cfg = LoopedMiniMindConfig(
+    cfg = LoopedInstinctConfig(
         hidden_size=768, num_hidden_layers=8, vocab_size=6400,
         flash_attn=False, inference_rope_scaling=False,
         loop_encoder_layers=[0, 1], loop_body_layers=[2, 3, 4],
@@ -62,7 +62,7 @@ def build_looped(depth_reward):
         q_threshold=Q_THRESHOLD, exit_in_training=True,
         n_supervision=N_SUPERVISION, beta=BETA, depth_reward=depth_reward,
     )
-    model = LoopedMiniMindForCausalLM(cfg).to(DEVICE)
+    model = LoopedInstinctForCausalLM(cfg).to(DEVICE)
     sd = torch.load("out/pretrain_768.pth", map_location=DEVICE)
     if "model_state_dict" in sd:
         sd = sd["model_state_dict"]

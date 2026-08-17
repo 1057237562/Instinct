@@ -1,4 +1,4 @@
-"""Convert docs/looped_minimind_paper.md into a formatted academic PDF.
+"""Convert docs/looped_instinct_paper.md into a formatted academic PDF.
 
 Pipeline: Markdown -> HTML (MathJax + academic CSS) -> Chrome headless print-to-pdf.
 Requires: python markdown lib + a local Chrome/Edge binary (auto-detected).
@@ -10,9 +10,9 @@ import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MD_PATH = os.path.join(REPO, "docs", "looped_minimind_paper.md")
-HTML_PATH = os.path.join(REPO, "docs", "looped_minimind_paper.html")
-PDF_PATH = os.path.join(REPO, "docs", "looped_minimind_paper.pdf")
+MD_PATH = os.path.join(REPO, "docs", "looped_instinct_paper.md")
+HTML_PATH = os.path.join(REPO, "docs", "looped_instinct_paper.html")
+PDF_PATH = os.path.join(REPO, "docs", "looped_instinct_paper.pdf")
 
 TITLE = "面向小语言模型的动态循环与奖励驱动早退机制"
 EN_TITLE = "Dynamic Looping with Reward-Driven Early Exit for Small Language Models"
@@ -168,7 +168,7 @@ window.MathJax = {{
 <div class="title">
   <h1>{title}</h1>
   <div class="en">{en}</div>
-  <div class="meta">MiniMind Project &mdash; Technical Report</div>
+  <div class="meta">Instinct Project &mdash; Technical Report</div>
 </div>
 <hr class="rule">
 {body}

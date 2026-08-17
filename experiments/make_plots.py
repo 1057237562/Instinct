@@ -21,8 +21,8 @@ loop_acc = np.array(d["loop_acc"]).mean(0)
 
 # ── fig 1: total loss curves ──
 fig, ax = plt.subplots(1, 1, figsize=(6.4, 4.2))
-ax.plot(iters, std_loss, label="Standard MiniMind (8 layers, fixed)", lw=2)
-ax.plot(iters, loop_loss, label="Looped MiniMind (dynamic loop + reward)", lw=2)
+ax.plot(iters, std_loss, label="Standard Instinct (8 layers, fixed)", lw=2)
+ax.plot(iters, loop_loss, label="Looped Instinct (dynamic loop + reward)", lw=2)
 ax.set_xlabel("Training iteration"); ax.set_ylabel("Total loss")
 ax.set_title("Training Loss: Standard vs Looped (mean over 5 seeds)")
 ax.legend(); ax.grid(alpha=0.3)

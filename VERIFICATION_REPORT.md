@@ -1,7 +1,7 @@
 # 实验验证报告：动态循环与奖励驱动早退机制
 
-> 对应论文：《面向小语言模型的动态循环与奖励驱动早退机制》（docs/looped_minimind_paper.md）
-> 验证目的：按论文 §4 实验内容，在自造小型数据集上对两种网络结构（标准 MiniMind 与 Looped MiniMind）进行对比验证。
+> 对应论文：《面向小语言模型的动态循环与奖励驱动早退机制》（docs/looped_instinct_paper.md）
+> 验证目的：按论文 §4 实验内容，在自造小型数据集上对两种网络结构（标准 Instinct 与 Looped Instinct）进行对比验证。
 
 ---
 
@@ -28,17 +28,17 @@
 - **宾语池**（10 个）：图像识别、语音识别、文本生成、机器翻译、推荐系统、自动驾驶、医疗诊断、金融风控、智能问答、代码生成
 - **副词池**（5 个，50% 概率出现）：通常、近年来、在实际应用中、与传统方法相比、在工业界
 
-格式：`{"text": "..."}`，一行一条（与 MiniMind pretrain 数据格式一致）。共 600 条，平均 18.7 字符 / 10.0 token（MiniMind tokenizer）。
+格式：`{"text": "..."}`，一行一条（与 Instinct pretrain 数据格式一致）。共 600 条，平均 18.7 字符 / 10.0 token（Instinct tokenizer）。
 
 > 生成脚本：`experiments/gen_synthetic_data.py` → `experiments/data/synthetic_pretrain.jsonl`
 
 ### 2.2 网络结构与配置
 
-两种结构均基于 MiniMind-3 Dense（8 层 Transformer，hidden=768，词表 6400），加载相同的公开预训练权重 `out/pretrain_768.pth`。
+两种结构均基于 Instinct-3 Dense（8 层 Transformer，hidden=768，词表 6400），加载相同的公开预训练权重 `out/pretrain_768.pth`。
 
-| 维度 | 标准 MiniMind | Looped MiniMind |
+| 维度 | 标准 Instinct | Looped Instinct |
 |------|--------------|-----------------|
-| 模型类 | `MiniMindForCausalLM` | `LoopedMiniMindForCausalLM` |
+| 模型类 | `InstinctForCausalLM` | `LoopedInstinctForCausalLM` |
 | 前向方式 | 固定 8 层一次前向 | encoder[0,1] → loop[2,3,4]×B → output[5,6,7] |
 | 循环预算 | — | 动态（安全上限 cap=10，实际不构成约束） |
 | 退出机制 | — | q-head，阈值 q_th=0.75，训练/推理均生效 |
@@ -101,8 +101,8 @@
 
 | 结构 | 困惑度 (PPL, 5 seed mean) | 推理平均循环步数 |
 |------|---------------------------|------------------|
-| 标准 MiniMind | **1.544** | 固定 8 层 |
-| Looped MiniMind | 1.600 | **1.04** |
+| 标准 Instinct | **1.544** | 固定 8 层 |
+| Looped Instinct | 1.600 | **1.04** |
 
 **结论：**
 - ✅ 两种结构均成功收敛（loss 8.9→0.4 / 9.9→0.3，acc →0.85）。
@@ -280,7 +280,7 @@
 | C3 涌现行为 | ✅ "训练越充分、推理越早退"复现：损失收敛时步数收敛至 1 |
 | 双结构对比 | ✅ 标准 8 层与 Looped 达到相当质量（PPL 1.54 vs 1.60），Looped 增加仅 77.6k 参数 |
 
-**总结**：论文的三项核心机制主张在自造合成数据集 + 真实预训练权重（pretrain_768.pth）上全部得到复现验证。Looped MiniMind 相比标准 MiniMind，以 <0.2% 的额外参数实现了等效质量下的自适应推理深度，且早退步数由训练习得而非推理阈值调参——与论文结论一致。
+**总结**：论文的三项核心机制主张在自造合成数据集 + 真实预训练权重（pretrain_768.pth）上全部得到复现验证。Looped Instinct 相比标准 Instinct，以 <0.2% 的额外参数实现了等效质量下的自适应推理深度，且早退步数由训练习得而非推理阈值调参——与论文结论一致。
 
 ## 6. 复现方式
 

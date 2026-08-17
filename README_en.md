@@ -6,12 +6,12 @@
 
 <div align="center">
 
-![visitors](https://visitor-badge.laobi.icu/badge?page_id=jingyaogong/minimind)
-[![GitHub Repo stars](https://img.shields.io/github/stars/jingyaogong/minimind?style=social)](https://github.com/jingyaogong/minimind/stargazers)
-[![GitHub Code License](https://img.shields.io/github/license/jingyaogong/minimind)](LICENSE)
-[![GitHub last commit](https://img.shields.io/github/last-commit/jingyaogong/minimind)](https://github.com/jingyaogong/minimind/commits/master)
-[![GitHub pull request](https://img.shields.io/badge/PRs-welcome-blue)](https://github.com/jingyaogong/minimind/pulls)
-[![Collection](https://img.shields.io/badge/🤗-MiniMind%20%20Collection-blue)](https://huggingface.co/collections/jingyaogong/minimind-66caf8d999f5c7fa64f399e5)
+![visitors](https://visitor-badge.laobi.icu/badge?page_id=1057237562/Instinct)
+[![GitHub Repo stars](https://img.shields.io/github/stars/1057237562/Instinct?style=social)](https://github.com/1057237562/Instinct/stargazers)
+[![GitHub Code License](https://img.shields.io/github/license/1057237562/Instinct)](LICENSE)
+[![GitHub last commit](https://img.shields.io/github/last-commit/1057237562/Instinct)](https://github.com/1057237562/Instinct/commits/master)
+[![GitHub pull request](https://img.shields.io/badge/PRs-welcome-blue)](https://github.com/1057237562/Instinct/pulls)
+[![Collection](https://img.shields.io/badge/🤗-Instinct%20%20Collection-blue)](https://huggingface.co/collections/1057237562/Instinct-66caf8d999f5c7fa64f399e5)
 
 </div>
 
@@ -31,12 +31,12 @@
 
 </div>
 
-* This open-source project aims to train MiniMind, an ultra-small language model with about 64M parameters, entirely from scratch with only about RMB 3 in cost and 2 hours of training time.
-* The MiniMind series is intentionally lightweight. The smallest model on the main branch is about $\frac{1}{2700}$ the size of GPT-3, making full training and reproduction feasible even on ordinary personal GPUs.
+* This open-source project aims to train Instinct, an ultra-small language model with about 64M parameters, entirely from scratch with only about RMB 3 in cost and 2 hours of training time.
+* The Instinct series is intentionally lightweight. The smallest model on the main branch is about $\frac{1}{2700}$ the size of GPT-3, making full training and reproduction feasible even on ordinary personal GPUs.
 * The project provides a minimalist model architecture and an end-to-end LLM training pipeline, covering MoE, data cleaning, pretraining, Supervised Fine-Tuning (SFT), LoRA, RLHF (DPO), RLAIF (PPO / GRPO / CISPO), Tool Use, Agentic RL, Adaptive Thinking, and Model Distillation.
-* MiniMind has also been extended to a vision model [MiniMind-V](https://github.com/jingyaogong/minimind-v), a multimodal Omni model [MiniMind-O](https://github.com/jingyaogong/minimind-o), a diffusion language model (MiniMind-dLM), and a linear attention model (MiniMind-Linear). See [Discussion](https://github.com/jingyaogong/minimind/discussions) for details.
+* Instinct has also been extended to a vision model [Instinct-V](https://github.com/1057237562/Instinct-v), a multimodal Omni model [Instinct-O](https://github.com/1057237562/Instinct-o), a diffusion language model (Instinct-dLM), and a linear attention model (Instinct-Linear). See [Discussion](https://github.com/1057237562/Instinct/discussions) for details.
 * All core algorithms are implemented directly in native PyTorch, without relying on high-level abstractions from third-party libraries.
-* MiniMind is both an end-to-end open-source reproduction of the LLM training pipeline and a hands-on tutorial for learning how LLMs are built.
+* Instinct is both an end-to-end open-source reproduction of the LLM training pipeline and a hands-on tutorial for learning how LLMs are built.
 * We hope this project can provide a reproducible, understandable, and extensible starting point for more people, share the joy of creation, and help move the broader AI community forward.
 
 > Note: This project is released under the Apache 2.0 license and is completely free. "2 hours" refers to the measured time for running `1 epoch` of the SFT stage on a single NVIDIA 3090, while "RMB 3" refers to the corresponding GPU rental cost.
@@ -45,21 +45,21 @@
 
 <div align="center">
 
-![minimind-3](./images/minimind-3.gif)
+![instinct-3](./images/instinct-3.gif)
 
-[🔗 Online Demo](https://www.modelscope.cn/studios/gongjy/MiniMind) | [🔗 Video Introduction](https://www.bilibili.com/video/BV12dHPeqE72)
+[🔗 Online Demo](https://www.modelscope.cn/studios/1057237562/Instinct) | [🔗 Video Introduction](https://www.bilibili.com/video/BV12dHPeqE72)
 
 
 <div align="center">
   <table>
     <tr>
       <td align="center">
-        <a href="https://huggingface.co/collections/jingyaogong/minimind" style="text-decoration: none;">
+        <a href="https://huggingface.co/collections/1057237562/Instinct" style="text-decoration: none;">
           <img src="./images/with_huggingface.png" alt="Hugging Face Logo" style="vertical-align: middle; width: auto; max-width: 100%;" />
         </a>
       </td>
       <td align="center">
-        <a href="https://www.modelscope.cn/profile/gongjy" style="text-decoration: none;">
+        <a href="https://github.com/1057237562/Instinct" style="text-decoration: none;">
           <img src="./images/with_modelscope.png" alt="ModelScope Logo" style="vertical-align: middle; width: auto; max-width: 100%;" />
         </a>
       </td>
@@ -84,7 +84,7 @@ At the same time, third-party LLM frameworks and toolkits such as `transformers`
 
 #### 🎉 This Project Includes the Following
 
-- Provides the full MiniMind-LLM architecture implementation (Dense + MoE), aligned with the `Qwen3 / Qwen3-MoE` ecosystem.
+- Provides the full Instinct-LLM architecture implementation (Dense + MoE), aligned with the `Qwen3 / Qwen3-MoE` ecosystem.
 - Provides the tokenizer and tokenizer training code, supporting template tokens such as `<tool_call>`, `<tool_response>`, `<think>`, etc.
 - Covers end-to-end training pipelines including pretraining, SFT, LoRA, RLHF-DPO, RLAIF (PPO / GRPO / CISPO), Tool Use, Agentic RL, Adaptive Thinking, and Model Distillation.
 - Provides open-source data for all stages, covering collected, distilled, cleaned, and deduplicated high-quality datasets.
@@ -94,20 +94,20 @@ At the same time, third-party LLM frameworks and toolkits such as `transformers`
 - Supports evaluation on third-party benchmark suites such as C-Eval, C-MMLU, OpenBookQA, etc., and supports RoPE long context extrapolation through YaRN.
 - Provides a lightweight OpenAI-compatible API server for integration with third-party Chat UIs such as FastGPT and Open-WebUI, with support for `reasoning_content`, `tool_calls`, and `open_thinking`.
 - Provides a minimalist chat WebUI based on Streamlit, supporting thinking display, tool selection, and multi-turn Tool Call.
-- Includes experimental extensions: diffusion language model ([dLM](https://github.com/jingyaogong/minimind/discussions/618)) and linear attention model ([Linear Attention](https://github.com/jingyaogong/minimind/discussions/704)), both of which can be further trained from the main autoregressive model.
+- Includes experimental extensions: diffusion language model ([dLM](https://github.com/1057237562/Instinct/discussions/618)) and linear attention model ([Linear Attention](https://github.com/1057237562/Instinct/discussions/704)), both of which can be further trained from the main autoregressive model.
 
 #### 🎉 Released Model List
 
 | Model | Parameters | Release |
 |------|--------|---------|
-| minimind-3 | 64M | 2026.04.01 |
-| minimind-3-moe | 198M-A64M | 2026.04.01 |
-| minimind2-small | 26M | 2025.04.26 |
-| minimind2-moe | 145M | 2025.04.26 |
-| minimind2 | 104M | 2025.04.26 |
-| minimind-v1-small | 26M | 2024.08.28 |
-| minimind-v1-moe | 4×26M | 2024.09.17 |
-| minimind-v1 | 108M | 2024.09.01 |
+| instinct-3 | 64M | 2026.04.01 |
+| instinct-3-moe | 198M-A64M | 2026.04.01 |
+| instinct2-small | 26M | 2025.04.26 |
+| instinct2-moe | 145M | 2025.04.26 |
+| instinct2 | 104M | 2025.04.26 |
+| instinct-v1-small | 26M | 2024.08.28 |
+| instinct-v1-moe | 4×26M | 2024.09.17 |
+| instinct-v1 | 108M | 2024.09.01 |
 
 ---
 
@@ -116,7 +116,7 @@ At the same time, third-party LLM frameworks and toolkits such as `transformers`
 <details> 
 <summary> <b>🔥 2026-04-01</b> </summary>
 
- - Released `minimind-3` / `minimind-3-moe`: comprehensive updates to structure, Tokenizer, training pipeline, inference interface, and default configuration
+ - Released `instinct-3` / `instinct-3-moe`: comprehensive updates to structure, Tokenizer, training pipeline, inference interface, and default configuration
 - Main branch structure aligned with `Qwen3 / Qwen3-MoE` ecosystem: Dense approximately `64M`, MoE approximately `198M-A64M`, and removed shared expert design
 - Default training data switched to `pretrain_t2t(_mini).jsonl`, `sft_t2t(_mini).jsonl`, `rlaif.jsonl`, `agent_rl.jsonl`, and `agent_rl_math.jsonl`
 - Removed standalone `train_reason.py`; thinking capability is now unified through `chat_template + <think>` and `open_thinking` adaptive switch control
@@ -149,8 +149,8 @@ At the same time, third-party LLM frameworks and toolkits such as `transformers`
 <summary> <b>2025-04-26</b> </summary>
 
 - Major update
-- For compatibility needs, visit [🔗Old Repository Content🔗](https://github.com/jingyaogong/minimind/tree/7da201a944a90ed49daef8a0265c959288dff83a).
-- MiniMind model parameters completely renamed, aligned with Transformers library models (unified naming).
+- For compatibility needs, visit [🔗Old Repository Content🔗](https://github.com/1057237562/Instinct/tree/7da201a944a90ed49daef8a0265c959288dff83a).
+- Instinct model parameters completely renamed, aligned with Transformers library models (unified naming).
 - generate method refactored, inheriting from GenerationMixin class.
 - 🔥Supports popular third-party ecosystems such as llama.cpp, vllm, ollama.
 - Standardized code and directory structure.
@@ -159,9 +159,9 @@ At the same time, third-party LLM frameworks and toolkits such as `transformers`
 ```text
 To be compatible with third-party inference frameworks llama.cpp, vllm, this update comes with some considerable costs.
 This update no longer supports "directly" loading old models from before 25-04-26 for inference.
-Due to differences between Llama's positional encoding method and minimind's, QK values differ after mapping to the Llama model.
-The minimind2 series old models were all recovered through weight mapping + (fine-tuning) QKVO linear layer calibration.
-After this update, maintenance for the entire `minimind-v1` series will be discontinued and taken offline from the repository.
+Due to differences between Llama's positional encoding method and instinct's, QK values differ after mapping to the Llama model.
+The instinct2 series old models were all recovered through weight mapping + (fine-tuning) QKVO linear layer calibration.
+After this update, maintenance for the entire `instinct-v1` series will be discontinued and taken offline from the repository.
 ```
 
 </details>
@@ -170,22 +170,22 @@ After this update, maintenance for the entire `minimind-v1` series will be disco
 <summary> <b>More...</b> </summary>
 
 **2025-02-09**
-- Major update since release, Release minimind2 Series.
+- Major update since release, Release instinct2 Series.
 - Code almost entirely refactored, using a more concise and clear unified structure.
-  For compatibility needs with old code, visit [🔗Old Repository Content🔗](https://github.com/jingyaogong/minimind/tree/6e9cd28ef9b34a0a10afbdf6f59e65cb6e628efb).
+  For compatibility needs with old code, visit [🔗Old Repository Content🔗](https://github.com/1057237562/Instinct/tree/6e9cd28ef9b34a0a10afbdf6f59e65cb6e628efb).
 - Eliminated data preprocessing steps. Unified dataset format, switched to `jsonl` format to avoid dataset download confusion issues.
-- minimind2 series significantly improved performance compared to MiniMind-V1.
+- instinct2 series significantly improved performance compared to Instinct-V1.
 - Minor issues: {kv-cache implementation more standard, MoE load balancing loss now considered, etc.}
 - Provides training solution for migrating models to private datasets (medical model, self-awareness examples).
 - Streamlined pretraining dataset and significantly improved pretraining data quality, greatly reduced time needed for individual quick training, reproducible in 2 hours on a single 3090!
 - Updated: LoRA fine-tuning decoupled from peft wrapper, LoRA process implemented from scratch; DPO algorithm natively implemented from scratch using PyTorch; model white-box distillation natively implemented.
-- minimind2-DeepSeek-R1 series distilled models born!
-- minimind2 has certain English language capability!
-- Updated benchmark test performance results of minimind2 vs third-party models on more LLM leaderboards.
+- instinct2-DeepSeek-R1 series distilled models born!
+- instinct2 has certain English language capability!
+- Updated benchmark test performance results of instinct2 vs third-party models on more LLM leaderboards.
 
 **2024-10-05**
-- Extended multimodal capability for MiniMind --- Vision
-- Visit the sibling project [minimind-v](https://github.com/jingyaogong/minimind-v) for details!
+- Extended multimodal capability for Instinct --- Vision
+- Visit the sibling project [instinct-v](https://github.com/1057237562/Instinct-v) for details!
 
 **2024-09-27**
 - 09-27 updated pretrain dataset preprocessing method, to ensure text integrity, abandoned preprocessing into .bin format for training (slight sacrifice in training speed).
@@ -193,13 +193,13 @@ After this update, maintenance for the entire `minimind-v1` series will be disco
 - Removed some redundant code.
 
 **2024-09-17**
-- Updated minimind-v1-moe model
-- To prevent ambiguity, mistral_tokenizer is no longer used for tokenization, all using custom minimind_tokenizer as the tokenizer.
+- Updated instinct-v1-moe model
+- To prevent ambiguity, mistral_tokenizer is no longer used for tokenization, all using custom instinct_tokenizer as the tokenizer.
 
 **2024-09-01**
-- Updated minimind-v1 (108M) model, using minimind_tokenizer, pretrain epochs 3 + SFT epochs 10, more thorough training, stronger performance.
+- Updated instinct-v1 (108M) model, using instinct_tokenizer, pretrain epochs 3 + SFT epochs 10, more thorough training, stronger performance.
 - Project deployed to ModelScope Creative Space, can be experienced at this website:
-- [🔗ModelScope Online Demo🔗](https://www.modelscope.cn/studios/gongjy/minimind)
+- [🔗ModelScope Online Demo🔗](https://www.modelscope.cn/studios/1057237562/Instinct)
 
 **2024-08-27**
 - Project first open-sourced
@@ -227,8 +227,8 @@ After this update, maintenance for the entire `minimind-v1` series will be disco
 
 ```bash
 # Clone repository and install dependencies
-git clone --depth 1 https://github.com/jingyaogong/minimind
-cd minimind && pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
+git clone --depth 1 https://github.com/1057237562/Instinct
+cd instinct && pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
 ```
 
 ## Ⅰ 🚀 Model Inference
@@ -238,16 +238,16 @@ cd minimind && pip install -r requirements.txt -i https://mirrors.aliyun.com/pyp
 In the project root directory:
 ```bash
 # Method 1
-modelscope download --model gongjy/minimind-3 --local_dir ./minimind-3
+modelscope download --model 1057237562/instinct-3 --local_dir ./instinct-3
 # Method 2
-git clone https://huggingface.co/jingyaogong/minimind-3
+git clone https://huggingface.co/1057237562/instinct-3
 ```
 
 ### 2' CLI Inference
 
 ```bash
 # Method 1: Using Transformers format model
-python eval_llm.py --load_from ./minimind-3
+python eval_llm.py --load_from ./instinct-3
 # Method 2: Based on PyTorch model (ensure corresponding weights are in the ./out directory)
 python eval_llm.py --load_from ./model --weight full_sft
 ```
@@ -256,7 +256,7 @@ python eval_llm.py --load_from ./model --weight full_sft
 
 ```bash
 # May need `python>=3.10`, install `pip install streamlit`
-# ⚠️ You must first copy the transformers-format model folder into ./scripts/ (e.g.: cp -r minimind-3 ./scripts/minimind-3). The web_demo script will auto-scan subdirectories containing weight files; it will throw an error if none are found.
+# ⚠️ You must first copy the transformers-format model folder into ./scripts/ (e.g.: cp -r instinct-3 ./scripts/instinct-3). The web_demo script will auto-scan subdirectories containing weight files; it will throw an error if none are found.
 cd scripts && streamlit run web_demo.py
 ```
 
@@ -264,9 +264,9 @@ cd scripts && streamlit run web_demo.py
 
 ```bash
 # ollama
-ollama run jingyaogong/minimind-3
+ollama run 1057237562/instinct-3
 # vllm
-vllm serve /path/to/model --served-model-name "minimind"
+vllm serve /path/to/model --served-model-name "instinct"
 ```
 
 ## Ⅱ 🛠️ Model Training
@@ -287,9 +287,9 @@ If you need to install or switch PyTorch versions, refer to [torch_stable](https
 
 ### 1' Download Data
 
-Download the required data files from the [dataset download link](https://www.modelscope.cn/datasets/gongjy/minimind_dataset/files) provided below, and place them in the `./dataset` directory
+Download the required data files from the [dataset download link](https://www.modelscope.cn/datasets/1057237562/Instinct_dataset/files) provided below, and place them in the `./dataset` directory
 
-> Currently, by default, you only need to download `pretrain_t2t_mini.jsonl` and `sft_t2t_mini.jsonl` to quickly reproduce the `MiniMind Zero` dialogue model.
+> Currently, by default, you only need to download `pretrain_t2t_mini.jsonl` and `sft_t2t_mini.jsonl` to quickly reproduce the `Instinct Zero` dialogue model.
 For other use cases, several data combinations are provided below and can be selected according to your task objectives and GPU resources.
 
 ### 2' Start Training
@@ -333,7 +333,7 @@ cd trainer && python train_full_sft.py
 
 #### 2.3 Test Trained Model (Optional)
 
-Ensure the model `*.pth` files to be tested are located in the `./out/` directory; you can also go directly to [here](https://www.modelscope.cn/models/gongjy/minimind-3-pytorch/files) to download my pre-trained `*.pth` weights.
+Ensure the model `*.pth` files to be tested are located in the `./out/` directory; you can also go directly to [here](https://www.modelscope.cn/models/1057237562/instinct-3-pytorch/files) to download my pre-trained `*.pth` weights.
 
 ```bash
 python eval_llm.py --weight full_sft
@@ -357,7 +357,7 @@ torchrun --nproc_per_node N train_xxx.py
 ```bash
 ... train_xxx.py --use_wandb
 ```
-After June `2025`, domestic network environments in China typically cannot directly connect to WandB. MiniMind currently defaults to using [SwanLab](https://swanlab.cn/) as the training visualization tool, whose interface is basically compatible with WandB; usually you only need to replace `import wandb` with `import swanlab as wandb`, and other usage remains largely unchanged.
+After June `2025`, domestic network environments in China typically cannot directly connect to WandB. Instinct currently defaults to using [SwanLab](https://swanlab.cn/) as the training visualization tool, whose interface is basically compatible with WandB; usually you only need to replace `import wandb` with `import swanlab as wandb`, and other usage remains largely unchanged.
 
 </details>
 
@@ -368,7 +368,7 @@ After June `2025`, domestic network environments in China typically cannot direc
 ## Ⅰ Tokenizer
 
 A tokenizer can be roughly understood as a "dictionary" used by LLMs, responsible for mapping natural language to token ids and decoding token ids back to text; the project also provides `train_tokenizer.py` as a vocabulary training example. It is not recommended to retrain the tokenizer, because once the vocabulary and segmentation rules change, model weights, data formats, inference interfaces, and community ecosystem compatibility will all be affected, and the resulting model will also be harder to share. Meanwhile, the tokenizer also affects metrics like PPL that are calculated per token, so when comparing across tokenizers, BPB (Bits Per Byte) is often a more comparable metric. See [this article](https://skeptric.com/perplexity/).
-For small models like MiniMind, vocabulary size also directly affects the parameter proportion of the embedding and output layers, so keeping the vocabulary compact is usually a more appropriate trade-off.
+For small models like Instinct, vocabulary size also directly affects the parameter proportion of the embedding and output layers, so keeping the vocabulary compact is usually a more appropriate trade-off.
 
 <details>
 <summary>Tokenizer Introduction</summary>
@@ -382,19 +382,19 @@ The tokenizer vocabulary sizes of powerful third-party open-source models such a
   <tr><td>ChatGLM</td><td>151,329</td><td>Zhipu AI (China)</td></tr>
   <tr><td>Mistral</td><td>32,000</td><td>Mistral AI (France)</td></tr>
   <tr><td>Llama 3</td><td>128,000</td><td>Meta (USA)</td></tr>
-  <tr><td>MiniMind</td><td>6,400</td><td>Custom</td></tr>
+  <tr><td>Instinct</td><td>6,400</td><td>Custom</td></tr>
 </table>
 
-> The main branch uses `minimind_tokenizer` consistently to avoid historical version ambiguity and control overall size, and no longer maintains the `mistral_tokenizer` version.
+> The main branch uses `instinct_tokenizer` consistently to avoid historical version ambiguity and control overall size, and no longer maintains the `mistral_tokenizer` version.
 
-Although `minimind_tokenizer` has a vocabulary of only `6400`, and its encoding/decoding efficiency is weaker than more Chinese-friendly tokenizers like `qwen2` and `glm`, it significantly reduces the parameter share of the embedding and output layers, which better fits the size constraints of small models like MiniMind.
+Although `instinct_tokenizer` has a vocabulary of only `6400`, and its encoding/decoding efficiency is weaker than more Chinese-friendly tokenizers like `qwen2` and `glm`, it significantly reduces the parameter share of the embedding and output layers, which better fits the size constraints of small models like Instinct.
 In practice, this tokenizer has not noticeably caused rare-word decoding failures and remains stable enough for general use. Therefore, the main branch uses this vocabulary consistently rather than maintaining additional tokenizer forks.
 
 </details>
 
 ## Ⅱ Pretrain Data
 
-The pretraining data for the current `MiniMind-3` main branch is `pretrain_t2t.jsonl` / `pretrain_t2t_mini.jsonl`.
+The pretraining data for the current `Instinct-3` main branch is `pretrain_t2t.jsonl` / `pretrain_t2t_mini.jsonl`.
 These two datasets have been organized into a unified `text -> next token prediction` training format, aiming to balance under limited compute:
 
 - Text quality;
@@ -407,7 +407,7 @@ Data sources include but are not limited to general text corpora, curated dialog
 Among them:
 
 - `pretrain_t2t_mini.jsonl` is intended for quick reproduction;
-- `pretrain_t2t.jsonl` is intended for full training of the `MiniMind-3` main branch model.
+- `pretrain_t2t.jsonl` is intended for full training of the `Instinct-3` main branch model.
 
 The file format is as follows:
 
@@ -419,7 +419,7 @@ The file format is as follows:
 
 ## Ⅲ SFT Data
 
-The SFT data for the current `MiniMind-3` main branch is `sft_t2t.jsonl` / `sft_t2t_mini.jsonl`. Compared with earlier `sft_512 / sft_1024 / sft_2048` schemes, the current version places more emphasis on:
+The SFT data for the current `Instinct-3` main branch is `sft_t2t.jsonl` / `sft_t2t_mini.jsonl`. Compared with earlier `sft_512 / sft_1024 / sft_2048` schemes, the current version places more emphasis on:
 
 - Unified templates;
 - Better suited for mixed training of dialogue + thinking tags + Tool Calling;
@@ -457,7 +457,7 @@ All SFT files follow the same format, including dialogue and Tool Use data:
 
 ## Ⅳ RL Data
 
-The RL data for the current `MiniMind` main branch is `dpo.jsonl`, sampled from [DPO-En-Zh-20k](https://huggingface.co/datasets/llamafactory/DPO-En-Zh-20k).
+The RL data for the current `Instinct` main branch is `dpo.jsonl`, sampled from [DPO-En-Zh-20k](https://huggingface.co/datasets/llamafactory/DPO-En-Zh-20k).
 
 In the main branch, these samples are reorganized into the preference-learning format used by this repository for reward-model training or preference optimization. Here, `chosen` represents the preferred response, and `rejected` represents the weaker response.
 
@@ -478,12 +478,12 @@ The `dpo.jsonl` data format is
 
 Besides this, other RL data maintains the same format as SFT data, typically filtered from SFT data by total length and dialogue turns, with the last `assistant` position left blank for continuation during the rollout stage.
 
-## Ⅴ MiniMind Training Dataset
+## Ⅴ Instinct Training Dataset
 
 > [!NOTE]
 > The core datasets needed for the current main branch training have been open-sourced, so you do not need to preprocess large-scale datasets yourself.
 
-MiniMind training dataset download links: [ModelScope](https://www.modelscope.cn/datasets/gongjy/minimind_dataset/files) | [HuggingFace](https://huggingface.co/datasets/jingyaogong/minimind_dataset/tree/main)
+Instinct training dataset download links: [ModelScope](https://www.modelscope.cn/datasets/1057237562/Instinct_dataset/files) | [HuggingFace](https://huggingface.co/datasets/1057237562/Instinct_dataset/tree/main)
 
 > No need to clone everything, you can download individual files as needed
 
@@ -507,11 +507,11 @@ Place the downloaded dataset files in the `./dataset/` directory (✨ indicates 
 * `agent_rl.jsonl` -- Agentic RL main branch training data, for `train_agent.py` multi-turn Tool-Use / CISPO / GRPO training
 * `agent_rl_math.jsonl` -- Agentic RL pure math supplementary data, suitable for multi-turn reasoning/tool-use scenarios with final verification targets (for RLVR)
 * `dpo.jsonl` -- RLHF stage preference training data (DPO)
-* `pretrain_t2t_mini`✨ -- `minimind-3` lightweight pretraining data, suitable for quick reproduction (recommended setting `max_seq_len≈768`)
-* `pretrain_t2t` -- `minimind-3` main branch pretraining data (recommended setting `max_seq_len≈380`)
+* `pretrain_t2t_mini`✨ -- `instinct-3` lightweight pretraining data, suitable for quick reproduction (recommended setting `max_seq_len≈768`)
+* `pretrain_t2t` -- `instinct-3` main branch pretraining data (recommended setting `max_seq_len≈380`)
 * `rlaif.jsonl`✨ -- RLAIF training dataset, for PPO/GRPO/CISPO and other reinforcement learning algorithm training
-* `sft_t2t_mini.jsonl`✨ -- `minimind-3` lightweight SFT data (for quickly training a Zero model), recommended setting `max_seq_len≈768`, with a portion of Tool Call samples already mixed in
-* `sft_t2t.jsonl` -- `minimind-3` main branch SFT data, suitable for full reproduction, with Tool Call samples also mixed in
+* `sft_t2t_mini.jsonl`✨ -- `instinct-3` lightweight SFT data (for quickly training a Zero model), recommended setting `max_seq_len≈768`, with a portion of Tool Call samples already mixed in
+* `sft_t2t.jsonl` -- `instinct-3` main branch SFT data, suitable for full reproduction, with Tool Call samples also mixed in
 
 
 The training parameter `max_seq_len` currently refers to token length, not absolute character count.
@@ -533,16 +533,16 @@ In practice, it is enough to balance compute efficiency and semantic completenes
 
 ![dataset](./images/dataset.jpg)
 
-> MiniMind main branch training data composition and recommended combination diagram
+> Instinct main branch training data composition and recommended combination diagram
 
 <details>
 <summary>Instructions & Recommended Training Schemes</summary>
 
-* `minimind-3` main branch recommends using the staged training combination of `pretrain_t2t` + `sft_t2t` + `rlaif/agent_rl`.
+* `instinct-3` main branch recommends using the staged training combination of `pretrain_t2t` + `sft_t2t` + `rlaif/agent_rl`.
 
 * For the fastest speed to implement a Zero model from scratch, it is recommended to use the data combination of `pretrain_t2t_mini.jsonl` + `sft_t2t_mini.jsonl`
 
-* Those with sufficient compute resources or who care more about performance are recommended to fully reproduce `minimind-3`; those with only a single GPU or who prioritize quick reproduction are strongly recommended to use the mini combination.
+* Those with sufficient compute resources or who care more about performance are recommended to fully reproduce `instinct-3`; those with only a single GPU or who prioritize quick reproduction are strongly recommended to use the mini combination.
 
 * The current `sft_t2t / sft_t2t_mini` already has Tool Call data mixed in, so there is usually no need for an additional separate round of Tool Calling supervised fine-tuning.
 
@@ -552,39 +552,39 @@ In practice, it is enough to balance compute efficiency and semantic completenes
 
 ## Structure
 
-`minimind-3` Dense uses a Transformer Decoder-Only architecture, with its overall configuration aligned with the `Qwen3` ecosystem for easier conversion to `transformers / llama.cpp / ollama / vllm`:
+`instinct-3` Dense uses a Transformer Decoder-Only architecture, with its overall configuration aligned with the `Qwen3` ecosystem for easier conversion to `transformers / llama.cpp / ollama / vllm`:
 
 * Uses Pre-Normalization (Pre-Norm) + RMSNorm.
 * Uses SwiGLU activation function.
 * Uses RoPE rotary positional encoding, with YaRN extrapolation support.
 * `q_heads=8`, `kv_heads=4`, `max_position_embeddings=32768`, `rope_theta=1e6`.
 
-`minimind-3-moe` extends MoE feed-forward layers on the same structure, with implementation compatible with `Qwen3-MoE` style configuration (removing shared expert).
+`instinct-3-moe` extends MoE feed-forward layers on the same structure, with implementation compatible with `Qwen3-MoE` style configuration (removing shared expert).
 
 * The current default configuration is `4 experts / top-1 routing`, to achieve higher capacity with lower active parameters.
-* As the number of experts increases, training can become much slower than a dense model of similar size. This may seem counterintuitive given the common claim that "MoE inference is faster", but in training, tokens are first bucketed by expert and then forwarded separately. In a native PyTorch implementation, kernel launch and scheduling overhead quickly become significant. This usually requires fused MoE kernels or specialized libraries such as `Triton`, `DeepSpeed-MoE`, or `Megatron-LM` for optimization. MiniMind keeps the implementation in native PyTorch for portability, so this is a practical trade-off. Under the current implementation, the `4 experts / top-1` configuration is only about `50%` slower than the dense model.
+* As the number of experts increases, training can become much slower than a dense model of similar size. This may seem counterintuitive given the common claim that "MoE inference is faster", but in training, tokens are first bucketed by expert and then forwarded separately. In a native PyTorch implementation, kernel launch and scheduling overhead quickly become significant. This usually requires fused MoE kernels or specialized libraries such as `Triton`, `DeepSpeed-MoE`, or `Megatron-LM` for optimization. Instinct keeps the implementation in native PyTorch for portability, so this is a practical trade-off. Under the current implementation, the `4 experts / top-1` configuration is only about `50%` slower than the dense model.
 
-The `minimind-3` series structure is shown below:
+The `instinct-3` series structure is shown below:
 
 ![structure](./images/LLM-structure.jpg)
 ![structure-moe](./images/LLM-structure-moe.jpg)
 
-To modify model configuration, see [./model/model_minimind.py](./model/model_minimind.py). Reference model parameter versions are shown in the table below:
+To modify model configuration, see [./model/model_instinct.py](./model/model_instinct.py). Reference model parameter versions are shown in the table below:
 
 | Model Name | params | len_vocab | max_pos | rope_theta | n_layers | d_model | kv_heads | q_heads | note |
 |------------|--------|-----------|---------|------------|----------|---------|----------|---------|------|
-| minimind-3 | 64M | 6400 | 32768 | 1e6 | 8 | 768 | 4 | 8 | Dense |
-| minimind-3-moe | 198M-A64M | 6400 | 32768 | 1e6 | 8 | 768 | 4 | 8 | 4 experts / top-1 |
-| minimind2-small | 26M | 6400 | 32768 | 1e6 | 8 | 512 | 2 | 8 | Historical version |
-| minimind2-moe | 145M | 6400 | 32768 | 1e6 | 8 | 640 | 2 | 8 | Historical version |
-| minimind2 | 104M | 6400 | 32768 | 1e6 | 16 | 768 | 2 | 8 | Historical version |
+| instinct-3 | 64M | 6400 | 32768 | 1e6 | 8 | 768 | 4 | 8 | Dense |
+| instinct-3-moe | 198M-A64M | 6400 | 32768 | 1e6 | 8 | 768 | 4 | 8 | 4 experts / top-1 |
+| instinct2-small | 26M | 6400 | 32768 | 1e6 | 8 | 512 | 2 | 8 | Historical version |
+| instinct2-moe | 145M | 6400 | 32768 | 1e6 | 8 | 640 | 2 | 8 | Historical version |
+| instinct2 | 104M | 6400 | 32768 | 1e6 | 16 | 768 | 2 | 8 | Historical version |
 
 
 ## Model Configuration
 
-Regarding LLM parameter configuration, [MobileLLM](https://arxiv.org/pdf/2402.14905) has conducted a very representative systematic study on small models. For ~100M-level models like MiniMind, the trade-off between `d_model` and `n_layers` is not just a parameter allocation issue, but also directly affects training stability and final performance.
+Regarding LLM parameter configuration, [MobileLLM](https://arxiv.org/pdf/2402.14905) has conducted a very representative systematic study on small models. For ~100M-level models like Instinct, the trade-off between `d_model` and `n_layers` is not just a parameter allocation issue, but also directly affects training stability and final performance.
 
-The current `minimind-3` main branch uses `dim=768, n_layers=8`, which is essentially an engineering trade-off: shallower networks train faster, while `dim` is still large enough to avoid a severe representation bottleneck, giving a reasonable balance between training efficiency, stability, and final performance.
+The current `instinct-3` main branch uses `dim=768, n_layers=8`, which is essentially an engineering trade-off: shallower networks train faster, while `dim` is still large enough to avoid a severe representation bottleneck, giving a reasonable balance between training efficiency, stability, and final performance.
 
 <details>
 <summary>View Detailed Explanation</summary>
@@ -598,7 +598,7 @@ Classic scaling laws emphasize the roles of training data size, parameter count,
 One core observation from MobileLLM is that, under a fixed parameter budget, depth is often more important than width. Compared with wide and shallow models, narrow and deep models tend to learn abstract concepts more effectively.
 For example, when the parameter count is fixed at `125M` or `350M`, narrow models with `30~42` layers typically outperform wide models with around `12` layers, showing similar trends across benchmarks such as commonsense reasoning, QA, and reading comprehension.
 
-This is consistent with MiniMind's own experiments around `d_model` and `n_layers`. However, "narrow" also has a lower bound: when `d_model < 512`, the representation bottleneck becomes much more pronounced, and adding extra layers is often insufficient to compensate for an overly small `d_head` under a fixed `q_head`.
+This is consistent with Instinct's own experiments around `d_model` and `n_layers`. However, "narrow" also has a lower bound: when `d_model < 512`, the representation bottleneck becomes much more pronounced, and adding extra layers is often insufficient to compensate for an overly small `d_head` under a fixed `q_head`.
 Conversely, when `d_model > 1536`, adding layers is often more cost-effective than further increasing width, and tends to yield better parameter-performance returns.
 
 For reference, GPT-3's parameter settings are as follows:
@@ -615,35 +615,35 @@ For reference, GPT-3's parameter settings are as follows:
 - **Time unit**: hours (h)
 - **Cost unit**: CNY (￥); `7￥ ≈ 1 USD`
 - **3090 rental price**: approximately `1.3￥/h` (actual prices may vary)
-- **Note**: The following results are empirical estimates for the `minimind` model on a single `3090` GPU, intended to make the training cost easy to estimate
+- **Note**: The following results are empirical estimates for the `instinct` model on a single `3090` GPU, intended to make the training cost easy to estimate
 
 | Model Name | params | pretrain_t2t_mini | sft_t2t_mini | toolcall | RLAIF |
 |------------|--------|-------------------|--------------|----------|-------|
-| minimind-3 | 64M | ≈1.21h<br/>≈1.57￥ | ≈1.10h<br/>≈1.43￥ | ≈0.9h<br/>≈1.17￥ | ≈1.1h<br/>≈1.43￥ |
-| minimind-3-moe | 198M-A64M | ≈1.69h<br/>≈2.20￥ | ≈1.54h<br/>≈2.00￥ | ≈1.26h<br/>≈1.64￥ | ≈1.54h<br/>≈2.00￥ |
+| instinct-3 | 64M | ≈1.21h<br/>≈1.57￥ | ≈1.10h<br/>≈1.43￥ | ≈0.9h<br/>≈1.17￥ | ≈1.1h<br/>≈1.43￥ |
+| instinct-3-moe | 198M-A64M | ≈1.69h<br/>≈2.20￥ | ≈1.54h<br/>≈2.00￥ | ≈1.26h<br/>≈1.64￥ | ≈1.54h<br/>≈2.00￥ |
 
 ---
 
 <details>
 <summary>Training Cost Summary & Prediction</summary>
 
-> `minimind-3`
+> `instinct-3`
 >> `pretrain_t2t_mini` + `sft_t2t_mini`
 <br/>Single `3090` GPU, `1 epoch` estimated approximately `2.31` hours, cost approximately `3.0` CNY
-<br/>Can train a `minimind-3 Zero` dialogue model from scratch.
+<br/>Can train a `instinct-3 Zero` dialogue model from scratch.
 
-> `minimind-3-moe`
+> `instinct-3-moe`
 >> `pretrain_t2t_mini` + `sft_t2t_mini`
 <br/>Single `3090` GPU, `1 epoch` estimated approximately `3.23` hours, cost approximately `4.2` CNY
-<br/>Can quickly obtain the basic dialogue version of `minimind-3-moe`.
+<br/>Can quickly obtain the basic dialogue version of `instinct-3-moe`.
 
 > The above values are estimates and are meant only as a rough reference for training cost.
 
 </details>
 
-On a single `NVIDIA 3090`, `minimind zero` can still be trained from scratch in roughly `2` hours, making the training process accessible to individual developers.
+On a single `NVIDIA 3090`, `instinct zero` can still be trained from scratch in roughly `2` hours, making the training process accessible to individual developers.
 
-With a higher-end multi-GPU setup such as `8x H100`, the total training time can be reduced to minutes. MiniMind has always aimed to keep LLM training reproducible, hands-on, and easy to iterate on. Low-cost quick reproduction is not a gimmick; below is an early Zero-style example conversation preserved for reference:
+With a higher-end multi-GPU setup such as `8x H100`, the total training time can be reduced to minutes. Instinct has always aimed to keep LLM training reproducible, hands-on, and easy to iterate on. Low-cost quick reproduction is not a gimmick; below is an early Zero-style example conversation preserved for reference:
 
 ```text
 👶: 请介绍一下自己。
@@ -660,7 +660,7 @@ With a higher-end multi-GPU setup such as `8x H100`, the total training time can
 ```
 
 Although this version already has basic dialogue capability, its factual knowledge and generalization ability are still limited; it is mainly an early reference for the feasibility of the Zero training route.
-Zero model weights are saved as `full_sft_zero_768.pth` (see MiniMind model file links below); if interested, you can download and experience its dialogue performance.
+Zero model weights are saved as `full_sft_zero_768.pth` (see Instinct model file links below); if interested, you can download and experience its dialogue performance.
 
 
 ---
@@ -699,9 +699,9 @@ python eval_llm.py --weight pretrain
 
 ### 2' Supervised Fine-Tuning (SFT):
 
-SFT is not only about making the model "chat better"; it can also continue to inject new knowledge, behavioral patterns, and response styles into the model. With `14GB` of SFT data in the current MiniMind main branch, this stage is already more than simple format alignment and is closer to a continued mid-training process.
+SFT is not only about making the model "chat better"; it can also continue to inject new knowledge, behavioral patterns, and response styles into the model. With `14GB` of SFT data in the current Instinct main branch, this stage is already more than simple format alignment and is closer to a continued mid-training process.
 If pretraining lets the model read broadly and acquire basic language ability, then SFT performs further processing on higher-quality and more targeted data. It helps the model adapt to multi-turn dialogue, Q&A, tool calling, and thinking-tag interaction formats, while also imprinting specific knowledge distributions, task patterns, and assistant styles into the parameters.
-Specifically in MiniMind, the SFT stage lets the model adapt to the multi-turn dialogue template used by the current repository. The model gradually understands the role structure of `user / assistant / system / tool`, while further strengthening instruction following, stable responses, and task completion capabilities.
+Specifically in Instinct, the SFT stage lets the model adapt to the multi-turn dialogue template used by the current repository. The model gradually understands the role structure of `user / assistant / system / tool`, while further strengthening instruction following, stable responses, and task completion capabilities.
 The current training applies truncation to instruction and response lengths, mainly to balance VRAM usage and training efficiency. If longer contexts are needed later, a small number of long-context samples can be used for incremental fine-tuning. During inference, YaRN extrapolation can extend the context length to 2048 and beyond without additional training.
 
 ```bash
@@ -734,9 +734,9 @@ python eval_llm.py --weight full_sft
 
 ### 3' Knowledge Distillation (KD)
 
-Knowledge distillation can be broadly divided into black-box and white-box categories. The current MiniMind main branch involves both approaches, with different emphases.
-* Black-box distillation: More common, and more aligned with the current main branch's actual practice. Strictly speaking, it is essentially supervised fine-tuning oriented towards teacher outputs, i.e., continuing to train based on hard labels; as LLMs became popular, this approach of "doing FT against strong model outputs" has gradually been broadly categorized under the distillation umbrella, hence commonly called black-box distillation. It focuses on learning answers, styles, and behavioral patterns — the student model can only see "what the teacher said" but cannot see how the teacher internally arrived at that judgment. High-quality answers from `DeepSeek R1`, `Qwen3`, as well as `tool call`, `reasoning`, chain-of-thought data, etc., can all be seen as black-box distillation signals; the current main branch `full_sft` data in MiniMind already has a considerable portion of this approach mixed in.
-* White-box distillation: Goes further, not only learning the teacher's final outputs but also learning the teacher's preferences at the token distribution level. Compared to black-box distillation, it additionally leverages the finer-grained distribution information from the teacher model's output layer, so the student model learns not just the "standard answer" but also the teacher's relative preferences among candidate tokens. Corresponding to `train_distillation.py`, the current implementation continues training the student model with distribution signals provided by the teacher model on top of already SFT-completed weights, making it more suitable as a reference implementation for understanding MiniMind's distillation pipeline.
+Knowledge distillation can be broadly divided into black-box and white-box categories. The current Instinct main branch involves both approaches, with different emphases.
+* Black-box distillation: More common, and more aligned with the current main branch's actual practice. Strictly speaking, it is essentially supervised fine-tuning oriented towards teacher outputs, i.e., continuing to train based on hard labels; as LLMs became popular, this approach of "doing FT against strong model outputs" has gradually been broadly categorized under the distillation umbrella, hence commonly called black-box distillation. It focuses on learning answers, styles, and behavioral patterns — the student model can only see "what the teacher said" but cannot see how the teacher internally arrived at that judgment. High-quality answers from `DeepSeek R1`, `Qwen3`, as well as `tool call`, `reasoning`, chain-of-thought data, etc., can all be seen as black-box distillation signals; the current main branch `full_sft` data in Instinct already has a considerable portion of this approach mixed in.
+* White-box distillation: Goes further, not only learning the teacher's final outputs but also learning the teacher's preferences at the token distribution level. Compared to black-box distillation, it additionally leverages the finer-grained distribution information from the teacher model's output layer, so the student model learns not just the "standard answer" but also the teacher's relative preferences among candidate tokens. Corresponding to `train_distillation.py`, the current implementation continues training the student model with distribution signals provided by the teacher model on top of already SFT-completed weights, making it more suitable as a reference implementation for understanding Instinct's distillation pipeline.
 
 Black-box distillation is essentially equivalent to supervised fine-tuning on teacher-generated answers:
 ```math
@@ -786,8 +786,8 @@ Example 1: Vertical domain data
 Example 2: Self-awareness data
 
 ```jsonl
- {"conversations": [{"role": "user", "content": "你叫什么名字？"}, {"role": "assistant", "content": "您好，我名叫 MiniMind，是由 Jingyao Gong 开发的人工智能助手。我可以帮助你解决各种问题，包括翻译、推荐内容等等。"}]}
- {"conversations": [{"role": "user", "content": "你是谁"}, {"role": "assistant", "content": "您好，我是 MiniMind，由 Jingyao Gong 创建。我的主要职责是提供准确的回答和帮助。"}]}
+ {"conversations": [{"role": "user", "content": "你叫什么名字？"}, {"role": "assistant", "content": "您好，我名叫 Instinct，是由 Jingyao Gong 开发的人工智能助手。我可以帮助你解决各种问题，包括翻译、推荐内容等等。"}]}
+ {"conversations": [{"role": "user", "content": "你是谁"}, {"role": "assistant", "content": "您好，我是 Instinct，由 Jingyao Gong 创建。我的主要职责是提供准确的回答和帮助。"}]}
 ```
 
 At this point, the [base model + LoRA weights] can be used in combination, preserving the base model's general capabilities while enhancing specific domain performance. After training, simple tests can also be done via `eval_llm.py`.
@@ -802,7 +802,7 @@ python eval_llm.py  --weight full_sft --lora_weight lora_medical
 python eval_llm.py  --weight full_sft --lora_weight lora_identity
 
 👶: 你和openai是什么关系？
-🤖️: 我是 MiniMind，一个由 Jingyao Gong 开发的人工智能助手。我通过自然语言处理和算法训练来与用户进行交互。
+🤖️: 我是 Instinct，一个由 Jingyao Gong 开发的人工智能助手。我通过自然语言处理和算法训练来与用户进行交互。
 ```
 
 PS: If you have sufficient data, you can also perform `full_sft` full-parameter fine-tuning directly. This usually requires careful mixing of general and domain-specific data; otherwise, the model may lose part of its general capability due to overfitting on vertical-domain samples.
@@ -858,7 +858,7 @@ python eval_toolcall.py --weight full_sft
 
 #### 5.2 Adaptive Thinking
 
-`minimind` unifies explicit thinking capability at the template level, which is also consistent with the template design of many current mainstream large models:
+`instinct` unifies explicit thinking capability at the template level, which is also consistent with the template design of many current mainstream large models:
 
 - `open_thinking=0`: By default injects an empty `<think>\n\n</think>`, the model tends to answer directly;
 - `open_thinking=1`: The template pre-injects the `<think>` start tag, and the model then continues to output the explicit thinking process and final answer;
@@ -868,14 +868,14 @@ More precisely, the approach is no longer to train a separate thinking model, bu
 
 ```bash
 # Test responses
-python eval_llm.py --load_from ./minimind-3 --open_thinking 1
+python eval_llm.py --load_from ./instinct-3 --open_thinking 1
 ```
 
 OpenAI-API-SDK usage:
 
 ```python
 response = client.chat.completions.create(
-    model="minimind",
+    model="instinct",
     messages=[{"role": "user", "content": "你是谁？"}],
     # ...
     extra_body={"chat_template_kwargs": {"open_thinking": True}} # Thinking switch
@@ -977,7 +977,7 @@ This chapter therefore focuses on reinforcement learning after SFT using various
 For single-turn verifiable tasks, this feedback is often closer to an immediate reward. In Agentic RL scenarios, rewards are more often delayed until the end of a multi-step interaction, or come directly from the environment itself.
 Their common characteristics are usually **on-policy training** and **high scalability**: no expensive human annotation is required, and large numbers of training samples can be generated for online trial and error.
 
-MiniMind has implemented **2+N** basic + cutting-edge RLAIF methods:
+Instinct has implemented **2+N** basic + cutting-edge RLAIF methods:
 * **PPO**, **GRPO** — classic RL algorithms validated at large scale
 * N cutting-edge RL algorithms (updated periodically on an experimental basis)
 
@@ -1001,15 +1001,15 @@ High-scoring responses will be encouraged (increasing the $\Pi$ policy probabili
 
 **2️⃣ Reward Mechanism Preparation (Required)**
 
-RLAIF training requires some form of computable reward signal; it can come from a reward model, or from rule functions, Ground Truth verification, or environment feedback. MiniMind currently demonstrates the Reward Model route by default.
+RLAIF training requires some form of computable reward signal; it can come from a reward model, or from rule functions, Ground Truth verification, or environment feedback. Instinct currently demonstrates the Reward Model route by default.
 
 Here we select the small and high-quality `InternLM2-1.8B-Reward` ([ModelScope](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-1_8b-reward) | [HuggingFace](https://huggingface.co/internlm/internlm2-1_8b-reward)) as the base reward model.
 
-After downloading the reward model, it needs to be placed in the **sibling directory** of the minimind project, with the recommended structure as follows:
+After downloading the reward model, it needs to be placed in the **sibling directory** of the instinct project, with the recommended structure as follows:
 
 ```
 root/
-├── minimind/                    # MiniMind project
+├── instinct/                    # Instinct project
 │   ├── model/
 │   └── ...
 └── internlm2-1_8b-reward/       # Reward model
@@ -1019,7 +1019,7 @@ root/
 ```
 
 <details>
-<summary><b>Reward Mechanism Selection & MiniMind Limitations (Click to Expand)</b></summary>
+<summary><b>Reward Mechanism Selection & Instinct Limitations (Click to Expand)</b></summary>
 
 **1. Diversity of Reward Mechanisms**
 
@@ -1039,23 +1039,23 @@ The "reward signal" sources in RLAIF can be very flexible:
 
 Any mechanism that can quantify "response quality" can serve as an RL reward source. DeepSeek R1 is a typical example: using rule functions to verify math answer correctness as rewards, without needing an additional Reward Model.
 
-**2. MiniMind Limitation: Reward Sparsity Problem**
+**2. Instinct Limitation: Reward Sparsity Problem**
 
 RLAIF training can target both reasoning models and non-reasoning models; the difference is only in format.
 
-However, for models like MiniMind with extremely small 0.1B parameters and weak capabilities, serious Reward Sparsity problems will be encountered on general tasks (such as R1-style math datasets):
+However, for models like Instinct with extremely small 0.1B parameters and weak capabilities, serious Reward Sparsity problems will be encountered on general tasks (such as R1-style math datasets):
 
 - **Phenomenon**: Almost all candidate responses generated by the model are incorrect, resulting in all reward scores $r(x,y) \approx 0$
 - **Consequence**: The advantage function $A(x,y) = r(x,y) - b(x) \approx 0$, the policy gradient signal vanishes, and parameters $\theta$ cannot be effectively updated
 
 It's like having an elementary school student take college entrance exam math problems — no matter how many attempts, they always score zero, unable to learn improvement strategies from score differences. Therefore, this is a fundamental limitation of the RL algorithm's principles.
 
-To mitigate this problem, MiniMind's implementation chose **model-based continuous reward signals**:
+To mitigate this problem, Instinct's implementation chose **model-based continuous reward signals**:
 
 - The Reward Model outputs continuous scores (e.g., -2.5 to +3.0), rather than binary 0/1
 - Even when all response quality is poor, it can still distinguish subtle differences between "even worse" (-3.0) and "worse" (-2.8). So this kind of **dense and continuous** reward signal can provide non-zero gradients for the advantage function $A(x,y)$, enabling the policy network to optimize incrementally
 - Multiple reward sources can also be mixed: $r_{\text{total}} = \alpha \cdot r_{\text{model}} + \beta \cdot r_{\text{rule}}$ (for example, both detecting think tag format reward and combining the reward score for the response quality itself)
-- In MiniMind practice, avoid directly using rule-based binary rewards + difficulty beyond capability (such as MATH500), which easily leads to all-zero rewards;
+- In Instinct practice, avoid directly using rule-based binary rewards + difficulty beyond capability (such as MATH500), which easily leads to all-zero rewards;
 - Monitor training by observing the variance of reward scores $\text{Var}(r)$; if it stays close to 0, the data or reward mechanism needs to be adjusted
 
 **For production-level large model Agentic RL scenarios**:
@@ -1097,7 +1097,7 @@ Simply put:
 - The former learns according to offline predetermined "good/bad standards";
 - The latter samples online based on the latest policy and corrects in real-time.
 
-MiniMind's PPO implementation includes Actor (generating responses), Critic (evaluating response value), and complete GAE (Generalized Advantage Estimation) advantage function computation.
+Instinct's PPO implementation includes Actor (generating responses), Critic (evaluating response value), and complete GAE (Generalized Advantage Estimation) advantage function computation.
 
 **Training method**:
 
@@ -1113,7 +1113,7 @@ python train_ppo.py
 
 ![ppo_loss](./images/ppo_loss.jpg)
 
-> MiniMind optimization trends during the PPO training stage
+> Instinct optimization trends during the PPO training stage
 
 From the training curves, it can be seen that PPO has the problem of **slow reward improvement**. I personally believe this mainly stems from PPO's **dual-network joint optimization** approach: the Critic needs to gradually converge to accurately estimate the value function, while the Actor's policy updates depend on the advantage estimates provided by the Critic. The two are interdependent, forming a complex optimization process. In the early stages of training, inaccurate Critic estimates affect the Actor's gradient direction, leading to overall slow convergence. Additionally, PPO needs to maintain two networks simultaneously, and under the current implementation, VRAM usage is approximately 1.5–2 times that of single-network methods.
 
@@ -1132,7 +1132,7 @@ Where:
 
 For the same question, the model generates N responses and computes their respective rewards, then uses the intra-group average reward as a baseline. Responses above the baseline are encouraged, and responses below the baseline are suppressed, thus no additional critic network needs to be trained.
 
-A more prominent issue with GRPO is Degenerate Groups: if for a certain question the rewards of N responses are almost identical, then the learning signal for this group will be close to 0. On ultra-small models like MiniMind, this problem is especially pronounced, so training must be constrained within reasonable capability boundaries.
+A more prominent issue with GRPO is Degenerate Groups: if for a certain question the rewards of N responses are almost identical, then the learning signal for this group will be close to 0. On ultra-small models like Instinct, this problem is especially pronounced, so training must be constrained within reasonable capability boundaries.
 
 
 **Training method**:
@@ -1149,7 +1149,7 @@ python train_grpo.py
 
 ![grpo_loss](./images/grpo_loss.jpg)
 
-> MiniMind optimization trends during the GRPO training stage
+> Instinct optimization trends during the GRPO training stage
 
 From the training curves, it can be seen that GRPO's **reward shows a more stable upward trend**, reaching around 4, indicating that GRPO itself can better utilize RLAIF signals. Policy Loss decreases steadily overall, and compared to PPO's dual-network optimization, GRPO's single-network architecture trains more stably with a higher convergence ceiling.
 
@@ -1171,9 +1171,9 @@ CISPO, building on GRPO, rewrites the policy term that was easily clipped into a
 
 #### 7.4 Agentic RL 🔥
 
-The concept of "Agentic" is broad, and here it is used in a narrower sense: the goal is to let small models like MiniMind (~100M) learn basic calling, observation, and re-planning capabilities on a limited tool set, rather than covering the full scope of state management, long-term memory, and complex workflow orchestration in a complete Agent system.
+The concept of "Agentic" is broad, and here it is used in a narrower sense: the goal is to let small models like Instinct (~100M) learn basic calling, observation, and re-planning capabilities on a limited tool set, rather than covering the full scope of state management, long-term memory, and complex workflow orchestration in a complete Agent system.
 
-Starting from `2026-03`, the repository added `train_agent`, which begins to support a form of multi-turn Tool-Use RL closer to real interaction. This is a training script I personally enjoy a lot: it combines RLVR / RLAIF-style data organization with online RL rollout, went through many iterations of debugging, and encountered issues such as convergence failure, reward hacking, and multi-turn context misalignment, but ultimately still preserves MiniMind's consistent simplicity and readability.
+Starting from `2026-03`, the repository added `train_agent`, which begins to support a form of multi-turn Tool-Use RL closer to real interaction. This is a training script I personally enjoy a lot: it combines RLVR / RLAIF-style data organization with online RL rollout, went through many iterations of debugging, and encountered issues such as convergence failure, reward hacking, and multi-turn context misalignment, but ultimately still preserves Instinct's consistent simplicity and readability.
 
 The data for this part is `agent_rl.jsonl` / `agent_rl_math.jsonl`. Compared to regular dialogue data, they have an additional `gt` as the final verification target; if we denote a sample as $(x, \mathcal{T}, gt)$, then the optimization target during training is no longer a single-turn response $y$, but a multi-turn trajectory $\tau$:
 
@@ -1212,7 +1212,7 @@ python train_agent.py
 ```bash
 # ② Use sglang for rollout
 # Start sglang server first:
-python -m sglang.launch_server --model-path ./minimind-3 --attention-backend triton --host 0.0.0.0 --port 8998
+python -m sglang.launch_server --model-path ./instinct-3 --attention-backend triton --host 0.0.0.0 --port 8998
 # Training parameters for reference:
 python train_agent.py --rollout_engine sglang --sglang_base_url http://localhost:8998 --sglang_shared_path ./ckpt_mm --data_path ../dataset/agent_rl_math.jsonl --use_wandb
 ```
@@ -1221,13 +1221,13 @@ python train_agent.py --rollout_engine sglang --sglang_base_url http://localhost
 
 ![agent_rl_loss](./images/agent_rl_loss.jpg)
 
-> MiniMind optimization trends during the Agentic RL training stage
+> Instinct optimization trends during the Agentic RL training stage
 
 Here I'll also briefly mention the `rollout_engine`. The so-called "training-inference separation" means decoupling **parameter updates** and **trajectory rollout**: the training side handles policy optimization, while the rollout side handles high-throughput sampling. From the top level, they uniformly present as "give me a prompt, I'll return rollout results; after training is done, sync the new weights back." Therefore, the training script doesn't need to care whether the underlying implementation is local `generate` or a remote `inference` engine. Note that the current implementation is still **synchronous** (sample a batch, then update), not yet asynchronous training with a pure rollout buffer.
 
 ![rl-structure](./images/rl-structure.jpg)
 
-> Schematic diagram of the decoupled RL structure in MiniMind: training side, trajectory side, and rollout side
+> Schematic diagram of the decoupled RL structure in Instinct: training side, trajectory side, and rollout side
 
 If we draw an analogy to larger-scale systems, it already has the flavor of large-scale RL frameworks like openrlhf/verl/slime:
 
@@ -1236,7 +1236,7 @@ If we draw an analogy to larger-scale systems, it already has the flavor of larg
 - The middle connects through trajectory and weight synchronization
 - Tool execution and environment feedback do not directly enter the loss, but directly affect the reward quality of the entire trajectory
 
-I personally view this implementation as a very interesting transitional version within MiniMind. Although it is still far from an industrial-grade Agent training framework, it has already connected the key elements end to end: **template organization, tool execution, multi-turn rollout, delayed reward, and training-inference separation**. Perhaps there is nothing simpler than it for now.
+I personally view this implementation as a very interesting transitional version within Instinct. Although it is still far from an industrial-grade Agent training framework, it has already connected the key elements end to end: **template organization, tool execution, multi-turn rollout, delayed reward, and training-inference separation**. Perhaps there is nothing simpler than it for now.
 
 ```bash
 # Test the final model's Tool Use capability
@@ -1277,7 +1277,7 @@ Returning to the "**unified framework**", the table below summarizes how differe
 
 ## Ⅴ Open-Sourced Training Results 📦
 
-#### ① PyTorch Models ([ModelScope](https://www.modelscope.cn/models/gongjy/minimind-3-pytorch) | [HuggingFace](https://huggingface.co/jingyaogong/minimind-3-pytorch))
+#### ① PyTorch Models ([ModelScope](https://www.modelscope.cn/models/1057237562/instinct-3-pytorch) | [HuggingFace](https://huggingface.co/1057237562/instinct-3-pytorch))
 
 > Note: Model weights are subject to actual releases. Not all training stages or experimental branches (such as DPO, PPO, GRPO, CISPO, Agent, LoRA, etc.) will be continuously maintained and separately published; some weights are only used for experimental verification or learning purposes. As data iterates or models are adjusted, the necessity of synchronizing all versions one by one is limited and would incur high maintenance and training costs.
 
@@ -1299,7 +1299,7 @@ Returning to the "**unified framework**", the table below summarizes how differe
 
 </details>
 
-#### ② Transformers Models ([ModelScope](https://www.modelscope.cn/collections/MiniMind-b72f4cfeb74b47) | [HuggingFace](https://huggingface.co/collections/jingyaogong/minimind-66caf8d999f5c7fa64f399e5))
+#### ② Transformers Models ([ModelScope](https://www.modelscope.cn/collections/Instinct-b72f4cfeb74b47) | [HuggingFace](https://huggingface.co/collections/1057237562/Instinct-66caf8d999f5c7fa64f399e5))
 
 > Note: Unless otherwise specified, `transformers` versions are usually converted from `full_sft` weights. RL-type post-training tends to optimize around specific reward targets; although it usually improves the reward score, it sacrifices some general capabilities and knowledge; this kind of reward hacking / capability trade-off is difficult to avoid across all models, differing more in degree.
 
@@ -1309,13 +1309,13 @@ Returning to the "**unified framework**", the table below summarizes how differe
 
 ## Ⅰ RL Model Comparison
 
-Subjective/objective comparison based on `minimind-3 (64M)` under the same random seed and other hyperparameters, for reference:
+Subjective/objective comparison based on `instinct-3 (64M)` under the same random seed and other hyperparameters, for reference:
 
-[A] minimind-3 (64M, SFT)
+[A] instinct-3 (64M, SFT)
 
-[B] minimind-3 (64M, GRPO)
+[B] instinct-3 (64M, GRPO)
 
-[C] minimind-3 (64M, Agent-CISPO)
+[C] instinct-3 (64M, Agent-CISPO)
 
 ### Test 1: Subjective Q&A Comparison
 
@@ -1344,7 +1344,7 @@ Subjective/objective comparison based on `minimind-3 (64M)` under the same rando
 A test adapted from the `eval_toolcall` script, using a set of math ToolUse tasks to compare the performance of the current `agent` weights and `full_sft` weights:
 
 ```text
-[A] minimind-3 (full_sft)
+[A] instinct-3 (full_sft)
 [full_sft] 1/20 | ✅ | (94)-35 | gt=59 | pred=59
 [full_sft] 2/20 | ❌ | 3**2 | gt=9 | pred=8
 [full_sft] 3/20 | ✅ | (29)+64 | gt=93 | pred=93
@@ -1366,7 +1366,7 @@ A test adapted from the `eval_toolcall` script, using a set of math ToolUse task
 [full_sft] 19/20 | ❌ | (84)-60 | gt=24 | pred=144
 [full_sft] 20/20 | ✅ | (348/(12))-(28)*(8) | gt=-195 | pred=-195
 
-[C] minimind-3 (agent)
+[C] instinct-3 (agent)
 [agent] 1/20 | ✅ | (94)-35 | gt=59 | pred=59
 [agent] 2/20 | ✅ | 3**2 | gt=9 | pred=9
 [agent] 3/20 | ✅ | (29)+64 | gt=93 | pred=93
@@ -1405,9 +1405,9 @@ So if the task objective is ToolUse, lightweight multi-step calling, and verifia
 
 > Note: The following comparison is only for experiential reference, not a strict benchmark; sample size is limited and involves subjectivity.
 
-[A] minimind-3 (0.06B)
+[A] instinct-3 (0.06B)
 
-[B] minimind-3-moe (0.2B-A0.06B)
+[B] instinct-3-moe (0.2B-A0.06B)
 
 [C] [baby-llama2-chinese (0.2B)](https://github.com/DLLXW/baby-llama2-chinese)
 
@@ -1480,12 +1480,12 @@ So if the task objective is ToolUse, lightweight multi-step calling, and verifia
 
 ### Per-Model Review:
 
-1. **Model A (minimind-3, 0.06B)**:
+1. **Model A (instinct-3, 0.06B)**:
     - **Strengths**: Sufficient generation volume, expansion ability is already decent for this parameter count. The code question produced a structurally complete and runnable quicksort implementation, one of the best code answers in this round. The Everest question also basically got the core information right.
     - **Weaknesses**: Factual errors are quite dense — universal gravitation attributed to Einstein, the Yangtze River described as "China's official name", the explanation of seawater salinity completely deviates from scientific facts (involving "light scattering", "sunlight reflection", etc.). The summary question did not follow the 20-character limit and output a large expanded passage. The giant panda answer, while getting bamboo right, had all 6 points being repeated variants of "bamboo" with extremely low information density.
     - **Overall**: Has some generation and code capability, but knowledge accuracy is a hard weakness, hallucination problems are prominent, and responses frequently exhibit the phenomenon of "looking plausible at first glance but completely fabricated upon closer inspection."
 
-2. **Model B (minimind-3-moe, 0.2B-A0.06B)**:
+2. **Model B (instinct-3-moe, 0.2B-A0.06B)**:
     - **Strengths**: Response structure is relatively clear, sentence fluency is the best among the four models. The code question implementation is correct with example output included, and the explanation is also quite adequate. The Everest question answer is accurate. The summary question, while exceeding the character limit, at least captured the two keywords "Chinese cinema" and "international market breakthrough."
     - **Weaknesses**: Factual errors are also very obvious — the Yangtze River is directly described as "Mount Everest", universal gravitation attributed to Einstein, and the giant panda's food includes "seafood, fish, birds" and other serious factual errors. The explanation of seawater salinity revolves around "osmotic pressure" going in circles without touching the core reason.
     - **Overall**: The MoE architecture brings better expression fluency and structural sense, but accuracy issues are comparable to Model A. Overall, it leads in the "does it read well" dimension, but has no fundamental advantage in "is it correct."
@@ -1521,13 +1521,13 @@ So if the task objective is ToolUse, lightweight multi-step calling, and verifia
 
 ### 👉 Comprehensive Evaluation 2
 
-Subjectively, I would rank `minimind-3-moe` first, `chatlm-mini-chinese` second, `minimind-3` third, and `baby-llama2-chinese` fourth. Although `B` has severe hallucinations in knowledge accuracy (such as giant pandas eating seafood), it stands out for its fluent expression, clear structure, and correct code implementation, giving it the highest overall output quality. `D` clearly leads in factual knowledge (Newton in 1687, the source of the Yangtze River, etc. are all correct), but its code answer reverses the condition and becomes completely unusable, and it directly gives up on the summarization task, which significantly lowers its score. `A` is close to `B` in style and its code is also usable, but both its stability and factual accuracy are worse than `B`; it is a typical case of "being able to say something about everything, but fabricating details upon closer inspection". `C` has obvious gaps in factuality, elaboration ability, and overall readability, only occasionally answering the simplest factual questions correctly. It is worth noting that `D` and `A` have very close total scores (62 vs 61), but their strengths and weaknesses are almost complementary: `D` wins on knowledge accuracy (25 vs 10), while `A` wins on coding ability (17 vs 3). This also reflects a typical phenomenon of small-parameter models — under a limited parameter budget, "writing well" and "writing correctly" are often hard to achieve simultaneously.
+Subjectively, I would rank `instinct-3-moe` first, `chatlm-mini-chinese` second, `instinct-3` third, and `baby-llama2-chinese` fourth. Although `B` has severe hallucinations in knowledge accuracy (such as giant pandas eating seafood), it stands out for its fluent expression, clear structure, and correct code implementation, giving it the highest overall output quality. `D` clearly leads in factual knowledge (Newton in 1687, the source of the Yangtze River, etc. are all correct), but its code answer reverses the condition and becomes completely unusable, and it directly gives up on the summarization task, which significantly lowers its score. `A` is close to `B` in style and its code is also usable, but both its stability and factual accuracy are worse than `B`; it is a typical case of "being able to say something about everything, but fabricating details upon closer inspection". `C` has obvious gaps in factuality, elaboration ability, and overall readability, only occasionally answering the simplest factual questions correctly. It is worth noting that `D` and `A` have very close total scores (62 vs 61), but their strengths and weaknesses are almost complementary: `D` wins on knowledge accuracy (25 vs 10), while `A` wins on coding ability (17 vs 3). This also reflects a typical phenomenon of small-parameter models — under a limited parameter budget, "writing well" and "writing correctly" are often hard to achieve simultaneously.
 
 ---
 
 ## Ⅳ RoPE Length Extrapolation
 
-MiniMind supports length extrapolation of RoPE positional encoding through the YaRN algorithm, enabling the model to more stably handle text sequences that exceed the training length.
+Instinct supports length extrapolation of RoPE positional encoding through the YaRN algorithm, enabling the model to more stably handle text sequences that exceed the training length.
 
 When using the native torch model for inference with `eval_llm.py`, simply add the `--inference_rope_scaling` parameter to enable RoPE extrapolation:
 
@@ -1548,13 +1548,13 @@ For models in `Transformers` format, the following configuration can be added to
 }
 ```
 
-Below, using MiniMind as an example, we use vernacular text from *Journey to the West* of different lengths as input, comparing the perplexity (PPL) changes before and after enabling RoPE scaling. It can be seen that in long-text scenarios, the model's PPL significantly decreases after enabling YaRN extrapolation:
+Below, using Instinct as an example, we use vernacular text from *Journey to the West* of different lengths as input, comparing the perplexity (PPL) changes before and after enabling RoPE scaling. It can be seen that in long-text scenarios, the model's PPL significantly decreases after enabling YaRN extrapolation:
 
 <div align="center">
 <img src="./images/rope_ppl.png">
 </div>
 
-> PPL comparison of MiniMind before and after enabling YaRN at different text lengths
+> PPL comparison of Instinct before and after enabling YaRN at different text lengths
 
 ---
 
@@ -1582,13 +1582,13 @@ HF_ENDPOINT=https://hf-mirror.com lm_eval --model hf --model_args pretrained="/p
 
 > Note: These multiple-choice benchmarks are usually not evaluated by asking the model to freely generate the full answer. Instead, given a context `y` and a set of candidate options `x`, the standard practice is to compare the conditional probability `p(x | y)` of each option and select the one with the highest score. If an option maps to a single token, comparing that token probability is enough; if it spans multiple tokens, a more standard approach is to compare the sum of conditional log-probabilities over the whole option. The candidates are not necessarily `A`, `B`, `C`, `D`; some datasets have only two options. In that sense, random guessing is already a fairly strong lower bound, and models at this scale do tend to stay close to it for quite a while.
 
-MiniMind is trained on far less data than the other models listed here, and its training mix is heavily skewed toward Chinese, so its English performance is relatively weak. It is also not specifically aligned to this multiple-choice evaluation format by default, so its performance is relatively weak, and the results are only for fun:
+Instinct is trained on far less data than the other models listed here, and its training mix is heavily skewed toward Chinese, so its English performance is relatively weak. It is also not specifically aligned to this multiple-choice evaluation format by default, so its performance is relatively weak, and the results are only for fun:
 
 | model name | from | params | zh (ceval / cmmlu) | en (arc / piqa / obqa / hellaswag / siqa) |
 |---|---|---|---|---|
-| minimind-3 | current | 64M | 24.89 / 25.38 | 28.49 / 50.65 / 23.60 / 28.28 / 34.19 |
-| minimind-3-moe | current | 198M | 25.48 / 24.32 | 27.74 / 50.71 / 26.20 / 27.43 / 34.03 |
-| minimind-3-exam | current | 64M | 30.98 / 26.12 | 35.61 / 56.26 / 24.20 / 28.40 / 34.19 |
+| instinct-3 | current | 64M | 24.89 / 25.38 | 28.49 / 50.65 / 23.60 / 28.28 / 34.19 |
+| instinct-3-moe | current | 198M | 25.48 / 24.32 | 27.74 / 50.71 / 26.20 / 27.43 / 34.03 |
+| instinct-3-exam | current | 64M | 30.98 / 26.12 | 35.61 / 56.26 / 24.20 / 28.40 / 34.19 |
 | [Steel-LLM](https://huggingface.co/gqszhanshijin/Steel-LLM) | ZhanShiJin | 1121M | 24.89 / 25.32 | 39.69 / 65.13 / 26.00 / 35.73 / 39.15 |
 | [gpt2-medium](https://huggingface.co/openai-community/gpt2-medium) | OpenAI | 360M | 23.18 / 25.00 | 43.60 / 66.38 / 30.20 / 39.38 / 39.10 |
 | [TinyLlama-1.1B](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0) | TinyLlama | 1100M | 25.71 / 25.03 | 54.80 / 74.43 / 35.60 / 60.38 / 43.09 |
@@ -1598,11 +1598,11 @@ MiniMind is trained on far less data than the other models listed here, and its 
 <details>
 <summary><strong>Additional note (source / no contamination / reproduction)</strong></summary>
 
-minimind-3-exam is not a larger base model, and it contains little if any new knowledge. It is simply minimind-3 after a lightweight LoRA alignment on [lora_exam.jsonl](https://huggingface.co/datasets/jingyaogong/minimind_dataset/blob/main/lora_exam.jsonl), with [lora_exam_768.pth](https://huggingface.co/jingyaogong/minimind-3-pytorch/resolve/main/lora_exam_768.pth) merged back into the base model. This alignment data is sampled from the test subsets of ceval and English mmlu, with additional prefix/suffix augmentation. Its purpose is to align the context and option format commonly seen in multiple-choice evaluation, rather than to teach the answers.
+instinct-3-exam is not a larger base model, and it contains little if any new knowledge. It is simply instinct-3 after a lightweight LoRA alignment on [lora_exam.jsonl](https://huggingface.co/datasets/1057237562/Instinct_dataset/blob/main/lora_exam.jsonl), with [lora_exam_768.pth](https://huggingface.co/1057237562/instinct-3-pytorch/resolve/main/lora_exam_768.pth) merged back into the base model. This alignment data is sampled from the test subsets of ceval and English mmlu, with additional prefix/suffix augmentation. Its purpose is to align the context and option format commonly seen in multiple-choice evaluation, rather than to teach the answers.
 
-The 7 benchmarks used in this section have no sample overlap with the alignment data above, so this result can be regarded as free of data contamination. By contrast, if one fine-tunes directly on overlapping data, the scores of a small model can become heavily distorted; for example, minimind-3 once reached about 97% accuracy on contaminated ceval / cmmlu subsets, but such numbers are not meaningful.
+The 7 benchmarks used in this section have no sample overlap with the alignment data above, so this result can be regarded as free of data contamination. By contrast, if one fine-tunes directly on overlapping data, the scores of a small model can become heavily distorted; for example, instinct-3 once reached about 97% accuracy on contaminated ceval / cmmlu subsets, but such numbers are not meaningful.
 
-What this experiment suggests is simple: for this kind of benchmark, the bottleneck of a small model may not lie entirely in knowledge itself, but also in whether the input format is aligned. With only a small amount of format alignment, minimind-3-exam improves by about 2.9 percentage points on average across the 7 tasks above.
+What this experiment suggests is simple: for this kind of benchmark, the bottleneck of a small model may not lie entirely in knowledge itself, but also in whether the input format is aligned. With only a small amount of format alignment, instinct-3-exam improves by about 2.9 percentage points on average across the 7 tasks above.
 
 </details>
 
@@ -1615,21 +1615,21 @@ What this experiment suggests is simple: for this kind of benchmark, the bottlen
 ## 🔧 Model Conversion
 
 * [./scripts/convert_model.py](./scripts/convert_model.py) can be used for conversion between `torch` and `transformers` model formats.
-* Unless otherwise specified, models released from the mainline `MiniMind` series are usually provided in `Transformers` format. If you use native `torch` weights, please run `torch2transformers` conversion first.
+* Unless otherwise specified, models released from the mainline `Instinct` series are usually provided in `Transformers` format. If you use native `torch` weights, please run `torch2transformers` conversion first.
 
 
-## 🖥️ API Service Interface Based on MiniMind
+## 🖥️ API Service Interface Based on Instinct
 
 * [./scripts/serve_openai_api.py](./scripts/serve_openai_api.py) provides a lightweight chat service compatible with the OpenAI API, making it easy to connect your own models to third-party UIs such as FastGPT, OpenWebUI, Dify, etc.
 * The API server additionally supports fields such as `reasoning_content`, `tool_calls`, and `open_thinking`, making it suitable for Tool Calling / Thinking scenarios.
 
-* After downloading model weights from [HuggingFace](https://huggingface.co/collections/jingyaogong/minimind-66caf8d999f5c7fa64f399e5), the directory structure example is as follows:
+* After downloading model weights from [HuggingFace](https://huggingface.co/collections/1057237562/Instinct-66caf8d999f5c7fa64f399e5), the directory structure example is as follows:
     ```
-    minimind (root dir)
-    ├─<MiniMind-Model-Name> (e.g., minimind-3)
+    instinct (root dir)
+    ├─<Instinct-Model-Name> (e.g., instinct-3)
     |  ├── config.json
     |  ├── generation_config.json
-    |  ├── model_minimind.py (optional, depending on the export format)
+    |  ├── model_instinct.py (optional, depending on the export format)
     |  ├── pytorch_model.bin or model.safetensors
     |  ├── special_tokens_map.json
     |  ├── tokenizer_config.json
@@ -1681,7 +1681,7 @@ vLLM is a widely used efficient inference framework for rapid LLM deployment, wi
 Launch the model as an OpenAI-compatible API server:
 
 ```bash
-vllm serve /path/to/model --model-impl transformers --served-model-name "minimind" --port 8998
+vllm serve /path/to/model --model-impl transformers --served-model-name "instinct" --port 8998
 ```
 
 ## <img src="https://user-images.githubusercontent.com/1991296/230134379-7181e485-c521-4d23-a0d6-f7b3b61ba524.png" height="28" style="vertical-align: middle;"/> [llama.cpp](https://github.com/ggerganov/llama.cpp)
@@ -1693,7 +1693,7 @@ llama.cpp is a lightweight and practical C++ inference framework that can be use
 ```
 parent/
 ├── project/           # your project directory
-│   ├── minimind-model/       # HuggingFace-format model directory
+│   ├── instinct-model/       # HuggingFace-format model directory
 │   │   ├── config.json
 │   │   ├── model.safetensors
 │   │   └── ...
@@ -1709,16 +1709,16 @@ parent/
 1. Insert at the end of the `get_vocab_base_pre` function in `convert_hf_to_gguf.py`:
 
 ```python
-# Add MiniMind tokenizer support. A compatible fallback such as qwen2 can be reused temporarily.
+# Add Instinct tokenizer support. A compatible fallback such as qwen2 can be reused temporarily.
 if res is None:
     res = "qwen2"
 ```
 
-2. Convert the HuggingFace format minimind model to GGUF:
+2. Convert the HuggingFace format instinct model to GGUF:
 
 ```bash
 # Run this under the llama.cpp directory. The GGUF file will be generated in the model directory.
-python convert_hf_to_gguf.py /path/to/minimind-model
+python convert_hf_to_gguf.py /path/to/instinct-model
 ```
 
 3. Quantize the model (optional)
@@ -1739,15 +1739,15 @@ Ollama is a commonly used tool for running large models locally. It supports man
 
 1. Load a custom GGUF model via Ollama
 
-Create a new `minimind.modelfile` file in the model directory and write the following configuration template. You may replace the system prompt as needed:
+Create a new `instinct.modelfile` file in the model directory and write the following configuration template. You may replace the system prompt as needed:
 
 <details>
-<summary>minimind.modelfile (template)</summary>
+<summary>instinct.modelfile (template)</summary>
 
 ```text
 FROM /path/to/model/xxxx.gguf
 
-SYSTEM "你的名字叫MiniMind，你是一个乐于助人、知识渊博的AI助手。请用完整且友好的方式回答用户问题，当被问到名字时请回答MiniMind。"
+SYSTEM "你的名字叫Instinct，你是一个乐于助人、知识渊博的AI助手。请用完整且友好的方式回答用户问题，当被问到名字时请回答Instinct。"
 
 
 TEMPLATE """{{- if .Tools }}<|im_start|>system
@@ -1822,24 +1822,24 @@ PARAMETER num_ctx 8192
 2. Load and name the local model
 
 ```bash
-ollama create -f minimind.modelfile minimind-local
+ollama create -f instinct.modelfile instinct-local
 ```
 
 3. Start inference
 
 ```bash
-ollama run minimind-local
+ollama run instinct-local
 ```
 
 <details>
 <summary>📤 Push your model to Ollama Hub</summary>
 
 ```bash
-# 1. Rename the local model to your ollama-account/minimind tag
-ollama cp minimind-local:latest your_username/minimind:latest
+# 1. Rename the local model to your ollama-account/instinct tag
+ollama cp instinct-local:latest your_username/instinct:latest
 
 # 2. Push the model
-ollama push your_username/minimind:latest
+ollama push your_username/instinct:latest
 ```
 </details>
 <br/>
@@ -1847,7 +1847,7 @@ ollama push your_username/minimind:latest
 ⭐️ You can also directly use the Ollama model I provide for a quick start:
 
 ```bash
-ollama run jingyaogong/minimind-3
+ollama run 1057237562/instinct-3
 >>> 你叫什么名字
 我是一个语言模型...
 ```
@@ -1874,38 +1874,38 @@ Alternatively, test it with the mobile app.
 
 ## 👨‍💻 More Content
 
-* <a href="https://github.com/jingyaogong/minimind/discussions/618">🔗Fine-tuning Diffusion Language Models from MiniMind-LLM</a>
+* <a href="https://github.com/1057237562/Instinct/discussions/618">🔗Fine-tuning Diffusion Language Models from Instinct-LLM</a>
 
-* <a href="https://github.com/jingyaogong/minimind/discussions/611">🔗Description of the Model's generate Method</a>
+* <a href="https://github.com/1057237562/Instinct/discussions/611">🔗Description of the Model's generate Method</a>
 
-* <a href="https://github.com/jingyaogong/minimind/discussions/704">🔗Training Linear Attention Models from MiniMind</a>
+* <a href="https://github.com/1057237562/Instinct/discussions/704">🔗Training Linear Attention Models from Instinct</a>
 
 # 📌 Acknowledgments
 
 > [!NOTE]
-> If the `MiniMind` series of projects has been helpful to you, feel free to star ⭐ on GitHub<br/>
+> If the `Instinct` series of projects has been helpful to you, feel free to star ⭐ on GitHub<br/>
 > The documentation is long, and omissions are inevitable. Feedback via Issues or PRs is welcome to help improve the project together.<br/>
 > Your support and suggestions are important driving forces for the continuous iteration of this project!
 
-## 🤝[Contributors](https://github.com/jingyaogong/minimind/graphs/contributors)
+## 🤝[Contributors](https://github.com/1057237562/Instinct/graphs/contributors)
 
-<a href="https://github.com/jingyaogong/minimind/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=jingyaogong/minimind" />
+<a href="https://github.com/1057237562/Instinct/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=1057237562/Instinct" />
 </a>
 
 ## 😊Acknowledgments
 
 Thanks to the following contributors for sharing training notes, data processing experience, tutorials, and code walkthroughs:
 
-* [@ipfgao](https://github.com/ipfgao): [🔗Training Step Records](https://github.com/jingyaogong/minimind/issues/26)
+* [@ipfgao](https://github.com/ipfgao): [🔗Training Step Records](https://github.com/1057237562/Instinct/issues/26)
 
-* [@WangRongsheng](https://github.com/WangRongsheng): [🔗Large Dataset Preprocessing](https://github.com/jingyaogong/minimind/issues/39)
+* [@WangRongsheng](https://github.com/WangRongsheng): [🔗Large Dataset Preprocessing](https://github.com/1057237562/Instinct/issues/39)
 
-* [@pengqianhan](https://github.com/pengqianhan): [🔗A Concise Tutorial](https://github.com/jingyaogong/minimind/issues/73)
+* [@pengqianhan](https://github.com/pengqianhan): [🔗A Concise Tutorial](https://github.com/1057237562/Instinct/issues/73)
 
-* [@RyanSunn](https://github.com/RyanSunn): [🔗Inference Process Learning Notes](https://github.com/jingyaogong/minimind/issues/75)
+* [@RyanSunn](https://github.com/RyanSunn): [🔗Inference Process Learning Notes](https://github.com/1057237562/Instinct/issues/75)
 
-* [@Nijikadesu](https://github.com/Nijikadesu): [🔗Breaking Down Project Code in Interactive Notebook Format](https://github.com/jingyaogong/minimind/issues/213)
+* [@Nijikadesu](https://github.com/Nijikadesu): [🔗Breaking Down Project Code in Interactive Notebook Format](https://github.com/1057237562/Instinct/issues/213)
 
 
 Thanks also to the following papers and projects:
@@ -1926,29 +1926,29 @@ Thanks also to the following papers and projects:
 
 ## 🫶Supporters
 
-<a href="https://github.com/jingyaogong/minimind/stargazers">
+<a href="https://github.com/1057237562/Instinct/stargazers">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
-      <source media="(prefers-color-scheme: light)" srcset="https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=jingyaogong&repo=minimind"/>
-      <img alt="Star poster" src="https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
+      <source media="(prefers-color-scheme: dark)" srcset="https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=1057237562&repo=Instinct&theme=dark"/>
+      <source media="(prefers-color-scheme: light)" srcset="https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=1057237562&repo=Instinct"/>
+      <img alt="Star poster" src="https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=1057237562&repo=Instinct&theme=dark"/>
     </picture>
 </a>
 
-<a href="https://github.com/jingyaogong/minimind/network/members">
+<a href="https://github.com/1057237562/Instinct/network/members">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
-      <source media="(prefers-color-scheme: light)" srcset="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind"/>
-      <img alt="Fork poster" src="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
+      <source media="(prefers-color-scheme: dark)" srcset="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=1057237562&repo=Instinct&theme=dark"/>
+      <source media="(prefers-color-scheme: light)" srcset="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=1057237562&repo=Instinct"/>
+      <img alt="Fork poster" src="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=1057237562&repo=Instinct&theme=dark"/>
     </picture>
 </a>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=jingyaogong/minimind&type=Date&theme=dark"/>
-  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=jingyaogong/minimind&type=Date"/>
-  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=jingyaogong/minimind&type=Date&theme=dark"/>
+  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=1057237562/Instinct&type=Date&theme=dark"/>
+  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=1057237562/Instinct&type=Date"/>
+  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=1057237562/Instinct&type=Date&theme=dark"/>
 </picture>
 
-## 🎉 MiniMind Related Achievements
+## 🎉 Instinct Related Achievements
 
 This model has served as a stepping stone for several gratifying research outcomes. Thanks to the researchers for their recognition:
 
@@ -1975,14 +1975,14 @@ This model has served as a stepping stone for several gratifying research outcom
 
 # 🎓 Citation
 
-If `MiniMind` has been helpful to your research or work, feel free to cite:
+If `Instinct` has been helpful to your research or work, feel free to cite:
 
 ```bibtex
-@misc{minimind,
-  title = {MiniMind: Train a Tiny LLM from Scratch},
+@misc{instinct,
+  title = {Instinct: Train a Tiny LLM from Scratch},
   author = {Jingyao Gong},
   year = {2024},
-  url = {https://github.com/jingyaogong/minimind},
+  url = {https://github.com/1057237562/Instinct},
   note = {GitHub repository}
 }
 ```

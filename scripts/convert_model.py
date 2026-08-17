@@ -8,15 +8,15 @@ import torch
 import transformers
 import warnings
 from transformers import AutoTokenizer, AutoModelForCausalLM, Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
-from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
+from model.model_instinct import InstinctConfig, InstinctForCausalLM
 from model.model_lora import apply_lora, merge_lora
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
-def convert_torch2transformers_minimind(torch_path, transformers_path, dtype=torch.float16):
-    MiniMindConfig.register_for_auto_class()
-    MiniMindForCausalLM.register_for_auto_class("AutoModelForCausalLM")
-    lm_model = MiniMindForCausalLM(lm_config)
+def convert_torch2transformers_instinct(torch_path, transformers_path, dtype=torch.float16):
+    InstinctConfig.register_for_auto_class()
+    InstinctForCausalLM.register_for_auto_class("AutoModelForCausalLM")
+    lm_model = InstinctForCausalLM(lm_config)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     state_dict = torch.load(torch_path, map_location=device)
     lm_model.load_state_dict(state_dict, strict=False)
@@ -33,7 +33,7 @@ def convert_torch2transformers_minimind(torch_path, transformers_path, dtype=tor
         config = json.load(open(config_path, 'r', encoding='utf-8'))
         config['rope_theta'] = lm_config.rope_theta; config['rope_scaling'] = None; del config['rope_parameters']
         json.dump(config, open(config_path, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
-    print(f"模型已保存为 Transformers-MiniMind 格式: {transformers_path}")
+    print(f"模型已保存为 Transformers-Instinct 格式: {transformers_path}")
 
 
 # QwenForCausalLM/LlamaForCausalLM结构兼容生态
@@ -104,7 +104,7 @@ def convert_transformers2torch(transformers_path, torch_path):
 
 def convert_merge_base_lora(base_torch_path, lora_path, merged_torch_path):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    lm_model = MiniMindForCausalLM(lm_config).to(device)
+    lm_model = InstinctForCausalLM(lm_config).to(device)
     state_dict = torch.load(base_torch_path, map_location=device)
     lm_model.load_state_dict(state_dict, strict=False)
     apply_lora(lm_model)
@@ -126,11 +126,11 @@ def convert_json_to_jinja(json_file_path, output_path):
 
 
 if __name__ == '__main__':
-    lm_config = MiniMindConfig(hidden_size=768, num_hidden_layers=8, max_seq_len=8192, use_moe=False)
+    lm_config = InstinctConfig(hidden_size=768, num_hidden_layers=8, max_seq_len=8192, use_moe=False)
 
     # convert torch to transformers
     torch_path = f"../out/full_sft_{lm_config.hidden_size}{'_moe' if lm_config.use_moe else ''}.pth"
-    transformers_path = '../minimind-3'
+    transformers_path = '../instinct-3'
     convert_torch2transformers(torch_path, transformers_path)
 
     # # merge lora

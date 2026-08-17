@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Generate a formatted Chinese master's-thesis-style PDF from the LoopUS-MiniMind paper.
+"""Generate a formatted Chinese master's-thesis-style PDF from the LoopUS-Instinct paper.
 
 Structure (per CN thesis conventions):
   Cover (no page number) -> Declaration (no page number) ->
@@ -230,7 +230,7 @@ ABSTRACT_CN = (
     "(ii) <b>奖励驱动的早退训练</b>——将期望循环深度 $\\mathbb{E}[\\text{steps}]$ 以可微的存活链"
     "（survival chain）形式纳入训练损失，通过 $\\lambda\\cdot\\mathbb{E}[\\text{steps}]$ 项直接为"
     "\u201c更快退出\u201d提供梯度信号，使模型在保持预测质量的同时学会最小化计算开销。"
-    "我们在 MiniMind（64M Dense，自训练）上验证了核心机制：加载真实预训练权重后微调，平均循环步数"
+    "我们在 Instinct（64M Dense，自训练）上验证了核心机制：加载真实预训练权重后微调，平均循环步数"
     "随训练进程从接近安全上限（约 9.5）收敛至 1，同时总损失同步收敛（0.106 ± 0.009），证实了"
     "\u201c训练越充分、推理越早退\u201d的预期行为。该方法与 LayerSkip/PonderNet 等家族方法的不同之处在于："
     "退出决策与表征学习联合优化，早退步数由训练习得，而非依赖推理时的阈值精细调节。"
@@ -250,7 +250,7 @@ ABSTRACT_EN = (
     "(ii) <b>reward-driven early-exit training</b> — the expected loop depth "
     "$\\mathbb{E}[\\text{steps}]$ is accumulated through a differentiable survival chain and added to "
     "the loss as $\\lambda\\cdot\\mathbb{E}[\\text{steps}]$, giving a direct gradient signal to exit "
-    "earlier while preserving prediction quality. On MiniMind (64M Dense, trained from scratch) we "
+    "earlier while preserving prediction quality. On Instinct (64M Dense, trained from scratch) we "
     "verify the core mechanism: after fine-tuning from real pretrained weights, the average number of "
     "loop steps converges from near the safety cap (about 9.5) to 1, while the total loss converges "
     "to $0.106 \\pm 0.009$, confirming that the model exits earlier as training proceeds. Unlike the "
@@ -290,7 +290,7 @@ CHAPTERS = [
             ]),
             ("1.2 研究内容与贡献", [
                 "本文针对上述两点，提出<b>动态循环 + 奖励驱动早退</b>（Dynamic Looping with Reward-Driven "
-                "Early Exit），并在自研的 MiniMind（64M Dense）上实现与验证。核心贡献如下：",
+                "Early Exit），并在自研的 Instinct（64M Dense）上实现与验证。核心贡献如下：",
                 "（1）<b>动态循环</b>：移除固定 $N$。训练与推理中，每个样本独立循环，直至 $q \\ge q_{\\text{th}}$ "
                 "或到达安全上限 $\\text{cap}$（实际上不构成约束）。",
                 "（2）<b>可微深度奖励</b>：以存活链 $S_b = \\prod_{j \lt b}(1-q_j)$ 累积期望循环深度 "
@@ -379,12 +379,12 @@ CHAPTERS = [
         "第4章 研究结果与分析",
         [
             ("4.1 实验设置", [
-                "<b>基座</b>：MiniMind-3 Dense，64M 参数，8 层 Transformer，hidden size 768，词表 6400。"
+                "<b>基座</b>：Instinct-3 Dense，64M 参数，8 层 Transformer，hidden size 768，词表 6400。"
                 "加载公开预训练权重。",
                 "<b>循环结构</b>：encoder = 层 [0,1]；reasoning = 层 [2,3,4]；decoder = 层 [5,6,7]。安全上限 "
                 "$\\text{cap}=10$，阈值 $q_{\\text{th}}=0.75$，随机深度监督 $|\\mathcal{S}|=5$，$\\beta=0.5$，"
                 "$\\lambda=0.1$。",
-                "<b>数据</b>：以 MiniMind tokenizer 编码的重复中文文本（机器学习/自然语言主题），序列长 48，"
+                "<b>数据</b>：以 Instinct tokenizer 编码的重复中文文本（机器学习/自然语言主题），序列长 48，"
                 "batch 4，AdamW（lr=2e-4），60 次迭代。报告的总损失为第 3.3 节定义的训练目标 $\\mathcal{L}$"
                 "（含深度奖励项），而非纯语言建模损失。",
                 "<b>对照设置</b>：(a) 加载预训练权重、不训练；(b) 同上但开启动态循环 + 深度奖励训练。",

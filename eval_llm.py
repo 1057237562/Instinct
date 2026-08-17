@@ -4,7 +4,7 @@ import random
 import warnings
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
-from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
+from model.model_instinct import InstinctConfig, InstinctForCausalLM
 from model.model_lora import *
 from trainer.trainer_utils import setup_seed, get_model_params
 warnings.filterwarnings('ignore')
@@ -29,7 +29,7 @@ def logit_lens_explain(model, tokenizer, input_ids, attention_mask, top_k=5):
 def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
     if 'model' in args.load_from:
-        model = MiniMindForCausalLM(MiniMindConfig(
+        model = InstinctForCausalLM(InstinctConfig(
             hidden_size=args.hidden_size,
             num_hidden_layers=args.num_hidden_layers,
             use_moe=bool(args.use_moe),
@@ -47,7 +47,7 @@ def init_model(args):
     return model.half().eval().to(args.device), tokenizer
 
 def main():
-    parser = argparse.ArgumentParser(description="MiniMind模型推理与对话")
+    parser = argparse.ArgumentParser(description="Instinct模型推理与对话")
     parser.add_argument('--load_from', default='model', type=str, help="模型加载路径（model=原生torch权重，其他路径=transformers格式）")
     parser.add_argument('--save_dir', default='out', type=str, help="模型权重目录")
     parser.add_argument('--weight', default='full_sft', type=str, help="权重名称前缀（pretrain, full_sft, rlhf, reason, ppo_actor, grpo, spo）")

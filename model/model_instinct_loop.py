@@ -5,10 +5,10 @@ from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 
 # 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
-#                                 MiniMind Loop Config
+#                                 Instinct Loop Config
 # 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
-class MiniMindConfig(PretrainedConfig):
-    model_type = "minimind"
+class InstinctConfig(PretrainedConfig):
+    model_type = "instinct"
     def __init__(self, hidden_size=768, num_hidden_layers=8, use_moe=False, **kwargs):
         super().__init__(**kwargs)
         self.hidden_size = hidden_size
@@ -50,7 +50,7 @@ class MiniMindConfig(PretrainedConfig):
         self.use_input_injection = kwargs.get("use_input_injection", True)
 
 # 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
-#                                 MiniMind Loop Model
+#                                 Instinct Loop Model
 # 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-5):
@@ -94,7 +94,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     return (x[:, :, :, None, :].expand(bs, slen, num_key_value_heads, n_rep, head_dim).reshape(bs, slen, num_key_value_heads * n_rep, head_dim))
 
 class Attention(nn.Module):
-    def __init__(self, config: MiniMindConfig):
+    def __init__(self, config: InstinctConfig):
         super().__init__()
         self.num_key_value_heads = config.num_attention_heads if config.num_key_value_heads is None else config.num_key_value_heads
         self.n_local_heads = config.num_attention_heads
@@ -139,7 +139,7 @@ class Attention(nn.Module):
         return output, past_kv
 
 class FeedForward(nn.Module):
-    def __init__(self, config: MiniMindConfig, intermediate_size: int = None):
+    def __init__(self, config: InstinctConfig, intermediate_size: int = None):
         super().__init__()
         intermediate_size = intermediate_size or config.intermediate_size
         self.gate_proj = nn.Linear(config.hidden_size, intermediate_size, bias=False)
@@ -151,7 +151,7 @@ class FeedForward(nn.Module):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 class MOEFeedForward(nn.Module):
-    def __init__(self, config: MiniMindConfig):
+    def __init__(self, config: InstinctConfig):
         super().__init__()
         self.config = config
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
@@ -180,9 +180,9 @@ class MOEFeedForward(nn.Module):
             self.aux_loss = scores.new_zeros(1).squeeze()
         return y.view(batch_size, seq_len, hidden_dim)
 
-class MiniMindBlock(nn.Module):
+class InstinctBlock(nn.Module):
     """Standard transformer block (pre-norm with residual). Reused by loop model."""
-    def __init__(self, layer_id: int, config: MiniMindConfig):
+    def __init__(self, layer_id: int, config: InstinctConfig):
         super().__init__()
         self.self_attn = Attention(config)
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -199,7 +199,7 @@ class MiniMindBlock(nn.Module):
         hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
         return hidden_states, present_key_value
 
-class MiniMindLoopModel(nn.Module):
+class InstinctLoopModel(nn.Module):
     """
     Loop Transformer model with prelude → shared loop block → coda architecture.
 
@@ -218,7 +218,7 @@ class MiniMindLoopModel(nn.Module):
     Total effective depth = prelude_layers + loop_iters + coda_layers
     Unique transformer blocks = prelude_layers + 1 + coda_layers
     """
-    def __init__(self, config: MiniMindConfig):
+    def __init__(self, config: InstinctConfig):
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
@@ -232,15 +232,15 @@ class MiniMindLoopModel(nn.Module):
 
         # Prelude: unique transformer blocks (run once, freeze output for injection)
         self.prelude = nn.ModuleList([
-            MiniMindBlock(l, config) for l in range(self.prelude_layers)
+            InstinctBlock(l, config) for l in range(self.prelude_layers)
         ]) if self.prelude_layers > 0 else nn.ModuleList()
 
         # Loop: one shared transformer block, applied loop_iters times
-        self.loop_block = MiniMindBlock(0, config) if self.loop_iters > 0 else None
+        self.loop_block = InstinctBlock(0, config) if self.loop_iters > 0 else None
 
         # Coda: unique transformer blocks (run once after loop)
         self.coda = nn.ModuleList([
-            MiniMindBlock(self.prelude_layers + 1 + l, config)
+            InstinctBlock(self.prelude_layers + 1 + l, config)
             for l in range(self.coda_layers)
         ]) if self.coda_layers > 0 else nn.ModuleList()
 
@@ -375,14 +375,14 @@ class MiniMindLoopModel(nn.Module):
             return hidden_states, presents, aux_loss, intermediates
         return hidden_states, presents, aux_loss
 
-class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
-    config_class = MiniMindConfig
+class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
+    config_class = InstinctConfig
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
-    def __init__(self, config: MiniMindConfig = None):
-        self.config = config or MiniMindConfig()
+    def __init__(self, config: InstinctConfig = None):
+        self.config = config or InstinctConfig()
         super().__init__(self.config)
-        self.model = MiniMindLoopModel(self.config)
+        self.model = InstinctLoopModel(self.config)
         self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
         if self.config.tie_word_embeddings:
             self.model.embed_tokens.weight = self.lm_head.weight

@@ -7,7 +7,7 @@ if exist ".venv\Scripts\activate.bat" (
 )
 
 cd scripts
-echo Starting MiniMind Config WebUI...
+echo Starting Instinct Config WebUI...
 echo Open http://localhost:8501 in your browser
 echo Press Ctrl+C to stop
 echo.

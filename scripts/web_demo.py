@@ -15,9 +15,9 @@ import torch
 import numpy as np
 import streamlit as st
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
-from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
+from model.model_instinct import InstinctConfig, InstinctForCausalLM
 
-st.set_page_config(page_title="MiniMind", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Instinct", initial_sidebar_state="collapsed")
 
 st.markdown("""
     <style>
@@ -87,7 +87,7 @@ LANG_TEXTS = {
         'thinking': '思考',
         'tools': '工具',
         'language': '语言',
-        'send': '给 MiniMind 发送消息',
+        'send': '给 Instinct 发送消息',
         'disclaimer': 'AI 生成内容可能存在错误，请仔细核实',
         'think_tip': '自适应思考，目前多轮对话或Tool Call共存时思考不稳定',
         'tool_select': '工具选择（最多4个）',
@@ -113,7 +113,7 @@ LANG_TEXTS = {
         'thinking': 'Thinking',
         'tools': 'Tools',
         'language': 'Language',
-        'send': 'Send a message to MiniMind',
+        'send': 'Send a message to Instinct',
         'disclaimer': 'AI-generated content may be inaccurate, please verify',
         'think_tip': 'Adaptive thinking; may be unstable with multi-turn or Tool Call',
         'tool_select': 'Tool Selection (max 4)',
@@ -263,7 +263,7 @@ def setup_logit_lens(model, tokenizer, temperature=None, top_p=None, top_k_sampl
       * 单元 (第L层, 第k列) = 第 k 个 token 被采样前，第 L 层预测概率最大的 Top-1 token（含概率）
     —— 因此列的维度是"实际生成了多少个 token"，每个单元只展示 Top-1 数据。
 
-    实现：MiniMind 的 generate() 会把额外 kwargs 原样透传给 forward，而 forward 支持
+    实现：Instinct 的 generate() 会把额外 kwargs 原样透传给 forward，而 forward 支持
     layer_callback 钩子（每层算完即回调 normed 状态）。借助它即可在不复写生成循环的
     前提下，逐步采集每一生成步的各层 Top-1。最终层额外做与 generate() 相同的采样对齐
     （温度→top-k→top-p），使末行展示的正是采样器实际面对的分布；中间层保持原始 softmax。
@@ -385,9 +385,9 @@ def setup_logit_lens(model, tokenizer, temperature=None, top_p=None, top_k_sampl
 def load_model_tokenizer(config_path, tokenizer_path, weight_path=None):
     with open(config_path, 'r', encoding='utf-8') as f:
         cfg_dict = json.load(f)
-    config = MiniMindConfig(**cfg_dict)
+    config = InstinctConfig(**cfg_dict)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    model = MiniMindForCausalLM(config)
+    model = InstinctForCausalLM(config)
     if weight_path:
         state_dict = torch.load(weight_path, map_location='cpu', weights_only=True)
         model.load_state_dict(state_dict, strict=False)
@@ -490,7 +490,7 @@ st.session_state.tokenizer_path = tokenizer_path
 st.session_state.weight_path = weight_path
 
 ready = os.path.exists(config_path) and os.path.isdir(tokenizer_path)
-slogan = "MiniMind Chat"
+slogan = "Instinct Chat"
 
 if not st.session_state.get('model_loaded', False):
     if ready:
@@ -557,7 +557,7 @@ with st.sidebar.expander(get_text('tools')):
         if checked and len(st.session_state.selected_tools) < 4:
             st.session_state.selected_tools.append(name)
 
-image_url = "https://www.modelscope.cn/api/v1/studio/gongjy/MiniMind/repo?Revision=master&FilePath=images%2Flogo2.png&View=true"
+image_url = "https://raw.githubusercontent.com/1057237562/Instinct/main/images/logo2.png"
 
 st.markdown(
     f'<div style="display: flex; flex-direction: column; align-items: center; text-align: center; margin: 0; padding: 0;">'
@@ -629,7 +629,7 @@ def main():
         setup_seed(random_seed)
 
         tools = [t for t in TOOLS if t['function']['name'] in st.session_state.get('selected_tools', [])] or None
-        sys_prompt = [] if tools else [{"role": "system", "content": "你是MiniMind，一个乐于助人、知识渊博的AI助手。请用完整且友好的方式回答用户问题。"}]
+        sys_prompt = [] if tools else [{"role": "system", "content": "你是Instinct，一个乐于助人、知识渊博的AI助手。请用完整且友好的方式回答用户问题。"}]
         st.session_state.chat_messages = sys_prompt + st.session_state.chat_messages[-(st.session_state.history_chat_num + 1):]
         template_kwargs = {"tokenize": False, "add_generation_prompt": True}
         if st.session_state.get('enable_thinking', False):

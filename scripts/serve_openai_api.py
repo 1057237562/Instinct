@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
-from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
+from model.model_instinct import InstinctConfig, InstinctForCausalLM
 from model.model_lora import apply_lora, load_lora
 
 warnings.filterwarnings('ignore')
@@ -30,7 +30,7 @@ def init_model(args):
     if 'model' in args.load_from:
         moe_suffix = '_moe' if args.use_moe else ''
         ckp = f'../{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
-        model = MiniMindForCausalLM(MiniMindConfig(
+        model = InstinctForCausalLM(InstinctConfig(
             hidden_size=args.hidden_size,
             num_hidden_layers=args.num_hidden_layers,
             max_seq_len=args.max_seq_len,
@@ -43,7 +43,7 @@ def init_model(args):
             load_lora(model, f'../{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth')
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
-    print(f'MiniMind模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M(illion)')
+    print(f'Instinct模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M(illion)')
     return model.half().eval().to(device), tokenizer
 
 
@@ -221,7 +221,7 @@ async def chat_completions(request: ChatRequest):
                 "id": f"chatcmpl-{int(time.time())}",
                 "object": "chat.completion",
                 "created": int(time.time()),
-                "model": "minimind",
+                "model": "instinct",
                 "choices": [
                     {
                         "index": 0,
@@ -235,7 +235,7 @@ async def chat_completions(request: ChatRequest):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Server for MiniMind")
+    parser = argparse.ArgumentParser(description="Server for Instinct")
     parser.add_argument('--load_from', default='../model', type=str, help="模型加载路径（model=原生torch权重，其他路径=transformers格式）")
     parser.add_argument('--save_dir', default='out', type=str, help="模型权重目录")
     parser.add_argument('--weight', default='full_sft', type=str, help="权重名称前缀（pretrain, full_sft, dpo, reason, ppo_actor, grpo, spo）")

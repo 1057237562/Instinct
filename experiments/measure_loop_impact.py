@@ -4,9 +4,9 @@ Isolate the impact of the Looped structure on model accuracy and PPL.
 Three models, same pretrained start (out/pretrain_768.pth), same data, same
 training config (3 seeds x 80 iters, lr 2e-4, AdamW):
 
-  A) Standard MiniMind (8 fixed layers)                     — quality baseline
-  B) Looped MiniMind, depth_reward=0.1 (paper default)      — loop + reward
-  C) Looped MiniMind, depth_reward=0.0 (ablation)           — pure loop, no reward
+  A) Standard Instinct (8 fixed layers)                     — quality baseline
+  B) Looped Instinct, depth_reward=0.1 (paper default)      — loop + reward
+  C) Looped Instinct, depth_reward=0.0 (ablation)           — pure loop, no reward
 
 Measurements:
   1. Same-depth comparison: Standard(8 layers) vs Looped forced to k=1 step
@@ -25,8 +25,8 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
-from model.model_looped_minimind import LoopedMiniMindConfig, LoopedMiniMindForCausalLM
+from model.model_instinct import InstinctConfig, InstinctForCausalLM
+from model.model_looped_instinct import LoopedInstinctConfig, LoopedInstinctForCausalLM
 from transformers import AutoTokenizer
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -64,9 +64,9 @@ def make_batch(ids, batch_size, rng):
 
 
 def build_standard():
-    cfg = MiniMindConfig(hidden_size=768, num_hidden_layers=8, vocab_size=6400,
+    cfg = InstinctConfig(hidden_size=768, num_hidden_layers=8, vocab_size=6400,
                          flash_attn=False, inference_rope_scaling=False)
-    model = MiniMindForCausalLM(cfg).to(DEVICE)
+    model = InstinctForCausalLM(cfg).to(DEVICE)
     sd = torch.load("out/pretrain_768.pth", map_location=DEVICE)
     if "model_state_dict" in sd:
         sd = sd["model_state_dict"]
@@ -75,7 +75,7 @@ def build_standard():
 
 
 def build_looped(depth_reward):
-    cfg = LoopedMiniMindConfig(
+    cfg = LoopedInstinctConfig(
         hidden_size=768, num_hidden_layers=8, vocab_size=6400,
         flash_attn=False, inference_rope_scaling=False,
         loop_encoder_layers=[0, 1], loop_body_layers=[2, 3, 4],
@@ -83,7 +83,7 @@ def build_looped(depth_reward):
         q_threshold=Q_THRESHOLD, exit_in_training=True,
         n_supervision=N_SUPERVISION, beta=BETA, depth_reward=depth_reward,
     )
-    model = LoopedMiniMindForCausalLM(cfg).to(DEVICE)
+    model = LoopedInstinctForCausalLM(cfg).to(DEVICE)
     sd = torch.load("out/pretrain_768.pth", map_location=DEVICE)
     if "model_state_dict" in sd:
         sd = sd["model_state_dict"]

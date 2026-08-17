@@ -1,6 +1,6 @@
 """
 # 如果使用sglang加速，需通过以下命令首先启动（transformers格式）模型：
-python -m sglang.launch_server --model-path ./minimind-3 --attention-backend triton --host 0.0.0.0 --port 8998
+python -m sglang.launch_server --model-path ./instinct-3 --attention-backend triton --host 0.0.0.0 --port 8998
 """
 import os
 import sys

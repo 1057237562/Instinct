@@ -1,4 +1,4 @@
-# MiniMind
+# Instinct
 
 从零训练一个 64M 参数的小型语言模型:单张 RTX 3090、约 2 小时、成本几块钱。
 
@@ -47,7 +47,7 @@ pip install -r requirements.txt
 
 ```bash
 # 使用 Transformers 格式模型
-python eval_llm.py --load_from ./minimind-3
+python eval_llm.py --load_from ./instinct-3
 
 # 使用原生 torch 权重(out/ 目录下)
 python eval_llm.py --load_from model --weight full_sft
@@ -56,7 +56,7 @@ python eval_llm.py --load_from model --weight full_sft
 python eval_llm.py --weight full_sft --lora_weight lora_medical
 
 # 启用自适应思考
-python eval_llm.py --load_from ./minimind-3 --open_thinking 1
+python eval_llm.py --load_from ./instinct-3 --open_thinking 1
 
 # 启用 Early Exit 动态推理
 python eval_llm.py --weight full_sft --early_exit 1
@@ -132,7 +132,7 @@ python train_pretrain.py --from_resume 1
 ## 项目结构
 
 ```text
-model/          # MiniMindConfig / MiniMindForCausalLM / LoRA / 循环架构 / tokenizer 文件
+model/          # InstinctConfig / InstinctForCausalLM / LoRA / 循环架构 / tokenizer 文件
 trainer/        # 全部训练脚本(pretrain, SFT, LoRA, DPO, PPO, GRPO, Agent RL, KD, tokenizer)
 dataset/        # 数据集加载类(PretrainDataset, SFTDataset 等)+ 数据文件
 scripts/        # 推理、API 服务、WebUI、模型转换
@@ -147,8 +147,8 @@ eval_llm.py     # CLI 推理入口
 
 | 模型 | 参数量 | 说明 |
 |------|--------|------|
-| minimind-3 | 64M | Dense 主线(dim 768, 8 层, max_pos 32768) |
-| minimind-3-moe | 198M-A64M | 4 experts / top-1 routing |
+| instinct-3 | 64M | Dense 主线(dim 768, 8 层, max_pos 32768) |
+| instinct-3-moe | 198M-A64M | 4 experts / top-1 routing |
 
 循环深度架构(LoopUS)可在固定参数下增加有效深度,配合 Early Exit 在推理时按 token 动态选择退出层,以控制推理成本。
 
@@ -169,7 +169,7 @@ cd scripts && python serve_openai_api.py
 
 ```bash
 # 先将 transformers 格式模型复制到 scripts/ 下
-cp -r minimind-3 ./scripts/minimind-3
+cp -r instinct-3 ./scripts/instinct-3
 cd scripts && streamlit run web_demo.py
 ```
 
@@ -182,9 +182,9 @@ cd scripts && python convert_model.py
 
 ### 第三方推理框架
 
-- **llama.cpp**: 转换 GGUF 后使用(需在 `convert_hf_to_gguf.py` 中补充 MiniMind tokenizer 映射,可临时复用 `qwen2`)
-- **vllm**: `vllm serve /path/to/model --served-model-name "minimind"`
-- **ollama**: 通过 GGUF 文件创建本地模型,或 `ollama run jingyaogong/minimind-3`
+- **llama.cpp**: 转换 GGUF 后使用(需在 `convert_hf_to_gguf.py` 中补充 Instinct tokenizer 映射,可临时复用 `qwen2`)
+- **vllm**: `vllm serve /path/to/model --served-model-name "instinct"`
+- **ollama**: 通过 GGUF 文件创建本地模型,或 `ollama run 1057237562/instinct-3`
 
 ---
 
@@ -242,13 +242,13 @@ Apache License 2.0。详见 [LICENSE](./LICENSE)。
 
 ## 致谢与引用
 
-感谢开源社区与 MiniMind 原项目([jingyaogong/minimind](https://github.com/jingyaogong/minimind))的启发。
+感谢开源社区与 Instinct 原项目([1057237562/Instinct](https://github.com/1057237562/Instinct))的启发。
 
 ```bibtex
-@misc{minimind,
-  title = {MiniMind: Train a Tiny LLM from Scratch},
+@misc{instinct,
+  title = {Instinct: Train a Tiny LLM from Scratch},
   author = {Jingyao Gong},
   year = {2024},
-  url = {https://github.com/jingyaogong/minimind}
+  url = {https://github.com/1057237562/Instinct}
 }
 ```

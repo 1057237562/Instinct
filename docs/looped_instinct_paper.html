@@ -66,10 +66,10 @@ window.MathJax = {
 <div class="title">
   <h1>面向小语言模型的动态循环与奖励驱动早退机制</h1>
   <div class="en">Dynamic Looping with Reward-Driven Early Exit for Small Language Models</div>
-  <div class="meta">MiniMind Project &mdash; Technical Report</div>
+  <div class="meta">Instinct Project &mdash; Technical Report</div>
 </div>
 <hr class="rule">
-<div class="abstract"><span class="k">摘要：</span><p>循环计算（looped computation）通过在隐空间中重复执行推理模块，为预训练语言模型提供了一种不增加参数量即可扩展测试时计算（test-time compute, TTC）的手段。LoopUS 等现有方法依赖一个预先设定的固定循环次数上限 $N$，并在训练中仅通过置信度头（q-head）的辅助分类损失间接影响退出行为，早退决策本身并不参与优化目标。本文针对参数量约 64M 的小语言模型提出两项改进：(i) <strong>动态循环</strong>——彻底移除固定循环次数 $N$，循环在训练与推理中均按样本独立运行，直至置信度头判定"已足够"为止，仅保留一个实际不构成约束的安全上限；(ii) <strong>奖励驱动的早退训练</strong>——将期望循环深度 $\mathbb{E}[\text{steps}]$ 以可微的存活链（survival chain）形式纳入训练损失，通过 $\lambda\cdot\mathbb{E}[\text{steps}]$ 项直接为"更快退出"提供梯度信号，使模型在保持预测质量的同时学会最小化计算开销。我们在 MiniMind（64M Dense，自训练）上验证了核心机制：加载真实预训练权重后微调，平均循环步数随训练进程从接近安全上限（约 9.5）收敛至 1，同时总损失同步收敛（0.106 ± 0.009），证实了"训练越充分、推理越早退"的预期行为。该方法与 LayerSkip/PonderNet 等家族方法的不同之处在于：退出决策与表征学习联合优化，早退步数由训练习得，而非依赖推理时的阈值精细调节。</p><div class="kw"><p><strong>关键词</strong>：循环语言模型；动态推理；早退机制；测试时计算；小语言模型</p></div></div>
+<div class="abstract"><span class="k">摘要：</span><p>循环计算（looped computation）通过在隐空间中重复执行推理模块，为预训练语言模型提供了一种不增加参数量即可扩展测试时计算（test-time compute, TTC）的手段。LoopUS 等现有方法依赖一个预先设定的固定循环次数上限 $N$，并在训练中仅通过置信度头（q-head）的辅助分类损失间接影响退出行为，早退决策本身并不参与优化目标。本文针对参数量约 64M 的小语言模型提出两项改进：(i) <strong>动态循环</strong>——彻底移除固定循环次数 $N$，循环在训练与推理中均按样本独立运行，直至置信度头判定"已足够"为止，仅保留一个实际不构成约束的安全上限；(ii) <strong>奖励驱动的早退训练</strong>——将期望循环深度 $\mathbb{E}[\text{steps}]$ 以可微的存活链（survival chain）形式纳入训练损失，通过 $\lambda\cdot\mathbb{E}[\text{steps}]$ 项直接为"更快退出"提供梯度信号，使模型在保持预测质量的同时学会最小化计算开销。我们在 Instinct（64M Dense，自训练）上验证了核心机制：加载真实预训练权重后微调，平均循环步数随训练进程从接近安全上限（约 9.5）收敛至 1，同时总损失同步收敛（0.106 ± 0.009），证实了"训练越充分、推理越早退"的预期行为。该方法与 LayerSkip/PonderNet 等家族方法的不同之处在于：退出决策与表征学习联合优化，早退步数由训练习得，而非依赖推理时的阈值精细调节。</p><div class="kw"><p><strong>关键词</strong>：循环语言模型；动态推理；早退机制；测试时计算；小语言模型</p></div></div>
 
 
 <hr />
@@ -85,7 +85,7 @@ window.MathJax = {
 <p><strong>早退未进入优化目标</strong>。LoopUS 通过辅助损失 $L_Q = \text{BCE}(q, \text{accuracy})$ 训练 q-head 预测"当前步预测是否准确"，但退出决策本身（在哪一步停）并不产生梯度。模型没有直接的信号去学习"更早地退出"。对需要追求极致效率的小模型部署场景，这一缺失使得早退步数只能依赖推理时的阈值调节，而非训练习得。</p>
 </li>
 </ol>
-<p>本文针对上述两点，提出<strong>动态循环 + 奖励驱动早退</strong>（Dynamic Looping with Reward-Driven Early Exit），并在自研的 MiniMind（64M Dense）上实现与验证。我们的核心贡献如下：</p>
+<p>本文针对上述两点，提出<strong>动态循环 + 奖励驱动早退</strong>（Dynamic Looping with Reward-Driven Early Exit），并在自研的 Instinct（64M Dense）上实现与验证。我们的核心贡献如下：</p>
 <ul>
 <li><strong>动态循环</strong>：移除固定 $N$。训练与推理中，每个样本独立循环，直至 $q \ge q_{\text{th}}$ 或到达安全上限 $\text{cap}$（实际上不构成约束）。</li>
 <li><strong>可微深度奖励</strong>：以存活链 $S_b = \prod_{j&lt;b}(1-q_j)$ 累积期望循环深度 $\mathbb{E}[\text{steps}]=\sum_b S_b$，将 $\lambda\cdot\mathbb{E}[\text{steps}]$ 加入训练损失。该梯度信号直接鼓励"更快退出"，与语言建模损失联合优化，使早退步数由训练习得而非靠推理阈值调参。</li>
@@ -136,9 +136,9 @@ $$</p>
 <hr />
 <h2>4 实验</h2>
 <h3>4.1 实验设置</h3>
-<p><strong>基座</strong>：MiniMind-3 Dense，64M 参数，8 层 Transformer，hidden size 768，词表 6400。加载公开预训练权重 <code>pretrain_768.pth</code>。</p>
+<p><strong>基座</strong>：Instinct-3 Dense，64M 参数，8 层 Transformer，hidden size 768，词表 6400。加载公开预训练权重 <code>pretrain_768.pth</code>。</p>
 <p><strong>循环结构</strong>：encoder = 层 [0,1]；reasoning = 层 [2,3,4]；decoder = 层 [5,6,7]。安全上限 $\text{cap}=10$，阈值 $q_{\text{th}}=0.75$，随机深度监督 $|\mathcal{S}|=5$，$\beta=0.5$，$\lambda=0.1$，<code>exit_in_training=True</code>。</p>
-<p><strong>数据</strong>：以 MiniMind tokenizer 编码的重复中文文本（机器学习/自然语言主题），序列长 48，batch 4，AdamW（lr=2e-4），60 次迭代。§4.2 报告的总损失为 §3.3 定义的训练目标 $\mathcal{L}$（含深度奖励项 $\lambda\cdot\mathbb{E}[\text{steps}]$），而非纯语言建模损失。</p>
+<p><strong>数据</strong>：以 Instinct tokenizer 编码的重复中文文本（机器学习/自然语言主题），序列长 48，batch 4，AdamW（lr=2e-4），60 次迭代。§4.2 报告的总损失为 §3.3 定义的训练目标 $\mathcal{L}$（含深度奖励项 $\lambda\cdot\mathbb{E}[\text{steps}]$），而非纯语言建模损失。</p>
 <p><strong>对照设置</strong>：(a) 加载预训练权重、不训练；(b) 同上但开启动态循环 + 深度奖励训练。</p>
 <h3>4.2 核心结果：循环步数随训练递减</h3>
 <p>表 1 报告了 5 个随机种子下的均值 ± 标准差（每次迭代在固定中文重复文本上微调，配置同 §4.1）。<code>iter 0</code> 表示仅加载预训练权重、不做任何训练时的行为。</p>
@@ -245,6 +245,6 @@ $$</p>
 <h2>参考文献</h2>
 <ol class="refs"><li>[1] T. Schuster et al. <em>Confident Adaptive Language Modeling</em>. NeurIPS 2022. (CALM)</li><li>[2] M. Elhoushi et al. <em>LayerSkip: Enabling Early Exit Inference and Self-Speculative Decoding</em>. ACL 2024.</li><li>[3] S. Teerapittayanon et al. <em>BranchyNet: Fast Inference via Early Exiting from Deep Neural Networks</em>. ICPR 2016.</li><li>[4] D. Raposo et al. <em>Mixture-of-Depths: Dynamically allocating compute in transformer-based language models</em>. 2024.</li><li>[5] A. Graves. <em>Adaptive Computation Time for Recurrent Neural Networks</em>. 2016.</li><li>[6] M. Dehghani et al. <em>Universal Transformers</em>. ICLR 2019.</li><li>[7] S. Bae et al. <em>Mixture-of-Recursions: Learning Dynamic Recursive Depths for Adaptive Token-Level Computation</em>. 2025.</li><li>[8] R. Zhu et al. <em>Scaling Latent Reasoning via Looped Language Models</em>. 2025.</li><li>[9] T. Park et al. <em>LoopUS: Recasting Pretrained LLMs into Looped Latent Refinement Models</em>. 2026.</li><li>[10] J. Xin et al. <em>DeeBERT: Dynamic Early Exiting for Accelerating BERT Inference</em>. ACL 2020.</li><li>[11] W. Liu et al. <em>FastBERT: a Self-distilling BERT with Adaptive Inference Time</em>. ACL 2020.</li><li>[12] W. Zhou et al. <em>BERT Loses Patience: Fast and Robust Inference with Early Exit</em>. NeurIPS 2020.</li><li>[13] A. Banino et al. <em>PonderNet: Learning to Ponder</em>. ICML 2021.</li><li>[14] S. Bae et al. <em>Relaxed Recursive Transformers: Effective Parameter Sharing with Layer-wise LoRA</em>. ICLR 2025.</li></ol>
 <hr />
-<p><em>注：本论文基于 MiniMind 仓库中 model/model_looped_minimind.py 的实际实现撰写；§4.2 实验结果来自真实预训练权重（pretrain_768.pth）上的微调验证，可复现。</em></p>
+<p><em>注：本论文基于 Instinct 仓库中 model/model_looped_instinct.py 的实际实现撰写；§4.2 实验结果来自真实预训练权重（pretrain_768.pth）上的微调验证，可复现。</em></p>
 </body>
 </html>

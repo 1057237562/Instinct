@@ -56,7 +56,7 @@ def main():
         for t in texts:
             f.write(json.dumps({"text": t}, ensure_ascii=False) + "\n")
 
-    # token stats (MiniMind tokenizer, ~1.5-1.7 chars/token for Chinese)
+    # token stats (Instinct tokenizer, ~1.5-1.7 chars/token for Chinese)
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained("model", trust_remote_code=True)
     lens = [len(tok.encode(t)) for t in texts]

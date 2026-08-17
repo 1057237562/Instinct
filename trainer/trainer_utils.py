@@ -15,8 +15,8 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import Sampler
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
-from model.model_minimind import MiniMindForCausalLM, MiniMindConfig
-from model.model_minimind_loop import MiniMindConfig as LoopedMiniMindConfig, MiniMindForCausalLM as LoopedMiniMindForCausalLM
+from model.model_instinct import InstinctForCausalLM, InstinctConfig
+from model.model_instinct_loop import InstinctConfig as LoopedInstinctConfig, InstinctForCausalLM as LoopedInstinctForCausalLM
 
 def get_model_params(model, config):
     total = sum(p.numel() for p in model.parameters()) / 1e6
@@ -49,9 +49,9 @@ def config_from_args(args, **overrides):
         cfg_dict['use_moe'] = use_moe
         cfg_dict.update(overrides)
         use_looped = use_looped or cfg_dict.get('model_architecture') == 'looped'
-        cfg_cls = LoopedMiniMindConfig if use_looped else MiniMindConfig
+        cfg_cls = LoopedInstinctConfig if use_looped else InstinctConfig
         return cfg_cls(**cfg_dict)
-    cfg_cls = LoopedMiniMindConfig if use_looped else MiniMindConfig
+    cfg_cls = LoopedInstinctConfig if use_looped else InstinctConfig
     return cfg_cls(
         hidden_size=hidden_size,
         num_hidden_layers=num_hidden_layers,
@@ -290,16 +290,16 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
 
 def init_model(lm_config, from_weight='pretrain', tokenizer_path='../model', save_dir='../out', device='cuda'):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    if isinstance(lm_config, LoopedMiniMindConfig):
-        model = LoopedMiniMindForCausalLM(lm_config)
+    if isinstance(lm_config, LoopedInstinctConfig):
+        model = LoopedInstinctForCausalLM(lm_config)
     else:
-        model = MiniMindForCausalLM(lm_config)
+        model = InstinctForCausalLM(lm_config)
 
     if from_weight != 'none':
         moe_suffix = '_moe' if lm_config.use_moe else ''
         weight_path = f'{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
         weights = torch.load(weight_path, map_location=device)
-        if isinstance(model, LoopedMiniMindForCausalLM):
+        if isinstance(model, LoopedInstinctForCausalLM):
             model.load_pretrained_weights(weights)
         else:
             model.load_state_dict(weights, strict=False)
