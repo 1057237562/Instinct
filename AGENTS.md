@@ -15,22 +15,25 @@ eval_llm.py     # CLI inference script
 
 ## Essential commands
 
-### Training (all run from `trainer/`)
+### Training (all run from repo root)
 ```bash
-cd trainer
-
 # Single GPU
-python train_pretrain.py
-python train_full_sft.py
+python trainer/train_pretrain.py
+python trainer/train_full_sft.py
 
 # Multi-GPU (DDP)
-torchrun --nproc_per_node N train_pretrain.py
-torchrun --nproc_per_node N train_full_sft.py
+torchrun --nproc_per_node N trainer/train_pretrain.py
+torchrun --nproc_per_node N trainer/train_full_sft.py
 ```
+
+### Precision knobs (all 8 trainers + WebUI)
+- `--dtype bfloat16|float16|fp32` — activation compute precision (autocast; fp32 = no autocast)
+- `--param_dtype fp32|bf16|fp16` — parameter precision (fp32 = master weights; bf16/fp16 = weights cast directly)
+- `--kv_cache_dtype fp32|bf16|fp16|fp8_e4m3|fp8_e5m2` — KV cache precision (fp8 = per-(batch,head) quantized cache, half decode bandwidth; affects generation/RL rollouts)
 
 ### Resume from checkpoint
 ```bash
-cd trainer && python train_pretrain.py --from_resume 1
+python trainer/train_pretrain.py --from_resume 1
 # Checkpoints: checkpoints/{weight}_{dim}_resume.pth
 # Model weights: out/{weight}_{dim}.pth
 ```
@@ -85,11 +88,14 @@ cd scripts && streamlit run web_demo.py
 Training scripts and `scripts/` files set `__package__` + `sys.path.append` to resolve imports from the repo root. This is intentional — do NOT refactor away without understanding the import chain.
 
 ### Working directory matters
-- **Training scripts**: MUST run from `trainer/` directory. Data paths default to `../dataset/`, model paths to `../model/`, output to `../out/`
+- **Training scripts**: MUST run from repo root. Data paths default to `./dataset/`, model paths to `./model/`, output to `./out/`, checkpoints to `./checkpoints/`. Reward model (`../internlm2-1_8b-reward`) lives as a sibling directory of the repo
 - **API server / WebUI**: MUST run from `scripts/` directory
 
 ### Windows workaround
 `trainer/` scripts import `datasets` before `torch` to work around a known pyarrow/torch DLL conflict on Windows. Do NOT reorder or remove.
+
+### Windows + torch.compile (`--use_compile 1`)
+`torch.compile` on Windows **requires UTF-8 mode** — torch's own inductor template files (e.g. `torch/_inductor/kernel/mm_grouped.py`) crash with `UnicodeDecodeError: 'gbk' codec can't decode` otherwise. Set `PYTHONUTF8=1` in the environment of the training process (WebUI launches already inject it).
 
 ### Swarmed (WandB replacement)
 WandB is blocked in China. Training scripts use `swanlab` by default; API is compatible with WandB calls. Set `--use_wandb` to enable logging.

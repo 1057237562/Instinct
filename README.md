@@ -66,20 +66,16 @@ python eval_llm.py --weight full_sft --early_exit 1
 
 ## 训练管线
 
-所有训练脚本需在 `trainer/` 目录下运行:
-
-```bash
-cd trainer
-```
+所有训练脚本在仓库根目录运行(无需进入 `trainer/` 目录):
 
 ### 1. 预训练(Pretrain,必须)
 
 ```bash
 # 单卡
-python train_pretrain.py
+python trainer/train_pretrain.py
 
 # 多卡 DDP
-torchrun --nproc_per_node N train_pretrain.py
+torchrun --nproc_per_node N trainer/train_pretrain.py
 ```
 
 输出权重:`out/pretrain_{hidden_size}.pth`(默认 768)。
@@ -87,7 +83,7 @@ torchrun --nproc_per_node N train_pretrain.py
 ### 2. 指令微调(SFT,必须)
 
 ```bash
-python train_full_sft.py
+python trainer/train_full_sft.py
 ```
 
 SFT 必须基于预训练权重(`--from_weight pretrain`)。输出:`out/full_sft_{hidden_size}.pth`。
@@ -109,7 +105,7 @@ SFT 必须基于预训练权重(`--from_weight pretrain`)。输出:`out/full_sft
 所有训练脚本支持检查点恢复:
 
 ```bash
-python train_pretrain.py --from_resume 1
+python trainer/train_pretrain.py --from_resume 1
 ```
 
 检查点保存在 `./checkpoints/`,命名 `<权重名>_<维度>_resume.pth`,跨 GPU 数量变化亦可恢复。
@@ -228,7 +224,7 @@ cd scripts && python convert_model.py
 
 ## 注意事项
 
-- **工作目录**: 训练脚本必须从 `trainer/` 运行,数据默认指向 `../dataset/`,权重输出到 `../out/`;API / WebUI 需在 `scripts/` 下运行
+- **工作目录**: 训练脚本在仓库根目录运行,数据默认指向 `./dataset/`,权重输出到 `./out/`;API / WebUI 需在 `scripts/` 下运行
 - **Windows**: 训练脚本先 import `datasets` 再 import `torch`,以规避 pyarrow/torch DLL 冲突,勿调整顺序
 - **日志工具**: WandB 在国内常不可直连,默认使用 SwanLab(API 兼容),需要时加 `--use_wandb`
 - **奖励模型**: PPO / GRPO 使用的 `internlm2-1_8b-reward` 需放在仓库同级目录(非仓库内)
