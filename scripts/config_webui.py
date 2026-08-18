@@ -1731,6 +1731,33 @@ with st.sidebar:
             help="AdamW (默认) / Adafactor (torch 内置) / Muon (torch>=2.10 内置，"
                  "否则自动回退到原生纯 PyTorch 实现)",
         )
+        st.checkbox(
+            "Use torch.compile (Triton)",
+            value=st.session_state.get("use_compile", True),
+            key="use_compile",
+            help="启用 torch.compile (Triton 后端)，实测约 40% 提速；MoE/Loop 变体兼容性请自行验证",
+        )
+        st.selectbox(
+            "参数精度 (param_dtype)",
+            ["fp32", "bf16", "fp16"],
+            index=["fp32", "bf16", "fp16"].index(st.session_state.get("param_dtype", "fp32")),
+            key="param_dtype",
+            help="模型参数精度：fp32=主权重(推荐)；bf16/fp16=训练时权重直接 cast",
+        )
+        st.selectbox(
+            "激活层精度 (dtype)",
+            ["bfloat16", "float16", "fp32"],
+            index=["bfloat16", "float16", "fp32"].index(st.session_state.get("activation_dtype", "bfloat16")),
+            key="activation_dtype",
+            help="激活层计算精度：bfloat16(推荐) / float16 / fp32(纯精度，慢)",
+        )
+        st.selectbox(
+            "KV Cache 精度 (kv_cache_dtype)",
+            ["fp32", "bf16", "fp16", "fp8_e4m3", "fp8_e5m2"],
+            index=["fp32", "bf16", "fp16", "fp8_e4m3", "fp8_e5m2"].index(st.session_state.get("kv_cache_dtype", "fp32")),
+            key="kv_cache_dtype",
+            help="KV Cache 精度：fp8 量化缓存，decode 带宽减半(影响 RL rollouts 与推理)",
+        )
         if st.button("Start Training", use_container_width=True, key="btn_start_train"):
             st.session_state.train_triggered = True
         if st.session_state.get("train_status") == "running":
@@ -1790,6 +1817,11 @@ if st.session_state.get("train_triggered", False):
                     "--use_moe", "1" if cfg["use_moe"] else "0",
                 ])
                 cmd.extend(["--optimizer", st.session_state.get("optimizer", "adamw")])
+                cmd.extend(["--dtype", st.session_state.get("activation_dtype", "bfloat16")])
+                cmd.extend(["--param_dtype", st.session_state.get("param_dtype", "fp32")])
+                cmd.extend(["--kv_cache_dtype", st.session_state.get("kv_cache_dtype", "fp32")])
+                if st.session_state.get("use_compile", True):
+                    cmd.extend(["--use_compile", "1"])
                 if train_type == "lora":
                     cmd.extend(["--lora_name", save_prefix])
                 else:
@@ -1802,10 +1834,10 @@ if st.session_state.get("train_triggered", False):
                     cmd.extend(["--from_resume", "1"])
                 if train_type == "pretrain":
                     suffix = "_mini" if st.session_state.get("dataset_size", "mini") == "mini" else ""
-                    cmd.extend(["--data_path", f"../dataset/pretrain_t2t{suffix}.jsonl"])
+                    cmd.extend(["--data_path", f"./dataset/pretrain_t2t{suffix}.jsonl"])
                 elif train_type in ("full_sft", "distillation"):
                     suffix = "_mini" if st.session_state.get("dataset_size", "mini") == "mini" else ""
-                    cmd.extend(["--data_path", f"../dataset/sft_t2t{suffix}.jsonl"])
+                    cmd.extend(["--data_path", f"./dataset/sft_t2t{suffix}.jsonl"])
                 logs_dir = os.path.join(trainer_dir, "logs")
                 os.makedirs(logs_dir, exist_ok=True)
                 log_path = os.path.join(logs_dir, f"train_{save_prefix}.log")
@@ -1815,12 +1847,15 @@ if st.session_state.get("train_triggered", False):
                         seq += 1
                         log_path = os.path.join(logs_dir, f"train_{save_prefix}_{seq}.log")
                 log_file = open(log_path, "a" if from_resume else "w", encoding="utf-8")
+                log_file.write(f"# torch.compile (Triton): {'ON' if st.session_state.get('use_compile', True) else 'OFF'}\n")
+                log_file.flush()
                 st.session_state.train_log_path = log_path
                 st.session_state.train_proc = subprocess.Popen(
                     cmd,
-                    cwd=trainer_dir,
+                    cwd=os.path.dirname(trainer_dir),
                     stdout=log_file,
                     stderr=subprocess.STDOUT,
+                    env={**os.environ, "PYTHONUTF8": "1"},  # Windows: torch.compile 需 UTF-8 模式，否则 gbk 解码崩溃
                 )
                 st.session_state.train_status = "running"
         except Exception:
