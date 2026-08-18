@@ -3,6 +3,8 @@ from torch import nn
 from transformers.activations import ACT2FN
 from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
+from model.flash_attn_4 import flash_attention
+from model.kv_cache_quant import parse_cache, make_cache
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,8 @@ class InstinctConfig(PretrainedConfig):
         self.bos_token_id = kwargs.get("bos_token_id", 1)
         self.eos_token_id = kwargs.get("eos_token_id", 2)
         self.flash_attn = kwargs.get("flash_attn", True)
+        self.param_dtype = kwargs.get("param_dtype", "fp32")
+        self.kv_cache_dtype = kwargs.get("kv_cache_dtype", "fp32")
         self.num_attention_heads = kwargs.get("num_attention_heads", 8)
         self.num_key_value_heads = kwargs.get("num_key_value_heads", 4)
         self.head_dim = kwargs.get("head_dim", self.hidden_size // self.num_attention_heads)
@@ -284,6 +288,7 @@ class Attention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.dropout = config.dropout
+        self.kv_cache_dtype = getattr(config, 'kv_cache_dtype', 'fp32')
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention') and config.flash_attn
 
     def forward(self, x, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
@@ -296,18 +301,23 @@ class Attention(nn.Module):
         cos, sin = position_embeddings
         xq, xk = apply_rotary_pos_emb(xq, xk, cos, sin)
         if past_key_value is not None:
-            xk = torch.cat([past_key_value[0], xk], dim=1)
-            xv = torch.cat([past_key_value[1], xv], dim=1)
-        past_kv = (xk, xv) if use_cache else None
-        xq, xk, xv = (xq.transpose(1, 2), repeat_kv(xk, self.n_rep).transpose(1, 2), repeat_kv(xv, self.n_rep).transpose(1, 2))
+            k_past, v_past = parse_cache(past_key_value)
+            k_past = k_past.to(xq.dtype)
+            v_past = v_past.to(xq.dtype)
+            xk = torch.cat([k_past, xk], dim=1)
+            xv = torch.cat([v_past, xv], dim=1)
+        past_kv = make_cache(xk, xv, self.kv_cache_dtype) if use_cache else None
         if self.flash and (seq_len > 1) and (past_key_value is None) and (attention_mask is None or torch.all(attention_mask == 1)):
-            output = F.scaled_dot_product_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
+            # FA4 / SDPA fused fast path: 输入输出布局 (bs, seq, heads, hd),kernel 内部处理 GQA
+            output = flash_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
+            output = output.reshape(bsz, seq_len, -1)
         else:
+            xq, xk, xv = (xq.transpose(1, 2), repeat_kv(xk, self.n_rep).transpose(1, 2), repeat_kv(xv, self.n_rep).transpose(1, 2))
             scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
             scores[:, :, :, -seq_len:] += torch.full((seq_len, seq_len), float("-inf"), device=scores.device).triu(1)
             if attention_mask is not None: scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
             output = self.attn_dropout(F.softmax(scores.float(), dim=-1).type_as(xq)) @ xv
-        output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
+            output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
         output = self.resid_dropout(self.o_proj(output))
         return output, past_kv
 
