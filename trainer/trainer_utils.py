@@ -36,6 +36,8 @@ def is_main_process():
 
 
 def config_from_args(args, **overrides):
+    overrides.setdefault('param_dtype', getattr(args, 'param_dtype', 'fp32'))
+    overrides.setdefault('kv_cache_dtype', getattr(args, 'kv_cache_dtype', 'fp32'))
     hidden_size = overrides.pop('hidden_size', getattr(args, 'hidden_size', 768))
     num_hidden_layers = overrides.pop('num_hidden_layers', getattr(args, 'num_hidden_layers', 8))
     use_moe = overrides.pop('use_moe', bool(getattr(args, 'use_moe', 0)))
@@ -224,7 +226,7 @@ def build_optimizer(params, lr, optimizer='adamw', **kwargs):
     raise ValueError(f"未知优化器: {optimizer}，可选: adamw / adafactor / muon")
 
 
-def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='../checkpoints', **kwargs):
+def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='./checkpoints', **kwargs):
     os.makedirs(save_dir, exist_ok=True)
     moe_path = '_moe' if lm_config.use_moe else ''
     ckp_path = f'{save_dir}/{weight}_{lm_config.hidden_size}{moe_path}.pth'
@@ -288,7 +290,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
         return None
 
 
-def init_model(lm_config, from_weight='pretrain', tokenizer_path='../model', save_dir='../out', device='cuda'):
+def init_model(lm_config, from_weight='pretrain', tokenizer_path='./model', save_dir='./out', device='cuda'):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     if isinstance(lm_config, LoopedInstinctConfig):
         model = LoopedInstinctForCausalLM(lm_config)
@@ -306,6 +308,9 @@ def init_model(lm_config, from_weight='pretrain', tokenizer_path='../model', sav
 
     get_model_params(model, lm_config)
     Logger(f'Trainable Params: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f}M')
+    param_dtype = getattr(lm_config, 'param_dtype', 'fp32')
+    if param_dtype != 'fp32':
+        model = model.to({'bf16': torch.bfloat16, 'fp16': torch.float16}[param_dtype])
     return model.to(device), tokenizer
 
 
