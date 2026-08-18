@@ -183,6 +183,55 @@ class MuonOptimizer(torch.optim.Optimizer):
         return loss
 
 
+class CombinedOptimizer(torch.optim.Optimizer):
+    """将多个 PyTorch 优化器组合为一个 Optimizer-like 接口。
+
+    背景：`torch.optim.Muon`（torch>=2.10 内置）只接受 2D 参数矩阵，
+    模型中的 1D 参数（RMSNorm 权重、bias 等）必须交给 AdamW 处理。
+    为保持训练脚本的调用方式不变（step / zero_grad / param_groups /
+    state_dict / load_state_dict），把两个子优化器包成一个对外兼容的对象：
+
+    - `param_groups` 直接拼接子优化器的 param_groups（同一 dict 对象），
+      训练脚本里 `param_group['lr'] = lr` 的调度方式对子优化器透明生效；
+    - `step` / `zero_grad` 依次转发给所有子优化器；
+    - `state_dict` / `load_state_dict` 以 `{"optimizers": [...]}` 格式存取。
+    """
+
+    def __init__(self, optimizers):
+        optimizers = list(optimizers)
+        if not optimizers:
+            raise ValueError("optimizers 不能为空")
+        self.optimizers = optimizers
+        # 拼接子优化器的 param_groups（共享 dict 对象），超参由子优化器各自管理
+        param_groups = [g for opt in optimizers for g in opt.param_groups]
+        super().__init__(param_groups, defaults={})
+
+    def zero_grad(self, *args, **kwargs):
+        for opt in self.optimizers:
+            opt.zero_grad(*args, **kwargs)
+
+    def step(self, closure=None):
+        for opt in self.optimizers:
+            if closure is None:
+                opt.step()
+            else:
+                opt.step(closure)
+
+    def state_dict(self):
+        return {"optimizers": [opt.state_dict() for opt in self.optimizers]}
+
+    def load_state_dict(self, state_dict):
+        if "optimizers" not in state_dict:
+            raise ValueError(
+                "检查点中的优化器状态不是 CombinedOptimizer 格式（可能由旧版 "
+                "MuonOptimizer 或其它优化器保存）。跨格式恢复 Muon 训练状态不受支持，"
+                "请改用 --from_weight 从模型权重继续，而非 --from_resume。"
+            )
+        for opt, sd in zip(self.optimizers, state_dict["optimizers"]):
+            opt.load_state_dict(sd)
+        self.param_groups = [g for opt in self.optimizers for g in opt.param_groups]
+
+
 _OPTIMIZER_ALIASES = {
     'adamw': 'adamw',
     'adafactor': 'adafactor',
@@ -203,8 +252,9 @@ def build_optimizer(params, lr, optimizer='adamw', **kwargs):
     说明:
         - AdamW    -> torch.optim.AdamW（保持原有默认行为）
         - Adafactor-> torch.optim.Adafactor（显式 lr，关闭自动相对步长）
-        - Muon     -> 优先 torch.optim.Muon（torch>=2.10 内置）；
-                      否则回退到原生 MuonOptimizer（纯 PyTorch 实现，超参一致）
+        - Muon     -> 2D 参数交给 Muon（优先 torch.optim.Muon，torch>=2.10 内置；
+                      否则回退到原生 MuonOptimizer）；1D 参数（RMSNorm 权重/bias 等）
+                      交给 AdamW。两类都存在时组合为 CombinedOptimizer 返回。
     """
     name = _OPTIMIZER_ALIASES.get(str(optimizer).strip().lower(), str(optimizer).strip().lower())
     if name == 'adamw':
@@ -220,9 +270,18 @@ def build_optimizer(params, lr, optimizer='adamw', **kwargs):
             defaults.update(kwargs)
         return torch.optim.Adafactor(params, **defaults)
     if name == 'muon':
+        params = list(params)
+        matrix_params = [p for p in params if p.ndim == 2]
+        other_params = [p for p in params if p.ndim != 2]
+        if not matrix_params:
+            return torch.optim.AdamW(other_params, lr=lr)
         if hasattr(torch.optim, 'Muon'):
-            return torch.optim.Muon(params, lr=lr, **kwargs)
-        return MuonOptimizer(params, lr=lr, **kwargs)
+            muon_opt = torch.optim.Muon(matrix_params, lr=lr, **kwargs)
+        else:
+            muon_opt = MuonOptimizer(matrix_params, lr=lr, **kwargs)
+        if not other_params:
+            return muon_opt
+        return CombinedOptimizer([muon_opt, torch.optim.AdamW(other_params, lr=lr)])
     raise ValueError(f"未知优化器: {optimizer}，可选: adamw / adafactor / muon")
 
 

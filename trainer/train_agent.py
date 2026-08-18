@@ -406,6 +406,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb记录")
     parser.add_argument("--wandb_project", type=str, default="Instinct-Agent-RL", help="wandb项目名称")
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile")
+    parser.add_argument("--compile_mode", type=str, default="default", choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"], help="torch.compile 模式（default=Triton 编译；reduce-overhead=叠加 CUDA graph，小模型首选；max-autotune=极限调优，编译极慢）")
     parser.add_argument("--debug_mode", action="store_true", help="调试模式")
     parser.add_argument("--debug_interval", type=int, default=20, help="调试日志间隔")
     parser.add_argument("--thinking_ratio", type=float, default=0.1, help="按概率开启thinking（0.0~1.0）")
@@ -472,7 +473,7 @@ if __name__ == "__main__":
         start_step = ckp_data.get('step', 0)
 
     if args.use_compile == 1:
-        model = torch.compile(model)
+        model = torch.compile(model, mode=args.compile_mode)
         Logger('torch.compile enabled')
         rollout_engine.update_policy(model)
     if dist.is_initialized():

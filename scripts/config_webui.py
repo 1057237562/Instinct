@@ -1721,6 +1721,22 @@ with st.sidebar:
                 st.rerun()
         st.checkbox("Resume from checkpoint (--from_resume)", value=False, key="from_resume",
                     help="Auto-detect and resume from checkpoints/{weight}_{dim}{_moe}_resume.pth")
+        st.number_input(
+            "batch_size",
+            min_value=1, max_value=512,
+            value=st.session_state.get("batch_size", 32),
+            step=8, key="batch_size",
+            help="批次大小。小模型 GPU 利用率低时，可提升到 64/128 放大单步 GEMM "
+                 "(注意：batch×seq 与激活显存成正比，过高会 OOM)",
+        )
+        st.number_input(
+            "max_seq_len (训练截断长度)",
+            min_value=64, max_value=8192,
+            value=st.session_state.get("max_seq_len", 768),
+            step=32, key="max_seq_len",
+            help="训练最大截断长度（token 数）。mini 数据建议 768（旧默认 340 过低，"
+                 "导致 GEMM 尺寸小、GPU 利用率低）",
+        )
         st.selectbox(
             "Optimizer",
             ["adamw", "adafactor", "muon"],
@@ -1736,6 +1752,18 @@ with st.sidebar:
             value=st.session_state.get("use_compile", True),
             key="use_compile",
             help="启用 torch.compile (Triton 后端)，实测约 40% 提速；MoE/Loop 变体兼容性请自行验证",
+        )
+        st.selectbox(
+            "torch.compile mode",
+            ["default", "reduce-overhead", "max-autotune"],
+            index=["default", "reduce-overhead", "max-autotune"].index(
+                st.session_state.get("compile_mode", "reduce-overhead")
+            ),
+            key="compile_mode",
+            disabled=not st.session_state.get("use_compile", True),
+            help="default=Triton 编译（现状）；reduce-overhead=叠加 CUDA graph，"
+                 "消除 kernel launch 间隙，小模型首选（MoE 动态路由可能部分 fallback，无碍）；"
+                 "max-autotune=极限调优，编译极慢",
         )
         st.selectbox(
             "参数精度 (param_dtype)",
@@ -1816,12 +1844,15 @@ if st.session_state.get("train_triggered", False):
                     "--num_hidden_layers", str(cfg["num_hidden_layers"]),
                     "--use_moe", "1" if cfg["use_moe"] else "0",
                 ])
+                cmd.extend(["--batch_size", str(st.session_state.get("batch_size", 32))])
+                cmd.extend(["--max_seq_len", str(st.session_state.get("max_seq_len", 768))])
                 cmd.extend(["--optimizer", st.session_state.get("optimizer", "adamw")])
                 cmd.extend(["--dtype", st.session_state.get("activation_dtype", "bfloat16")])
                 cmd.extend(["--param_dtype", st.session_state.get("param_dtype", "fp32")])
                 cmd.extend(["--kv_cache_dtype", st.session_state.get("kv_cache_dtype", "fp32")])
                 if st.session_state.get("use_compile", True):
                     cmd.extend(["--use_compile", "1"])
+                    cmd.extend(["--compile_mode", st.session_state.get("compile_mode", "reduce-overhead")])
                 if train_type == "lora":
                     cmd.extend(["--lora_name", save_prefix])
                 else:
