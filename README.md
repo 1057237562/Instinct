@@ -238,13 +238,13 @@ Apache License 2.0。详见 [LICENSE](./LICENSE)。
 
 ## 致谢与引用
 
-感谢开源社区与 Instinct 原项目([1057237562/Instinct](https://github.com/1057237562/Instinct))的启发。
+感谢开源社区与 MiniMind 原项目([jingyaogong/minimind](https://github.com/jingyaogong/minimind))的启发。
 
 ```bibtex
-@misc{instinct,
-  title = {Instinct: Train a Tiny LLM from Scratch},
+@misc{minimind,
+  title = {MiniMind: Train a 64M-parameter LLM from Scratch},
   author = {Jingyao Gong},
   year = {2024},
-  url = {https://github.com/1057237562/Instinct}
+  url = {https://github.com/jingyaogong/minimind}
 }
 ```
