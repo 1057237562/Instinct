@@ -150,7 +150,7 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project, name=wandb_run_name, id=wandb_id, resume=resume)
     
     # ========== 5. 定义模型、数据、优化器 ==========
-    model, tokenizer = init_model(lm_config, args.from_weight, device=args.device)
+    model, tokenizer = init_model(lm_config, 'none' if ckp_data else args.from_weight, device=args.device)
     if args.use_looped and args.depth_reward >= 0:
         model.set_depth_reward(args.depth_reward)
         Logger(f'[Looped] depth_reward λ = {args.depth_reward}')

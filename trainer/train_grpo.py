@@ -187,7 +187,7 @@ def grpo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_mod
             state_dict = raw_model.state_dict()
             torch.save({k: v.half().cpu() for k, v in state_dict.items()}, ckp)
             lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, 
-                         epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints', scheduler=scheduler)
+                         epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints', scheduler=scheduler, ref_model=ref_model)
             model.train()
             del state_dict
 
@@ -274,7 +274,12 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project, name=wandb_run_name, id=wandb_id, resume=resume)
     
     # ========== 5. 初始化模型和数据 ==========
-    base_weight = args.from_weight
+    if ckp_data and 'ref_model' in ckp_data:
+        base_weight = 'none'
+        ref_from_ckp = True
+    else:
+        base_weight = args.from_weight
+        ref_from_ckp = False
     # Policy模型
     model, tokenizer = init_model(lm_config, base_weight, device=args.device)
     # Reference模型
@@ -306,6 +311,8 @@ if __name__ == "__main__":
     start_epoch, start_step = 0, 0
     if ckp_data:
         model.load_state_dict(ckp_data['model'])
+        if ref_from_ckp:
+            ref_model.load_state_dict(ckp_data['ref_model'])
         optimizer.load_state_dict(ckp_data['optimizer'])
         scheduler.load_state_dict(ckp_data['scheduler'])
         start_epoch = ckp_data['epoch']

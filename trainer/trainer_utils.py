@@ -357,8 +357,11 @@ def init_model(lm_config, from_weight='pretrain', tokenizer_path='./model', save
         model = InstinctForCausalLM(lm_config)
 
     if from_weight != 'none':
-        moe_suffix = '_moe' if lm_config.use_moe else ''
-        weight_path = f'{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+        if from_weight.endswith('.pth'):
+            weight_path = from_weight
+        else:
+            moe_suffix = '_moe' if lm_config.use_moe else ''
+            weight_path = f'{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
         weights = torch.load(weight_path, map_location=device)
         if isinstance(model, LoopedInstinctForCausalLM):
             model.load_pretrained_weights(weights)

@@ -285,7 +285,7 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
             lm_checkpoint(lm_config, weight=args.save_weight, model=actor_model, optimizer=actor_optimizer, 
                          epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints',
                          scheduler=actor_scheduler, critic_model=critic_model, 
-                         critic_optimizer=critic_optimizer, critic_scheduler=critic_scheduler)
+                         critic_optimizer=critic_optimizer, critic_scheduler=critic_scheduler, ref_model=ref_model)
             actor_model.train()
             del actor_state
 
@@ -369,16 +369,22 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project, name=wandb_run_name, id=wandb_id, resume=resume)
     
     # ========== 5. 初始化模型和数据 ==========
-    base_weight = args.from_weight
+    if ckp_data and 'ref_model' in ckp_data:
+        base_weight = 'none'
+        ref_from_ckp = True
+    else:
+        base_weight = args.from_weight
+        ref_from_ckp = False
     # Actor模型
     actor_model, tokenizer = init_model(lm_config, base_weight, device=args.device)
     ref_model, _ = init_model(lm_config, base_weight, device=args.device)
     ref_model = ref_model.eval().requires_grad_(False)
-    moe_suffix = '_moe' if lm_config.use_moe else ''
-    ckp = f'{args.save_dir}/{base_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
-    state_dict = torch.load(ckp, map_location=args.device)
     critic_model = CriticModel(lm_config)
-    critic_model.load_state_dict(state_dict, strict=False)
+    if ckp_data is None:
+        moe_suffix = '_moe' if lm_config.use_moe else ''
+        ckp = f'{args.save_dir}/{base_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+        state_dict = torch.load(ckp, map_location=args.device)
+        critic_model.load_state_dict(state_dict, strict=False)
     critic_model = critic_model.to(args.device)
     reward_model = LMForRewardModel(args.reward_model_path, device=args.device, dtype=torch.float16)
     # Rollout引擎
@@ -406,6 +412,8 @@ if __name__ == "__main__":
     start_epoch, start_step = 0, 0
     if ckp_data:
         actor_model.load_state_dict(ckp_data['model'])
+        if ref_from_ckp:
+            ref_model.load_state_dict(ckp_data['ref_model'])
         critic_model.load_state_dict(ckp_data['critic_model'])
         actor_optimizer.load_state_dict(ckp_data['optimizer'])
         critic_optimizer.load_state_dict(ckp_data['critic_optimizer'])

@@ -358,7 +358,7 @@ def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model
             state_dict = raw_model.state_dict()
             torch.save({k: v.half().cpu() for k, v in state_dict.items()}, ckp)
             lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer,
-                         epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints', scheduler=scheduler)
+                         epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints', scheduler=scheduler, ref_model=ref_model)
             model.train()
             del state_dict
 
@@ -437,9 +437,16 @@ if __name__ == "__main__":
         resume = 'must' if wandb_id else None
         wandb.init(project=args.wandb_project, name=f"Agent-RL-E{args.epochs}-B{args.batch_size}-LR{args.learning_rate}", id=wandb_id, resume=resume)
 
-    model, tokenizer = init_model(lm_config, args.from_weight, device=args.device)
+    if ckp_data and 'ref_model' in ckp_data:
+        base_weight = 'none'
+        ref_from_ckp = True
+    else:
+        base_weight = args.from_weight
+        ref_from_ckp = False
 
-    ref_model, _ = init_model(lm_config, args.from_weight, device=args.device)
+    model, tokenizer = init_model(lm_config, base_weight, device=args.device)
+
+    ref_model, _ = init_model(lm_config, base_weight, device=args.device)
     ref_model = ref_model.eval().requires_grad_(False)
 
     reward_model = LMForRewardModel(args.reward_model_path, device=args.device, dtype=torch.float16)
@@ -467,6 +474,8 @@ if __name__ == "__main__":
     start_epoch, start_step = 0, 0
     if ckp_data:
         model.load_state_dict(ckp_data['model'])
+        if ref_from_ckp:
+            ref_model.load_state_dict(ckp_data['ref_model'])
         optimizer.load_state_dict(ckp_data['optimizer'])
         scheduler.load_state_dict(ckp_data['scheduler'])
         start_epoch = ckp_data['epoch']
