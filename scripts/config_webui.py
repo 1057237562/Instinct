@@ -1057,12 +1057,19 @@ if "model_architecture" not in st.session_state:
 if not st.session_state.get("_config_auto_loaded"):
     st.session_state._config_auto_loaded = True
     trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
-    default_config = os.path.join(trainer_dir, "config_pretrain.json")
-    if os.path.exists(default_config):
-        with open(default_config, "r", encoding="utf-8") as f:
-            load_config_to_session(json.load(f))
-        if st.session_state.preset != "instinct-3":
-            st.rerun()
+    state_file = os.path.join(trainer_dir, "webui_state.json")
+    if os.path.exists(state_file):
+        with open(state_file, "r", encoding="utf-8") as f:
+            for k, v in json.load(f).items():
+                st.session_state[k] = v
+        st.rerun()
+    else:
+        default_config = os.path.join(trainer_dir, "config_pretrain.json")
+        if os.path.exists(default_config):
+            with open(default_config, "r", encoding="utf-8") as f:
+                load_config_to_session(json.load(f))
+            if st.session_state.preset != "instinct-3":
+                st.rerun()
 
 # Handle deferred config load from button click (must run before any widget with the same key)
 if "_pending_config_load" in st.session_state:
@@ -1131,6 +1138,21 @@ def _default_weight_prefix(train_type):
 
 def _arch_tag():
     return "_linear" if st.session_state.get("model_architecture") == "linear" else ""
+
+
+def _persist_panel_state(trainer_dir):
+    """把训练面板参数（含训练超参）写入 webui_state.json，刷新/重启后自动恢复。"""
+    def _serializable(v):
+        return isinstance(v, (str, int, float, bool, list, dict, type(None)))
+    state = {
+        k: v for k, v in st.session_state.items()
+        if not k.startswith("_")
+        and k not in ("train_proc", "train_status", "train_log_path")
+        and not k.startswith("save_prefix_")
+        and _serializable(v)
+    }
+    with open(os.path.join(trainer_dir, "webui_state.json"), "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
 
 
 def _latest_checkpoint_prefix(train_type, hidden_size, use_moe, arch_tag=""):
@@ -2253,3 +2275,7 @@ st.markdown(
 "</div>",
 unsafe_allow_html=True,
 )
+
+# 每次交互后持久化面板参数（widget 变更触发 rerun，此时 session_state 即当前值）
+_trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
+_persist_panel_state(_trainer_dir)

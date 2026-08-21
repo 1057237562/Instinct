@@ -37,3 +37,6 @@ trainer/logs/
 # ===== 系统文件 =====
 .DS_Store
 Thumbs.db
+
+# ===== WebUI 本地面板状态（用户参数持久化，不入库） =====
+trainer/webui_state.json
