@@ -1129,7 +1129,11 @@ def _default_weight_prefix(train_type):
     return _DEFAULT_WEIGHT_PREFIX.get(train_type, train_type)
 
 
-def _latest_checkpoint_prefix(train_type, hidden_size, use_moe):
+def _arch_tag():
+    return "_linear" if st.session_state.get("model_architecture") == "linear" else ""
+
+
+def _latest_checkpoint_prefix(train_type, hidden_size, use_moe, arch_tag=""):
     """Derive the newest matching run id from checkpoints/{train_type}_*_{dim}{moe}_resume.pth."""
     repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
     ckpt_dir = os.path.join(repo_root, "checkpoints")
@@ -1144,6 +1148,11 @@ def _latest_checkpoint_prefix(train_type, hidden_size, use_moe):
         if stem.endswith(dim_suffix):
             prefix = stem[: -len(dim_suffix)]
             if prefix.startswith(f"{train_type}_"):
+                if arch_tag:
+                    if not prefix.endswith(arch_tag):
+                        continue
+                elif prefix.endswith("_linear"):
+                    continue
                 matches.append((os.path.getmtime(os.path.join(ckpt_dir, f)), prefix))
     if not matches:
         return None
@@ -1152,15 +1161,68 @@ def _latest_checkpoint_prefix(train_type, hidden_size, use_moe):
 
 
 def _resolve_save_prefix(train_type, hidden_size, use_moe, from_resume, stamp):
+    arch_tag = _arch_tag()
     if from_resume:
         prefix = st.session_state.get(f"save_prefix_{train_type}")
         if not prefix:
-            prefix = _latest_checkpoint_prefix(train_type, hidden_size, use_moe)
+            prefix = _latest_checkpoint_prefix(train_type, hidden_size, use_moe, arch_tag)
         if prefix:
             return prefix
-    prefix = f"{_default_weight_prefix(train_type)}_{stamp}"
+    prefix = f"{_default_weight_prefix(train_type)}_{stamp}{arch_tag}"
     st.session_state[f"save_prefix_{train_type}"] = prefix
     return prefix
+
+
+_BASE_WEIGHT_TYPE = {
+    "pretrain": "pretrain",
+    "full_sft": "pretrain",
+    "lora": "full_sft",
+    "dpo": "full_sft",
+    "ppo": "full_sft",
+    "grpo": "full_sft",
+    "agent": "full_sft",
+    "distillation": "full_sft",
+}
+
+
+def _available_weight_files():
+    """Scan out/ + checkpoints/ for loadable base-weight .pth files (excludes _resume.pth)."""
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    files = []
+    for sub in ("out", "checkpoints"):
+        d = os.path.join(repo_root, sub)
+        if os.path.isdir(d):
+            for f in sorted(os.listdir(d)):
+                if f.endswith(".pth") and "_resume.pth" not in f:
+                    files.append(os.path.join(sub, f))
+    return files
+
+
+def _latest_weight_file(base_type, hidden_size, use_moe, arch_tag=""):
+    """Newest loadable .pth of a base weight type (out/ preferred, then checkpoints/)."""
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    dim_suffix = f"_{hidden_size}{'_moe' if use_moe else ''}"
+    candidates = []
+    for sub in ("out", "checkpoints"):
+        d = os.path.join(repo_root, sub)
+        if not os.path.isdir(d):
+            continue
+        for f in os.listdir(d):
+            if not f.endswith(".pth") or "_resume.pth" in f:
+                continue
+            stem = f[: -len(".pth")]
+            if stem.endswith(dim_suffix) and stem[: -len(dim_suffix)].startswith(f"{base_type}_"):
+                type_part = stem[: -len(dim_suffix)]
+                if arch_tag:
+                    if not type_part.endswith(arch_tag):
+                        continue
+                elif type_part.endswith("_linear"):
+                    continue
+                candidates.append((os.path.getmtime(os.path.join(d, f)), os.path.join(sub, f)))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
 
 
 def _try_recover_training_state():
@@ -1721,6 +1783,22 @@ with st.sidebar:
                 st.rerun()
         st.checkbox("Resume from checkpoint (--from_resume)", value=False, key="from_resume",
                     help="Auto-detect and resume from checkpoints/{weight}_{dim}{_moe}_resume.pth")
+        _weight_files = _available_weight_files()
+        _auto_label = "auto (newest matching base)"
+        _base_options = ["none (from scratch)", _auto_label] + _weight_files
+        if "base_weight" not in st.session_state:
+            st.session_state.base_weight = "none" if train_type == "pretrain" else _auto_label
+        elif st.session_state.base_weight not in _base_options:
+            st.session_state.base_weight = _auto_label
+        st.selectbox(
+            "Base weights (--from_weight)",
+            _base_options,
+            key="base_weight",
+            help="SFT 基于 pretrain、LoRA/DPO/PPO/GRPO/Agent/蒸馏基于 full_sft 启动。"
+                 "可选 out/ 与 checkpoints/ 下的 .pth（自动排除 _resume 检查点），"
+                 "或 'auto' 自动选择最新匹配权重；'none' 从随机初始化开始。"
+                 "选中 Resume 且检查点含完整状态时，基础权重会自动跳过。",
+        )
         st.number_input(
             "batch_size",
             min_value=1, max_value=512,
@@ -1837,13 +1915,36 @@ if st.session_state.get("train_triggered", False):
                 stamp = time.strftime("%Y%m%d_%H%M%S")
                 save_prefix = _resolve_save_prefix(train_type, cfg["hidden_size"], cfg["use_moe"],
                                                    from_resume, stamp)
-                cmd = [sys.executable, "-u", script_path]
+                from_weight = st.session_state.get("base_weight", "auto")
+                # selectbox 显示文案(见 _base_options)需映射回 CLI 值，否则会去加载 out/none (from scratch)_768.pth
+                if from_weight == "none (from scratch)":
+                    from_weight = "none"
+                elif from_weight == "auto (newest matching base)":
+                    from_weight = "auto"
+                if from_weight == "auto":
+                    base_type = _BASE_WEIGHT_TYPE.get(train_type, train_type)
+                    auto_path = _latest_weight_file(base_type, cfg["hidden_size"], cfg["use_moe"], _arch_tag())
+                    from_weight = auto_path if auto_path else "none"
+                elif from_weight.startswith(("out/", "checkpoints/")):
+                    from_weight = os.path.join(os.path.dirname(trainer_dir), from_weight)
+                if cfg.get("model_architecture") == "linear":
+                    # linear 架构必须经 run_linear.py 的 sys.modules 劫持启动，直接跑 trainer 会静默回退到标准 Transformer
+                    runner = os.path.join(os.path.dirname(trainer_dir), "run_linear.py")
+                    cmd = [sys.executable, "-u", runner, script_path]
+                else:
+                    cmd = [sys.executable, "-u", script_path]
                 cmd.extend([
                     "--config_path", config_path,
                     "--hidden_size", str(cfg["hidden_size"]),
                     "--num_hidden_layers", str(cfg["num_hidden_layers"]),
                     "--use_moe", "1" if cfg["use_moe"] else "0",
                 ])
+                if train_type == "distillation":
+                    if from_weight != "none":
+                        cmd.extend(["--from_student_weight", from_weight])
+                        cmd.extend(["--from_teacher_weight", from_weight])
+                else:
+                    cmd.extend(["--from_weight", from_weight])
                 cmd.extend(["--batch_size", str(st.session_state.get("batch_size", 32))])
                 cmd.extend(["--max_seq_len", str(st.session_state.get("max_seq_len", 768))])
                 cmd.extend(["--optimizer", st.session_state.get("optimizer", "adamw")])
