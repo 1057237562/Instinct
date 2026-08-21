@@ -1061,6 +1061,8 @@ if not st.session_state.get("_config_auto_loaded"):
     if os.path.exists(state_file):
         with open(state_file, "r", encoding="utf-8") as f:
             for k, v in json.load(f).items():
+                if k.startswith("btn_"):
+                    continue  # 兼容旧 state 文件里已保存的按钮 key，赋值会报错
                 st.session_state[k] = v
         st.rerun()
     else:
@@ -1147,6 +1149,7 @@ def _persist_panel_state(trainer_dir):
     state = {
         k: v for k, v in st.session_state.items()
         if not k.startswith("_")
+        and not k.startswith("btn_")  # 按钮状态只读，恢复赋值会抛 StreamlitValueAssignmentNotAllowedError
         and k not in ("train_proc", "train_status", "train_log_path")
         and not k.startswith("save_prefix_")
         and _serializable(v)
