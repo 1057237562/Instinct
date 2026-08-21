@@ -175,8 +175,12 @@ class GatedDeltaNet(nn.Module):
 
     def forward(self, x, conv_state=None, recurrent_state=None, use_cache=False):
         input_dtype = x.dtype
+        # 参数可能被 param_dtype 转成 bf16/fp16：输入跟随参数 dtype，否则 conv1d 等会
+        # 因 fp32 输入 vs bf16 权重在 torch.compile 的 fake tensor 阶段直接报 dtype 不匹配
+        param_dtype = next(self.parameters()).dtype
+        x = x.to(param_dtype)
         with torch.amp.autocast(device_type=x.device.type, enabled=False):
-            return self._forward(x.float(), conv_state, recurrent_state, use_cache, input_dtype)
+            return self._forward(x, conv_state, recurrent_state, use_cache, input_dtype)
 
     def _forward(self, x, conv_state, recurrent_state, use_cache, input_dtype):
         B, T, _ = x.shape
@@ -206,7 +210,7 @@ class GatedDeltaNet(nn.Module):
         q = l2norm(q.reshape(B, T, -1, self.head_k_dim))
         k = l2norm(k.reshape(B, T, -1, self.head_k_dim))
         v = v.reshape(B, T, -1, self.head_v_dim)
-        g = (-self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias))
+        g = (-self.A_log.exp() * F.softplus(a + self.dt_bias))
         if self.num_v_heads // self.num_k_heads > 1:
             q = q.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
             k = k.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
