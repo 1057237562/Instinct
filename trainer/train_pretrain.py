@@ -112,7 +112,6 @@ if __name__ == "__main__":
     parser.add_argument('--teacher_stop_grad', default=1, type=int, choices=[0, 1], help="教师logits是否stop-grad（1=是，0=否）")
     parser.add_argument('--depth_gain_reward', default=0.0, type=float, help="深度增益奖励权重（>0时启用：仅当更深步相对第1步基线降低LM损失时给予正奖励）")
     parser.add_argument('--exit_in_training', default=-1, type=int, choices=[-1, 0, 1], help="训练中是否允许早退（-1用config默认；自蒸馏建议0=跑满循环）")
-    parser.add_argument('--loop_grad_checkpoint', default=0, type=int, choices=[0, 1], help="循环体梯度检查点（1=启用，大幅降低循环激活显存，适合大数据量预训练）")
     parser.add_argument('--n_supervision', default=-1, type=int, help="随机深度监督步数（-1用config默认；自蒸馏可提高以覆盖更多深度）")
     parser.add_argument('--early_exit', default=0, type=int, choices=[0, 1], help="启用Early Exit训练（0=否，1=是）")
     parser.add_argument("--data_path", type=str, default="./dataset/pretrain_t2t_mini.jsonl", help="预训练数据路径")
@@ -121,6 +120,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="Instinct-Pretrain", help="wandb项目名")
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
+    parser.add_argument("--use_grad_checkpoint", default=0, type=int, choices=[0, 1, 2], help="梯度检查点模式（0=关闭, 1=选择性重算注意力/FFN, 2=整层checkpoint）")
     parser.add_argument("--compile_mode", type=str, default="default", choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"], help="torch.compile 模式（default=Triton 编译；reduce-overhead=叠加 CUDA graph，小模型首选；max-autotune=极限调优，编译极慢）")
     parser.add_argument('--config_path', default='', type=str, help="JSON配置文件路径")
     args = parser.parse_args()
@@ -163,13 +163,10 @@ if __name__ == "__main__":
             model.config.exit_in_training = bool(args.exit_in_training)
         if args.n_supervision > 0:
             model.config.n_supervision = args.n_supervision
-        if args.loop_grad_checkpoint:
-            model.config.loop_grad_checkpoint = True
         Logger(f'[Looped] self-distill w={args.distill_weight} T={args.distill_temperature} '
                f'stop_grad={args.teacher_stop_grad} | depth-gain reward={args.depth_gain_reward} '
                f'| exit_in_training={model.config.exit_in_training} '
-               f'| n_supervision={model.config.n_supervision} '
-               f'| loop_grad_checkpoint={model.config.loop_grad_checkpoint}')
+               f'| n_supervision={model.config.n_supervision}')
     train_ds = PretrainDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
     scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))

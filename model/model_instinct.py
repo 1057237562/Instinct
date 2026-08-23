@@ -23,6 +23,8 @@ class InstinctConfig(PretrainedConfig):
         self.flash_attn = kwargs.get("flash_attn", True)
         self.param_dtype = kwargs.get("param_dtype", "fp32")
         self.kv_cache_dtype = kwargs.get("kv_cache_dtype", "fp32")
+        ### Gradient Checkpointing configs
+        self.use_grad_checkpoint = kwargs.get("use_grad_checkpoint", 0)
         self.num_attention_heads = kwargs.get("num_attention_heads", 8)
         self.num_key_value_heads = kwargs.get("num_key_value_heads", 4)
         self.head_dim = kwargs.get("head_dim", self.hidden_size // self.num_attention_heads)
