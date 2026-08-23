@@ -606,7 +606,7 @@ def build_config_dict() -> dict:
     # Looped (LoopUS) arch params
     if d["model_architecture"] == "looped":
         d["loop_max_steps"] = st.session_state.get("loop_max_steps", 32)
-        d["loop_grad_checkpoint"] = st.session_state.get("loop_grad_checkpoint", False)
+        d["use_grad_checkpoint"] = st.session_state.get("use_grad_checkpoint", 0)
         d["q_threshold"] = st.session_state.get("loop_q_threshold", 0.9)
         d["n_supervision"] = st.session_state.get("loop_n_supervision", 6)
         d["depth_reward"] = st.session_state.get("loop_depth_reward", 0.01)
@@ -682,8 +682,8 @@ def gen_python_code(cfg: dict) -> str:
 
     if cfg.get("model_architecture") == "looped":
         params.append(("loop_max_steps", cfg.get("loop_max_steps", 32)))
-        if cfg.get("loop_grad_checkpoint"):
-            params.append(("loop_grad_checkpoint", "True"))
+        if cfg.get("use_grad_checkpoint"):
+            params.append(("use_grad_checkpoint", cfg.get("use_grad_checkpoint")))
         params.append(("q_threshold", cfg.get("q_threshold", 0.9)))
         params.append(("n_supervision", cfg.get("n_supervision", 6)))
         params.append(("depth_reward", cfg.get("depth_reward", 0.01)))
@@ -760,7 +760,7 @@ def gen_config_json(cfg: dict) -> str:
             out[k] = cfg.get(k)
 
     if cfg.get("model_architecture") == "looped":
-        for k in ["loop_max_steps", "loop_grad_checkpoint", "q_threshold", "n_supervision",
+        for k in ["loop_max_steps", "use_grad_checkpoint", "q_threshold", "n_supervision",
                    "depth_reward", "exit_in_training", "beta",
                    "distill_weight", "distill_temperature", "teacher_stop_grad",
                    "depth_gain_reward",
@@ -853,7 +853,7 @@ def load_config_to_session(config_dict: dict):
     # Looped arch
     if arch == "looped":
         st.session_state.loop_max_steps = config_dict.get("loop_max_steps", 32)
-        st.session_state.loop_grad_checkpoint = config_dict.get("loop_grad_checkpoint", False)
+        st.session_state.use_grad_checkpoint = config_dict.get("use_grad_checkpoint", 0)
         st.session_state.loop_q_threshold = config_dict.get("q_threshold", 0.9)
         st.session_state.loop_n_supervision = config_dict.get("n_supervision", 6)
         st.session_state.loop_depth_reward = config_dict.get("depth_reward", 0.01)
@@ -1516,14 +1516,13 @@ with st.sidebar:
                 help="Dynamic loop safety cap. The loop exits when q >= threshold; "
                      "this only bounds worst-case (effectively infinite for trained models).",
             )
-            st.checkbox(
-                "loop_grad_checkpoint",
-                value=st.session_state.get("loop_grad_checkpoint", False),
-                key="loop_grad_checkpoint",
-                help="Gradient checkpointing on the loop body: recompute activations "
-                     "during backward instead of storing all loop-step activations. "
-                     "Big memory saving for large-batch/long-seq pretraining "
-                     "(loop activations scale with cap × step size otherwise).",
+            st.selectbox(
+                "梯度检查点模式（0关闭/1选择性/2整层）",
+                options=[0, 1, 2],
+                index=st.session_state.get("use_grad_checkpoint", 0),
+                key="use_grad_checkpoint",
+                help="Gradient checkpointing mode: 0 = off, 1 = selectively recompute "
+                     "attention/FFN activations, 2 = full-layer checkpointing.",
             )
             st.slider(
                 "loop_q_threshold",
@@ -1979,6 +1978,9 @@ if st.session_state.get("train_triggered", False):
                 if st.session_state.get("use_compile", True):
                     cmd.extend(["--use_compile", "1"])
                     cmd.extend(["--compile_mode", st.session_state.get("compile_mode", "reduce-overhead")])
+                grad_ckpt = st.session_state.get("use_grad_checkpoint", 0)
+                if grad_ckpt:
+                    cmd.extend(["--use_grad_checkpoint", str(grad_ckpt)])
                 if train_type == "lora":
                     cmd.extend(["--lora_name", save_prefix])
                 else:
