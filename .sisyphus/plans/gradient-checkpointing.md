@@ -67,7 +67,7 @@
 ### Definition of Done
 - [ ] `pytest tests/ -x -q` 全绿（CPU 可跑）
 - [ ] GPU 基准显示 S=2048 eager：Mode 1 激活节省 ≥45%，Mode 2 ≥85%；计算开销 ≤15%（Mode 1）/ ≤50%（Mode 2）
-- [ ] 8 个 trainer `--use_grad_checkpoint 1` smoke 通过（loss 有限、无崩溃）
+- [x] 8 个 trainer `--use_grad_checkpoint 1` smoke 通过（loss 有限、无崩溃）
 - [ ] `grep -r loop_grad_checkpoint` 零残留
 
 ### Must Have
@@ -175,7 +175,7 @@ Max Concurrent: 5 (Wave 1)
 
 ## TODOs
 
-- [ ] 1. 搭建 pytest 测试基建（TDD 前置）
+- [x] 1. 搭建 pytest 测试基建（TDD 前置）
 
   **What to do**:
   - 在 `requirements.txt` 追加 `pytest`（保持与现有 pin 风格一致，如 `pytest==8.3.4`）
@@ -244,7 +244,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: requirements.txt, tests/conftest.py, tests/helpers.py
   - Pre-commit: `python -m pytest tests/ -x -q`
 
-- [ ] 2. 实现注意力选择性重计算 autograd.Function（TDD）
+- [x] 2. 实现注意力选择性重计算 autograd.Function（TDD）
 
   **What to do**:
   - 创建 `model/checkpointing.py`，实现无参数注意力重计算：
@@ -332,7 +332,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: model/checkpointing.py, tests/test_checkpoint_attention.py
   - Pre-commit: `python -m pytest tests/test_checkpoint_attention.py -x -q`
 
-- [ ] 3. 实现 FFN checkpoint 助手 + MoE aux_loss 返回封装（TDD）
+- [x] 3. 实现 FFN checkpoint 助手 + MoE aux_loss 返回封装（TDD）
 
   **What to do**:
   - 在 `model/checkpointing.py` 实现 FFN/MoE 区域 checkpoint 助手（**参数安全，用 torch.utils.checkpoint**）：
@@ -415,7 +415,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: model/checkpointing.py, tests/test_checkpoint_ffn.py
   - Pre-commit: `python -m pytest tests/test_checkpoint_ffn.py -x -q`
 
-- [ ] 4. flag 线程化: 3 个 config + config_from_args + 8 个 trainer argparse
+- [x] 4. flag 线程化: 3 个 config + config_from_args + 8 个 trainer argparse
 
   **What to do**:
   - `model/model_instinct.py:InstinctConfig.__init__`（:12-52 区域）追加 `self.use_grad_checkpoint = kwargs.get("use_grad_checkpoint", 0)`（跟随现有 `kv_cache_dtype` 的 `kwargs.get` 模式，加 `### Gradient Checkpointing configs` 注释头）
@@ -492,7 +492,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: model/model_instinct.py, model/model_instinct_loop.py, model/model_instinct_linear.py, trainer/trainer_utils.py, trainer/train_*.py
   - Pre-commit: `python -m pytest tests/test_flag_threading.py -x -q && grep -rn "loop_grad_checkpoint" trainer/ || echo CLEAN`
 
-- [ ] 5. WebUI 死 flag 移除 + 新 flag 接入
+- [x] 5. WebUI 死 flag 移除 + 新 flag 接入
 
   **What to do**:
   - `scripts/config_webui.py` 中删除 `loop_grad_checkpoint` 全部引用（grep 确认 8 处：config dict :609, CLI 参数构建 :685-686, 持久化 :763/:856, UI checkbox :1520-1522）
@@ -559,7 +559,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: scripts/config_webui.py
   - Pre-commit: `cd scripts && python -c "import config_webui"`
 
-- [ ] 6. README 文档更新
+- [x] 6. README 文档更新
 
   **What to do**:
   - `README.md` 的"常用训练参数"表（含 `--use_moe`/`--use_looped` 的表）新增行：
@@ -606,7 +606,7 @@ Max Concurrent: 5 (Wave 1)
   - Message: `docs: document use_grad_checkpoint flag`
   - Files: README.md
 
-- [ ] 7. Dense 变体接入（model_instinct.py: Mode 1 选择性 + Mode 2 整层）
+- [x] 7. Dense 变体接入（model_instinct.py: Mode 1 选择性 + Mode 2 整层）
 
   **What to do**:
   - **Mode 1（选择性）**: 在 `Attention.forward`（model_instinct.py:119-147）的 eager 分支（:140-144）将 scores→softmax→dropout→@V 用 `RecomputeAttention`（T2 产出）替换：
@@ -691,7 +691,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: model/model_instinct.py, tests/test_dense_model.py
   - Pre-commit: `python -m pytest tests/test_dense_model.py -x -q`
 
-- [ ] 8. Loop 变体接入（model_instinct_loop.py: loop body + Attention）
+- [x] 8. Loop 变体接入（model_instinct_loop.py: loop body + Attention）
 
   **What to do**:
   - Loop 变体的 `Attention` 类（model_instinct_loop.py:100-149）与 dense 几乎相同 — 用与 T7 相同的方式接入 Mode 1（eager 分支 → RecomputeAttention）
@@ -763,7 +763,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: model/model_instinct_loop.py, tests/test_loop_model.py
   - Pre-commit: `python -m pytest tests/test_loop_model.py -x -q`
 
-- [ ] 9. Linear 变体接入（model_instinct_linear.py: 标准部分 Mode 1 + 整层 Mode 2）
+- [x] 9. Linear 变体接入（model_instinct_linear.py: 标准部分 Mode 1 + 整层 Mode 2）
 
   **What to do**:
   - Linear 变体的标准 `Attention` 类（model_instinct_linear.py:278-330，与 dense 近复制）接入 Mode 1（eager 分支 → RecomputeAttention）— 与 T7 相同方式
