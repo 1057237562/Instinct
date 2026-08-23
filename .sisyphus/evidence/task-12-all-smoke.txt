@@ -1,0 +1,9 @@
+Instinct 8-trainer smoke (T12): use_grad_checkpoint=1, hidden=64, layers=2, max_seq_len=32, batch=1, epochs=1, synthetic data
+trainer=train_pretrain status=PASS detail=exit=0, loss=8.712200 (finite)
+trainer=train_full_sft status=PASS detail=exit=0, loss=8.672800 (finite)
+trainer=train_lora status=PASS detail=exit=0, loss=8.672800 (finite)
+trainer=train_dpo status=PASS detail=exit=0, loss=0.710600 (finite)
+trainer=train_ppo status=SKIP detail=reward model not available (D:\AI\internlm2-1_8b-reward); hard dependency via LMForRewardModel at startup
+trainer=train_grpo status=SKIP detail=reward model not available (D:\AI\internlm2-1_8b-reward); hard dependency via LMForRewardModel at startup
+trainer=train_agent status=SKIP detail=reward model not available (D:\AI\internlm2-1_8b-reward); hard dependency via LMForRewardModel at startup
+trainer=train_distillation status=PASS detail=exit=0, loss=4.349200 (finite)
