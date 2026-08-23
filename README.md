@@ -117,6 +117,7 @@ python trainer/train_pretrain.py --from_resume 1
 | `--max_seq_len` | 最大截断长度(单位 token;中文约 1.5~1.7 字符/token)。轻量数据建议 768 |
 | `--use_moe 1` | 启用 MoE 架构 |
 | `--use_looped 1` | 启用循环深度架构(LoopUS) |
+| `--use_grad_checkpoint 0\|1\|2` | 梯度检查点(0=关闭, 1=选择性重算注意力QKᵀ/FFN, 2=整层checkpoint) |
 | `--hidden_size` / `--num_hidden_layers` | 模型宽度 / 深度 |
 | `--use_wandb` | 开启训练日志(默认 SwanLab,兼容 WandB 接口) |
 | `--from_weight` | 基于哪个权重继续训练(`none` = 从头) |
@@ -229,6 +230,7 @@ cd scripts && python convert_model.py
 - **日志工具**: WandB 在国内常不可直连,默认使用 SwanLab(API 兼容),需要时加 `--use_wandb`
 - **奖励模型**: PPO / GRPO 使用的 `internlm2-1_8b-reward` 需放在仓库同级目录(非仓库内)
 - **max_seq_len 是 token 数**: 中文约 1.5~1.7 字符/token,英文 4~5 字符/token,按数据分布调整
+- **梯度检查点**: 选择性重算(1)在 eager 路径生效,flash 路径下仅省 FFN 中间量;序列越长(seq 大)节省显存收益越大
 
 ---
 
