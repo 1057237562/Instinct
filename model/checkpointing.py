@@ -154,3 +154,49 @@ def recompute_attention(q, k, v, attention_mask=None, is_causal=True, dropout_p=
     if head_dim is None:
         head_dim = q.shape[-1]
     return RecomputeAttention.apply(q, k, v, attention_mask, is_causal, dropout_p, 1.0 / math.sqrt(head_dim))
+
+
+def checkpoint_ffn(ffn_module, hidden_states, use_reentrant=False):
+    """Gradient-checkpoint the FFN/MoE block (plan T3) — recompute, don't stash.
+
+    Wraps ``FeedForward`` (dense SwiGLU) or ``MOEFeedForward`` (top-1 routing)
+    in ``torch.utils.checkpoint`` so the large intermediate activations
+    (``[bs*seq, intermediate]``, expert expert-activations) are never kept
+    alive between forward and backward: only ``hidden_states`` is saved, and
+    the whole FFN forward is re-run inside backward under ``torch.enable_grad``.
+
+    Returns ``(output, aux_loss)``. For MoE, ``aux_loss`` is the router
+    auxiliary-load loss, surfaced **through the return value** rather than the
+    module side-channel attribute ``ffn_module.aux_loss``. Dense ``FeedForward``
+    has no ``aux_loss`` attribute, so ``getattr(..., None)`` yields ``None`` and
+    the dense path simply ignores it.
+
+    Key semantics (the tests pin these down):
+
+    * **``torch.utils.checkpoint``, not a custom ``torch.autograd.Function``.**
+      A custom Function's forward runs under ``torch.no_grad()``, so any
+      parameter gradient (``gate_proj``/``up_proj``/``down_proj``, MoE router
+      ``gate``, expert weights) computed against its outputs is silently
+      dropped. ``checkpoint`` has no such trap: the forward runs with autograd
+      attached and parameter gradients accumulate normally.
+    * **``use_reentrant=False``.** The non-reentrant variant supports tuple /
+      non-tensor return values, and its backward re-runs ``run`` under
+      ``torch.enable_grad()`` then calls ``torch.autograd.backward`` on **all**
+      returned outputs — including ``aux_loss``. That is what carries the aux
+      gradient back to ``gate.weight``. (``use_reentrant=True`` is deprecated
+      and rejects in-place / tuple outputs.)
+    * **``preserve_rng_state=True``.** Forward saves the generator state before
+      any dropout; backward restores it so the recomputed dropout mask is
+      bitwise identical to the one forward used.
+    """
+    def run(h):
+        out = ffn_module(h)
+        aux = getattr(ffn_module, "aux_loss", None)
+        return out, aux
+
+    return torch.utils.checkpoint.checkpoint(
+        run,
+        hidden_states,
+        use_reentrant=use_reentrant,
+        preserve_rng_state=True,
+    )
