@@ -563,6 +563,7 @@ def build_config_dict() -> dict:
         "rope_theta": st.session_state.get("rope_theta", 1e6),
         "inference_rope_scaling": st.session_state.get("inference_rope_scaling", False),
         "use_moe": st.session_state.get("use_moe", False),
+        "use_grad_checkpoint": st.session_state.get("use_grad_checkpoint", 0),
         "rms_norm_eps": st.session_state.get("rms_norm_eps", 1e-6),
         "flash_attn": st.session_state.get("flash_attn", True),
         "intermediate_size": compute_intermediate_size(st.session_state.get("hidden_size", 768)),
@@ -606,7 +607,6 @@ def build_config_dict() -> dict:
     # Looped (LoopUS) arch params
     if d["model_architecture"] == "looped":
         d["loop_max_steps"] = st.session_state.get("loop_max_steps", 32)
-        d["use_grad_checkpoint"] = st.session_state.get("use_grad_checkpoint", 0)
         d["q_threshold"] = st.session_state.get("loop_q_threshold", 0.9)
         d["n_supervision"] = st.session_state.get("loop_n_supervision", 6)
         d["depth_reward"] = st.session_state.get("loop_depth_reward", 0.01)
@@ -669,6 +669,9 @@ def gen_python_code(cfg: dict) -> str:
     else:
         params.append(("use_moe", "False"))
 
+    if cfg.get("use_grad_checkpoint"):
+        params.append(("use_grad_checkpoint", cfg.get("use_grad_checkpoint")))
+
     if cfg["inference_rope_scaling"]:
         params.append(("inference_rope_scaling", "True"))
 
@@ -682,8 +685,6 @@ def gen_python_code(cfg: dict) -> str:
 
     if cfg.get("model_architecture") == "looped":
         params.append(("loop_max_steps", cfg.get("loop_max_steps", 32)))
-        if cfg.get("use_grad_checkpoint"):
-            params.append(("use_grad_checkpoint", cfg.get("use_grad_checkpoint")))
         params.append(("q_threshold", cfg.get("q_threshold", 0.9)))
         params.append(("n_supervision", cfg.get("n_supervision", 6)))
         params.append(("depth_reward", cfg.get("depth_reward", 0.01)))
@@ -733,6 +734,7 @@ def gen_config_json(cfg: dict) -> str:
         "rms_norm_eps",
         "flash_attn",
         "use_moe",
+        "use_grad_checkpoint",
     ]
     for k in keys:
         if k == "rope_theta":
@@ -760,7 +762,7 @@ def gen_config_json(cfg: dict) -> str:
             out[k] = cfg.get(k)
 
     if cfg.get("model_architecture") == "looped":
-        for k in ["loop_max_steps", "use_grad_checkpoint", "q_threshold", "n_supervision",
+        for k in ["loop_max_steps", "q_threshold", "n_supervision",
                    "depth_reward", "exit_in_training", "beta",
                    "distill_weight", "distill_temperature", "teacher_stop_grad",
                    "depth_gain_reward",
@@ -808,6 +810,7 @@ def load_config_to_session(config_dict: dict):
     st.session_state.rope_theta = float(config_dict.get("rope_theta", 1e6))
     st.session_state.inference_rope_scaling = config_dict.get("inference_rope_scaling", False)
     st.session_state.use_moe = config_dict.get("use_moe", False)
+    st.session_state.use_grad_checkpoint = config_dict.get("use_grad_checkpoint", 0)
     st.session_state.rms_norm_eps = config_dict.get("rms_norm_eps", 1e-6)
     st.session_state.flash_attn = config_dict.get("flash_attn", True)
 
@@ -853,7 +856,6 @@ def load_config_to_session(config_dict: dict):
     # Looped arch
     if arch == "looped":
         st.session_state.loop_max_steps = config_dict.get("loop_max_steps", 32)
-        st.session_state.use_grad_checkpoint = config_dict.get("use_grad_checkpoint", 0)
         st.session_state.loop_q_threshold = config_dict.get("q_threshold", 0.9)
         st.session_state.loop_n_supervision = config_dict.get("n_supervision", 6)
         st.session_state.loop_depth_reward = config_dict.get("depth_reward", 0.01)
@@ -1516,14 +1518,6 @@ with st.sidebar:
                 help="Dynamic loop safety cap. The loop exits when q >= threshold; "
                      "this only bounds worst-case (effectively infinite for trained models).",
             )
-            st.selectbox(
-                "梯度检查点模式（0关闭/1选择性/2整层）",
-                options=[0, 1, 2],
-                index=st.session_state.get("use_grad_checkpoint", 0),
-                key="use_grad_checkpoint",
-                help="Gradient checkpointing mode: 0 = off, 1 = selectively recompute "
-                     "attention/FFN activations, 2 = full-layer checkpointing.",
-            )
             st.slider(
                 "loop_q_threshold",
                 0.1, 1.0,
@@ -1866,6 +1860,14 @@ with st.sidebar:
             help="default=Triton 编译（现状）；reduce-overhead=叠加 CUDA graph，"
                  "消除 kernel launch 间隙，小模型首选（MoE 动态路由可能部分 fallback，无碍）；"
                  "max-autotune=极限调优，编译极慢",
+        )
+        st.selectbox(
+            "梯度检查点模式（0关闭/1选择性/2整层）",
+            [0, 1, 2],
+            index=st.session_state.get("use_grad_checkpoint", 0),
+            key="use_grad_checkpoint",
+            help="Gradient checkpointing mode: 0 = off, 1 = selectively recompute "
+                 "attention/FFN activations, 2 = full-layer checkpointing.",
         )
         st.selectbox(
             "参数精度 (param_dtype)",
