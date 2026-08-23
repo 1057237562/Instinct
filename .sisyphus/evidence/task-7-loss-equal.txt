@@ -1,0 +1,14 @@
+=== T7 evidence: dense grad-checkpoint wiring (task-7-loss-equal) ===
+Mode1.loss == Mode0.loss (torch.equal): True
+Mode2.loss == Mode0.loss (torch.equal): True
+Mode1/2.aux_loss == Mode0 (torch.equal): True
+all param grads equal (mode0 vs mode1): True
+all param grads equal (mode0 vs mode2): True
+
+=== T7 evidence: MoE router grad (task-7-moe-grad) ===
+Mode 1: aux_loss.grad_fn is not None: True; layers[0].mlp.gate.weight.grad nonzero: True; |grad|.sum()=0.001109
+Mode 2: aux_loss.grad_fn is not None: True; layers[0].mlp.gate.weight.grad nonzero: True; |grad|.sum()=0.001109
+
+--- pytest tests/test_dense_model.py -x -q ---
+....                                                                     [100%]
+4 passed in 4.25s

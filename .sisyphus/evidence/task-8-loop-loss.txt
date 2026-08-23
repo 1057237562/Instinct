@@ -1,0 +1,17 @@
+.....                                                                    [100%]
+5 passed in 5.51s
+use_moe=False
+  loss equal 0vs1: True  0vs2: True
+  aux  equal 0vs1: True  0vs2: True
+  grads 0vs1: torch.equal OK
+  grads 0vs2: torch.equal OK
+use_moe=True
+  loss equal 0vs1: True  0vs2: True
+  aux  equal 0vs1: True  0vs2: True
+  grads 0vs1: torch.equal OK
+  grads 0vs2: torch.equal OK
+  mode1 loop_block gate.weight.grad nonzero: True | |grad|_1=0.006943
+  mode2 loop_block gate.weight.grad nonzero: True | |grad|_1=0.006943
+# T8 Loop gradient-checkpointing evidence (pytest)
+# Mode 0/1/2: use_grad_checkpoint in {0,1,2}; loop_iters=2, CPU fp32
+

@@ -1,0 +1,13 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.8, pytest-8.4.2, pluggy-1.5.0 -- E:\miniconda3\python.exe
+cachedir: .pytest_cache
+rootdir: D:\AI\Instinct
+configfile: pytest.ini
+plugins: anyio-4.11.0, hydra-core-1.3.2
+collecting ... collected 6 items / 3 deselected / 3 selected
+
+tests/test_checkpoint_attention.py::test_grad_output PASSED              [ 33%]
+tests/test_checkpoint_attention.py::test_grad_output_with_mask PASSED    [ 66%]
+tests/test_checkpoint_attention.py::test_dropout_rng PASSED              [100%]
+
+======================= 3 passed, 3 deselected in 0.75s =======================

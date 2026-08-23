@@ -1,0 +1,16 @@
+.....                                                                    [100%]
+============================== warnings summary ===============================
+E:\miniconda3\Lib\site-packages\torch\jit\_script.py:365: 14 warnings
+  E:\miniconda3\Lib\site-packages\torch\jit\_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+5 passed, 14 warnings in 8.00s
+
+=== torch.equal verification summary ===
+test_mode012_loss_equal_full_attn:  Mode 1/2 forward loss + aux_loss == Mode 0 (torch.equal),
+                                    all parameter grads Mode1/2 == Mode0 (torch.equal, fp32)
+test_mode2_linear_attn_loss_equal:  Mode 2 (whole-block checkpoint over GatedDeltaNet layers) loss
+                                    + all parameter grads == Mode 0 (torch.equal, fp32)
+test_moe_router_grad:               Mode 1/2 backward (loss+aux_loss) -> layers[0].mlp.gate.weight.grad nonzero
+test_gated_delta_net_untouched:     git diff hunks do not overlap GatedDeltaNet class body (L155-247)

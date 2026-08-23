@@ -1,0 +1,24 @@
+=== T13: dead flag 'loop_grad_checkpoint' global grep evidence ===
+Date: 2026-08-23 23:22:31
+
+Task command (exact): grep -rn "loop_grad_checkpoint" --include="*.py" .
+--- raw matches (full repo, all files) ---
+./model/model_instinct_loop.py:363:                    # Mode 2: checkpoint the whole shared loop_block (the old loop_grad_checkpoint
+./tests/test_flag_threading_e2e.py:16:   ``loop_grad_checkpoint`` key do NOT crash: ``InstinctConfig``'s ``**kwargs``
+./tests/test_flag_threading_e2e.py:88:# 2. Legacy JSON compat (leftover loop_grad_checkpoint key)
+./tests/test_flag_threading_e2e.py:92:    """Direct construction with a leftover loop_grad_checkpoint key must not crash."""
+./tests/test_flag_threading_e2e.py:93:    config = InstinctConfig(loop_grad_checkpoint=True, use_grad_checkpoint=1)
+./tests/test_flag_threading_e2e.py:97:def test_legacy_json_with_loop_grad_checkpoint_no_crash(tmp_path):
+./tests/test_flag_threading_e2e.py:98:    """An old config JSON carrying loop_grad_checkpoint survives config_from_args."""
+./tests/test_flag_threading_e2e.py:99:    old = {"loop_grad_checkpoint": True, "vocab_size": 128}
+
+--- live-code check: exclude comments AND the intentional legacy-compat test file ---
+(tests/test_flag_threading_e2e.py must reference the legacy key by design: it feeds
+ old JSONs containing 'loop_grad_checkpoint' to config_from_args to prove no-crash.)
+command: grep -rn loop_grad_checkpoint --include=*.py --exclude=test_flag_threading_e2e.py . | grep -vE ':[0-9]+:[[:space:]]*#'
+CLEAN: zero LIVE references to dead flag 'loop_grad_checkpoint' in non-comment code
+
+VERDICT: CLEAN — the dead flag is fully removed from production code.
+Only matches are (1) intentional legacy-JSON fixtures/docstrings in tests/test_flag_threading_e2e.py (T13 itself)
+and (2) an explanatory comment at model/model_instinct_loop.py:363 (commit 64b6ad9) documenting that
+Mode 2 use_grad_checkpoint fulfills the old loop_grad_checkpoint promise. Neither is a live flag.

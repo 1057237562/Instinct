@@ -1,0 +1,31 @@
+T5: WebUI import smoke test evidence
+====================================
+Date: 2026-08-23
+Branch: feature/gradient-checkpointing
+Working dir: D:\AI\Instinct\scripts
+
+Command:
+  PYTHONUTF8=1 python -c "import config_webui; print('OK')"
+
+Result:
+  OK
+
+Notes:
+  - Module imports and executes the full page body without syntax/import errors.
+  - Streamlit "missing ScriptRunContext" / use_container_width deprecation
+    warnings are pre-existing noise (bare-mode execution), not errors.
+  - New flag use_grad_checkpoint wired across all chains (GLOBAL, after fix):
+      * build_config_dict (L566):  "use_grad_checkpoint": st.session_state.get("use_grad_checkpoint", 0)
+      * gen_python_code (L672-673): emits ("use_grad_checkpoint", <v>) when v > 0
+      * gen_config_json (L737):     key "use_grad_checkpoint" in global keys list
+      * load_config_to_session (L813): st.session_state.use_grad_checkpoint = config_dict.get("use_grad_checkpoint", 0)
+      * UI (L1864-1868):            st.selectbox 0/1/2 "梯度检查点模式（0关闭/1选择性/2整层）" in global Training area
+      * launch command (L1983-1985): cmd.extend(["--use_grad_checkpoint", str(grad_ckpt)]) when v > 0
+  - No use_grad_checkpoint reference sits inside any looped (`== "looped"`) block.
+  - Matches T4 trainer-side CLI: --use_grad_checkpoint choices [0,1,2]
+
+Fix (2026-08-23): use_grad_checkpoint promoted from looped-only to global flag
+  so dense/MoE/linear architectures can set it in the WebUI (launch command was
+  already reading it globally).
+
+Verified: PASS

@@ -1,0 +1,35 @@
+T5: WebUI dead flag cleanup - loop_grad_checkpoint removal evidence
+===================================================================
+Date: 2026-08-23
+Branch: feature/gradient-checkpointing
+
+Command:
+  grep -rn "loop_grad_checkpoint" scripts/ 2>/dev/null || echo "CLEAN"
+
+Result:
+  CLEAN
+
+Notes:
+  - All 8 references to loop_grad_checkpoint removed from scripts/config_webui.py:
+      * build_config_dict (was L609)
+      * gen_python_code (was L685-686)
+      * gen_config_json persistence key list (was L763)
+      * session load (was L856)
+      * UI checkbox (was L1520-1522)
+  - Stale scripts/__pycache__/config_webui.cpython-312.pyc bytecode was removed
+    (it contained the old string from a prior compiled run; not source).
+  - Source tree is CLEAN: zero matches for loop_grad_checkpoint.
+
+Fix (2026-08-23): use_grad_checkpoint promoted from looped-only to GLOBAL flag.
+  - use_grad_checkpoint now lives at global positions (mirroring use_moe):
+      * build_config_dict global dict (L566, top-level key)
+      * gen_python_code global params (L672-673, after use_moe else)
+      * gen_config_json global keys list (L737, after "use_moe")
+      * load_config_to_session global restore (L813, after use_moe)
+      * UI selectbox in global Training area (L1864-1868, after compile_mode)
+      * launch command (L1983-1985, unchanged - was already global)
+  - No use_grad_checkpoint reference remains inside any `== "looped"` block
+    or looped key list (visible via indentation: all sites at global level).
+  - Verified: grep -rn "loop_grad_checkpoint" scripts/ -> CLEAN
+
+Verified: PASS
