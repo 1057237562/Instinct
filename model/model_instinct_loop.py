@@ -5,6 +5,7 @@ from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from model.flash_attn_4 import flash_attention
 from model.kv_cache_quant import parse_cache, make_cache
+from model.checkpointing import recompute_attention, checkpoint_ffn
 
 # 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
 #                                 Instinct Loop Config
@@ -119,6 +120,7 @@ class Attention(nn.Module):
         self.dropout = config.dropout
         self.kv_cache_dtype = getattr(config, 'kv_cache_dtype', 'fp32')
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention') and config.flash_attn
+        self.use_grad_checkpoint = getattr(config, "use_grad_checkpoint", 0)
 
     def forward(self, x, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
         bsz, seq_len, _ = x.shape
@@ -141,12 +143,17 @@ class Attention(nn.Module):
             output = flash_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=self.is_causal)
             output = output.reshape(bsz, seq_len, -1)
         else:
-            xq, xk, xv = (xq.transpose(1, 2), repeat_kv(xk, self.n_rep).transpose(1, 2), repeat_kv(xv, self.n_rep).transpose(1, 2))
-            scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
-            if self.is_causal: scores[:, :, :, -seq_len:] += torch.full((seq_len, seq_len), float("-inf"), device=scores.device).triu(1)
-            if attention_mask is not None: scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
-            output = self.attn_dropout(F.softmax(scores.float(), dim=-1).type_as(xq)) @ xv
-            output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
+            if self.use_grad_checkpoint == 1 and self.training and past_key_value is None:
+                # Mode 1: selective attention recompute — only pre-transpose Q/K/V is kept,
+                # QK^T/softmax/dropout/@V are recomputed in backward to save O(seq^2) memory
+                output = recompute_attention(xq, xk, xv, attention_mask, self.is_causal, self.attn_dropout.p, self.head_dim)
+            else:
+                xq, xk, xv = (xq.transpose(1, 2), repeat_kv(xk, self.n_rep).transpose(1, 2), repeat_kv(xv, self.n_rep).transpose(1, 2))
+                scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
+                if self.is_causal: scores[:, :, :, -seq_len:] += torch.full((seq_len, seq_len), float("-inf"), device=scores.device).triu(1)
+                if attention_mask is not None: scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
+                output = self.attn_dropout(F.softmax(scores.float(), dim=-1).type_as(xq)) @ xv
+                output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
         output = self.resid_dropout(self.o_proj(output))
         return output, past_kv
 
@@ -200,6 +207,7 @@ class InstinctBlock(nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mlp = FeedForward(config) if not config.use_moe else MOEFeedForward(config)
+        self.use_grad_checkpoint = getattr(config, "use_grad_checkpoint", 0)
 
     def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
         residual = hidden_states
@@ -208,7 +216,14 @@ class InstinctBlock(nn.Module):
             past_key_value, use_cache, attention_mask
         )
         hidden_states += residual
-        hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
+        normed = self.post_attention_layernorm(hidden_states)
+        if self.use_grad_checkpoint == 1 and self.training:
+            ffn_out, aux = checkpoint_ffn(self.mlp, normed)
+            if aux is not None:
+                self.mlp.aux_loss = aux
+            hidden_states = hidden_states + ffn_out
+        else:
+            hidden_states = hidden_states + self.mlp(normed)
         return hidden_states, present_key_value
 
 class InstinctLoopModel(nn.Module):
@@ -344,12 +359,25 @@ class InstinctLoopModel(nn.Module):
                 if self.config.use_input_injection:
                     updated = updated + frozen_input
 
-                hidden_states, present = self.loop_block(
-                    updated, position_embeddings,
-                    past_key_value=past_key_values[kv_idx],
-                    use_cache=use_cache,
-                    attention_mask=attention_mask
-                )
+                if self.config.use_grad_checkpoint == 2 and self.training:
+                    # Mode 2: checkpoint the whole shared loop_block (the old loop_grad_checkpoint
+                    # promise); MoE aux_loss returns through the closure so its gradient reaches the router
+                    def _loop_blk(h, pkv):
+                        hs, present = self.loop_block(h, position_embeddings, past_key_value=pkv,
+                                                      use_cache=use_cache, attention_mask=attention_mask)
+                        aux = self.loop_block.mlp.aux_loss if isinstance(self.loop_block.mlp, MOEFeedForward) else None
+                        return hs, present, aux
+                    hidden_states, present, loop_aux = torch.utils.checkpoint.checkpoint(
+                        _loop_blk, updated, past_key_values[kv_idx], use_reentrant=False, preserve_rng_state=True)
+                    if loop_aux is not None:
+                        self.loop_block.mlp.aux_loss = loop_aux
+                else:
+                    hidden_states, present = self.loop_block(
+                        updated, position_embeddings,
+                        past_key_value=past_key_values[kv_idx],
+                        use_cache=use_cache,
+                        attention_mask=attention_mask
+                    )
                 presents.append(present)
                 kv_idx += 1
                 if layer_callback is not None:
