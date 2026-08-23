@@ -5,6 +5,7 @@ from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from model.flash_attn_4 import flash_attention
 from model.kv_cache_quant import parse_cache, make_cache
+from model.checkpointing import recompute_attention, checkpoint_ffn
 
 # 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
 #                                     Instinct Config
@@ -117,6 +118,7 @@ class Attention(nn.Module):
         self.dropout = config.dropout
         self.kv_cache_dtype = getattr(config, 'kv_cache_dtype', 'fp32')
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention') and config.flash_attn
+        self.use_grad_checkpoint = getattr(config, "use_grad_checkpoint", 0)
 
     def forward(self, x, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
         bsz, seq_len, _ = x.shape
@@ -139,12 +141,16 @@ class Attention(nn.Module):
             output = flash_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=self.is_causal)
             output = output.reshape(bsz, seq_len, -1)
         else:
-            xq, xk, xv = (xq.transpose(1, 2), repeat_kv(xk, self.n_rep).transpose(1, 2), repeat_kv(xv, self.n_rep).transpose(1, 2))
-            scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
-            if self.is_causal: scores[:, :, :, -seq_len:] += torch.full((seq_len, seq_len), float("-inf"), device=scores.device).triu(1)
-            if attention_mask is not None: scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
-            output = self.attn_dropout(F.softmax(scores.float(), dim=-1).type_as(xq)) @ xv
-            output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
+            if self.use_grad_checkpoint == 1 and self.training and past_key_value is None:
+                # Mode 1: recompute attention core in backward; needs pre-transpose q/k/v and q/k same-seq (no cache).
+                output = recompute_attention(xq, xk, xv, attention_mask, self.is_causal, self.attn_dropout.p, self.head_dim)
+            else:
+                xq, xk, xv = (xq.transpose(1, 2), repeat_kv(xk, self.n_rep).transpose(1, 2), repeat_kv(xv, self.n_rep).transpose(1, 2))
+                scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
+                if self.is_causal: scores[:, :, :, -seq_len:] += torch.full((seq_len, seq_len), float("-inf"), device=scores.device).triu(1)
+                if attention_mask is not None: scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
+                output = self.attn_dropout(F.softmax(scores.float(), dim=-1).type_as(xq)) @ xv
+                output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
         output = self.resid_dropout(self.o_proj(output))
         return output, past_kv
 
@@ -197,6 +203,7 @@ class InstinctBlock(nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mlp = FeedForward(config) if not config.use_moe else MOEFeedForward(config)
+        self.use_grad_checkpoint = getattr(config, "use_grad_checkpoint", 0)
 
     def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
         residual = hidden_states
@@ -205,7 +212,14 @@ class InstinctBlock(nn.Module):
             past_key_value, use_cache, attention_mask
         )
         hidden_states += residual
-        hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
+        normed = self.post_attention_layernorm(hidden_states)
+        if self.use_grad_checkpoint == 1 and self.training:
+            ffn_out, aux = checkpoint_ffn(self.mlp, normed)
+            if aux is not None:
+                self.mlp.aux_loss = aux   # returned graph node replaces the no_grad side-channel attribute
+            hidden_states = hidden_states + ffn_out
+        else:
+            hidden_states = hidden_states + self.mlp(normed)
         return hidden_states, present_key_value
 
 class InstinctModel(nn.Module):
@@ -238,16 +252,29 @@ class InstinctModel(nn.Module):
         exit_check_fn = kwargs.pop("exit_check_fn", None)
         layer_callback = kwargs.pop("layer_callback", None)
         for layer, past_key_value in zip(self.layers, past_key_values):
-            hidden_states, present = layer(
-                hidden_states,
-                position_embeddings,
-                past_key_value=past_key_value,
-                use_cache=use_cache,
-                attention_mask=attention_mask
-            )
-            presents.append(present)
-            if isinstance(layer.mlp, MOEFeedForward):
-                aux_loss = aux_loss + layer.mlp.aux_loss
+            if self.config.use_grad_checkpoint == 2 and self.training:
+                # Pass the module directly, not a closure over it: torch's non-reentrant
+                # checkpoint mis-differentiates parameterized closures composed over 2+
+                # layers (wrong grads in the first block). The MoE aux_loss attribute
+                # stays graph-connected (grad-enabled forward) and is recompute-regenerated.
+                hidden_states, present = torch.utils.checkpoint.checkpoint(
+                    layer, hidden_states, position_embeddings, past_key_value,
+                    use_cache, attention_mask,
+                    use_reentrant=False, preserve_rng_state=True)
+                presents.append(present)
+                if isinstance(layer.mlp, MOEFeedForward):
+                    aux_loss = aux_loss + layer.mlp.aux_loss
+            else:
+                hidden_states, present = layer(
+                    hidden_states,
+                    position_embeddings,
+                    past_key_value=past_key_value,
+                    use_cache=use_cache,
+                    attention_mask=attention_mask
+                )
+                presents.append(present)
+                if isinstance(layer.mlp, MOEFeedForward):
+                    aux_loss = aux_loss + layer.mlp.aux_loss
             if layer_callback is not None:
                 # Per-layer streaming hook (logit lens etc.): fires with the normed
                 # hidden state right after each layer computes it.
