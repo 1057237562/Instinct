@@ -1,3 +1,12 @@
+"""
+Agentic RL 训练脚本：多轮 Tool-Use 场景下的强化学习（GRPO / CISPO 风格的组内相对 advantage）。
+
+- 多轮 rollout：模型可连续调用模拟工具（<tool_call> 标签 + JSON 参数），工具结果以 tool 角色回填；
+- 奖励：无工具调用时按格式/思考/reward model 打分；有工具调用时按 tool 对齐度与
+  ground truth 答案命中率打分，未完成扣分，总分 clip 到 [-3, 3]；
+- 策略更新与 train_grpo.py 一致：组内归一化 advantage + per-token KL 惩罚，
+  loss_type 支持 'grpo'（PPO 式裁剪）与 'cispo'（ratio 上界裁剪）。
+"""
 import os
 import sys
 
@@ -7,61 +16,135 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 os.environ.setdefault("HF_HOME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".cache", "huggingface"))
 import datasets  # noqa: F401  # Windows pyarrow/torch DLL conflict workaround (issue #771)
 import re
-import gc
 import json
 import math
 import random
 import signal
-import argparse
 import warnings
+from typing import List, Optional
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
-from contextlib import nullcontext
-from torch import optim
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from transformers import AutoTokenizer
-from model.model_instinct import InstinctForCausalLM
 from dataset.lm_dataset import AgentRLDataset
-from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, LMForRewardModel, config_from_args, build_optimizer
+from trainer.trainer_utils import (Logger, is_main_process, lm_checkpoint, setup_seed,
+                                   SkipBatchSampler, init_model, LMForRewardModel,
+                                   config_from_args, build_optimizer)
+from trainer.trainer_cli import (
+    build_trainer_parser, setup_dist_and_seed, build_autocast_ctx, init_wandb_logger,
+)
 from trainer.rollout_engine import create_rollout_engine, compute_per_token_logps
 
 warnings.filterwarnings('ignore')
 
 # ================================ 工具与 Reward = Start ================================
 
-def rep_penalty(text, n=3, cap=0.5):
+def rep_penalty(text: str, n: int = 3, cap: float = 0.5) -> float:
+    """计算文本的重复惩罚分数。
+
+    将文本切分为 n-gram，重复 n-gram 占比越高惩罚越大，结果被 cap 截断；
+    无有效 n-gram 时返回 0.0。用于抑制模型回复中的机械重复。
+    """
     toks = re.findall(r"\w+|[^\w\s]", text.lower())
     grams = [tuple(toks[i:i + n]) for i in range(len(toks) - n + 1)]
     return min(cap, (len(grams) - len(set(grams))) * cap * 2 / len(grams)) if grams else 0.0
 
 # ======== 工具定义 ========
+# 暴露给模型的工具 schema 列表（OpenAI function calling 格式），注入到 system 提示中
 TOOLS = [
-    {"type": "function", "function": {"name": "calculate_math", "description": "计算数学表达式", "parameters": {"type": "object", "properties": {"expression": {"type": "string"}}, "required": ["expression"]}}},
-    {"type": "function", "function": {"name": "unit_converter", "description": "单位换算", "parameters": {"type": "object", "properties": {"value": {"type": "number"}, "from_unit": {"type": "string"}, "to_unit": {"type": "string"}}, "required": ["value", "from_unit", "to_unit"]}}},
-    {"type": "function", "function": {"name": "get_current_weather", "description": "获取天气", "parameters": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]}}},
-    {"type": "function", "function": {"name": "get_current_time", "description": "获取时间", "parameters": {"type": "object", "properties": {"timezone": {"type": "string", "default": "Asia/Shanghai"}}, "required": []}}},
-    {"type": "function", "function": {"name": "get_exchange_rate", "description": "查询汇率", "parameters": {"type": "object", "properties": {"from_currency": {"type": "string"}, "to_currency": {"type": "string"}}, "required": ["from_currency", "to_currency"]}}},
-    {"type": "function", "function": {"name": "translate_text", "description": "翻译文本", "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "target_language": {"type": "string"}}, "required": ["text", "target_language"]}}},
+    {"type": "function", "function": {
+        "name": "calculate_math", "description": "计算数学表达式",
+        "parameters": {"type": "object", "properties": {"expression": {"type": "string"}}, "required": ["expression"]},
+    }},
+    {"type": "function", "function": {
+        "name": "unit_converter", "description": "单位换算",
+        "parameters": {
+            "type": "object",
+            "properties": {"value": {"type": "number"}, "from_unit": {"type": "string"}, "to_unit": {"type": "string"}},
+            "required": ["value", "from_unit", "to_unit"],
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "get_current_weather", "description": "获取天气",
+        "parameters": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
+    }},
+    {"type": "function", "function": {
+        "name": "get_current_time", "description": "获取时间",
+        "parameters": {"type": "object", "properties": {"timezone": {"type": "string", "default": "Asia/Shanghai"}}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "get_exchange_rate", "description": "查询汇率",
+        "parameters": {
+            "type": "object",
+            "properties": {"from_currency": {"type": "string"}, "to_currency": {"type": "string"}},
+            "required": ["from_currency", "to_currency"],
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "translate_text", "description": "翻译文本",
+        "parameters": {
+            "type": "object",
+            "properties": {"text": {"type": "string"}, "target_language": {"type": "string"}},
+            "required": ["text", "target_language"],
+        },
+    }},
 ]
 
 # ======== 模拟数据 ========
-WEATHER_DATA = {"北京": ("28°C", "晴"), "上海": ("15°C", "多云"), "广州": ("32°C", "闷热"), "深圳": ("30°C", "晴"), "杭州": ("22°C", "阴"), "成都": ("18°C", "小雨"), "武汉": ("25°C", "多云"), "南京": ("20°C", "晴"), "西安": ("16°C", "大风"), "重庆": ("26°C", "阴"), "Tokyo": ("12°C", "晴"), "New York": ("8°C", "多云"), "London": ("5°C", "小雨"), "Paris": ("10°C", "阴"), "Sydney": ("25°C", "晴朗")}
-TIME_DATA = {"Asia/Shanghai": "2025-03-07 14:30:00", "America/New_York": "2025-03-07 01:30:00", "Europe/London": "2025-03-07 06:30:00", "Asia/Tokyo": "2025-03-07 15:30:00", "Europe/Paris": "2025-03-07 07:30:00", "Australia/Sydney": "2025-03-07 17:30:00"}
-EXCHANGE_DATA = {("USD", "CNY"): 7.21, ("EUR", "CNY"): 7.85, ("GBP", "CNY"): 9.12, ("JPY", "CNY"): 0.048, ("USD", "EUR"): 0.92, ("USD", "GBP"): 0.79, ("CNY", "JPY"): 20.83, ("AUD", "CNY"): 4.72}
-TRANSLATE_DATA = {("你好世界", "english"): "Hello World", ("Good morning", "chinese"): "早上好", ("今天天气真好", "english"): "The weather is nice today", ("I love programming", "chinese"): "我喜欢编程", ("机器学习很有趣", "english"): "Machine learning is interesting", ("Happy birthday", "chinese"): "生日快乐"}
-UNIT_DATA = {"km_miles": 0.621371, "miles_km": 1.60934, "kg_pounds": 2.20462, "pounds_kg": 0.453592, "meters_feet": 3.28084, "feet_meters": 0.3048, "celsius_fahrenheit": 1.8, "fahrenheit_celsius": 0.5556}
+WEATHER_DATA = {
+    "北京": ("28°C", "晴"), "上海": ("15°C", "多云"), "广州": ("32°C", "闷热"), "深圳": ("30°C", "晴"),
+    "杭州": ("22°C", "阴"), "成都": ("18°C", "小雨"), "武汉": ("25°C", "多云"), "南京": ("20°C", "晴"),
+    "西安": ("16°C", "大风"), "重庆": ("26°C", "阴"), "Tokyo": ("12°C", "晴"), "New York": ("8°C", "多云"),
+    "London": ("5°C", "小雨"), "Paris": ("10°C", "阴"), "Sydney": ("25°C", "晴朗"),
+}
+TIME_DATA = {
+    "Asia/Shanghai": "2025-03-07 14:30:00", "America/New_York": "2025-03-07 01:30:00",
+    "Europe/London": "2025-03-07 06:30:00", "Asia/Tokyo": "2025-03-07 15:30:00",
+    "Europe/Paris": "2025-03-07 07:30:00", "Australia/Sydney": "2025-03-07 17:30:00",
+}
+EXCHANGE_DATA = {
+    ("USD", "CNY"): 7.21, ("EUR", "CNY"): 7.85, ("GBP", "CNY"): 9.12, ("JPY", "CNY"): 0.048,
+    ("USD", "EUR"): 0.92, ("USD", "GBP"): 0.79, ("CNY", "JPY"): 20.83, ("AUD", "CNY"): 4.72,
+}
+TRANSLATE_DATA = {
+    ("你好世界", "english"): "Hello World", ("Good morning", "chinese"): "早上好",
+    ("今天天气真好", "english"): "The weather is nice today", ("I love programming", "chinese"): "我喜欢编程",
+    ("机器学习很有趣", "english"): "Machine learning is interesting", ("Happy birthday", "chinese"): "生日快乐",
+}
+UNIT_DATA = {
+    "km_miles": 0.621371, "miles_km": 1.60934, "kg_pounds": 2.20462, "pounds_kg": 0.453592,
+    "meters_feet": 3.28084, "feet_meters": 0.3048, "celsius_fahrenheit": 1.8, "fahrenheit_celsius": 0.5556,
+}
 
 # ======== 模拟执行 ========
 MOCK_RESULTS = {
-    "calculate_math": lambda args: {"result": str(eval(str(args.get("expression", "0")).replace("^", "**").replace("×", "*").replace("÷", "/").replace("−", "-").replace("（", "(").replace("）", ")"), {"__builtins__": {}, "math": math}))},
-    "unit_converter": lambda args: {"result": round(float(args.get("value", 0)) * UNIT_DATA.get(f"{args.get('from_unit', '').lower()}_{args.get('to_unit', '').lower()}", 1), 4)},
-    "get_current_weather": lambda args: (lambda w: {"city": args.get("location"), "temperature": w[0], "humidity": "65%", "condition": w[1]})(WEATHER_DATA.get(args.get("location"), ("22°C", "晴"))),
-    "get_current_time": lambda args: {"datetime": TIME_DATA.get(args.get("timezone", "Asia/Shanghai"), "2025-03-07 14:30:00"), "timezone": args.get("timezone", "Asia/Shanghai")},
-    "get_exchange_rate": lambda args: {"from": args.get("from_currency"), "to": args.get("to_currency"), "rate": EXCHANGE_DATA.get((args.get("from_currency"), args.get("to_currency")), 1.0)},
-    "translate_text": lambda args: {"translated_text": TRANSLATE_DATA.get((args.get("text"), args.get("target_language")), args.get("text", ""))},
+    "calculate_math": lambda args: {"result": str(eval(
+        str(args.get("expression", "0"))
+        .replace("^", "**").replace("×", "*").replace("÷", "/")
+        .replace("−", "-").replace("（", "(").replace("）", ")"),
+        {"__builtins__": {}, "math": math},
+    ))},
+    "unit_converter": lambda args: {"result": round(
+        float(args.get("value", 0))
+        * UNIT_DATA.get(f"{args.get('from_unit', '').lower()}_{args.get('to_unit', '').lower()}", 1),
+        4,
+    )},
+    "get_current_weather": lambda args: (lambda w: {
+        "city": args.get("location"), "temperature": w[0], "humidity": "65%", "condition": w[1],
+    })(WEATHER_DATA.get(args.get("location"), ("22°C", "晴"))),
+    "get_current_time": lambda args: {
+        "datetime": TIME_DATA.get(args.get("timezone", "Asia/Shanghai"), "2025-03-07 14:30:00"),
+        "timezone": args.get("timezone", "Asia/Shanghai"),
+    },
+    "get_exchange_rate": lambda args: {
+        "from": args.get("from_currency"), "to": args.get("to_currency"),
+        "rate": EXCHANGE_DATA.get((args.get("from_currency"), args.get("to_currency")), 1.0),
+    },
+    "translate_text": lambda args: {
+        "translated_text": TRANSLATE_DATA.get((args.get("text"), args.get("target_language")), args.get("text", "")),
+    },
 }
 
 # ======== 参数校验 ========
@@ -75,14 +158,24 @@ CHECK_ARGS = {
 }
 
 # ======== 工具调用解析与执行 ========
-def parse_tool_calls(text):
+def parse_tool_calls(text: str) -> List[dict]:
+    """从回复文本中解析 <tool_call>...</tool_call> 包裹的 JSON 工具调用。
+
+    每个匹配片段按 JSON 解析为 {"name": ..., "arguments": ...} 格式，
+    解析失败的片段直接跳过。
+    """
     calls = []
     for m in re.findall(r'<tool_call>(.*?)</tool_call>', text, re.DOTALL):
         try: calls.append(json.loads(m.strip()))
         except: pass
     return calls
 
-def execute_tool(name, args):
+def execute_tool(name: str, args: dict) -> Optional[dict]:
+    """在模拟环境中执行工具调用并返回结果。
+
+    从 MOCK_RESULTS 查找对应执行函数，设置 SIGALRM 1 秒超时防止工具卡死；
+    工具不存在或执行异常时返回 None。
+    """
     fn = MOCK_RESULTS.get(name)
     if not fn: return None
     try:
@@ -96,7 +189,15 @@ def execute_tool(name, args):
         except: pass
 
 # ======== 多轮 Rollout ========
-def rollout_single(rollout_engine, tokenizer, messages, tools, max_turns=3, max_new_tokens=256, thinking_ratio=0.5, device="cuda"):
+def rollout_single(rollout_engine, tokenizer, messages, tools, max_turns: int = 3,
+                   max_new_tokens: int = 256, thinking_ratio: float = 0.5, device: str = "cuda"):
+    """单样本多轮工具调用 rollout：最多 max_turns 轮，直到无工具调用或轮数耗尽。
+
+    每轮用 chat template（含 tools 与 open_thinking 开关）构造上下文并生成回复；
+    若回复含 <tool_call> 则执行模拟工具并把结果以 tool 角色回填到 messages 继续下一轮。
+    返回 (最终回复文本, 最终上下文, prompt_ids, response_ids, response_mask,
+    response_old_logps, 每轮输出列表, 是否因轮数耗尽未完成)。
+    """
     all_outputs = []
     prompt_ids = None
     response_ids = []
@@ -144,7 +245,10 @@ def rollout_single(rollout_engine, tokenizer, messages, tools, max_turns=3, max_
             result_str = (json.dumps(result, ensure_ascii=False) if result else '{"error": "tool not found"}')[:2048]  # 防止天文数字撑爆tokenizer
             messages.append({"role": "tool", "content": result_str})
 
-        observe_context = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=not unfinished, tools=tools, open_thinking=open_thinking)
+        observe_context = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=not unfinished,
+            tools=tools, open_thinking=open_thinking,
+        )
         observe_ids = tokenizer(observe_context, return_tensors="pt", add_special_tokens=False)["input_ids"][0].tolist()
         current_len = len(prompt_ids) + len(response_ids)
         obs_delta = observe_ids[current_len:]
@@ -157,7 +261,13 @@ def rollout_single(rollout_engine, tokenizer, messages, tools, max_turns=3, max_
     prompt_ids = prompt_ids or []
     return final_output, final_context, prompt_ids, response_ids, response_mask, response_old_logps, list(all_outputs), unfinished
 
-def rollout_batch(rollout_engine, tokenizer, messages_batch, tools_batch, num_gen, max_turns=3, max_new_tokens=256, thinking_ratio=0.5, device="cuda"):
+def rollout_batch(rollout_engine, tokenizer, messages_batch, tools_batch, num_gen: int,
+                  max_turns: int = 3, max_new_tokens: int = 256,
+                  thinking_ratio: float = 0.5, device: str = "cuda"):
+    """对整批样本执行多轮 rollout：每个样本生成 num_gen 条轨迹。
+
+    逐样本逐条调用 rollout_single，汇总为 8 个与轨迹数一一对应的列表。
+    """
     all_completions = []
     all_contexts = []
     all_prompt_ids = []
@@ -169,7 +279,11 @@ def rollout_batch(rollout_engine, tokenizer, messages_batch, tools_batch, num_ge
     for messages, tools in zip(messages_batch, tools_batch):
         for _ in range(num_gen):
             msgs_copy = [dict(m) for m in messages]
-            completion, context, prompt_ids, response_ids, response_mask, response_old_logps, turn_outputs, unfinished = rollout_single(rollout_engine, tokenizer, msgs_copy, tools, max_turns, max_new_tokens, thinking_ratio, device)
+            (completion, context, prompt_ids, response_ids, response_mask,
+             response_old_logps, turn_outputs, unfinished) = rollout_single(
+                rollout_engine, tokenizer, msgs_copy, tools, max_turns,
+                max_new_tokens, thinking_ratio, device,
+            )
             all_completions.append(completion)
             all_contexts.append(context)
             all_prompt_ids.append(prompt_ids)
@@ -178,15 +292,32 @@ def rollout_batch(rollout_engine, tokenizer, messages_batch, tools_batch, num_ge
             all_response_old_logps.append(response_old_logps)
             all_turn_outputs.append(turn_outputs)
             all_unfinished.append(unfinished)
-    return all_completions, all_contexts, all_prompt_ids, all_response_ids, all_response_masks, all_response_old_logps, all_turn_outputs, all_unfinished
+    return (all_completions, all_contexts, all_prompt_ids, all_response_ids,
+            all_response_masks, all_response_old_logps, all_turn_outputs, all_unfinished)
 
 # ======== Reward 计算 ========
-def validate_gt_in_text(text, gt_list):
+def validate_gt_in_text(text: str, gt_list: List[str]) -> set:
+    """校验最终回答中是否包含 ground truth 内容。
+
+    支持两种匹配：字符串子串匹配；以及数值近似匹配（对文本中出现的数字与 GT 数值
+    做 1e-6 精度比较）。返回命中的 GT 元素集合。
+    """
     text, text_num = str(text), str(text).replace(',', '')
     nums = [float(x) for x in re.findall(r'(?<![\w.])[-+]?\d+(?:\.\d+)?(?![\w.])', text_num)]
-    return {g for g in gt_list if ((s := str(g).strip()) and s.lower() in text.lower()) or (re.fullmatch(r'[-+]?\d+(?:\.\d+)?', str(g).strip().replace(',', '')) and any(abs(float(str(g).strip().replace(',', '')) - n) < 1e-6 for n in nums))}
+    return {g for g in gt_list
+            if ((s := str(g).strip()) and s.lower() in text.lower())
+            or (re.fullmatch(r'[-+]?\d+(?:\.\d+)?', str(g).strip().replace(',', ''))
+                and any(abs(float(str(g).strip().replace(',', '')) - n) < 1e-6 for n in nums))}
 
-def calculate_rewards(prompts, completions, gt_batch, tools_batch, num_gen, reward_model=None, device="cuda", turn_outputs_batch=None, unfinished_batch=None):
+def calculate_rewards(prompts, completions, gt_batch, tools_batch, num_gen: int,
+                      reward_model=None, device: str = "cuda",
+                      turn_outputs_batch=None, unfinished_batch=None) -> torch.Tensor:
+    """为多轮工具调用轨迹计算奖励（组内相对 advantage 在训练循环中计算）。
+
+    无工具调用时：长度分 + thinking 分 + reward model 分 - 重复惩罚；
+    有工具调用时：tool 数量对齐分 + GT 答案命中分（2.5 * 命中比例） - 未完成扣分 - 重复惩罚；
+    最终总分 clip 到 [-3, 3]。返回形状 [num_samples * num_gen] 的奖励张量。
+    """
     rewards = torch.zeros(len(completions), device=device)
     for idx, response in enumerate(completions):
         reward, answer = 0.0, response
@@ -200,7 +331,7 @@ def calculate_rewards(prompts, completions, gt_batch, tools_batch, num_gen, rewa
         tool_calls = []
         for turn_answer in turn_answers: tool_calls.extend(parse_tool_calls(turn_answer))  # 解析tool调用
         reward -= 0.5 * sum(abs(turn.count('<tool_call>') - turn.count('</tool_call>')) for turn in turn_answers)  # 标签扣分
-        # -------- 无工具调用：格式+reward奖励 --------
+        # 无工具调用：格式+reward奖励
         if not tool_calls:
             reward += 0.5 if 5 <= len(response.strip()) <= 800 else -0.5  # 长度分
             if '</think>' in response:
@@ -217,7 +348,7 @@ def calculate_rewards(prompts, completions, gt_batch, tools_batch, num_gen, rewa
                 reward += score  # RM分
             reward -= rep_penalty(answer)
             rewards[idx] = max(min(reward, 3.0), -3.0)  # 总分Clip
-        # -------- 有工具调用：执行结果奖励 --------
+        # 有工具调用：执行结果奖励
         else:
             gt = gt_batch[sample_idx]
             valid_call_count = 0
@@ -230,7 +361,7 @@ def calculate_rewards(prompts, completions, gt_batch, tools_batch, num_gen, rewa
                 valid_call_count += int(bool(name in valid_names and check and check(raw)))
             tool_gap = abs(valid_call_count - len(gt)) + max(0, len(tool_calls) - valid_call_count)  # tool数差值
             reward += 0.5 if tool_gap == 0 else -0.5 * tool_gap  # tool对齐分
-            
+
             final_text = "" if unfinished else (answer.split('</tool_call>')[-1] if '</tool_call>' in answer else answer)
             verified = validate_gt_in_text(final_text, gt) if gt else set()
             if gt: reward += 2.5 * len(verified) / len(gt)  # GT分
@@ -240,7 +371,17 @@ def calculate_rewards(prompts, completions, gt_batch, tools_batch, num_gen, rewa
     return rewards
 
 # ================================ 工具与 Reward = End ================================
-def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model=None, start_step=0, wandb=None, use_sglang=False):
+def rl_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model,
+                   reward_model=None, start_step: int = 0, wandb=None, use_sglang: bool = False):
+    """Agentic RL 单 epoch 训练循环（GRPO / CISPO 风格的组内相对 advantage）。
+
+    流程：
+    1. rollout_batch 多轮工具调用生成轨迹，打包为定长张量（含 response mask 与 old logps）；
+    2. calculate_rewards 打分后按 num_generations 分组归一化得到 advantage；
+    3. per-token KL（相对 ref 策略）与 importance ratio，grpo / cispo 两种 loss 形态
+       与 train_grpo.py 一致；
+    4. 仅对响应 token 聚合 loss（跳过空行），梯度累积更新并周期性保存。
+    """
     last_step = start_step
     for step, batch in enumerate(loader, start=start_step + 1):
         messages_batch = batch['messages']
@@ -249,7 +390,12 @@ def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model
         last_step = step
 
         with torch.no_grad():
-            completions, contexts, prompt_ids_batch, response_ids_batch, response_masks_batch, response_old_logps_batch, turn_outputs_batch, unfinished_batch = rollout_batch(rollout_engine, tokenizer, messages_batch, tools_batch, args.num_generations, max_turns=3, max_new_tokens=args.max_gen_len, thinking_ratio=args.thinking_ratio, device=args.device)
+            (completions, contexts, prompt_ids_batch, response_ids_batch, response_masks_batch,
+             response_old_logps_batch, turn_outputs_batch, unfinished_batch) = rollout_batch(
+                rollout_engine, tokenizer, messages_batch, tools_batch, args.num_generations,
+                max_turns=3, max_new_tokens=args.max_gen_len,
+                thinking_ratio=args.thinking_ratio, device=args.device,
+            )
 
         prompts = [tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=True, tools=t) for m, t in zip(messages_batch, tools_batch)]
         packed_samples = []
@@ -267,11 +413,21 @@ def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model
         max_len = seq_lens.max().item()
         input_ids = torch.tensor([ids + [tokenizer.pad_token_id] * (max_len - len(ids)) for ids, _, _, _ in packed_samples], device=args.device)
         prompt_lens = torch.tensor([prompt_len for _, _, prompt_len, _ in packed_samples], device=args.device)
-        full_response_masks = torch.tensor([mask + [0] * (max_len - len(mask)) for _, mask, _, _ in packed_samples], device=args.device, dtype=torch.float32)
-        old_per_token_logps = torch.tensor([old_logps + [0.0] * ((max_len - 1) - len(old_logps)) for _, _, _, old_logps in packed_samples], device=args.device, dtype=torch.float32)
+        full_response_masks = torch.tensor(
+            [mask + [0] * (max_len - len(mask)) for _, mask, _, _ in packed_samples],
+            device=args.device, dtype=torch.float32,
+        )
+        old_per_token_logps = torch.tensor(
+            [old_logps + [0.0] * ((max_len - 1) - len(old_logps)) for _, _, _, old_logps in packed_samples],
+            device=args.device, dtype=torch.float32,
+        )
         full_mask = (input_ids != tokenizer.pad_token_id).long()
 
-        rewards = calculate_rewards(prompts, completions, gt_batch, tools_batch, args.num_generations, reward_model, device=args.device, turn_outputs_batch=turn_outputs_batch, unfinished_batch=unfinished_batch)
+        rewards = calculate_rewards(
+            prompts, completions, gt_batch, tools_batch, args.num_generations, reward_model,
+            device=args.device, turn_outputs_batch=turn_outputs_batch,
+            unfinished_batch=unfinished_batch,
+        )
 
         model_unwrapped = model.module if isinstance(model, DistributedDataParallel) else model
         with autocast_ctx:
@@ -345,9 +501,15 @@ def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model
             gs = grouped_rewards.std(dim=1, unbiased=False).mean().item()
             am, ast = advantages.mean().item(), advantages.std().item()
             lr = optimizer.param_groups[0]['lr']
-            Logger(f'Epoch:[{epoch+1}/{args.epochs}]({step}/{iters}), Reward:{ar:.4f}, KL:{kl:.4f}, GrpStd:{gs:.4f}, AdvStd:{ast:.4f}, Loss:{pl:.4f}, AvgLen:{al:.2f}, AdvMean:{am:.4f}, LR:{lr:.8f}')
+            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), '
+                   f'Reward:{ar:.4f}, KL:{kl:.4f}, GrpStd:{gs:.4f}, AdvStd:{ast:.4f}, '
+                   f'Loss:{pl:.4f}, AvgLen:{al:.2f}, AdvMean:{am:.4f}, LR:{lr:.8f}')
             if wandb and is_main_process():
-                wandb.log({"reward":ar,"kl_ref":kl,"group_reward_std":gs,"advantages_std":ast,"policy_loss":pl,"avg_response_len":al,"advantages_mean":am,"learning_rate":lr})
+                wandb.log({
+                    "reward": ar, "kl_ref": kl, "group_reward_std": gs, "advantages_std": ast,
+                    "policy_loss": pl, "avg_response_len": al, "advantages_mean": am,
+                    "learning_rate": lr,
+                })
 
         if (step % args.save_interval == 0 or step == iters) and is_main_process():
             model.eval()
@@ -373,26 +535,21 @@ def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Instinct Agent RL")
-    parser.add_argument("--save_dir", type=str, default="./out", help="模型保存目录")
-    parser.add_argument('--save_weight', default='agent', type=str, help="保存权重名称")
-    parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
-    parser.add_argument("--batch_size", type=int, default=2, help="批次大小")
-    parser.add_argument("--learning_rate", type=float, default=3e-7, help="学习率")
-    parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "adafactor", "muon"], help="优化器类型（adamw / adafactor / muon）")
-    parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
-    parser.add_argument("--dtype", type=str, default="bfloat16", help="激活层计算精度（bfloat16/float16/fp32）")
-    parser.add_argument("--param_dtype", type=str, default="fp32", choices=["fp32", "bf16", "fp16"], help="模型参数精度（fp32=主权重，bf16/fp16=训练时权重直接 cast）")
-    parser.add_argument("--kv_cache_dtype", type=str, default="fp32", choices=["fp32", "bf16", "fp16", "fp8_e4m3", "fp8_e5m2"], help="KV Cache 精度（fp8 时缓存量化，decode 带宽减半）")
-    parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程数")
-    parser.add_argument("--accumulation_steps", type=int, default=1, help="梯度累积步数")
-    parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
-    parser.add_argument("--log_interval", type=int, default=1, help="日志打印间隔")
-    parser.add_argument("--save_interval", type=int, default=10, help="模型保存间隔")
-    parser.add_argument('--hidden_size', default=768, type=int, help="模型隐藏层维度")
-    parser.add_argument('--num_hidden_layers', default=8, type=int, help="模型层数")
-    parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE")
-    parser.add_argument('--max_seq_len', default=1024, type=int, help="最大序列长度")
+    parser = build_trainer_parser(
+        description="Instinct Agent RL",
+        defaults={
+            'save_weight': 'agent',
+            'epochs': 1,
+            'batch_size': 2,
+            'learning_rate': 3e-7,
+            'accumulation_steps': 1,
+            'log_interval': 1,
+            'save_interval': 10,
+            'max_seq_len': 1024,
+            'from_weight': 'full_sft',
+            'wandb_project': 'Instinct-Agent-RL',
+        },
+    )
     parser.add_argument("--max_gen_len", type=int, default=768, help="单次最大生成长度")
     parser.add_argument("--max_total_len", type=int, default=2500, help="训练侧最终总长度上界")
     parser.add_argument("--data_path", type=str, default="./dataset/agent_rl.jsonl", help="训练数据路径")
@@ -401,13 +558,6 @@ if __name__ == "__main__":
     parser.add_argument("--loss_type", type=str, default="cispo", choices=["grpo", "cispo"], help="loss类型")
     parser.add_argument("--epsilon", type=float, default=0.2, help="GRPO的PPO clip epsilon")
     parser.add_argument("--epsilon_high", type=float, default=5.0, help="epsilon上界")
-    parser.add_argument('--from_weight', default='full_sft', type=str, help="加载预训练权重名称")
-    parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否从checkpoint恢复")
-    parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb记录")
-    parser.add_argument("--wandb_project", type=str, default="Instinct-Agent-RL", help="wandb项目名称")
-    parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile")
-    parser.add_argument("--use_grad_checkpoint", default=0, type=int, choices=[0, 1, 2], help="梯度检查点模式（0=关闭, 1=选择性重算注意力/FFN, 2=整层checkpoint）")
-    parser.add_argument("--compile_mode", type=str, default="default", choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"], help="torch.compile 模式（default=Triton 编译；reduce-overhead=叠加 CUDA graph，小模型首选；max-autotune=极限调优，编译极慢）")
     parser.add_argument("--debug_mode", action="store_true", help="调试模式")
     parser.add_argument("--debug_interval", type=int, default=20, help="调试日志间隔")
     parser.add_argument("--thinking_ratio", type=float, default=0.1, help="按概率开启thinking（0.0~1.0）")
@@ -416,27 +566,20 @@ if __name__ == "__main__":
     parser.add_argument("--sglang_base_url", type=str, default="http://localhost:8998", help="SGLang服务器URL")
     parser.add_argument("--sglang_model_path", type=str, default="./model", help="SGLang tokenizer路径")
     parser.add_argument("--sglang_shared_path", type=str, default="./sglang_ckpt_agent", help="SGLang共享存储路径")
-    parser.add_argument('--config_path', default='', type=str, help="JSON配置文件路径")
     args = parser.parse_args()
 
-    local_rank = init_distributed_mode()
-    if dist.is_initialized(): args.device = f"cuda:{local_rank}"
-    setup_seed(42 + (dist.get_rank() if dist.is_initialized() else 0))
+    # 1. 初始化环境和随机种子
+    local_rank = setup_dist_and_seed(args)
 
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = config_from_args(args, max_seq_len=args.max_seq_len + args.max_gen_len)
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='./checkpoints') if args.from_resume == 1 else None
 
-    device_type = "cuda" if "cuda" in args.device else "cpu"
-    dtype = {'bfloat16': torch.bfloat16, 'float16': torch.float16, 'fp32': torch.float32}[args.dtype]
-    autocast_ctx = nullcontext() if device_type == "cpu" or args.dtype == "fp32" else torch.cuda.amp.autocast(dtype=dtype)
+    # 2. 设置混合精度
+    autocast_ctx = build_autocast_ctx(args)
 
-    wandb = None
-    if args.use_wandb and is_main_process():
-        import swanlab as wandb
-        wandb_id = ckp_data.get('wandb_id') if ckp_data else None
-        resume = 'must' if wandb_id else None
-        wandb.init(project=args.wandb_project, name=f"Agent-RL-E{args.epochs}-B{args.batch_size}-LR{args.learning_rate}", id=wandb_id, resume=resume)
+    # 3. 配wandb
+    wandb = init_wandb_logger(args, ckp_data, run_name=f"Agent-RL-E{args.epochs}-B{args.batch_size}-LR{args.learning_rate}")
 
     if ckp_data and 'ref_model' in ckp_data:
         base_weight = 'none'
@@ -498,9 +641,13 @@ if __name__ == "__main__":
         loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True, collate_fn=collate_fn)
         if skip > 0:
             Logger(f'Epoch [{epoch+1}/{args.epochs}]: skip {start_step} steps')
-            rl_train_epoch(epoch, loader, len(loader) + skip, rollout_engine, ref_model, reward_model, start_step, wandb, use_sglang = (args.rollout_engine == "sglang"))
+            rl_train_epoch(epoch, loader, len(loader) + skip, rollout_engine, ref_model,
+                           reward_model, start_step, wandb,
+                           use_sglang=(args.rollout_engine == "sglang"))
         else:
-            rl_train_epoch(epoch, loader, len(loader), rollout_engine, ref_model, reward_model, 0, wandb, use_sglang = (args.rollout_engine == "sglang"))
+            rl_train_epoch(epoch, loader, len(loader), rollout_engine, ref_model,
+                           reward_model, 0, wandb,
+                           use_sglang=(args.rollout_engine == "sglang"))
 
     if dist.is_initialized():
         dist.barrier()

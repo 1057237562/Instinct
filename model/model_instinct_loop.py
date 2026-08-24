@@ -1,4 +1,20 @@
-import math, torch, torch.nn.functional as F
+"""
+循环深度（Looped Depth / LoopUS）变体:共享块的循环 Transformer。
+
+与主线 model/model_instinct.py（Dense 逐层堆叠,每层独立权重）不同,本文件实现
+「Prelude → 共享 Loop Block ×N → Coda」架构:主体层权重被同一个 InstinctBlock
+循环复用 loop_iters 次,在固定参数量下增加有效深度（total_effective_layers =
+prelude_layers + loop_iters + coda_layers）。每次循环注入可学习的 loop-position
+embedding,并按 use_input_injection 叠加冻结的 prelude 输出（Yang et al. 2024 的
+input injection 技巧）,保证循环稳定性;配合 Early Exit 可在推理时按 token 动态
+决定实际计算深度,控制推理成本。
+
+本文件自包含:定义了独立的 InstinctConfig / InstinctLoopModel / InstinctForCausalLM,
+对外接口与 Dense 主线完全一致（训练脚本通过 --use_looped 1 直接切换）。
+"""
+import math
+import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers.activations import ACT2FN
 from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
@@ -7,12 +23,19 @@ from model.flash_attn_4 import flash_attention
 from model.kv_cache_quant import parse_cache, make_cache
 from model.checkpointing import recompute_attention, checkpoint_ffn
 
-# 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
-#                                 Instinct Loop Config
-# 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
+# ═══════════════════════════════════════════════════════════════
+# Instinct Loop Config
+# ═══════════════════════════════════════════════════════════════
 class InstinctConfig(PretrainedConfig):
+    """循环深度（LoopUS）变体配置类:在 Dense 配置基础上新增循环深度专属字段:
+    - loop_iters:共享块循环次数（即循环段的有效深度）
+    - prelude_layers / coda_layers:循环前后各独享的块数量
+    - use_input_injection:是否每轮循环注入冻结的 prelude 输出
+    - tie_word_embeddings:是否绑定 embedding 与 lm_head 权重
+    """
     model_type = "instinct"
-    def __init__(self, hidden_size=768, num_hidden_layers=8, use_moe=False, **kwargs):
+    def __init__(self, hidden_size: int = 768, num_hidden_layers: int = 8, use_moe: bool = False, **kwargs):
+        """初始化配置:全部可选字段经 kwargs 传入。"""
         super().__init__(**kwargs)
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
@@ -24,7 +47,7 @@ class InstinctConfig(PretrainedConfig):
         self.flash_attn = kwargs.get("flash_attn", True)
         self.param_dtype = kwargs.get("param_dtype", "fp32")
         self.kv_cache_dtype = kwargs.get("kv_cache_dtype", "fp32")
-        ### Gradient Checkpointing configs
+        # Gradient Checkpointing configs
         self.use_grad_checkpoint = kwargs.get("use_grad_checkpoint", 0)
         self.num_attention_heads = kwargs.get("num_attention_heads", 8)
         self.num_key_value_heads = kwargs.get("num_key_value_heads", 4)
@@ -44,34 +67,45 @@ class InstinctConfig(PretrainedConfig):
             "attention_factor": 1.0,
             "type": "yarn"
         } if self.inference_rope_scaling else None
-        ### MoE specific configs (ignored if use_moe = False)
+        # MoE specific configs (ignored if use_moe = False)
         self.num_experts = kwargs.get("num_experts", 4)
         self.num_experts_per_tok = kwargs.get("num_experts_per_tok", 1)
         self.moe_intermediate_size = kwargs.get("moe_intermediate_size", self.intermediate_size)
         self.norm_topk_prob = kwargs.get("norm_topk_prob", True)
         self.router_aux_loss_coef = kwargs.get("router_aux_loss_coef", 5e-4)
-        ### Loop Transformer configs
+        # Loop Transformer configs
         self.loop_iters = kwargs.get("loop_iters", 8)
         self.prelude_layers = kwargs.get("prelude_layers", 1)
         self.coda_layers = kwargs.get("coda_layers", 1)
         self.use_input_injection = kwargs.get("use_input_injection", True)
 
-# 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
-#                                 Instinct Loop Model
-# 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
+# ═══════════════════════════════════════════════════════════════
+# Instinct Loop Model
+# ═══════════════════════════════════════════════════════════════
 class RMSNorm(torch.nn.Module):
+    """RMS 归一化层:对最后一维做均方根归一化,再乘可学习权重逐元素缩放。
+
+    计算在 fp32 下进行（与 HF 实现一致）,避免低精度数值不稳定。
+    """
     def __init__(self, dim: int, eps: float = 1e-5):
+        """初始化归一化权重（全 1）与 eps。"""
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
     def norm(self, x):
+        """归一化核心:y = x / sqrt(mean(x^2) + eps)。"""
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
+        """前向:归一化后乘权重,并恢复输入 dtype。"""
         return (self.weight * self.norm(x.float())).type_as(x)
 
 def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float = 1e6, rope_scaling: dict = None):
+    """预计算 RoPE 的 cos/sin 频率表,返回 (freqs_cos, freqs_sin),形状 (end, dim)。
+
+    rope_scaling 非空时应用 YaRN 缩放:f'(i) = f(i)((1-γ) + γ/s),γ 为线性 ramp。
+    """
     freqs, attn_factor = 1.0 / (rope_base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)), 1.0
     if rope_scaling is not None:
         orig_max, factor, beta_fast, beta_slow, attn_factor = (
@@ -89,13 +123,15 @@ def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float =
     freqs_sin = torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1) * attn_factor
     return freqs_cos, freqs_sin
 
-def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
+def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, unsqueeze_dim: int = 1):
+    """对 q/k 施加旋转位置编码（rotate_half 拼接实现）。"""
     def rotate_half(x): return torch.cat((-x[..., x.shape[-1] // 2:], x[..., : x.shape[-1] // 2]), dim=-1)
     q_embed = ((q * cos.unsqueeze(unsqueeze_dim)) + (rotate_half(q) * sin.unsqueeze(unsqueeze_dim))).to(q.dtype)
     k_embed = ((k * cos.unsqueeze(unsqueeze_dim)) + (rotate_half(k) * sin.unsqueeze(unsqueeze_dim))).to(k.dtype)
     return q_embed, k_embed
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """GQA 头扩展:把 KV 头沿新维重复 n_rep 次并展平,使其与 Q 头数一致。"""
     bs, slen, num_key_value_heads, head_dim = x.shape
     if n_rep == 1: return x
     return (x[:, :, :, None, :].expand(bs, slen, num_key_value_heads, n_rep, head_dim).reshape(bs, slen, num_key_value_heads * n_rep, head_dim))
@@ -138,7 +174,9 @@ class Attention(nn.Module):
             xk = torch.cat([k_past, xk], dim=1)
             xv = torch.cat([v_past, xv], dim=1)
         past_kv = make_cache(xk, xv, self.kv_cache_dtype) if use_cache else None
-        if self.flash and (seq_len > 1) and (not self.is_causal or past_key_value is None) and (attention_mask is None or torch.all(attention_mask == 1)):
+        if (self.flash and (seq_len > 1)
+                and (not self.is_causal or past_key_value is None)
+                and (attention_mask is None or torch.all(attention_mask == 1))):
             # FA4 / SDPA fused fast path: 输入输出布局 (bs, seq, heads, hd),kernel 内部处理 GQA
             output = flash_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=self.is_causal)
             output = output.reshape(bsz, seq_len, -1)
@@ -278,7 +316,6 @@ class InstinctLoopModel(nn.Module):
             self.loop_pos_embed = nn.Embedding(self.loop_iters, config.hidden_size)
             nn.init.zeros_(self.loop_pos_embed.weight)
 
-        # RoPE frequencies
         freqs_cos, freqs_sin = precompute_freqs_cis(
             dim=config.head_dim, end=config.max_position_embeddings,
             rope_base=config.rope_theta, rope_scaling=config.rope_scaling
@@ -295,7 +332,8 @@ class InstinctLoopModel(nn.Module):
         blocks.extend(self.coda)
         return blocks
 
-    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, return_intermediate=False, layer_callback=None, **kwargs):
+    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False,
+                return_intermediate=False, layer_callback=None, **kwargs):
         batch_size, seq_length = input_ids.shape
 
         # Normalize past_key_values: must match total effective layers (each loop iter = 1 slot)
@@ -403,17 +441,20 @@ class InstinctLoopModel(nn.Module):
         hidden_states = self.norm(hidden_states)
 
         # Collect aux_loss from MoE layers
-        unique_blocks = list(self.prelude)
-        if self.loop_block is not None:
-            unique_blocks.append(self.loop_block)
-        unique_blocks.extend(self.coda)
         aux_loss = sum(
-            [l.mlp.aux_loss for l in unique_blocks if isinstance(l.mlp, MOEFeedForward)],
+            [l.mlp.aux_loss for l in self.layers if isinstance(l.mlp, MOEFeedForward)],
             hidden_states.new_zeros(1).squeeze()
         )
         if return_intermediate:
             return hidden_states, presents, aux_loss, intermediates
         return hidden_states, presents, aux_loss
+
+def _compute_lm_loss(logits: torch.Tensor, labels):
+    """Next-token cross-entropy over the last hidden state; None when labels are absent."""
+    if labels is None:
+        return None
+    x, y = logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
+    return F.cross_entropy(x.view(-1, x.size(-1)), y.view(-1), ignore_index=-100)
 
 class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
     config_class = InstinctConfig
@@ -442,10 +483,7 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
             )
             layer_logits = [_compute_logits(h) for h in intermediates]
             logits = _compute_logits(hidden_states)
-            loss = None
-            if labels is not None:
-                x, y = logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
-                loss = F.cross_entropy(x.view(-1, x.size(-1)), y.view(-1), ignore_index=-100)
+            loss = _compute_lm_loss(logits, labels)
             output = MoeCausalLMOutputWithPast(
                 loss=loss, aux_loss=aux_loss, logits=logits,
                 past_key_values=past_key_values, hidden_states=hidden_states
@@ -457,10 +495,7 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
             input_ids, attention_mask, past_key_values, use_cache, **kwargs
         )
         logits = _compute_logits(hidden_states)
-        loss = None
-        if labels is not None:
-            x, y = logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
-            loss = F.cross_entropy(x.view(-1, x.size(-1)), y.view(-1), ignore_index=-100)
+        loss = _compute_lm_loss(logits, labels)
         return MoeCausalLMOutputWithPast(
             loss=loss, aux_loss=aux_loss, logits=logits,
             past_key_values=past_key_values, hidden_states=hidden_states

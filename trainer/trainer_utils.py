@@ -14,11 +14,11 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import Sampler
-from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
+from transformers import AutoTokenizer, AutoModel
 from model.model_instinct import InstinctForCausalLM, InstinctConfig
 from model.model_instinct_loop import InstinctConfig as LoopedInstinctConfig, InstinctForCausalLM as LoopedInstinctForCausalLM
 
-def get_model_params(model, config):
+def get_model_params(model: torch.nn.Module, config) -> None:
     total = sum(p.numel() for p in model.parameters()) / 1e6
     n_routed = getattr(config, 'n_routed_experts', getattr(config, 'num_experts', 0))
     n_active = getattr(config, 'num_experts_per_tok', 0)
@@ -31,11 +31,21 @@ def get_model_params(model, config):
     else: Logger(f'Model Params: {total:.2f}M')
 
 
-def is_main_process():
+def is_main_process() -> bool:
     return not dist.is_initialized() or dist.get_rank() == 0
 
 
 def config_from_args(args, **overrides):
+    """从命令行参数（可选叠加 JSON 配置）构建模型配置。
+
+    参数:
+        args: argparse 解析出的命令行参数对象
+        **overrides: 显式覆盖项（hidden_size / num_hidden_layers / use_moe / use_looped 等）
+
+    说明:
+        - 指定 config_path 时，以 JSON 为基底再叠加命令行覆盖；
+        - 按 use_looped（或配置中的 model_architecture）选择 Looped / 普通配置类。
+    """
     overrides.setdefault('param_dtype', getattr(args, 'param_dtype', 'fp32'))
     overrides.setdefault('kv_cache_dtype', getattr(args, 'kv_cache_dtype', 'fp32'))
     overrides.setdefault("use_grad_checkpoint", int(getattr(args, "use_grad_checkpoint", 0)))
@@ -63,16 +73,16 @@ def config_from_args(args, **overrides):
     )
 
 
-def Logger(content):
+def Logger(content: str) -> None:
     if is_main_process():
         print(content)
 
 
-def get_lr(current_step, total_steps, lr):
+def get_lr(current_step: int, total_steps: int, lr: float) -> float:
     return lr*(0.1 + 0.45*(1 + math.cos(math.pi * current_step / total_steps)))
 
 
-def init_distributed_mode():
+def init_distributed_mode() -> int:
     if int(os.environ.get("RANK", -1)) == -1:
         return 0  # 非DDP模式
 
@@ -82,7 +92,7 @@ def init_distributed_mode():
     return local_rank
 
 
-def setup_seed(seed: int):
+def setup_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -241,7 +251,7 @@ _OPTIMIZER_ALIASES = {
 }
 
 
-def build_optimizer(params, lr, optimizer='adamw', **kwargs):
+def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> torch.optim.Optimizer:
     """按名称统一构建优化器：AdamW / Adafactor / Muon。
 
     参数:
@@ -286,7 +296,21 @@ def build_optimizer(params, lr, optimizer='adamw', **kwargs):
     raise ValueError(f"未知优化器: {optimizer}，可选: adamw / adafactor / muon")
 
 
-def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='./checkpoints', **kwargs):
+def lm_checkpoint(lm_config, weight: str = 'full_sft', model=None, optimizer=None, epoch: int = 0, step: int = 0, wandb=None, save_dir: str = './checkpoints', **kwargs):
+    """保存或加载训练检查点。
+
+    参数:
+        lm_config: 模型配置（决定文件名中的 hidden_size / _moe 后缀）
+        weight: 权重前缀名
+        model: 传入时执行「保存」，为 None 时执行「加载」
+        optimizer / epoch / step / wandb: 随 resume 检查点一并保存的训练状态
+        save_dir: 检查点保存目录（默认 ./checkpoints）
+        **kwargs: 额外随检查点保存的状态（如 scaler / ref_model / teacher_model）
+
+    说明:
+        - 保存：原子写入权重 .pth、resume 检查点与 config JSON；
+        - 加载：读取 *_resume.pth，GPU 数量变化时自动按比例换算 step。
+    """
     os.makedirs(save_dir, exist_ok=True)
     moe_path = '_moe' if lm_config.use_moe else ''
     ckp_path = f'{save_dir}/{weight}_{lm_config.hidden_size}{moe_path}.pth'
@@ -350,7 +374,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
         return None
 
 
-def init_model(lm_config, from_weight='pretrain', tokenizer_path='./model', save_dir='./out', device='cuda'):
+def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = './model', save_dir: str = './out', device: str = 'cuda') -> tuple:
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     if isinstance(lm_config, LoopedInstinctConfig):
         model = LoopedInstinctForCausalLM(lm_config)
@@ -378,6 +402,14 @@ def init_model(lm_config, from_weight='pretrain', tokenizer_path='./model', save
 
 
 class SkipBatchSampler(Sampler):
+    """断点续训采样器：跳过前 skip_batches 个 batch，从上次中断处继续产出。
+
+    参数:
+        sampler: 底层采样器（DistributedSampler 或索引列表）
+        batch_size: 每个 batch 的样本数
+        skip_batches: 需要跳过的 batch 数（由上次中断的 step 换算而来）
+    """
+
     def __init__(self, sampler, batch_size, skip_batches=0):
         self.sampler = sampler
         self.batch_size = batch_size
@@ -404,6 +436,18 @@ class SkipBatchSampler(Sampler):
 
 
 class LMForRewardModel:
+    """通用对话模型奖励打分器（用于 PPO / GRPO 等 RL 阶段）。
+
+    参数:
+        model_path: HuggingFace 模型路径
+        device: 运行设备
+        dtype: 推理精度
+
+    说明:
+        get_score 拼接对话历史与回复后调用模型的 get_score 打分，
+        并将结果裁剪到 [-3, 3] 区间。
+    """
+
     def __init__(self, model_path, device="cuda", dtype=torch.float16):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         self.model = AutoModel.from_pretrained(model_path, torch_dtype=dtype, trust_remote_code=True)

@@ -1,3 +1,10 @@
+"""
+DPO（Direct Preference Optimization）离线偏好优化脚本（Pipeline 可选阶段）。
+
+在 dpo.jsonl 的偏好对（chosen / rejected）上优化策略模型：以冻结的参考模型为基线，
+损失 = -log sigmoid(beta * (pi_logratios - ref_logratios))，拉大偏好对的似然差。
+学习率建议很小（默认 4e-8）以避免遗忘既有能力，输出 {save_weight}_{hidden_size}.pth。
+"""
 import os
 import sys
 
@@ -6,33 +13,53 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 os.environ.setdefault("HF_HOME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".cache", "huggingface"))
 import datasets  # noqa: F401  # Windows pyarrow/torch DLL conflict workaround (issue #771)
-import argparse
 import time
 import warnings
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
-from contextlib import nullcontext
-from torch import optim
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from dataset.lm_dataset import DPODataset
-from trainer.trainer_utils import get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler, config_from_args, build_optimizer
+from trainer.trainer_utils import (
+    Logger, is_main_process, lm_checkpoint,
+    setup_seed, init_model, SkipBatchSampler, config_from_args, build_optimizer,
+)
+from trainer.trainer_cli import (
+    build_trainer_parser, setup_dist_and_seed, build_autocast_ctx,
+    init_wandb_logger, set_cosine_lr, step_with_scaler, flush_remaining_grad,
+)
 
 warnings.filterwarnings('ignore')
 
 
-def logits_to_log_probs(logits, labels):
-    # logits shape: (batch_size, seq_len, vocab_size)
-    # labels shape: (batch_size, seq_len)
-    # log_probs shape: (batch_size, seq_len)
+def logits_to_log_probs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """按 labels 位置从 logits 中收集逐 token 对数概率。
+
+    参数:
+        logits: 模型输出 logits，shape (batch_size, seq_len, vocab_size)
+        labels: 目标 token id，shape (batch_size, seq_len)
+
+    返回:
+        逐 token 对数概率，shape (batch_size, seq_len)
+    """
     log_probs = F.log_softmax(logits, dim=2)
     log_probs_per_token = torch.gather(log_probs, dim=2, index=labels.unsqueeze(2)).squeeze(-1)
     return log_probs_per_token
 
 
-def dpo_loss(ref_log_probs, policy_log_probs, mask, beta):
-    # ref_log_probs 和 policy_log_probs 都是 shape: (batch_size, seq_len)
+def dpo_loss(ref_log_probs: torch.Tensor, policy_log_probs: torch.Tensor, mask: torch.Tensor, beta: float) -> torch.Tensor:
+    """DPO 损失：基于参考模型与策略模型的偏好对对数概率差。
+
+    参数:
+        ref_log_probs: 参考模型逐 token 对数概率，(batch_size, seq_len)
+        policy_log_probs: 策略模型逐 token 对数概率，(batch_size, seq_len)
+        mask: 有效 token 掩码（1=参与计算）
+        beta: DPO 温度系数（越大越强调与参考模型的偏离）
+
+    返回:
+        标量损失（chosen 与 rejected 各占 batch 前/后一半）
+    """
     ref_log_probs = (ref_log_probs * mask).sum(dim=1)
     policy_log_probs = (policy_log_probs * mask).sum(dim=1)
 
@@ -50,7 +77,24 @@ def dpo_loss(ref_log_probs, policy_log_probs, mask, beta):
     return loss.mean()
 
 
-def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=None, beta=0.1):
+def train_epoch(epoch: int, loader: DataLoader, iters: int, ref_model, lm_config, start_step: int = 0, wandb=None, beta: float = 0.1) -> None:
+    """执行一个 epoch 的 DPO 优化循环。
+
+    参数:
+        epoch: 当前轮数（从 0 起）
+        loader: 数据加载器
+        iters: 本 epoch 总步数（含断点续训跳过的步数）
+        ref_model: 冻结的参考模型（no_grad 提供基线对数概率）
+        lm_config: 模型配置（用于保存时的文件名后缀）
+        start_step: 断点续训的起始步数（跳过前 start_step 步）
+        wandb: 日志对象（swanlab / wandb，可选）
+        beta: DPO 温度系数
+
+    说明:
+        每个 step 依次完成：chosen/rejected 拼接 → 余弦 LR 调度 → 参考模型与策略
+        模型前向（autocast）→ DPO 损失 → 反向（GradScaler）→ 累积后更新参数
+        → 周期性打日志 / 存检查点。
+    """
     start_time = time.time()
     last_step = start_step
 
@@ -66,20 +110,18 @@ def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=
         y = torch.cat([y_chosen, y_rejected], dim=0)
         mask = torch.cat([mask_chosen, mask_rejected], dim=0)
 
-        lr = get_lr(epoch * iters + step, args.epochs * iters, args.learning_rate)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
+        set_cosine_lr(optimizer, epoch, step, iters, args)
 
         with autocast_ctx:
             with torch.no_grad():
                 ref_outputs = ref_model(x)
                 ref_logits = ref_outputs.logits
             ref_log_probs = logits_to_log_probs(ref_logits, y)
-            
+
             outputs = model(x)
             logits = outputs.logits
             policy_log_probs = logits_to_log_probs(logits, y)
-            
+
             dpo_loss_val = dpo_loss(ref_log_probs, policy_log_probs, mask, beta=beta)
             loss = dpo_loss_val + outputs.aux_loss
             loss = loss / args.accumulation_steps
@@ -87,11 +129,7 @@ def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=
         scaler.scale(loss).backward()
 
         if step % args.accumulation_steps == 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad(set_to_none=True)
+            step_with_scaler(scaler, optimizer, model.parameters(), args.grad_clip)
 
         if step % args.log_interval == 0 or step == iters:
             spend_time = time.time() - start_time
@@ -100,9 +138,9 @@ def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=
             current_aux_loss = outputs.aux_loss.item()
             current_lr = optimizer.param_groups[-1]['lr']
             eta_min = spend_time / max(step - start_step, 1) * (iters - step) // 60
-            
+
             Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, dpo_loss: {current_dpo_loss:.4f}, aux_loss: {current_aux_loss:.4f}, learning_rate: {current_lr:.8f}, epoch_time: {eta_min:.3f}min')
-            
+
             if wandb: wandb.log({"loss": current_loss, "dpo_loss": current_dpo_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
 
         if (step % args.save_interval == 0 or step == iters) and is_main_process():
@@ -120,72 +158,43 @@ def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=
         del x_chosen, x_rejected, y_chosen, y_rejected, mask_chosen, mask_rejected, x, y, mask
         del ref_outputs, ref_logits, ref_log_probs, outputs, logits, policy_log_probs, loss
 
-    if last_step > start_step and last_step % args.accumulation_steps != 0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad(set_to_none=True)
+    flush_remaining_grad(scaler, optimizer, model.parameters(), args.grad_clip, last_step, start_step, args.accumulation_steps)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Instinct DPO (Direct Preference Optimization)")
-    parser.add_argument("--save_dir", type=str, default="./out", help="模型保存目录")
-    parser.add_argument('--save_weight', default='dpo', type=str, help="保存权重的前缀名")
-    parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
-    parser.add_argument("--batch_size", type=int, default=4, help="batch size")
-    parser.add_argument("--learning_rate", type=float, default=4e-8, help="初始学习率（建议<=5e-8避免遗忘）")
-    parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "adafactor", "muon"], help="优化器类型（adamw / adafactor / muon）")
-    parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
-    parser.add_argument("--dtype", type=str, default="bfloat16", help="激活层计算精度（bfloat16/float16/fp32）")
-    parser.add_argument("--param_dtype", type=str, default="fp32", choices=["fp32", "bf16", "fp16"], help="模型参数精度（fp32=主权重，bf16/fp16=训练时权重直接 cast）")
-    parser.add_argument("--kv_cache_dtype", type=str, default="fp32", choices=["fp32", "bf16", "fp16", "fp8_e4m3", "fp8_e5m2"], help="KV Cache 精度（fp8 时缓存量化，decode 带宽减半）")
-    parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程数")
-    parser.add_argument("--accumulation_steps", type=int, default=1, help="梯度累积步数")
-    parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
-    parser.add_argument("--log_interval", type=int, default=100, help="日志打印间隔")
-    parser.add_argument("--save_interval", type=int, default=100, help="模型保存间隔")
-    parser.add_argument('--hidden_size', default=768, type=int, help="隐藏层维度")
-    parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
-    parser.add_argument('--max_seq_len', default=1024, type=int, help="训练的最大截断长度（中文1token≈1.5~1.7字符）")
-    parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
+    parser = build_trainer_parser(
+        description="Instinct DPO (Direct Preference Optimization)",
+        defaults={
+            'save_weight': 'dpo',
+            'epochs': 1,
+            'batch_size': 4,
+            'learning_rate': 4e-8,
+            'accumulation_steps': 1,
+            'save_interval': 100,
+            'max_seq_len': 1024,
+            'from_weight': 'full_sft',
+            'wandb_project': 'Instinct-DPO',
+        },
+    )
     parser.add_argument("--data_path", type=str, default="./dataset/dpo.jsonl", help="DPO训练数据路径")
-    parser.add_argument('--from_weight', default='full_sft', type=str, help="基于哪个权重训练")
-    parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument('--beta', default=0.15, type=float, help="DPO中的beta参数")
-    parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
-    parser.add_argument("--wandb_project", type=str, default="Instinct-DPO", help="wandb项目名")
-    parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
-    parser.add_argument("--use_grad_checkpoint", default=0, type=int, choices=[0, 1, 2], help="梯度检查点模式（0=关闭, 1=选择性重算注意力/FFN, 2=整层checkpoint）")
-    parser.add_argument("--compile_mode", type=str, default="default", choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"], help="torch.compile 模式（default=Triton 编译；reduce-overhead=叠加 CUDA graph，小模型首选；max-autotune=极限调优，编译极慢）")
-    parser.add_argument('--config_path', default='', type=str, help="JSON配置文件路径")
     args = parser.parse_args()
 
-    # ========== 1. 初始化环境和随机种子 ==========
-    local_rank = init_distributed_mode()
-    if dist.is_initialized(): args.device = f"cuda:{local_rank}"
-    setup_seed(42 + (dist.get_rank() if dist.is_initialized() else 0))
-    
-    # ========== 2. 配置目录、模型参数、检查ckp ==========
+    # 1. 初始化环境和随机种子
+    local_rank = setup_dist_and_seed(args)
+
+    # 2. 配置目录、模型参数、检查ckp
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = config_from_args(args)
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='./checkpoints') if args.from_resume==1 else None
-    
-    # ========== 3. 设置混合精度 ==========
-    device_type = "cuda" if "cuda" in args.device else "cpu"
-    dtype = {'bfloat16': torch.bfloat16, 'float16': torch.float16, 'fp32': torch.float32}[args.dtype]
-    autocast_ctx = nullcontext() if device_type == "cpu" or args.dtype == "fp32" else torch.cuda.amp.autocast(dtype=dtype)
-    
-    # ========== 4. 配wandb ==========
-    wandb = None
-    if args.use_wandb and is_main_process():
-        import swanlab as wandb
-        wandb_id = ckp_data.get('wandb_id') if ckp_data else None
-        resume = 'must' if wandb_id else None
-        wandb_run_name = f"Instinct-DPO-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LR-{args.learning_rate}"
-        wandb.init(project=args.wandb_project, name=wandb_run_name, id=wandb_id, resume=resume)
-    
-    # ========== 5. 定义模型和参考模型 ==========
+
+    # 3. 设置混合精度
+    autocast_ctx = build_autocast_ctx(args)
+
+    # 4. 配wandb
+    wandb = init_wandb_logger(args, ckp_data, run_name=f"Instinct-DPO-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LR-{args.learning_rate}")
+
+    # 5. 定义模型和参考模型
     if ckp_data and 'ref_model' in ckp_data:
         base_weight = 'none'
         ref_from_ckp = True
@@ -199,13 +208,13 @@ if __name__ == "__main__":
     ref_model.eval()
     ref_model.requires_grad_(False)
     Logger(f'参考模型总参数量：{sum(p.numel() for p in ref_model.parameters()) / 1e6:.3f} M')
-    
+
     train_ds = DPODataset(args.data_path, tokenizer, max_length=args.max_seq_len)
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
     scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))
     optimizer = build_optimizer(model.parameters(), lr=args.learning_rate, optimizer=args.optimizer)
-    
-    # ========== 6. 从ckp恢复状态 ==========
+
+    # 6. 从ckp恢复状态
     start_epoch, start_step = 0, 0
     if ckp_data:
         model.load_state_dict(ckp_data['model'])
@@ -215,28 +224,28 @@ if __name__ == "__main__":
         scaler.load_state_dict(ckp_data['scaler'])
         start_epoch = ckp_data['epoch']
         start_step = ckp_data.get('step', 0)
-    
-    # ========== 7. 编译和分布式包装 ==========
+
+    # 7. 编译和分布式包装
     if args.use_compile == 1:
         model = torch.compile(model, mode=args.compile_mode)
         Logger('torch.compile enabled')
     if dist.is_initialized():
         model = DistributedDataParallel(model, device_ids=[local_rank])
-    
-    # ========== 8. 开始训练 ==========
+
+    # 8. 开始训练
     for epoch in range(start_epoch, args.epochs):
         train_sampler and train_sampler.set_epoch(epoch)
         setup_seed(42 + epoch); indices = torch.randperm(len(train_ds)).tolist()
         skip = start_step if (epoch == start_epoch and start_step > 0) else 0
         batch_sampler = SkipBatchSampler(train_sampler or indices, args.batch_size, skip)
         loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
-        if skip > 0: 
+        if skip > 0:
             Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
             train_epoch(epoch, loader, len(loader) + skip, ref_model, lm_config, start_step, wandb, args.beta)
         else:
             train_epoch(epoch, loader, len(loader), ref_model, lm_config, 0, wandb, args.beta)
-    
-    # ========== 9. 清理分布进程 ==========
+
+    # 9. 清理分布进程
     if dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()

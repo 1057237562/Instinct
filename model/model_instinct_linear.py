@@ -1,4 +1,20 @@
-import math, torch, torch.nn.functional as F, logging
+"""
+线性注意力（Linear Attention）变体:Instinct 的 GatedDeltaNet 混合架构。
+
+与主线 model/model_instinct.py（Dense GQA 多头注意力）不同,本文件把主干的一部分层
+替换为 GatedDeltaNet——一种门控 delta rule 线性注意力:通过因果卷积（depthwise conv1d）
+做局部建模,再用线性递归状态传递全局信息,使注意力复杂度从 O(T^2) 降到 O(T),
+适合超长序列的预训练与推理。层间按 config.full_attention_interval 交替
+「linear_attention / full_attention」,兼顾线性注意力的效率与全注意力的表达能力。
+
+本文件自包含:定义了独立的 InstinctConfig / InstinctModel / InstinctForCausalLM,
+对外接口与 Dense 主线完全一致（同为 Qwen3 风格,支持 KV cache 量化、梯度检查点、
+Logit Lens 与 Early Exit 动态推理）,训练脚本与模型转换工具可直接复用。
+"""
+import math
+import torch
+import torch.nn.functional as F
+import logging
 from torch import nn
 from transformers.activations import ACT2FN
 from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
@@ -23,12 +39,21 @@ except ImportError:
     chunk_gated_delta_rule, fused_recurrent_gated_delta_rule = None, None
     logger.warning('flash-linear-attention (FLA) not available, falling back to PyTorch native linear attention')
 
-# 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
-#                                     Instinct Config
-# 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
+# ═══════════════════════════════════════════════════════════════
+# Instinct Config
+# ═══════════════════════════════════════════════════════════════
 class InstinctConfig(PretrainedConfig):
+    """线性注意力变体（GatedDeltaNet 混合架构）的配置类。
+
+    继承 PretrainedConfig,与 Dense 主线共享大部分字段;线性注意力专属的超参包括:
+    - full_attention_interval:每 N 层插入一层标准全注意力
+    - linear_conv_kernel_dim:因果卷积核大小
+    - linear_key_head_dim / linear_value_head_dim / linear_num_key_heads / linear_num_value_heads:线性注意力头维度
+    - layer_types:按 full_attention_interval 自动生成的逐层类型列表（"linear_attention" / "full_attention"）
+    """
     model_type = "instinct"
-    def __init__(self, hidden_size=768, num_hidden_layers=8, use_moe=False, **kwargs):
+    def __init__(self, hidden_size: int = 768, num_hidden_layers: int = 8, use_moe: bool = False, **kwargs):
+        """初始化配置:全部可选字段经 kwargs 传入,并据此生成 layer_types。"""
         super().__init__(**kwargs)
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
@@ -40,7 +65,7 @@ class InstinctConfig(PretrainedConfig):
         self.flash_attn = kwargs.get("flash_attn", True)
         self.param_dtype = kwargs.get("param_dtype", "fp32")
         self.kv_cache_dtype = kwargs.get("kv_cache_dtype", "fp32")
-        ### Gradient Checkpointing configs
+        # Gradient Checkpointing configs
         self.use_grad_checkpoint = kwargs.get("use_grad_checkpoint", 0)
         self.num_attention_heads = kwargs.get("num_attention_heads", 8)
         self.num_key_value_heads = kwargs.get("num_key_value_heads", 4)
@@ -59,16 +84,16 @@ class InstinctConfig(PretrainedConfig):
             "attention_factor": 1.0,
             "type": "yarn"
         } if self.inference_rope_scaling else None
-        ### Early Exit configs (LayerSkip-style: shared LM head, no auxiliary classifiers)
+        # Early Exit configs (LayerSkip-style: shared LM head, no auxiliary classifiers)
         self.early_exit_layers = kwargs.get("early_exit_layers", [4, 5, 6, 7])
         self.early_exit_loss_weight = kwargs.get("early_exit_loss_weight", 0.3)
-        ### MoE specific configs (ignored if use_moe = False)
+        # MoE specific configs (ignored if use_moe = False)
         self.num_experts = kwargs.get("num_experts", 4)
         self.num_experts_per_tok = kwargs.get("num_experts_per_tok", 1)
         self.moe_intermediate_size = kwargs.get("moe_intermediate_size", self.intermediate_size)
         self.norm_topk_prob = kwargs.get("norm_topk_prob", True)
         self.router_aux_loss_coef = kwargs.get("router_aux_loss_coef", 5e-4)
-        ### GatedDeltaNet configs
+        # GatedDeltaNet configs
         self.full_attention_interval = kwargs.get("full_attention_interval", 4)
         self.linear_conv_kernel_dim = kwargs.get("linear_conv_kernel_dim", 4)
         self.linear_key_head_dim = kwargs.get("linear_key_head_dim", self.head_dim)
@@ -82,37 +107,65 @@ class InstinctConfig(PretrainedConfig):
             else:
                 self.layer_types.append("linear_attention")
 
-# 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
-#                                     Instinct Model
-# 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
+# ═══════════════════════════════════════════════════════════════
+# Instinct Model
+# ═══════════════════════════════════════════════════════════════
 class RMSNorm(torch.nn.Module):
+    """RMS 归一化层:对最后一维做均方根归一化,再乘可学习权重逐元素缩放。
+
+    计算在 fp32 下进行（与 HF 实现一致）,避免低精度数值不稳定。
+    """
     def __init__(self, dim: int, eps: float = 1e-5):
+        """初始化归一化权重（全 1）与 eps。"""
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
     def norm(self, x):
+        """归一化核心:y = x / sqrt(mean(x^2) + eps)。"""
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
+        """前向:归一化后乘权重,并恢复输入 dtype。"""
         return (self.weight * self.norm(x.float())).type_as(x)
 
 class RMSNormGated(nn.Module):
-    def __init__(self, dim, eps=1e-6):
+    """带门控的 RMS 归一化:归一化结果再乘以 SiLU(gate),用于 GatedDeltaNet 的 z 输出门。"""
+    def __init__(self, dim: int, eps: float = 1e-6):
+        """初始化归一化权重（全 1）与 eps。"""
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))
         self.eps = eps
 
     def forward(self, x, gate=None):
+        """前向:fp32 归一化 + 权重缩放,再乘 SiLU 门控。"""
         x_float = x.float()
         x_normed = x_float * torch.rsqrt(x_float.pow(2).mean(-1, keepdim=True) + self.eps)
         x_normed = (self.weight * x_normed.type_as(x))
         return x_normed * F.silu(gate.float()).type_as(x)
 
-def l2norm(x, dim=-1, eps=1e-6):
+def l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6):
+    """沿指定维度做 L2 归一化（保留方向、归一化幅度）。"""
     return x * torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
 
-def torch_chunk_gated_delta_rule(q, k, v, g, beta, chunk_size=128, initial_state=None, output_final_state=False):
+def torch_chunk_gated_delta_rule(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, g: torch.Tensor, beta: torch.Tensor,
+    chunk_size: int = 128, initial_state: torch.Tensor = None, output_final_state: bool = False,
+):
+    """chunk_gated_delta_rule 的纯 PyTorch 参考实现（FLA Triton 内核缺失时的回退）。
+
+    算法分两层:
+    - 块内（intra-chunk）:构造严格下三角的关联矩阵 B = -(k_beta @ k^T) ⊙ decay_mask
+      （decay_mask = exp(g_i - g_j),g 为累积对数衰减）,再逐行扫描
+      A_i = B_i + B_i @ A_{:i} 计算 (I - B)^{-1} - I（B 幂零,无需显式求逆）;
+      得到 A 后,v = A @ v_beta、k_cumdecay = A @ (k_beta * exp(g));
+    - 块间（inter-chunk）:用循环状态 S(B, H, Dk, Dv) 跨块传递:
+      v_new = v_i - k_cumdecay @ S（delta rule 残差更新）,
+      out = (q * exp(g)) @ S + attn_intra @ v_new,
+      S = S * exp(g_last) + (k * exp(g_last - g))^T @ v_new。
+
+    输出形状 (B, T, H, Dv)（去掉 padding）;output_final_state=False 时返回的 S 为 None。
+    """
     q, k, v, beta, g = [x.transpose(1, 2).contiguous().float() for x in (q, k, v, beta, g)]
     B, H, T, Dk = k.shape
     Dv = v.shape[-1]
@@ -265,13 +318,15 @@ def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float =
     freqs_sin = torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1) * attn_factor
     return freqs_cos, freqs_sin
 
-def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
+def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, unsqueeze_dim: int = 1):
+    """对 q/k 施加旋转位置编码（rotate_half 拼接实现）。"""
     def rotate_half(x): return torch.cat((-x[..., x.shape[-1] // 2:], x[..., : x.shape[-1] // 2]), dim=-1)
     q_embed = (q * cos.unsqueeze(unsqueeze_dim)) + (rotate_half(q) * sin.unsqueeze(unsqueeze_dim))
     k_embed = (k * cos.unsqueeze(unsqueeze_dim)) + (rotate_half(k) * sin.unsqueeze(unsqueeze_dim))
     return q_embed, k_embed
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """GQA 头扩展:把 KV 头沿新维重复 n_rep 次并展平,使其与 Q 头数一致。"""
     bs, slen, num_key_value_heads, head_dim = x.shape
     if n_rep == 1: return x
     return (
@@ -279,7 +334,13 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 class Attention(nn.Module):
+    """标准 GQA 因果注意力（Qwen3 风格）:q/k 先 RMSNorm 归一,再施加 RoPE。
+
+    支持 SDPA/FA4 flash 快速路径与 eager 路径（含选择性重算 recompute_attention）;
+    KV cache 经 make_cache/parse_cache 支持量化（fp8 等）与 dtype 回读。
+    """
     def __init__(self, config: InstinctConfig):
+        """初始化 QKV/输出投影、q/k 归一化、dropout、KV cache dtype 与 flash 开关。"""
         super().__init__()
         self.num_key_value_heads = config.num_attention_heads if config.num_key_value_heads is None else config.num_key_value_heads
         self.n_local_heads = config.num_attention_heads
@@ -300,6 +361,7 @@ class Attention(nn.Module):
         self.use_grad_checkpoint = getattr(config, "use_grad_checkpoint", 0)
 
     def forward(self, x, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
+        """前向:投影 → q/k 归一化 → RoPE → 拼接历史 KV → flash/eager 注意力 → 输出投影。"""
         bsz, seq_len, _ = x.shape
         xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
         xq = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)
@@ -337,7 +399,9 @@ class Attention(nn.Module):
         return output, past_kv
 
 class FeedForward(nn.Module):
+    """SwiGLU FFN:gate_proj(x) * up_proj(x) 经激活后由 down_proj 投影回 hidden_size。"""
     def __init__(self, config: InstinctConfig, intermediate_size: int = None):
+        """初始化 gate/down/up 三个线性层与激活函数;intermediate_size 可覆盖默认值。"""
         super().__init__()
         intermediate_size = intermediate_size or config.intermediate_size
         self.gate_proj = nn.Linear(config.hidden_size, intermediate_size, bias=False)
@@ -346,10 +410,16 @@ class FeedForward(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
+        """前向:SwiGLU 门控激活（act(gate(x)) * up(x)）→ down 投影。"""
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 class MOEFeedForward(nn.Module):
+    """Top-k 路由 MoE FFN:softmax 门控选 top-k 专家,按权重聚合专家输出。
+
+    训练时累计 router aux loss（负载均衡正则,通过 aux_loss 属性暴露给外部累加）。
+    """
     def __init__(self, config: InstinctConfig):
+        """初始化路由器与专家列表（每个专家是一个 FeedForward）。"""
         super().__init__()
         self.config = config
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
@@ -360,6 +430,7 @@ class MOEFeedForward(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
+        """前向:门控打分 → top-k 选择 → 逐专家 index_add 聚合;附带 aux_loss 计算。"""
         batch_size, seq_len, hidden_dim = x.shape
         x_flat = x.view(-1, hidden_dim)
         scores = F.softmax(self.gate(x_flat), dim=-1)
@@ -382,7 +453,10 @@ class MOEFeedForward(nn.Module):
         return y.view(batch_size, seq_len, hidden_dim)
 
 class InstinctBlock(nn.Module):
+    """混合注意力块:按 config.layer_types 分派——linear_attention 层走 GatedDeltaNet,
+    full_attention 层走标准 Attention;Pre-Norm 残差结构,FFN 支持 mode-1 选择性重算（checkpoint_ffn）。"""
     def __init__(self, layer_id: int, config: InstinctConfig):
+        """按 layer_type 构造注意力子模块、两个 RMSNorm 与 MLP（可切 MoE）。"""
         super().__init__()
         self.layer_type = config.layer_types[layer_id]
         if self.layer_type == "linear_attention":
@@ -395,6 +469,7 @@ class InstinctBlock(nn.Module):
         self.use_grad_checkpoint = getattr(config, "use_grad_checkpoint", 0)
 
     def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
+        """前向:残差 + 注意力（GatedDeltaNet 或 Attention）→ post-norm → MLP;返回 (hidden_states, present_key_value)。"""
         residual = hidden_states
         if self.layer_type == "linear_attention":
             conv_state = past_key_value[0] if past_key_value is not None else None
@@ -424,7 +499,13 @@ class InstinctBlock(nn.Module):
         return hidden_states, present_key_value
 
 class InstinctModel(nn.Module):
+    """混合架构主干:Embedding → N 个 InstinctBlock → 最终 RMSNorm。
+
+    预计算 RoPE 频率表并注册为非持久 buffer;支持 mode-2 整层梯度检查点、
+    per-layer callback（logit lens 等流式钩子）、中间态收集与 early-exit 早退钩子。
+    """
     def __init__(self, config: InstinctConfig):
+        """初始化 embedding、dropout、层列表、最终 norm 与 RoPE buffer。"""
         super().__init__()
         self.config = config
         self.vocab_size, self.num_hidden_layers = config.vocab_size, config.num_hidden_layers
@@ -432,11 +513,19 @@ class InstinctModel(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
         self.layers = nn.ModuleList([InstinctBlock(l, config) for l in range(self.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        freqs_cos, freqs_sin = precompute_freqs_cis(dim=config.head_dim, end=config.max_position_embeddings, rope_base=config.rope_theta, rope_scaling=config.rope_scaling)
+        freqs_cos, freqs_sin = precompute_freqs_cis(
+            dim=config.head_dim, end=config.max_position_embeddings,
+            rope_base=config.rope_theta, rope_scaling=config.rope_scaling,
+        )
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, **kwargs):
+        """前向:推导 start_pos（首个有 KV 的全注意力层）→ embedding → 逐层前向。
+
+        逐层收集 presents / intermediates,累加 MoE aux_loss;支持 mode-2 整层 checkpoint、
+        layer_callback 流式钩子与 exit_check_fn 早退（早退时用 None 补齐剩余层 KV 槽位）。
+        """
         batch_size, seq_length = input_ids.shape
         if hasattr(past_key_values, 'layers'): past_key_values = None
         past_key_values = past_key_values or [None] * len(self.layers)
@@ -502,15 +591,23 @@ class InstinctModel(nn.Module):
         return hidden_states, presents, aux_loss
 
 class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
+    """线性注意力模型的语言模型头:共享 embedding/lm_head 权重（tied weights）。
+
+    支持 Logit Lens（logit_lens 逐层反嵌入探测）、Early Exit（训练时加权早退损失 /
+    推理时置信度阈值动态退出）与 generate 采样解码;统一返回 MoeCausalLMOutputWithPast。
+    """
     config_class = InstinctConfig
     def __init__(self, config: InstinctConfig = None):
+        """初始化主干模型与 lm_head,并绑定 embedding 权重（tied weights）。"""
         self.config = config or InstinctConfig()
         super().__init__(self.config)
         self.model = InstinctModel(self.config)
         self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
         self.model.embed_tokens.weight = self.lm_head.weight
     
-    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, logits_to_keep=0, labels=None, early_exit=False, logit_lens=False, **kwargs):
+    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False,
+                logits_to_keep=0, labels=None, early_exit=False, logit_lens=False, **kwargs):
+        """前向:按 logit_lens / early_exit / 普通三条路径计算 logits 与损失,统一返回 MoeCausalLMOutputWithPast。"""
         def _cross_entropy_loss(logits, labels):
             x, y = logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
             return F.cross_entropy(x.view(-1, x.size(-1)), y.view(-1), ignore_index=-100)
@@ -575,7 +672,11 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         return MoeCausalLMOutputWithPast(loss=loss, aux_loss=aux_loss, logits=logits, past_key_values=past_key_values, hidden_states=hidden_states)
     
     @torch.inference_mode()
-    def generate(self, inputs=None, attention_mask=None, max_new_tokens=8192, temperature=0.85, top_p=0.85, top_k=50, eos_token_id=2, streamer=None, use_cache=True, num_return_sequences=1, do_sample=True, repetition_penalty=1.0, **kwargs):
+    def generate(self, inputs=None, attention_mask=None, max_new_tokens=8192, temperature=0.85,
+                 top_p=0.85, top_k=50, eos_token_id=2, streamer=None, use_cache=True,
+                 num_return_sequences=1, do_sample=True, repetition_penalty=1.0, **kwargs):
+        """自回归解码循环:top-k / top-p / temperature 采样,支持 repetition penalty、
+        streamer、early exit 与 KV cache 复用;return_kv=True 时额外返回 past_kv。"""
         input_ids = kwargs.pop("input_ids", inputs).repeat(num_return_sequences, 1)
         attention_mask = attention_mask.repeat(num_return_sequences, 1) if attention_mask is not None else None
         past_key_values = kwargs.pop("past_key_values", None)
@@ -595,7 +696,9 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                 forward_kwargs['early_exit'] = True
                 forward_kwargs['exit_threshold'] = exit_threshold
             outputs = self.forward(input_ids[:, past_len:], attention_mask, past_key_values, use_cache=use_cache, **forward_kwargs)
-            attention_mask = torch.cat([attention_mask, attention_mask.new_ones(attention_mask.shape[0], 1)], -1) if attention_mask is not None else None
+            attention_mask = torch.cat(
+                [attention_mask, attention_mask.new_ones(attention_mask.shape[0], 1)], -1
+            ) if attention_mask is not None else None
             logits = outputs.logits[:, -1, :] / temperature
             if repetition_penalty != 1.0:
                 for i in range(input_ids.shape[0]): logits[i, torch.unique(input_ids[i])] /= repetition_penalty
@@ -607,7 +710,12 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                 mask[..., 1:], mask[..., 0] = mask[..., :-1].clone(), 0
                 logits[mask.scatter(1, sorted_indices, mask)] = -float('inf')
             next_token = torch.multinomial(torch.softmax(logits, dim=-1), num_samples=1) if do_sample else torch.argmax(logits, dim=-1, keepdim=True)
-            if eos_token_id is not None: next_token = torch.where(finished.unsqueeze(-1), next_token.new_full((next_token.shape[0], 1), eos_token_id), next_token)
+            if eos_token_id is not None:
+                next_token = torch.where(
+                    finished.unsqueeze(-1),
+                    next_token.new_full((next_token.shape[0], 1), eos_token_id),
+                    next_token,
+                )
             input_ids = torch.cat([input_ids, next_token], dim=-1)
             past_key_values = outputs.past_key_values if use_cache else None
             if streamer: streamer.put(next_token.cpu())

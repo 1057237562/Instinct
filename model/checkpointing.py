@@ -10,19 +10,8 @@ The large intermediates (scores ``[bs, heads, seq, seq]``, softmax probabilities
 dropout mask) are never saved — the memory win grows with ``seq``.
 
 Semantics are a byte-for-byte re-implementation of the eager math-attention
-branch of ``Attention.forward`` in ``model/model_instinct.py:142-147``:
-
-    q_t = q.transpose(1, 2)
-    k_t = repeat_kv(k, n_rep).transpose(1, 2)
-    v_t = repeat_kv(v, n_rep).transpose(1, 2)
-    scores = (q_t @ k_t.transpose(-2, -1)) * scale          # eager: / sqrt(head_dim)
-    if is_causal:
-        scores[:, :, :, -seq_len:] += torch.full((seq_len, seq_len), float("-inf"),
-                                                  device=scores.device).triu(1)
-    if attention_mask is not None:
-        scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
-    out = F.dropout(F.softmax(scores.float(), dim=-1).type_as(q_t), p=dropout_p) @ v_t
-    out = out.transpose(1, 2).reshape(bs, seq_len, -1)
+branch of ``Attention.forward`` in ``model/model_instinct.py:142-147``;
+the exact math lives in ``_attention_core`` below.
 
 Key constraints honored here:
 
@@ -41,6 +30,7 @@ Key constraints honored here:
 """
 
 import math
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -60,7 +50,7 @@ def _repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
-def _get_rng_state():
+def _get_rng_state() -> List[torch.Tensor]:
     """Snapshot the generators used by dropout: CPU always, current CUDA if any."""
     states = [torch.get_rng_state()]
     if torch.cuda.is_available():
@@ -68,7 +58,12 @@ def _get_rng_state():
     return states
 
 
-def _set_rng_state(states):
+def _set_rng_state(states: List[torch.Tensor]) -> None:
+    """Restore the RNG state saved by ``_get_rng_state`` (CPU always, CUDA if any).
+
+    Called at the top of ``backward`` so the replayed dropout mask is bitwise
+    identical to the one forward used.
+    """
     torch.set_rng_state(states[0])
     if torch.cuda.is_available() and len(states) > 1:
         torch.cuda.set_rng_state(states[1])
@@ -93,7 +88,16 @@ class RecomputeAttention(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, q, k, v, attention_mask, is_causal, dropout_p, scale):
+    def forward(
+        ctx,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        is_causal: bool,
+        dropout_p: float,
+        scale: float,
+    ) -> torch.Tensor:
         n_rep = q.shape[2] // k.shape[2]  # GQA: n_heads / n_kv_heads
         ctx.save_for_backward(q, k, v, attention_mask)
         ctx.is_causal = bool(is_causal)
@@ -109,7 +113,16 @@ class RecomputeAttention(torch.autograd.Function):
         return output
 
     @staticmethod
-    def _attention_core(q, k, v, attention_mask, is_causal, dropout_p, scale, n_rep):
+    def _attention_core(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        is_causal: bool,
+        dropout_p: float,
+        scale: float,
+        n_rep: int,
+    ) -> torch.Tensor:
         """Eager math-attention core, ``* scale`` instead of ``/ sqrt(head_dim)``."""
         bs, seq_len = q.shape[0], q.shape[1]
         q_t = q.transpose(1, 2)
@@ -126,27 +139,44 @@ class RecomputeAttention(torch.autograd.Function):
         return out.transpose(1, 2).reshape(bs, seq_len, -1)
 
     @staticmethod
-    def backward(ctx, grad_out):
+    def backward(
+        ctx,
+        grad_out: torch.Tensor,
+    ) -> Tuple[Optional[torch.Tensor], ...]:
+        """Restore the forward RNG state, recompute the core under ``enable_grad``,
+        and return first-order grads for q/k/v. Non-differentiable inputs
+        (attention_mask, is_causal, dropout_p, scale) map to ``None``.
+        """
         q, k, v, attention_mask = ctx.saved_tensors
-        _set_rng_state(ctx.rng_state)  # replay forward's exact dropout mask
+        _set_rng_state(ctx.rng_state)
         with torch.enable_grad():
             output = RecomputeAttention._attention_core(
                 q, k, v, attention_mask, ctx.is_causal, ctx.dropout_p, ctx.scale, ctx.n_rep
             )
-            # Differentiate only the inputs that actually require grad; a frozen
-            # q/k/v would make torch.autograd.grad raise otherwise.
-            grads = {0: None, 1: None, 2: None}
+            # Differentiate only the tensors that require grad — a frozen q/k/v
+            # would make torch.autograd.grad raise otherwise.
+            grads = [None, None, None]
             diff = [(i, t) for i, t in enumerate((q, k, v)) if t.requires_grad]
             if diff:
                 idxs = [i for i, _ in diff]
                 tensors = [t for _, t in diff]
-                got = torch.autograd.grad(output, tensors, grad_outputs=grad_out, allow_unused=True)
+                got = torch.autograd.grad(
+                    output, tensors, grad_outputs=grad_out, allow_unused=True
+                )
                 for i, g in zip(idxs, got):
                     grads[i] = g
         return (grads[0], grads[1], grads[2], None, None, None, None)
 
 
-def recompute_attention(q, k, v, attention_mask=None, is_causal=True, dropout_p=0.0, head_dim=None):
+def recompute_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    is_causal: bool = True,
+    dropout_p: float = 0.0,
+    head_dim: Optional[int] = None,
+) -> torch.Tensor:
     """Functional wrapper: convenience API for the T7 integration.
 
     ``scale`` is derived from ``head_dim`` (defaults to ``q.shape[-1]``).
@@ -156,7 +186,11 @@ def recompute_attention(q, k, v, attention_mask=None, is_causal=True, dropout_p=
     return RecomputeAttention.apply(q, k, v, attention_mask, is_causal, dropout_p, 1.0 / math.sqrt(head_dim))
 
 
-def checkpoint_ffn(ffn_module, hidden_states, use_reentrant=False):
+def checkpoint_ffn(
+    ffn_module: torch.nn.Module,
+    hidden_states: torch.Tensor,
+    use_reentrant: bool = False,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Gradient-checkpoint the FFN/MoE block (plan T3) — recompute, don't stash.
 
     Wraps ``FeedForward`` (dense SwiGLU) or ``MOEFeedForward`` (top-1 routing)

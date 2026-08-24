@@ -1,4 +1,13 @@
-import math, torch, torch.nn.functional as F
+"""
+Instinct 模型定义:配置类(InstinctConfig)与 Dense Transformer 主干。
+
+包含 RMSNorm、RoPE(支持 YaRN 外推)、GQA 注意力(flash / math / 梯度检查点
+三路实现)、SwiGLU FFN、MoE 路由、Early Exit / logit lens,以及带完整采样
+参数(temperature / top_k / top_p / repetition_penalty)的自定义 generate 循环。
+"""
+import math
+import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers.activations import ACT2FN
 from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
@@ -7,10 +16,13 @@ from model.flash_attn_4 import flash_attention
 from model.kv_cache_quant import parse_cache, make_cache
 from model.checkpointing import recompute_attention, checkpoint_ffn
 
-# 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
-#                                     Instinct Config
-# 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
+# ═══════════════════════════════════════════════════════════════
+# InstinctConfig
+# ═══════════════════════════════════════════════════════════════
 class InstinctConfig(PretrainedConfig):
+    """模型超参配置(对齐 Qwen3 生态)。kwargs 中未给出的字段取默认值:
+    vocab 6400、8 层、dim 768、GQA 8/4 头、SwiGLU、RoPE θ=1e6、max_pos 32768;
+    use_moe=True 时启用 MoE 路由相关字段。"""
     model_type = "instinct"
     def __init__(self, hidden_size=768, num_hidden_layers=8, use_moe=False, **kwargs):
         super().__init__(**kwargs)
@@ -24,7 +36,7 @@ class InstinctConfig(PretrainedConfig):
         self.flash_attn = kwargs.get("flash_attn", True)
         self.param_dtype = kwargs.get("param_dtype", "fp32")
         self.kv_cache_dtype = kwargs.get("kv_cache_dtype", "fp32")
-        ### Gradient Checkpointing configs
+        # Gradient Checkpointing configs
         self.use_grad_checkpoint = kwargs.get("use_grad_checkpoint", 0)
         self.num_attention_heads = kwargs.get("num_attention_heads", 8)
         self.num_key_value_heads = kwargs.get("num_key_value_heads", 4)
@@ -44,19 +56,19 @@ class InstinctConfig(PretrainedConfig):
             "attention_factor": 1.0,
             "type": "yarn"
         } if self.inference_rope_scaling else None
-        ### Early Exit configs (LayerSkip-style: shared LM head, no auxiliary classifiers)
+        # Early Exit configs (LayerSkip-style: shared LM head, no auxiliary classifiers)
         self.early_exit_layers = kwargs.get("early_exit_layers", [4, 5, 6, 7])
         self.early_exit_loss_weight = kwargs.get("early_exit_loss_weight", 0.3)
-        ### MoE specific configs (ignored if use_moe = False)
+        # MoE specific configs (ignored if use_moe = False)
         self.num_experts = kwargs.get("num_experts", 4)
         self.num_experts_per_tok = kwargs.get("num_experts_per_tok", 1)
         self.moe_intermediate_size = kwargs.get("moe_intermediate_size", self.intermediate_size)
         self.norm_topk_prob = kwargs.get("norm_topk_prob", True)
         self.router_aux_loss_coef = kwargs.get("router_aux_loss_coef", 5e-4)
 
-# 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
-#                                     Instinct Model
-# 🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏🌎🌍🌏
+# ═══════════════════════════════════════════════════════════════
+# Instinct Model
+# ═══════════════════════════════════════════════════════════════
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-5):
         super().__init__()
@@ -64,9 +76,11 @@ class RMSNorm(torch.nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def norm(self, x):
+        """RMS 归一化核心:x / sqrt(mean(x²) + eps),按最后一维计算。"""
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
+        """在 fp32 下归一化避免低精度下平方和溢出,再乘权重并恢复原 dtype。"""
         return (self.weight * self.norm(x.float())).type_as(x)
 
 def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float = 1e6, rope_scaling: dict = None):
@@ -136,7 +150,9 @@ class Attention(nn.Module):
             xk = torch.cat([k_past, xk], dim=1)
             xv = torch.cat([v_past, xv], dim=1)
         past_kv = make_cache(xk, xv, self.kv_cache_dtype) if use_cache else None
-        if self.flash and (seq_len > 1) and (not self.is_causal or past_key_value is None) and (attention_mask is None or torch.all(attention_mask == 1)):
+        if (self.flash and (seq_len > 1)
+                and (not self.is_causal or past_key_value is None)
+                and (attention_mask is None or torch.all(attention_mask == 1))):
             # FA4 / SDPA fused fast path: 输入输出布局 (bs, seq, heads, hd),kernel 内部处理 GQA
             output = flash_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=self.is_causal)
             output = output.reshape(bsz, seq_len, -1)
@@ -231,7 +247,10 @@ class InstinctModel(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
         self.layers = nn.ModuleList([InstinctBlock(l, config) for l in range(self.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        freqs_cos, freqs_sin = precompute_freqs_cis(dim=config.head_dim, end=config.max_position_embeddings, rope_base=config.rope_theta, rope_scaling=config.rope_scaling)
+        freqs_cos, freqs_sin = precompute_freqs_cis(
+            dim=config.head_dim, end=config.max_position_embeddings,
+            rope_base=config.rope_theta, rope_scaling=config.rope_scaling,
+        )
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
@@ -243,7 +262,10 @@ class InstinctModel(nn.Module):
         hidden_states = self.dropout(self.embed_tokens(input_ids))
         # Recompute RoPE buffers lost during meta-device init (transformers>=5.x)
         if self.freqs_cos[0, 0] == 0:
-            freqs_cos, freqs_sin = precompute_freqs_cis(dim=self.config.head_dim, end=self.config.max_position_embeddings, rope_base=self.config.rope_theta, rope_scaling=self.config.rope_scaling)
+            freqs_cos, freqs_sin = precompute_freqs_cis(
+                dim=self.config.head_dim, end=self.config.max_position_embeddings,
+                rope_base=self.config.rope_theta, rope_scaling=self.config.rope_scaling,
+            )
             self.freqs_cos, self.freqs_sin = freqs_cos.to(hidden_states.device), freqs_sin.to(hidden_states.device)
         position_embeddings = (self.freqs_cos[start_pos:start_pos + seq_length], self.freqs_sin[start_pos:start_pos + seq_length])
         presents, intermediates = [], []
@@ -261,9 +283,6 @@ class InstinctModel(nn.Module):
                     layer, hidden_states, position_embeddings, past_key_value,
                     use_cache, attention_mask,
                     use_reentrant=False, preserve_rng_state=True)
-                presents.append(present)
-                if isinstance(layer.mlp, MOEFeedForward):
-                    aux_loss = aux_loss + layer.mlp.aux_loss
             else:
                 hidden_states, present = layer(
                     hidden_states,
@@ -272,9 +291,9 @@ class InstinctModel(nn.Module):
                     use_cache=use_cache,
                     attention_mask=attention_mask
                 )
-                presents.append(present)
-                if isinstance(layer.mlp, MOEFeedForward):
-                    aux_loss = aux_loss + layer.mlp.aux_loss
+            presents.append(present)
+            if isinstance(layer.mlp, MOEFeedForward):
+                aux_loss = aux_loss + layer.mlp.aux_loss
             if layer_callback is not None:
                 # Per-layer streaming hook (logit lens etc.): fires with the normed
                 # hidden state right after each layer computes it.
@@ -304,7 +323,8 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         if self.config.tie_word_embeddings: self.model.embed_tokens.weight = self.lm_head.weight
         self.post_init()
 
-    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, logits_to_keep=0, labels=None, early_exit=False, logit_lens=False, **kwargs):
+    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False,
+                logits_to_keep=0, labels=None, early_exit=False, logit_lens=False, **kwargs):
         def _cross_entropy_loss(logits, labels):
             x, y = logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
             return F.cross_entropy(x.view(-1, x.size(-1)), y.view(-1), ignore_index=-100)
@@ -368,10 +388,12 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         logits = _compute_logits(hidden_states)
         loss = _cross_entropy_loss(logits, labels) if labels is not None else None
         return MoeCausalLMOutputWithPast(loss=loss, aux_loss=aux_loss, logits=logits, past_key_values=past_key_values, hidden_states=hidden_states)
-    
+
     # https://github.com/1057237562/Instinct/discussions/611
     @torch.inference_mode()
-    def generate(self, inputs=None, attention_mask=None, max_new_tokens=8192, temperature=0.85, top_p=0.85, top_k=50, eos_token_id=2, streamer=None, use_cache=True, num_return_sequences=1, do_sample=True, repetition_penalty=1.0, **kwargs):
+    def generate(self, inputs=None, attention_mask=None, max_new_tokens=8192, temperature=0.85,
+                 top_p=0.85, top_k=50, eos_token_id=2, streamer=None, use_cache=True,
+                 num_return_sequences=1, do_sample=True, repetition_penalty=1.0, **kwargs):
         input_ids = kwargs.pop("input_ids", inputs).repeat(num_return_sequences, 1)
         attention_mask = attention_mask.repeat(num_return_sequences, 1) if attention_mask is not None else None
         past_key_values = kwargs.pop("past_key_values", None)
@@ -390,8 +412,10 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
             logits = outputs.logits[:, -1, :] / temperature
             if repetition_penalty != 1.0:
                 for i in range(input_ids.shape[0]):
-                    seen = torch.unique(input_ids[i]); score = logits[i, seen]; logits[i, seen] = torch.where(score > 0, score / repetition_penalty, score * repetition_penalty)
-            if top_k > 0: 
+                    seen = torch.unique(input_ids[i])
+                    score = logits[i, seen]
+                    logits[i, seen] = torch.where(score > 0, score / repetition_penalty, score * repetition_penalty)
+            if top_k > 0:
                 logits[logits < torch.topk(logits, top_k)[0][..., -1, None]] = -float('inf')
             if top_p < 1.0:
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True)

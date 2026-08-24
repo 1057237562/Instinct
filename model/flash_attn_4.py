@@ -15,6 +15,8 @@ mem-efficient backend(在 sm_120 上实测约 20x 于 math),极端情况再回�
 - seq_len 非 128 倍数时(FA4 non-varlen 接口的约束),causal 场景自动 pad 到
   128 倍数再截断(因果掩码下数值精确等价);非 causal 场景回退 SDPA。
 """
+from typing import Any, Callable, Optional
+
 import torch
 import torch.nn.functional as F
 
@@ -22,14 +24,22 @@ _flash_attn_4_func = None
 _tried_import = False
 
 
-def _repeat_kv(x, n_rep):
+def _repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """GQA 键/值重复展开,与 ``checkpointing._repeat_kv`` 同源的本地副本。
+
+    将 (bs, slen, kv_heads, head_dim) 沿 head 维重复 n_rep 份,得到
+    (bs, slen, kv_heads * n_rep, head_dim);n_rep == 1 时原样返回。
+    仅 SDPA 回退路径需要(GQA 由 FA4 kernel 原生支持)。
+    """
     bs, slen, num_key_value_heads, head_dim = x.shape
     if n_rep == 1:
         return x
-    return x[:, :, :, None, :].expand(bs, slen, num_key_value_heads, n_rep, head_dim).reshape(bs, slen, num_key_value_heads * n_rep, head_dim)
+    return x[:, :, :, None, :].expand(bs, slen, num_key_value_heads, n_rep, head_dim).reshape(
+        bs, slen, num_key_value_heads * n_rep, head_dim
+    )
 
 
-def _get_fa4():
+def _get_fa4() -> Optional[Callable[..., Any]]:
     """惰性探测 flash_attn_interface.flash_attn_func(FA4),缓存结果。"""
     global _flash_attn_4_func, _tried_import
     if not _tried_import:
@@ -42,7 +52,13 @@ def _get_fa4():
     return _flash_attn_4_func
 
 
-def flash_attention(q, k, v, dropout_p=0.0, is_causal=True):
+def flash_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dropout_p: float = 0.0,
+    is_causal: bool = True,
+) -> torch.Tensor:
     """Fused attention 快路径。
 
     Args:
@@ -70,9 +86,8 @@ def flash_attention(q, k, v, dropout_p=0.0, is_causal=True):
         if pad == 0 or is_causal:
             try:
                 if pad:
-                    q = F.pad(q, (0, 0, 0, pad))
-                    k = F.pad(k, (0, 0, 0, pad))
-                    v = F.pad(v, (0, 0, 0, pad))
+                    pad_spec = (0, 0, 0, pad)
+                    q, k, v = F.pad(q, pad_spec), F.pad(k, pad_spec), F.pad(v, pad_spec)
                 out = fa4(q, k, v, dropout_p=dropout_p, is_causal=is_causal)
                 if isinstance(out, tuple):
                     out = out[0]
@@ -81,7 +96,8 @@ def flash_attention(q, k, v, dropout_p=0.0, is_causal=True):
                 pass  # FA4 kernel 不支持当前 shape/dtype,回退 SDPA
     # 回退: PyTorch SDPA(torch 2.8 在 sm_120 上自动命中 flash backend),需手动 repeat_kv
     n_rep = q.size(2) // k.size(2)
+    k, v = _repeat_kv(k, n_rep).transpose(1, 2), _repeat_kv(v, n_rep).transpose(1, 2)
     return F.scaled_dot_product_attention(
-        q.transpose(1, 2), _repeat_kv(k, n_rep).transpose(1, 2), _repeat_kv(v, n_rep).transpose(1, 2),
+        q.transpose(1, 2), k, v,
         dropout_p=dropout_p, is_causal=is_causal,
     ).transpose(1, 2)
