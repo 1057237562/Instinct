@@ -2,8 +2,9 @@
 Instinct 模型定义:配置类(InstinctConfig)与 Dense Transformer 主干。
 
 包含 RMSNorm、RoPE(支持 YaRN 外推)、GQA 注意力(flash / math / 梯度检查点
-三路实现)、SwiGLU FFN、MoE 路由、Early Exit / logit lens,以及带完整采样
-参数(temperature / top_k / top_p / repetition_penalty)的自定义 generate 循环。
+三路实现)、SwiGLU FFN、MoE 路由、mHC / Attention Residuals 可选残差拓扑、
+Early Exit / logit lens,以及带完整采样参数(temperature / top_k / top_p /
+repetition_penalty)的自定义 generate 循环。
 """
 import math
 import torch
@@ -65,6 +66,25 @@ class InstinctConfig(PretrainedConfig):
         self.moe_intermediate_size = kwargs.get("moe_intermediate_size", self.intermediate_size)
         self.norm_topk_prob = kwargs.get("norm_topk_prob", True)
         self.router_aux_loss_coef = kwargs.get("router_aux_loss_coef", 5e-4)
+        # Residual topology. ``standard`` keeps old configs/checkpoints exact.
+        self.residual_type = kwargs.get("residual_type", "standard")
+        if self.residual_type not in {"standard", "mhc", "attnres"}:
+            raise ValueError("residual_type must be one of: standard, mhc, attnres")
+        self.hc_mult = int(kwargs.get("hc_mult", 4))
+        self.hc_sinkhorn_iters = int(kwargs.get("hc_sinkhorn_iters", 20))
+        self.hc_eps = float(kwargs.get("hc_eps", 1e-6))
+        self.mhc_init_std = float(kwargs.get("mhc_init_std", 0.02))
+        if self.hc_mult < 1:
+            raise ValueError("hc_mult must be >= 1")
+        if self.hc_sinkhorn_iters < 1:
+            raise ValueError("hc_sinkhorn_iters must be >= 1")
+        self.attnres_variant = kwargs.get("attnres_variant", "block")
+        if self.attnres_variant not in {"full", "block"}:
+            raise ValueError("attnres_variant must be one of: full, block")
+        default_block_size = max(1, math.ceil(2 * self.num_hidden_layers / 8))
+        self.attnres_block_size = int(kwargs.get("attnres_block_size", default_block_size))
+        if self.attnres_block_size < 1:
+            raise ValueError("attnres_block_size must be >= 1")
 
 # ═══════════════════════════════════════════════════════════════
 # Instinct Model
@@ -82,6 +102,94 @@ class RMSNorm(torch.nn.Module):
     def forward(self, x):
         """在 fp32 下归一化避免低精度下平方和溢出,再乘权重并恢复原 dtype。"""
         return (self.weight * self.norm(x.float())).type_as(x)
+
+
+class UnweightedRMSNorm(nn.Module):
+    """Parameter-free RMSNorm used to normalize residual-routing keys."""
+
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, x):
+        x_float = x.float()
+        return (x_float * torch.rsqrt(x_float.pow(2).mean(-1, keepdim=True) + self.eps)).to(x.dtype)
+
+
+class AttentionResidual(nn.Module):
+    """Depth-wise softmax attention over ``[depth, batch, seq, hidden]`` sources."""
+
+    def __init__(self, config: InstinctConfig):
+        super().__init__()
+        self.query = nn.Parameter(torch.zeros(config.hidden_size))
+        self.key_norm = UnweightedRMSNorm(config.rms_norm_eps)
+
+    def forward(self, sources: torch.Tensor) -> torch.Tensor:
+        keys = self.key_norm(sources)
+        logits = torch.einsum("d,nbtd->nbt", self.query.float(), keys.float())
+        weights = torch.softmax(logits, dim=0).to(sources.dtype)
+        return torch.einsum("nbt,nbtd->btd", weights, sources)
+
+
+class ManifoldHyperConnection(nn.Module):
+    """Pure-PyTorch mHC pre/post mixer with a Sinkhorn manifold projection."""
+
+    def __init__(self, config: InstinctConfig):
+        super().__init__()
+        self.hc_mult = config.hc_mult
+        self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
+        self.hc_eps = config.hc_eps
+        self.input_norm = UnweightedRMSNorm(config.rms_norm_eps)
+        mix = (2 + self.hc_mult) * self.hc_mult
+        self.fn = nn.Parameter(torch.empty(mix, self.hc_mult * config.hidden_size))
+        self.base = nn.Parameter(torch.zeros(mix))
+        self.scale = nn.Parameter(torch.ones(3))
+        nn.init.normal_(self.fn, mean=0.0, std=config.mhc_init_std)
+
+    def forward(self, hidden_streams: torch.Tensor):
+        hc = self.hc_mult
+        flat = self.input_norm(hidden_streams.flatten(start_dim=2)).float()
+        logits = F.linear(flat, self.fn.float())
+        pre_w, post_w, comb_w = logits.split([hc, hc, hc * hc], dim=-1)
+        pre_b, post_b, comb_b = self.base.float().split([hc, hc, hc * hc])
+        pre_scale, post_scale, comb_scale = self.scale.float().unbind(0)
+        pre = torch.sigmoid(pre_w * pre_scale + pre_b) + self.hc_eps
+        post = 2.0 * torch.sigmoid(post_w * post_scale + post_b)
+        comb_logits = comb_w.view(*comb_w.shape[:-1], hc, hc) * comb_scale
+        comb_logits = comb_logits + comb_b.view(hc, hc)
+        comb = torch.softmax(comb_logits, dim=-1) + self.hc_eps
+        comb = comb / (comb.sum(dim=-2, keepdim=True) + self.hc_eps)
+        for _ in range(self.hc_sinkhorn_iters - 1):
+            comb = comb / (comb.sum(dim=-1, keepdim=True) + self.hc_eps)
+            comb = comb / (comb.sum(dim=-2, keepdim=True) + self.hc_eps)
+        collapsed = (pre.unsqueeze(-1) * hidden_streams).sum(dim=2)
+        return post, comb, collapsed.to(hidden_streams.dtype)
+
+    @staticmethod
+    def merge(hidden_streams, sublayer_output, post, comb):
+        dtype = hidden_streams.dtype
+        mixed = torch.matmul(comb.to(dtype).transpose(-1, -2), hidden_streams)
+        return mixed + post.to(dtype).unsqueeze(-1) * sublayer_output.unsqueeze(-2)
+
+
+class ManifoldHyperHead(nn.Module):
+    """Collapse the final mHC stream bundle back to one hidden sequence."""
+
+    def __init__(self, config: InstinctConfig):
+        super().__init__()
+        self.hc_mult = config.hc_mult
+        self.hc_eps = config.hc_eps
+        self.input_norm = UnweightedRMSNorm(config.rms_norm_eps)
+        self.fn = nn.Parameter(torch.empty(self.hc_mult, self.hc_mult * config.hidden_size))
+        self.base = nn.Parameter(torch.zeros(self.hc_mult))
+        self.scale = nn.Parameter(torch.ones(1))
+        nn.init.normal_(self.fn, mean=0.0, std=config.mhc_init_std)
+
+    def forward(self, hidden_streams):
+        flat = self.input_norm(hidden_streams.flatten(start_dim=2)).float()
+        logits = F.linear(flat, self.fn.float())
+        pre = torch.sigmoid(logits * self.scale.float() + self.base.float()) + self.hc_eps
+        return (pre.unsqueeze(-1) * hidden_streams).sum(dim=2).to(hidden_streams.dtype)
 
 def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float = 1e6, rope_scaling: dict = None):
     freqs, attn_factor = 1.0 / (rope_base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)), 1.0
@@ -220,8 +328,21 @@ class InstinctBlock(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mlp = FeedForward(config) if not config.use_moe else MOEFeedForward(config)
         self.use_grad_checkpoint = getattr(config, "use_grad_checkpoint", 0)
+        self.layer_id = layer_id
+        self.residual_type = config.residual_type
+        if self.residual_type == "mhc":
+            self.attn_hc = ManifoldHyperConnection(config)
+            self.ffn_hc = ManifoldHyperConnection(config)
+        elif self.residual_type == "attnres":
+            self.attn_residual = AttentionResidual(config)
+            self.mlp_residual = AttentionResidual(config)
+            self.attnres_block_size = config.attnres_block_size
 
     def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
+        if self.residual_type == "mhc":
+            return self._forward_mhc(
+                hidden_states, position_embeddings, past_key_value, use_cache, attention_mask
+            )
         residual = hidden_states
         hidden_states, present_key_value = self.self_attn(
             self.input_layernorm(hidden_states), position_embeddings,
@@ -238,6 +359,65 @@ class InstinctBlock(nn.Module):
             hidden_states = hidden_states + self.mlp(normed)
         return hidden_states, present_key_value
 
+    def _run_mlp(self, hidden_states):
+        if self.use_grad_checkpoint == 1 and self.training:
+            ffn_out, aux = checkpoint_ffn(self.mlp, hidden_states)
+            if aux is not None:
+                self.mlp.aux_loss = aux
+            return ffn_out
+        return self.mlp(hidden_states)
+
+    def _forward_mhc(self, hidden_states, position_embeddings, past_key_value=None,
+                     use_cache=False, attention_mask=None):
+        post, comb, collapsed = self.attn_hc(hidden_states)
+        attn_output, present_key_value = self.self_attn(
+            self.input_layernorm(collapsed), position_embeddings,
+            past_key_value, use_cache, attention_mask
+        )
+        hidden_states = self.attn_hc.merge(hidden_states, attn_output, post, comb)
+        post, comb, collapsed = self.ffn_hc(hidden_states)
+        mlp_output = self._run_mlp(self.post_attention_layernorm(collapsed))
+        hidden_states = self.ffn_hc.merge(hidden_states, mlp_output, post, comb)
+        return hidden_states, present_key_value
+
+    def forward_attnres_full(self, source_bank, position_embeddings, past_key_value=None,
+                             use_cache=False, attention_mask=None):
+        hidden_states = self.attn_residual(source_bank)
+        attn_output, present_key_value = self.self_attn(
+            self.input_layernorm(hidden_states), position_embeddings,
+            past_key_value, use_cache, attention_mask
+        )
+        source_bank = torch.cat((source_bank, attn_output.unsqueeze(0)), dim=0)
+        hidden_states = self.mlp_residual(source_bank)
+        mlp_output = self._run_mlp(self.post_attention_layernorm(hidden_states))
+        source_bank = torch.cat((source_bank, mlp_output.unsqueeze(0)), dim=0)
+        return source_bank, present_key_value
+
+    def _block_residual(self, source_bank, partial_count, residual):
+        partial = source_bank[-1] + residual
+        if partial_count + 1 == self.attnres_block_size:
+            return torch.cat((source_bank[:-1], partial.unsqueeze(0), torch.zeros_like(partial).unsqueeze(0)), dim=0)
+        return torch.cat((source_bank[:-1], partial.unsqueeze(0)), dim=0)
+
+    @staticmethod
+    def _block_sources(source_bank, partial_count):
+        return source_bank[:-1] if partial_count == 0 else source_bank
+
+    def forward_attnres_block(self, source_bank, position_embeddings, past_key_value=None,
+                              use_cache=False, attention_mask=None):
+        partial_count = (2 * self.layer_id) % self.attnres_block_size
+        hidden_states = self.attn_residual(self._block_sources(source_bank, partial_count))
+        attn_output, present_key_value = self.self_attn(
+            self.input_layernorm(hidden_states), position_embeddings,
+            past_key_value, use_cache, attention_mask
+        )
+        source_bank = self._block_residual(source_bank, partial_count, attn_output)
+        partial_count = (partial_count + 1) % self.attnres_block_size
+        hidden_states = self.mlp_residual(self._block_sources(source_bank, partial_count))
+        mlp_output = self._run_mlp(self.post_attention_layernorm(hidden_states))
+        source_bank = self._block_residual(source_bank, partial_count, mlp_output)
+        return source_bank, present_key_value
+
 class InstinctModel(nn.Module):
     def __init__(self, config: InstinctConfig):
         super().__init__()
@@ -247,6 +427,11 @@ class InstinctModel(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
         self.layers = nn.ModuleList([InstinctBlock(l, config) for l in range(self.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.residual_type = config.residual_type
+        if self.residual_type == "mhc":
+            self.hc_head = ManifoldHyperHead(config)
+        elif self.residual_type == "attnres":
+            self.output_residual = AttentionResidual(config)
         freqs_cos, freqs_sin = precompute_freqs_cis(
             dim=config.head_dim, end=config.max_position_embeddings,
             rope_base=config.rope_theta, rope_scaling=config.rope_scaling,
@@ -260,6 +445,14 @@ class InstinctModel(nn.Module):
         past_key_values = past_key_values or [None] * len(self.layers)
         start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
         hidden_states = self.dropout(self.embed_tokens(input_ids))
+        if self.residual_type == "mhc":
+            hidden_states = hidden_states.unsqueeze(2).expand(-1, -1, self.config.hc_mult, -1).contiguous()
+        elif self.residual_type == "attnres":
+            if self.config.attnres_variant == "full":
+                hidden_states = hidden_states.unsqueeze(0)
+            else:
+                # [embedding, completed blocks..., current partial]
+                hidden_states = torch.stack((hidden_states, torch.zeros_like(hidden_states)), dim=0)
         # Recompute RoPE buffers lost during meta-device init (transformers>=5.x)
         if self.freqs_cos[0, 0] == 0:
             freqs_cos, freqs_sin = precompute_freqs_cis(
@@ -274,17 +467,21 @@ class InstinctModel(nn.Module):
         exit_check_fn = kwargs.pop("exit_check_fn", None)
         layer_callback = kwargs.pop("layer_callback", None)
         for layer, past_key_value in zip(self.layers, past_key_values):
+            layer_forward = layer
+            if self.residual_type == "attnres":
+                layer_forward = (layer.forward_attnres_full if self.config.attnres_variant == "full"
+                                 else layer.forward_attnres_block)
             if self.config.use_grad_checkpoint == 2 and self.training:
                 # Pass the module directly, not a closure over it: torch's non-reentrant
                 # checkpoint mis-differentiates parameterized closures composed over 2+
                 # layers (wrong grads in the first block). The MoE aux_loss attribute
                 # stays graph-connected (grad-enabled forward) and is recompute-regenerated.
                 hidden_states, present = torch.utils.checkpoint.checkpoint(
-                    layer, hidden_states, position_embeddings, past_key_value,
+                    layer_forward, hidden_states, position_embeddings, past_key_value,
                     use_cache, attention_mask,
                     use_reentrant=False, preserve_rng_state=True)
             else:
-                hidden_states, present = layer(
+                hidden_states, present = layer_forward(
                     hidden_states,
                     position_embeddings,
                     past_key_value=past_key_value,
@@ -294,23 +491,34 @@ class InstinctModel(nn.Module):
             presents.append(present)
             if isinstance(layer.mlp, MOEFeedForward):
                 aux_loss = aux_loss + layer.mlp.aux_loss
+            readout = self._readout(hidden_states, len(presents))
             if layer_callback is not None:
                 # Per-layer streaming hook (logit lens etc.): fires with the normed
                 # hidden state right after each layer computes it.
-                layer_callback(len(presents), self.norm(hidden_states))
+                layer_callback(len(presents), self.norm(readout))
             if return_intermediate:
-                intermediates.append(self.norm(hidden_states))
+                intermediates.append(self.norm(readout))
             if exit_check_fn is not None:
-                normed = self.norm(hidden_states)
+                normed = self.norm(readout)
                 if exit_check_fn(len(presents), normed):
                     presents.extend([None] * (len(self.layers) - len(presents)))
                     if return_intermediate:
                         return normed, presents, aux_loss, intermediates
                     return normed, presents, aux_loss
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm(self._readout(hidden_states, len(presents), final=True))
         if return_intermediate:
             return hidden_states, presents, aux_loss, intermediates
         return hidden_states, presents, aux_loss
+
+    def _readout(self, hidden_states, completed_layers, final=False):
+        if self.residual_type == "mhc":
+            return self.hc_head(hidden_states)
+        if self.residual_type != "attnres":
+            return hidden_states
+        if self.config.attnres_variant == "block":
+            partial_count = (2 * completed_layers) % self.config.attnres_block_size
+            hidden_states = hidden_states[:-1] if partial_count == 0 else hidden_states
+        return self.output_residual(hidden_states)
 
 class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
     config_class = InstinctConfig

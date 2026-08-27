@@ -1,5 +1,6 @@
 import time
 import argparse
+import json
 import random
 import warnings
 import torch
@@ -29,18 +30,42 @@ def logit_lens_explain(model, tokenizer, input_ids, attention_mask, top_k=5):
 def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
     if 'model' in args.load_from:
-        model = InstinctForCausalLM(InstinctConfig(
-            hidden_size=args.hidden_size,
-            num_hidden_layers=args.num_hidden_layers,
-            use_moe=bool(args.use_moe),
-            inference_rope_scaling=args.inference_rope_scaling
-        ))
-        moe_suffix = '_moe' if args.use_moe else ''
-        ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
+        if args.config_path:
+            with open(args.config_path, 'r', encoding='utf-8') as config_file:
+                config_kwargs = json.load(config_file)
+        else:
+            config_kwargs = {
+                'hidden_size': args.hidden_size,
+                'num_hidden_layers': args.num_hidden_layers,
+                'use_moe': bool(args.use_moe),
+                'inference_rope_scaling': args.inference_rope_scaling,
+                'residual_type': args.residual_type,
+                'hc_mult': args.hc_mult,
+                'hc_sinkhorn_iters': args.hc_sinkhorn_iters,
+                'attnres_variant': args.attnres_variant,
+                'attnres_block_size': args.attnres_block_size,
+            }
+        architecture = config_kwargs.get('model_architecture', args.model_architecture)
+        if architecture == 'linear':
+            from model.model_instinct_linear import (
+                InstinctConfig as LinearInstinctConfig,
+                InstinctForCausalLM as LinearInstinctForCausalLM,
+            )
+            model = LinearInstinctForCausalLM(LinearInstinctConfig(**config_kwargs))
+        elif architecture == 'looped':
+            from model.model_instinct_loop import (
+                InstinctConfig as LoopedInstinctConfig,
+                InstinctForCausalLM as LoopedInstinctForCausalLM,
+            )
+            model = LoopedInstinctForCausalLM(LoopedInstinctConfig(**config_kwargs))
+        else:
+            model = InstinctForCausalLM(InstinctConfig(**config_kwargs))
+        moe_suffix = '_moe' if model.config.use_moe else ''
+        ckp = f'./{args.save_dir}/{args.weight}_{model.config.hidden_size}{moe_suffix}.pth'
         model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
         if args.lora_weight != 'None':
             apply_lora(model)
-            load_lora(model, f'./{args.save_dir}/{args.lora_weight}_{args.hidden_size}.pth')
+            load_lora(model, f'./{args.save_dir}/{args.lora_weight}_{model.config.hidden_size}.pth')
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
     get_model_params(model, model.config)
@@ -55,6 +80,13 @@ def main():
     parser.add_argument('--hidden_size', default=768, type=int, help="隐藏层维度")
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
+    parser.add_argument('--config_path', default=None, type=str, help="原生torch权重对应的模型config JSON（优先于架构CLI参数）")
+    parser.add_argument('--model_architecture', default='standard', choices=['standard', 'linear', 'looped'], help="原生torch模型主干")
+    parser.add_argument('--residual_type', default='standard', choices=['standard', 'mhc', 'attnres'], help="残差拓扑")
+    parser.add_argument('--hc_mult', default=4, type=int, help="mHC并行残差流数量")
+    parser.add_argument('--hc_sinkhorn_iters', default=20, type=int, help="mHC Sinkhorn迭代次数")
+    parser.add_argument('--attnres_variant', default='block', choices=['full', 'block'], help="AttnRes变体")
+    parser.add_argument('--attnres_block_size', default=2, type=int, help="Block AttnRes块大小（按子层计）")
     parser.add_argument('--inference_rope_scaling', default=False, action='store_true', help="启用RoPE位置编码外推（4倍，仅解决位置编码问题）")
     parser.add_argument('--max_new_tokens', default=8192, type=int, help="最大生成长度（注意：并非模型实际长文本能力）")
     parser.add_argument('--temperature', default=0.85, type=float, help="生成温度，控制随机性（0-1，越大越随机）")

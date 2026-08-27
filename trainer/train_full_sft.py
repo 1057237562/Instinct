@@ -21,12 +21,13 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from dataset.lm_dataset import SFTDataset
 from trainer.trainer_utils import (
-    Logger, is_main_process, lm_checkpoint,
+    Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
     setup_seed, init_model, SkipBatchSampler, config_from_args, build_optimizer,
 )
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx,
     init_wandb_logger, set_cosine_lr, step_with_scaler, flush_remaining_grad,
+    PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
 )
 
 warnings.filterwarnings('ignore')
@@ -88,6 +89,13 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
             del state_dict
 
         del input_ids, labels, res, loss
+
+        if pause_requested(args):
+            clear_pause_request(args)
+            if is_main_process():
+                pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb)
+            Logger('[PAUSED] Training paused — resume checkpoint saved.')
+            sys.exit(PAUSE_EXIT_CODE)
 
     flush_remaining_grad(scaler, optimizer, model.parameters(), args.grad_clip, last_step, start_step, args.accumulation_steps)
 

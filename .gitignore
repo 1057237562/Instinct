@@ -19,6 +19,7 @@ checkpoints/
 # ===== 数据集（大文件，从 ModelScope / HuggingFace 单独下载） =====
 dataset/*.jsonl
 dataset/*.csv
+dataset/*.zip
 
 # ===== 工具 / IDE / 缓存目录 =====
 .omo/

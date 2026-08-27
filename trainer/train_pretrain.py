@@ -24,10 +24,12 @@ from dataset.lm_dataset import PretrainDataset
 from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint,
     setup_seed, init_model, SkipBatchSampler, config_from_args, build_optimizer,
+    pause_save_checkpoint,
 )
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx, init_wandb_logger,
     set_cosine_lr, step_with_scaler, flush_remaining_grad,
+    PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
 )
 
 warnings.filterwarnings('ignore')
@@ -92,6 +94,14 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
             del state_dict
 
         del input_ids, labels, res, loss
+
+        # 暂停分支：检测到暂停请求标记时，清标记并保存检查点后以 42 退出（WebUI 据此识别“已暂停”）。
+        if pause_requested(args):
+            clear_pause_request(args)
+            if is_main_process():
+                pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb)
+            Logger('[PAUSED] Training paused — resume checkpoint saved.')
+            sys.exit(PAUSE_EXIT_CODE)
 
     flush_remaining_grad(scaler, optimizer, model.parameters(), args.grad_clip, last_step, start_step, args.accumulation_steps)
 

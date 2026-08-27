@@ -29,11 +29,12 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from dataset.lm_dataset import AgentRLDataset
-from trainer.trainer_utils import (Logger, is_main_process, lm_checkpoint, setup_seed,
-                                   SkipBatchSampler, init_model, LMForRewardModel,
+from trainer.trainer_utils import (Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
+                                   setup_seed, SkipBatchSampler, init_model, LMForRewardModel,
                                    config_from_args, build_optimizer)
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx, init_wandb_logger,
+    PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
 )
 from trainer.rollout_engine import create_rollout_engine, compute_per_token_logps
 
@@ -528,6 +529,13 @@ def rl_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model,
 
         del per_token_logps, ref_per_token_logps
         del completions, rewards, grouped_rewards, mean_r, std_r, advantages, completion_mask
+
+        if pause_requested(args):
+            clear_pause_request(args)
+            if is_main_process():
+                pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model, optimizer=optimizer, epoch=epoch, step=step, wandb=wandb, scheduler=scheduler, ref_model=ref_model)
+            Logger('[PAUSED] Training paused — resume checkpoint saved.')
+            sys.exit(PAUSE_EXIT_CODE)
 
     if last_step > start_step and last_step % args.accumulation_steps != 0:
         if args.grad_clip > 0: torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)

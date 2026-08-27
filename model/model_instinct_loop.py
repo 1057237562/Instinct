@@ -22,6 +22,7 @@ from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from model.flash_attn_4 import flash_attention
 from model.kv_cache_quant import parse_cache, make_cache
 from model.checkpointing import recompute_attention, checkpoint_ffn
+from model.model_instinct import AttentionResidual, ManifoldHyperConnection, ManifoldHyperHead
 
 # ═══════════════════════════════════════════════════════════════
 # Instinct Loop Config
@@ -73,11 +74,29 @@ class InstinctConfig(PretrainedConfig):
         self.moe_intermediate_size = kwargs.get("moe_intermediate_size", self.intermediate_size)
         self.norm_topk_prob = kwargs.get("norm_topk_prob", True)
         self.router_aux_loss_coef = kwargs.get("router_aux_loss_coef", 5e-4)
+        self.residual_type = kwargs.get("residual_type", "standard")
+        if self.residual_type not in {"standard", "mhc", "attnres"}:
+            raise ValueError("residual_type must be one of: standard, mhc, attnres")
+        self.hc_mult = int(kwargs.get("hc_mult", 4))
+        self.hc_sinkhorn_iters = int(kwargs.get("hc_sinkhorn_iters", 20))
+        self.hc_eps = float(kwargs.get("hc_eps", 1e-6))
+        self.mhc_init_std = float(kwargs.get("mhc_init_std", 0.02))
+        if self.hc_mult < 1 or self.hc_sinkhorn_iters < 1:
+            raise ValueError("hc_mult and hc_sinkhorn_iters must be >= 1")
+        self.attnres_variant = kwargs.get("attnres_variant", "block")
+        if self.attnres_variant not in {"full", "block"}:
+            raise ValueError("attnres_variant must be one of: full, block")
         # Loop Transformer configs
         self.loop_iters = kwargs.get("loop_iters", 8)
         self.prelude_layers = kwargs.get("prelude_layers", 1)
         self.coda_layers = kwargs.get("coda_layers", 1)
         self.use_input_injection = kwargs.get("use_input_injection", True)
+        default_block_size = max(1, math.ceil(2 * (
+            self.prelude_layers + self.loop_iters + self.coda_layers
+        ) / 8))
+        self.attnres_block_size = int(kwargs.get("attnres_block_size", default_block_size))
+        if self.attnres_block_size < 1:
+            raise ValueError("attnres_block_size must be >= 1")
 
 # ═══════════════════════════════════════════════════════════════
 # Instinct Loop Model
@@ -246,8 +265,21 @@ class InstinctBlock(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mlp = FeedForward(config) if not config.use_moe else MOEFeedForward(config)
         self.use_grad_checkpoint = getattr(config, "use_grad_checkpoint", 0)
+        self.layer_id = layer_id
+        self.residual_type = config.residual_type
+        if self.residual_type == "mhc":
+            self.attn_hc = ManifoldHyperConnection(config)
+            self.ffn_hc = ManifoldHyperConnection(config)
+        elif self.residual_type == "attnres":
+            self.attn_residual = AttentionResidual(config)
+            self.mlp_residual = AttentionResidual(config)
+            self.attnres_block_size = config.attnres_block_size
 
     def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
+        if self.residual_type == "mhc":
+            return self._forward_mhc(
+                hidden_states, position_embeddings, past_key_value, use_cache, attention_mask
+            )
         residual = hidden_states
         hidden_states, present_key_value = self.self_attn(
             self.input_layernorm(hidden_states), position_embeddings,
@@ -263,6 +295,69 @@ class InstinctBlock(nn.Module):
         else:
             hidden_states = hidden_states + self.mlp(normed)
         return hidden_states, present_key_value
+
+    def _run_mlp(self, hidden_states):
+        if self.use_grad_checkpoint == 1 and self.training:
+            ffn_out, aux = checkpoint_ffn(self.mlp, hidden_states)
+            if aux is not None:
+                self.mlp.aux_loss = aux
+            return ffn_out
+        return self.mlp(hidden_states)
+
+    def _forward_mhc(self, hidden_states, position_embeddings, past_key_value=None,
+                     use_cache=False, attention_mask=None):
+        post, comb, collapsed = self.attn_hc(hidden_states)
+        attn_output, present_key_value = self.self_attn(
+            self.input_layernorm(collapsed), position_embeddings,
+            past_key_value, use_cache, attention_mask
+        )
+        hidden_states = self.attn_hc.merge(hidden_states, attn_output, post, comb)
+        post, comb, collapsed = self.ffn_hc(hidden_states)
+        mlp_output = self._run_mlp(self.post_attention_layernorm(collapsed))
+        return self.ffn_hc.merge(hidden_states, mlp_output, post, comb), present_key_value
+
+    def forward_attnres_full(self, source_bank, position_embeddings, past_key_value=None,
+                             use_cache=False, attention_mask=None, depth_index=None,
+                             input_injection=None):
+        hidden_states = self.attn_residual(source_bank)
+        if input_injection is not None:
+            hidden_states = hidden_states + input_injection
+        attn_output, present_key_value = self.self_attn(
+            self.input_layernorm(hidden_states), position_embeddings,
+            past_key_value, use_cache, attention_mask
+        )
+        source_bank = torch.cat((source_bank, attn_output.unsqueeze(0)), dim=0)
+        hidden_states = self.mlp_residual(source_bank)
+        mlp_output = self._run_mlp(self.post_attention_layernorm(hidden_states))
+        return torch.cat((source_bank, mlp_output.unsqueeze(0)), dim=0), present_key_value
+
+    def _block_residual(self, source_bank, partial_count, residual):
+        partial = source_bank[-1] + residual
+        if partial_count + 1 == self.attnres_block_size:
+            return torch.cat((source_bank[:-1], partial.unsqueeze(0), torch.zeros_like(partial).unsqueeze(0)), dim=0)
+        return torch.cat((source_bank[:-1], partial.unsqueeze(0)), dim=0)
+
+    @staticmethod
+    def _block_sources(source_bank, partial_count):
+        return source_bank[:-1] if partial_count == 0 else source_bank
+
+    def forward_attnres_block(self, source_bank, position_embeddings, past_key_value=None,
+                              use_cache=False, attention_mask=None, depth_index=None,
+                              input_injection=None):
+        depth_index = self.layer_id if depth_index is None else depth_index
+        partial_count = (2 * depth_index) % self.attnres_block_size
+        hidden_states = self.attn_residual(self._block_sources(source_bank, partial_count))
+        if input_injection is not None:
+            hidden_states = hidden_states + input_injection
+        attn_output, present_key_value = self.self_attn(
+            self.input_layernorm(hidden_states), position_embeddings,
+            past_key_value, use_cache, attention_mask
+        )
+        source_bank = self._block_residual(source_bank, partial_count, attn_output)
+        partial_count = (partial_count + 1) % self.attnres_block_size
+        hidden_states = self.mlp_residual(self._block_sources(source_bank, partial_count))
+        mlp_output = self._run_mlp(self.post_attention_layernorm(hidden_states))
+        return self._block_residual(source_bank, partial_count, mlp_output), present_key_value
 
 class InstinctLoopModel(nn.Module):
     """
@@ -310,6 +405,11 @@ class InstinctLoopModel(nn.Module):
         ]) if self.coda_layers > 0 else nn.ModuleList()
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.residual_type = config.residual_type
+        if self.residual_type == "mhc":
+            self.hc_head = ManifoldHyperHead(config)
+        elif self.residual_type == "attnres":
+            self.output_residual = AttentionResidual(config)
 
         # Learnable loop-position embedding (initialized to zeros for gradual activation)
         if self.loop_iters > 0:
@@ -332,6 +432,31 @@ class InstinctLoopModel(nn.Module):
         blocks.extend(self.coda)
         return blocks
 
+    def _run_block(self, layer, hidden_states, position_embeddings, past_key_value,
+                   use_cache, attention_mask, depth_index, input_injection=None):
+        if self.residual_type != "attnres":
+            return layer(
+                hidden_states, position_embeddings, past_key_value=past_key_value,
+                use_cache=use_cache, attention_mask=attention_mask
+            )
+        layer_forward = (layer.forward_attnres_full if self.config.attnres_variant == "full"
+                         else layer.forward_attnres_block)
+        return layer_forward(
+            hidden_states, position_embeddings, past_key_value=past_key_value,
+            use_cache=use_cache, attention_mask=attention_mask,
+            depth_index=depth_index, input_injection=input_injection
+        )
+
+    def _readout(self, hidden_states, completed_layers):
+        if self.residual_type == "mhc":
+            return self.hc_head(hidden_states)
+        if self.residual_type != "attnres":
+            return hidden_states
+        if self.config.attnres_variant == "block":
+            partial_count = (2 * completed_layers) % self.config.attnres_block_size
+            hidden_states = hidden_states[:-1] if partial_count == 0 else hidden_states
+        return self.output_residual(hidden_states)
+
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False,
                 return_intermediate=False, layer_callback=None, **kwargs):
         batch_size, seq_length = input_ids.shape
@@ -349,6 +474,13 @@ class InstinctLoopModel(nn.Module):
                 break
 
         hidden_states = self.dropout(self.embed_tokens(input_ids))
+        if self.residual_type == "mhc":
+            hidden_states = hidden_states.unsqueeze(2).expand(-1, -1, self.config.hc_mult, -1).contiguous()
+        elif self.residual_type == "attnres":
+            if self.config.attnres_variant == "full":
+                hidden_states = hidden_states.unsqueeze(0)
+            else:
+                hidden_states = torch.stack((hidden_states, torch.zeros_like(hidden_states)), dim=0)
 
         # Recompute RoPE buffers lost during meta-device init (transformers>=5.x)
         if self.freqs_cos[0, 0] == 0:
@@ -369,21 +501,23 @@ class InstinctLoopModel(nn.Module):
 
         # ── Prelude ──
         for layer in self.prelude:
-            hidden_states, present = layer(
-                hidden_states, position_embeddings,
-                past_key_value=past_key_values[kv_idx],
-                use_cache=use_cache,
-                attention_mask=attention_mask
+            hidden_states, present = self._run_block(
+                layer, hidden_states, position_embeddings, past_key_values[kv_idx],
+                use_cache, attention_mask, depth_index=kv_idx
             )
             presents.append(present)
             kv_idx += 1
+            readout = self._readout(hidden_states, kv_idx)
             if layer_callback is not None:
-                layer_callback(kv_idx, self.norm(hidden_states))
+                layer_callback(kv_idx, self.norm(readout))
             if return_intermediate:
-                intermediates.append(self.norm(hidden_states))
+                intermediates.append(self.norm(readout))
 
         # ── Freeze prelude output for input injection ──
-        frozen_input = hidden_states if self.config.use_input_injection else None
+        frozen_input = None
+        if self.config.use_input_injection:
+            frozen_input = (self._readout(hidden_states, kv_idx)
+                            if self.residual_type == "attnres" else hidden_states)
 
         # ── Loop ──
         if self.loop_iters > 0:
@@ -391,18 +525,26 @@ class InstinctLoopModel(nn.Module):
             for t in range(self.loop_iters):
                 # Inject learnable loop-position signal
                 loop_signal = self.loop_pos_embed(torch.tensor([t], device=loop_device))
-                updated = hidden_states + loop_signal
-
-                # Frozen input injection (Yang et al. 2024): h_t = Block(h_t + e)
-                if self.config.use_input_injection:
-                    updated = updated + frozen_input
+                input_injection = None
+                if self.residual_type == "attnres":
+                    input_injection = loop_signal
+                    if self.config.use_input_injection:
+                        input_injection = input_injection + frozen_input
+                    updated = hidden_states
+                else:
+                    updated = hidden_states + loop_signal
+                    if self.config.use_input_injection:
+                        updated = updated + frozen_input
 
                 if self.config.use_grad_checkpoint == 2 and self.training:
                     # Mode 2: checkpoint the whole shared loop_block (the old loop_grad_checkpoint
                     # promise); MoE aux_loss returns through the closure so its gradient reaches the router
-                    def _loop_blk(h, pkv):
-                        hs, present = self.loop_block(h, position_embeddings, past_key_value=pkv,
-                                                      use_cache=use_cache, attention_mask=attention_mask)
+                    def _loop_blk(h, pkv, depth_index=kv_idx, injection=input_injection):
+                        hs, present = self._run_block(
+                            self.loop_block, h, position_embeddings, pkv,
+                            use_cache, attention_mask, depth_index=depth_index,
+                            input_injection=injection
+                        )
                         aux = self.loop_block.mlp.aux_loss if isinstance(self.loop_block.mlp, MOEFeedForward) else None
                         return hs, present, aux
                     hidden_states, present, loop_aux = torch.utils.checkpoint.checkpoint(
@@ -410,35 +552,34 @@ class InstinctLoopModel(nn.Module):
                     if loop_aux is not None:
                         self.loop_block.mlp.aux_loss = loop_aux
                 else:
-                    hidden_states, present = self.loop_block(
-                        updated, position_embeddings,
-                        past_key_value=past_key_values[kv_idx],
-                        use_cache=use_cache,
-                        attention_mask=attention_mask
+                    hidden_states, present = self._run_block(
+                        self.loop_block, updated, position_embeddings, past_key_values[kv_idx],
+                        use_cache, attention_mask, depth_index=kv_idx,
+                        input_injection=input_injection
                     )
                 presents.append(present)
                 kv_idx += 1
+                readout = self._readout(hidden_states, kv_idx)
                 if layer_callback is not None:
-                    layer_callback(kv_idx, self.norm(hidden_states))
+                    layer_callback(kv_idx, self.norm(readout))
                 if return_intermediate:
-                    intermediates.append(self.norm(hidden_states))
+                    intermediates.append(self.norm(readout))
 
         # ── Coda ──
         for layer in self.coda:
-            hidden_states, present = layer(
-                hidden_states, position_embeddings,
-                past_key_value=past_key_values[kv_idx],
-                use_cache=use_cache,
-                attention_mask=attention_mask
+            hidden_states, present = self._run_block(
+                layer, hidden_states, position_embeddings, past_key_values[kv_idx],
+                use_cache, attention_mask, depth_index=kv_idx
             )
             presents.append(present)
             kv_idx += 1
+            readout = self._readout(hidden_states, kv_idx)
             if layer_callback is not None:
-                layer_callback(kv_idx, self.norm(hidden_states))
+                layer_callback(kv_idx, self.norm(readout))
             if return_intermediate:
-                intermediates.append(self.norm(hidden_states))
+                intermediates.append(self.norm(readout))
 
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm(self._readout(hidden_states, kv_idx))
 
         # Collect aux_loss from MoE layers
         aux_loss = sum(

@@ -38,6 +38,10 @@ python trainer/train_pretrain.py --from_resume 1
 # Model weights: out/{weight}_{dim}.pth
 ```
 
+### Pause / resume (暂停/续训)
+- While training is running, the WebUI config has a "⏸ Pause Training" button: the trainer finishes its current step, saves `out/{weight}_{dim}{_moe}.pth` plus full resume state `checkpoints/{weight}_{dim}{_moe}_resume.pth`, and exits. To resume, tick "Resume from checkpoint" in the WebUI and press Start Training (or run with `--from_resume 1`).
+- CLI equivalent: `touch checkpoints/.pause_request` pauses any running trainer at the next step boundary (same save + exit code 42); `--from_resume 1` resumes.
+
 ### Inference
 ```bash
 # Raw torch weights (from trainer output)

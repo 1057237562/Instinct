@@ -292,6 +292,7 @@ def calc_params(config: dict) -> dict:
     num_experts_per_tok = config.get("num_experts_per_tok", 1)
     moe_int_size = config.get("moe_intermediate_size", int_size)
     arch = config.get("model_architecture", "standard")
+    residual_type = config.get("residual_type", "standard")
 
     # ---- Embedding ----
     embedding = vocab * h
@@ -409,6 +410,31 @@ def calc_params(config: dict) -> dict:
         looped_gate = (h * dt_rank) + (dt_rank * h + h) + h  # dt_input_proj + delta_proj(+bias) + A_log
         looped_q_head = 2 * h + (h * 1 + 1)  # LayerNorm + Linear(h,1)(+bias)
 
+    # ---- Residual topology ----
+    residual_params = 0
+    residual_formula = ""
+    residual_layers = n_layers
+    if arch == "looped":
+        residual_layers = (
+            config.get("prelude_layers", 1)
+            + (1 if config.get("loop_iters", 8) > 0 else 0)
+            + config.get("coda_layers", 1)
+        )
+    if residual_type == "mhc":
+        hc = config.get("hc_mult", 4)
+        mix = (2 + hc) * hc
+        per_connector = mix * (hc * h) + mix + 3
+        hyper_head = hc * (hc * h) + hc + 1
+        residual_params = 2 * residual_layers * per_connector + hyper_head
+        residual_formula = (
+            f"2x{residual_layers} connectors x [({mix}x{hc * h})+{mix}+3] "
+            f"+ head [({hc}x{hc * h})+{hc}+1]"
+        )
+    elif residual_type == "attnres":
+        residual_params = (2 * residual_layers + 1) * h
+        variant = config.get("attnres_variant", "block")
+        residual_formula = f"(2x{residual_layers}+1) pseudo-queries x {h} ({variant})"
+
     # ---- Grand totals ----
     total = (
         embedding
@@ -416,6 +442,7 @@ def calc_params(config: dict) -> dict:
         + num_linear * linear_layer_total
         + final_norm + lm_head
         + looped_gate + looped_q_head
+        + residual_params
     )
     total_active = (
         embedding
@@ -423,6 +450,7 @@ def calc_params(config: dict) -> dict:
         + num_linear * linear_active_layer_total
         + final_norm + lm_head
         + looped_gate + looped_q_head
+        + residual_params
     )
 
     if arch == "linear":
@@ -465,6 +493,7 @@ def calc_params(config: dict) -> dict:
                 "formula": "",
             },
         }
+
     else:
         breakdown = {
             "Embedding": {"value": embedding, "formula": f"{vocab} x {h}"},
@@ -501,6 +530,14 @@ def calc_params(config: dict) -> dict:
                 "formula": "",
             },
         }
+
+    if residual_params:
+        total_row = breakdown.pop("Total Params")
+        breakdown[f"Residual ({residual_type})"] = {
+            "value": residual_params,
+            "formula": residual_formula,
+        }
+        breakdown["Total Params"] = total_row
 
     if arch == "looped":
         breakdown["SelectiveGate"] = {
@@ -567,6 +604,7 @@ def build_config_dict() -> dict:
         "rms_norm_eps": st.session_state.get("rms_norm_eps", 1e-6),
         "flash_attn": st.session_state.get("flash_attn", True),
         "intermediate_size": compute_intermediate_size(st.session_state.get("hidden_size", 768)),
+        "residual_type": st.session_state.get("residual_type", "standard"),
     }
 
     # head_dim
@@ -620,6 +658,16 @@ def build_config_dict() -> dict:
         d["loop_body_layers"] = st.session_state.get("loop_body_layers", [2, 3, 4])
         d["loop_output_layers"] = st.session_state.get("loop_output_layers", [5, 6, 7])
 
+    if d["residual_type"] == "mhc":
+        d["hc_mult"] = st.session_state.get("hc_mult", 4)
+        d["hc_sinkhorn_iters"] = st.session_state.get("hc_sinkhorn_iters", 20)
+        d["hc_eps"] = st.session_state.get("hc_eps", 1e-6)
+    elif d["residual_type"] == "attnres":
+        d["attnres_variant"] = st.session_state.get("attnres_variant", "block")
+        d["attnres_block_size"] = st.session_state.get(
+            "attnres_block_size", max(1, math.ceil(2 * d["num_hidden_layers"] / 8))
+        )
+
     # MoE
     if d["use_moe"]:
         d["num_experts"] = st.session_state.get("num_experts", 4)
@@ -658,6 +706,7 @@ def gen_python_code(cfg: dict) -> str:
         ("rope_theta", f'{cfg["rope_theta"]:.0f}'),
         ("rms_norm_eps", f'{cfg["rms_norm_eps"]}'),
         ("flash_attn", str(cfg["flash_attn"])),
+        ("residual_type", f'"{cfg.get("residual_type", "standard")}"'),
     ]
 
     if cfg["use_moe"]:
@@ -671,6 +720,14 @@ def gen_python_code(cfg: dict) -> str:
 
     if cfg.get("use_grad_checkpoint"):
         params.append(("use_grad_checkpoint", cfg.get("use_grad_checkpoint")))
+
+    if cfg.get("residual_type") == "mhc":
+        params.append(("hc_mult", cfg.get("hc_mult", 4)))
+        params.append(("hc_sinkhorn_iters", cfg.get("hc_sinkhorn_iters", 20)))
+        params.append(("hc_eps", cfg.get("hc_eps", 1e-6)))
+    elif cfg.get("residual_type") == "attnres":
+        params.append(("attnres_variant", f'"{cfg.get("attnres_variant", "block")}"'))
+        params.append(("attnres_block_size", cfg.get("attnres_block_size", 2)))
 
     if cfg["inference_rope_scaling"]:
         params.append(("inference_rope_scaling", "True"))
@@ -735,6 +792,7 @@ def gen_config_json(cfg: dict) -> str:
         "flash_attn",
         "use_moe",
         "use_grad_checkpoint",
+        "residual_type",
     ]
     for k in keys:
         if k == "rope_theta":
@@ -749,6 +807,13 @@ def gen_config_json(cfg: dict) -> str:
         out["inference_rope_scaling"] = False
 
     out["model_architecture"] = cfg.get("model_architecture", "standard")
+
+    if cfg.get("residual_type") == "mhc":
+        for k in ["hc_mult", "hc_sinkhorn_iters", "hc_eps"]:
+            out[k] = cfg.get(k)
+    elif cfg.get("residual_type") == "attnres":
+        for k in ["attnres_variant", "attnres_block_size"]:
+            out[k] = cfg.get(k)
 
     if cfg.get("use_moe"):
         for k in ["num_experts", "num_experts_per_tok", "moe_intermediate_size",
@@ -813,6 +878,15 @@ def load_config_to_session(config_dict: dict):
     st.session_state.use_grad_checkpoint = config_dict.get("use_grad_checkpoint", 0)
     st.session_state.rms_norm_eps = config_dict.get("rms_norm_eps", 1e-6)
     st.session_state.flash_attn = config_dict.get("flash_attn", True)
+    st.session_state.residual_type = config_dict.get("residual_type", "standard")
+    st.session_state.pop("_residual_radio", None)
+    st.session_state.hc_mult = config_dict.get("hc_mult", 4)
+    st.session_state.hc_sinkhorn_iters = config_dict.get("hc_sinkhorn_iters", 20)
+    st.session_state.hc_eps = config_dict.get("hc_eps", 1e-6)
+    st.session_state.attnres_variant = config_dict.get("attnres_variant", "block")
+    st.session_state.attnres_block_size = config_dict.get(
+        "attnres_block_size", max(1, math.ceil(2 * st.session_state.num_hidden_layers / 8))
+    )
 
     # Model architecture
     arch = config_dict.get("model_architecture", "standard")
@@ -933,6 +1007,7 @@ def arch_diagram(cfg: dict) -> str:
     n = cfg["num_hidden_layers"]
     use_moe = cfg.get("use_moe", False)
     arch = cfg.get("model_architecture", "standard")
+    residual_type = cfg.get("residual_type", "standard")
 
     blocks = []
 
@@ -990,6 +1065,11 @@ def arch_diagram(cfg: dict) -> str:
 
         ffn_label = "MoE-FFN" if use_moe else "FFN"
         layer_detail = f"{attn_type} + {ffn_label}"
+        if residual_type == "mhc":
+            layer_detail += f" · mHC({cfg.get('hc_mult', 4)} streams)"
+        elif residual_type == "attnres":
+            variant = cfg.get("attnres_variant", "block").title()
+            layer_detail += f" · {variant} AttnRes"
         if use_moe:
             n_exp = cfg.get("num_experts", 4)
             n_top = cfg.get("num_experts_per_tok", 1)
@@ -1044,6 +1124,10 @@ def init_from_preset(preset_name: str):
     data = PRESETS.get(preset_name)
     if data is None:
         return
+    # Presets predate the optional residual topologies; selecting one resets to
+    # the exact historical Standard Transformer graph.
+    st.session_state.residual_type = "standard"
+    st.session_state.pop("_residual_radio", None)
     for k, v in data.items():
         st.session_state[k] = v
 
@@ -1135,13 +1219,39 @@ _DEFAULT_WEIGHT_PREFIX = {
     "distillation": "full_dist",
 }
 
+# 暂停退出码：训练进程识别到 .pause_request 标记后保存检查点并以 42 退出，
+# 与 0=成功 / 其他=失败 相区分，WebUI 轮询时据此把状态置为 "paused"。
+PAUSE_EXIT_CODE = 42
+
 
 def _default_weight_prefix(train_type):
     return _DEFAULT_WEIGHT_PREFIX.get(train_type, train_type)
 
 
 def _arch_tag():
-    return "_linear" if st.session_state.get("model_architecture") == "linear" else ""
+    architecture = st.session_state.get("model_architecture", "standard")
+    tag = {"standard": "", "linear": "_linear", "looped": "_looped"}.get(
+        architecture, f"_{architecture}"
+    )
+    residual_type = st.session_state.get("residual_type", "standard")
+    if residual_type == "mhc":
+        tag += "_mhc"
+    elif residual_type == "attnres":
+        variant = st.session_state.get("attnres_variant", "block")
+        tag += f"_attnres_{variant}"
+        if variant == "block":
+            tag += str(st.session_state.get("attnres_block_size", 2))
+    return tag
+
+
+def _matches_arch_tag(prefix, arch_tag):
+    """Match generated weight prefixes without mixing backbone/residual topologies."""
+    if arch_tag:
+        return prefix.endswith(arch_tag)
+    return not (
+        prefix.endswith(("_linear", "_looped", "_mhc", "_attnres_full"))
+        or re.search(r"_attnres_block\d+$", prefix) is not None
+    )
 
 
 def _persist_panel_state(trainer_dir):
@@ -1167,6 +1277,9 @@ def _latest_checkpoint_prefix(train_type, hidden_size, use_moe, arch_tag=""):
     if not os.path.isdir(ckpt_dir):
         return None
     dim_suffix = f"_{hidden_size}{'_moe' if use_moe else ''}"
+    # 按默认权重前缀匹配（如 distillation 对应 full_dist_*），而非直接用 train_type，
+    # 否则蒸馏的 full_dist_*_resume.pth 无法被续训发现。
+    expect_stem = _default_weight_prefix(train_type) + "_"
     matches = []
     for f in os.listdir(ckpt_dir):
         if not f.endswith("_resume.pth"):
@@ -1174,11 +1287,8 @@ def _latest_checkpoint_prefix(train_type, hidden_size, use_moe, arch_tag=""):
         stem = f[: -len("_resume.pth")]
         if stem.endswith(dim_suffix):
             prefix = stem[: -len(dim_suffix)]
-            if prefix.startswith(f"{train_type}_"):
-                if arch_tag:
-                    if not prefix.endswith(arch_tag):
-                        continue
-                elif prefix.endswith("_linear"):
+            if prefix.startswith(expect_stem):
+                if not _matches_arch_tag(prefix, arch_tag):
                     continue
                 matches.append((os.path.getmtime(os.path.join(ckpt_dir, f)), prefix))
     if not matches:
@@ -1190,14 +1300,87 @@ def _latest_checkpoint_prefix(train_type, hidden_size, use_moe, arch_tag=""):
 def _resolve_save_prefix(train_type, hidden_size, use_moe, from_resume, stamp):
     arch_tag = _arch_tag()
     if from_resume:
+        # 1. 暂停状态记录的 weight 优先：这正是刚刚被暂停的那一轮训练，绝不落到旧检查点。
+        paused = _read_paused_state()
+        if paused and paused.get("weight"):
+            weight = paused["weight"]
+            if _resume_checkpoint_exists(weight, hidden_size, use_moe):
+                st.session_state[f"save_prefix_{train_type}"] = weight
+                return weight
+        # 2. 会话内已选择的 save_prefix（同会话续训无需重新扫描磁盘）。
         prefix = st.session_state.get(f"save_prefix_{train_type}")
-        if not prefix:
-            prefix = _latest_checkpoint_prefix(train_type, hidden_size, use_moe, arch_tag)
         if prefix:
             return prefix
+        # 3. 磁盘扫描最新匹配检查点（仍按默认前缀 stem 匹配，保持 train_type 隔离）。
+        prefix = _latest_checkpoint_prefix(train_type, hidden_size, use_moe, arch_tag)
+        if prefix:
+            return prefix
+        # 4. 找不到任何续训检查点：不清静合成新前缀，置标记让调用方告警（避免续训落到旧/新权重）。
+        st.session_state["_resume_not_found"] = True
+        return None
     prefix = f"{_default_weight_prefix(train_type)}_{stamp}{arch_tag}"
     st.session_state[f"save_prefix_{train_type}"] = prefix
     return prefix
+
+
+def _checkpoints_dir():
+    """与训练进程共享的 checkpoints/ 目录（训练默认 ./checkpoints，相对仓库根）。"""
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    return os.path.join(repo_root, "checkpoints")
+
+
+def _resume_checkpoint_exists(weight, hidden_size, use_moe):
+    """续训检查点是否存在：checkpoints/{weight}_{dim}{_moe}_resume.pth。"""
+    return os.path.exists(os.path.join(
+        _checkpoints_dir(),
+        f"{weight}_{hidden_size}{'_moe' if use_moe else ''}_resume.pth",
+    ))
+
+
+def _pause_flag_path():
+    """暂停请求标记：训练进程在每个 step 边界检查该文件，存在则保存检查点并以 42 退出。"""
+    return os.path.join(_checkpoints_dir(), ".pause_request")
+
+
+def _paused_state_path():
+    """WebUI 恢复用暂停状态记录；页面重载时据此把状态置为 \"paused\"。"""
+    return os.path.join(_checkpoints_dir(), ".paused.json")
+
+
+def _request_pause(train_type):
+    """请求暂停当前训练：写暂停标记 + 状态记录。checkpoints/ 可能在首次周期保存前不存在，需先创建。"""
+    os.makedirs(_checkpoints_dir(), exist_ok=True)
+    with open(_pause_flag_path(), "w", encoding="utf-8"):
+        pass  # 训练进程仅检查文件存在性
+    state = {
+        "train_type": train_type,
+        "paused_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "epoch": None,  # 点击时 epoch 未知，真实进度以训练进程保存的检查点为准
+        "weight": st.session_state.get(f"save_prefix_{train_type}") or None,
+    }
+    with open(_paused_state_path(), "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def _clear_pause_markers():
+    """清除暂停标记与状态记录（启动 / 续训前调用，防止残留标记误触发暂停）。"""
+    for path in (_pause_flag_path(), _paused_state_path()):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+
+def _read_paused_state():
+    """读取暂停状态记录；文件不存在或内容损坏时返回 None（不抛出，避免拖垮整页）。"""
+    path = _paused_state_path()
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 _BASE_WEIGHT_TYPE = {
@@ -1240,10 +1423,7 @@ def _latest_weight_file(base_type, hidden_size, use_moe, arch_tag=""):
             stem = f[: -len(".pth")]
             if stem.endswith(dim_suffix) and stem[: -len(dim_suffix)].startswith(f"{base_type}_"):
                 type_part = stem[: -len(dim_suffix)]
-                if arch_tag:
-                    if not type_part.endswith(arch_tag):
-                        continue
-                elif type_part.endswith("_linear"):
+                if not _matches_arch_tag(type_part, arch_tag):
                     continue
                 candidates.append((os.path.getmtime(os.path.join(d, f)), os.path.join(sub, f)))
     if not candidates:
@@ -1266,13 +1446,30 @@ def _try_recover_training_state():
     recently_modified = (time.time() - mtime) < 60
 
     pid, script = _find_running_train_process()
+    paused_state = _read_paused_state()
 
-    if recently_modified or pid is not None:
+    if pid is not None:
         st.session_state.train_status = "running"
         st.session_state.train_log_path = log_path
         if pid and script:
             st.session_state.train_type = script
-    elif pid is None and not recently_modified:
+    elif paused_state is not None:
+        # 必须先于 recently_modified 检查：刚暂停的日志 (<60s 新) 否则会被误判为 running。
+        st.session_state.train_status = "paused"
+        st.session_state.train_log_path = log_path
+        if paused_state.get("train_type"):
+            train_type = paused_state["train_type"]
+            st.session_state.train_type = train_type
+        else:
+            train_type = st.session_state.get("train_type", "pretrain")
+        if paused_state.get("weight"):
+            st.session_state[f"save_prefix_{train_type}"] = paused_state.get("weight")
+    elif recently_modified:
+        st.session_state.train_status = "running"
+        st.session_state.train_log_path = log_path
+        if pid and script:
+            st.session_state.train_type = script
+    else:
         with open(log_path, "r", encoding="utf-8") as f:
             log = f.read()
         if log.strip():
@@ -1401,6 +1598,66 @@ with st.sidebar:
             value=st.session_state.get("tie_word_embeddings", False),
             key="tie_word_embeddings",
         )
+
+    # ── Residual Connections ──
+    with st.expander("Residual Connections (Experimental)", expanded=True):
+        _residual_labels = {
+            "standard": "Standard residual",
+            "mhc": "mHC (Manifold-Constrained Hyper-Connections)",
+            "attnres": "AttnRes (Attention Residuals)",
+        }
+        _residual_options = list(_residual_labels)
+        _current_residual = st.session_state.get("residual_type", "standard")
+        _chosen_residual = st.radio(
+            "Residual topology",
+            _residual_options,
+            index=_residual_options.index(_current_residual),
+            format_func=lambda value: _residual_labels[value],
+            key="_residual_radio",
+        )
+        st.session_state.residual_type = _chosen_residual
+
+        if _chosen_residual == "mhc":
+            st.caption("Keeps parallel residual streams and projects their mixer onto a doubly-stochastic manifold.")
+            st.slider(
+                "hc_mult (parallel streams)", 1, 8,
+                st.session_state.get("hc_mult", 4), key="hc_mult",
+            )
+            st.slider(
+                "hc_sinkhorn_iters", 1, 50,
+                st.session_state.get("hc_sinkhorn_iters", 20), key="hc_sinkhorn_iters",
+                help="Alternating row/column normalizations used by the Sinkhorn-Knopp projection.",
+            )
+            st.number_input(
+                "hc_eps", min_value=1e-9, max_value=1e-3,
+                value=float(st.session_state.get("hc_eps", 1e-6)),
+                format="%.1e", key="hc_eps",
+            )
+        elif _chosen_residual == "attnres":
+            st.caption("Uses learned pseudo-queries to select residual sources along model depth.")
+            st.radio(
+                "AttnRes variant", ["block", "full"],
+                index=["block", "full"].index(st.session_state.get("attnres_variant", "block")),
+                format_func=lambda value: "Block AttnRes (recommended)" if value == "block" else "Full AttnRes",
+                key="attnres_variant",
+                horizontal=True,
+            )
+            if st.session_state.get("attnres_variant", "block") == "block":
+                _default_attnres_block = max(
+                    1, math.ceil(2 * st.session_state.get("num_hidden_layers", 8) / 8)
+                )
+                _max_attnres_block = max(2, 2 * st.session_state.get("num_hidden_layers", 8))
+                st.session_state.attnres_block_size = min(
+                    _max_attnres_block,
+                    max(1, st.session_state.get("attnres_block_size", _default_attnres_block)),
+                )
+                st.number_input(
+                    "attnres_block_size (sublayers)", min_value=1,
+                    max_value=_max_attnres_block,
+                    value=st.session_state.get("attnres_block_size", _default_attnres_block),
+                    step=1, key="attnres_block_size",
+                    help="Counts attention and MLP sublayers; choose about total_sublayers / 8 for ~8 blocks.",
+                )
 
     # ── Attention ──
     with st.expander("Attention", expanded=True):
@@ -1893,6 +2150,10 @@ with st.sidebar:
         if st.button("Start Training", use_container_width=True, key="btn_start_train"):
             st.session_state.train_triggered = True
         if st.session_state.get("train_status") == "running":
+            if st.button("⏸ Pause Training", use_container_width=True, key="btn_pause_train",
+                         help="写入 checkpoints/.pause_request，训练进程在下一个 step 边界保存检查点并退出(码42)"):
+                _request_pause(st.session_state.get("train_type", "pretrain"))
+                st.rerun()
             log_path = st.session_state.get("train_log_path")
             if log_path and os.path.exists(log_path):
                 with open(log_path, "r", encoding="utf-8") as f:
@@ -1911,6 +2172,9 @@ with st.sidebar:
             st.success("Training completed")
         elif st.session_state.get("train_status") == "failed":
             st.error("Failed to start training")
+        elif st.session_state.get("train_status") == "paused":
+            st.warning("⏸ Training paused — model state saved. Tick 'Resume from checkpoint' and press Start Training to continue.")
+            st.caption("Pause saves out/ + checkpoints/*_resume.pth so training can continue later.")
 
 # ═══════════════════════════════════════════════════════════════
 # ═══ MAIN AREA ═══
@@ -1925,6 +2189,7 @@ if st.session_state.get("train_triggered", False):
         else:
             st.session_state.train_proc = None
     if st.session_state.get("train_proc") is None:
+        _clear_pause_markers()  # 清掉残留的暂停标记/状态，冷启动与续训都从干净状态开始
         try:
             trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
             train_type = st.session_state.get("train_type", "pretrain")
@@ -1941,6 +2206,24 @@ if st.session_state.get("train_triggered", False):
                 stamp = time.strftime("%Y%m%d_%H%M%S")
                 save_prefix = _resolve_save_prefix(train_type, cfg["hidden_size"], cfg["use_moe"],
                                                    from_resume, stamp)
+                _launch_ok = True
+                if from_resume and (save_prefix is None or not _resume_checkpoint_exists(
+                        save_prefix, cfg["hidden_size"], cfg["use_moe"])):
+                    # 续训找不到/缺失对应 *_resume.pth：不清静启动（绝不落到旧权重或新一轮），置 failed 并告警。
+                    _launch_ok = False
+                    st.session_state.train_status = "failed"
+                    logs_dir = os.path.join(trainer_dir, "logs")
+                    os.makedirs(logs_dir, exist_ok=True)
+                    warn_path = os.path.join(logs_dir, f"train_{_default_weight_prefix(train_type)}.log")
+                    warn_msg = (f"⚠️ Resume failed: no matching checkpoints/{train_type}_*_resume.pth "
+                                f"for hidden_size={cfg['hidden_size']}. Untick 'Resume from checkpoint' to start "
+                                "fresh, or tick it only when a paused/periodic resume checkpoint exists.")
+                    with open(warn_path, "a", encoding="utf-8") as _log:
+                        _log.write(warn_msg + "\n")
+                    st.session_state.train_log_path = warn_path
+                    st.warning(warn_msg + " — 本次未启动训练进程。")
+                else:
+                    st.session_state.pop("_resume_not_found", None)
                 from_weight = st.session_state.get("base_weight", "auto")
                 # selectbox 显示文案(见 _base_options)需映射回 CLI 值，否则会去加载 out/none (from scratch)_768.pth
                 if from_weight == "none (from scratch)":
@@ -1999,33 +2282,40 @@ if st.session_state.get("train_triggered", False):
                 elif train_type in ("full_sft", "distillation"):
                     suffix = "_mini" if st.session_state.get("dataset_size", "mini") == "mini" else ""
                     cmd.extend(["--data_path", f"./dataset/sft_t2t{suffix}.jsonl"])
-                logs_dir = os.path.join(trainer_dir, "logs")
-                os.makedirs(logs_dir, exist_ok=True)
-                log_path = os.path.join(logs_dir, f"train_{save_prefix}.log")
-                if not from_resume:
-                    seq = 1
-                    while os.path.exists(log_path):
-                        seq += 1
-                        log_path = os.path.join(logs_dir, f"train_{save_prefix}_{seq}.log")
-                log_file = open(log_path, "a" if from_resume else "w", encoding="utf-8")
-                log_file.write(f"# torch.compile (Triton): {'ON' if st.session_state.get('use_compile', True) else 'OFF'}\n")
-                log_file.flush()
-                st.session_state.train_log_path = log_path
-                st.session_state.train_proc = subprocess.Popen(
-                    cmd,
-                    cwd=os.path.dirname(trainer_dir),
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    env={**os.environ, "PYTHONUTF8": "1"},  # Windows: torch.compile 需 UTF-8 模式，否则 gbk 解码崩溃
-                )
-                st.session_state.train_status = "running"
+                if _launch_ok:
+                    logs_dir = os.path.join(trainer_dir, "logs")
+                    os.makedirs(logs_dir, exist_ok=True)
+                    log_path = os.path.join(logs_dir, f"train_{save_prefix}.log")
+                    if not from_resume:
+                        seq = 1
+                        while os.path.exists(log_path):
+                            seq += 1
+                            log_path = os.path.join(logs_dir, f"train_{save_prefix}_{seq}.log")
+                    log_file = open(log_path, "a" if from_resume else "w", encoding="utf-8")
+                    log_file.write(f"# torch.compile (Triton): {'ON' if st.session_state.get('use_compile', True) else 'OFF'}\n")
+                    log_file.flush()
+                    st.session_state.train_log_path = log_path
+                    st.session_state.train_proc = subprocess.Popen(
+                        cmd,
+                        cwd=os.path.dirname(trainer_dir),
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                        env={**os.environ, "PYTHONUTF8": "1"},  # Windows: torch.compile 需 UTF-8 模式，否则 gbk 解码崩溃
+                    )
+                    st.session_state.train_status = "running"
         except Exception:
             st.session_state.train_status = "failed"
 
 if st.session_state.get("train_status") == "running":
     proc = st.session_state.get("train_proc")
     if proc is not None and proc.poll() is not None:
-        st.session_state.train_status = "success" if proc.poll() == 0 else "failed"
+        rc = proc.poll()
+        if rc == PAUSE_EXIT_CODE:
+            st.session_state.train_status = "paused"
+        elif rc == 0:
+            st.session_state.train_status = "success"
+        else:
+            st.session_state.train_status = "failed"
 
 cfg = build_config_dict()
 breakdown = calc_params(cfg)
@@ -2049,6 +2339,11 @@ elif cfg.get("model_architecture") == "looped":
 else:
     active_total = total_params
     suffix = ""
+if cfg.get("residual_type", "standard") == "mhc":
+    suffix = f"{suffix} + mHC" if suffix else " (mHC)"
+elif cfg.get("residual_type", "standard") == "attnres":
+    _attnres_label = f"{cfg.get('attnres_variant', 'block').title()} AttnRes"
+    suffix = f"{suffix} + {_attnres_label}" if suffix else f" ({_attnres_label})"
 name_label = f"{name} &nbsp;{suffix}" if suffix else name
 
 col_title, col_badges = st.columns([1.2, 2])
@@ -2076,6 +2371,10 @@ with col_badges:
     badge_html += (
         f'<span class="badge">vocab={cfg["vocab_size"]}</span>'
     )
+    if cfg.get("residual_type", "standard") != "standard":
+        badge_html += (
+            f'<span class="badge badge-moe">residual={cfg["residual_type"]}</span>'
+        )
     st.markdown(
         f'<div style="margin-top: 6px;">{badge_html}</div>',
         unsafe_allow_html=True,
@@ -2101,6 +2400,11 @@ if st.session_state.get("train_status") == "running":
             st.info("⏳ Training in progress... (waiting for first epoch output)")
     else:
         st.info("⏳ Training started...")
+elif st.session_state.get("train_status") == "paused":
+    tt = st.session_state.get("train_type", "pretrain")
+    cfg_local = build_config_dict()
+    ckpt_prefix = _latest_checkpoint_prefix(tt, cfg_local["hidden_size"], cfg_local["use_moe"], _arch_tag())
+    st.warning(f"⏸ Training paused. Resume checkpoint: checkpoints/{ckpt_prefix}_{cfg_local['hidden_size']}_resume.pth" if ckpt_prefix else "⏸ Training paused. Resume via 'Resume from checkpoint' + Start Training.")
 
 # ── Main content (single column) ──
 
@@ -2227,6 +2531,12 @@ if st.session_state.get("train_status") == "running":
     if auto:
         time.sleep(2)
         st.rerun()
+elif st.session_state.get("train_status") == "paused":
+    tt = st.session_state.get("train_type", "pretrain")
+    cfg_local = build_config_dict()
+    ckpt_prefix = _latest_checkpoint_prefix(tt, cfg_local["hidden_size"], cfg_local["use_moe"], _arch_tag())
+    st.warning(f"⏸ Training paused. Resume checkpoint: checkpoints/{ckpt_prefix}_{cfg_local['hidden_size']}_resume.pth" if ckpt_prefix else "⏸ Training paused. Resume via 'Resume from checkpoint' + Start Training.")
+    st.caption("Pause saves out/ + checkpoints/*_resume.pth so training can continue later.")
 elif st.session_state.get("train_status") == "success":
     st.success("Training completed successfully")
     log_path = st.session_state.get("train_log_path")

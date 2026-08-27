@@ -28,10 +28,11 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from model.model_instinct import InstinctForCausalLM
 from dataset.lm_dataset import RLAIFDataset
 from trainer.trainer_utils import (Logger, is_main_process, lm_checkpoint,
-                                   setup_seed, SkipBatchSampler, init_model, LMForRewardModel,
-                                   config_from_args, build_optimizer)
+                                   pause_save_checkpoint, setup_seed, SkipBatchSampler, init_model,
+                                   LMForRewardModel, config_from_args, build_optimizer)
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx, init_wandb_logger,
+    PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
 )
 from trainer.rollout_engine import create_rollout_engine
 
@@ -334,6 +335,13 @@ def ppo_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model, a
         del enc, gen_out, completion_ids, responses_text, rewards, full_mask, values_seq, advantages
         del labels, resp_labels, resp_idx, resp_pad_mask, valid_resp, eos_mask, has_eos, eos_pos, resp_lengths, resp_policy_mask, resp_value_mask, old_resp_logp, ref_resp_logp
         del kl, kl_ref, policy_loss, value_loss, loss, token_rewards, returns, old_resp_values, prompt_lens, logp_pos
+
+        if pause_requested(args):
+            clear_pause_request(args)
+            if is_main_process():
+                pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=actor_model, optimizer=actor_optimizer, epoch=epoch, step=step, wandb=wandb, scheduler=actor_scheduler, critic_model=critic_model, critic_optimizer=critic_optimizer, critic_scheduler=critic_scheduler, ref_model=ref_model)
+            Logger('[PAUSED] Training paused — resume checkpoint saved.')
+            sys.exit(PAUSE_EXIT_CODE)
 
 
 if __name__ == "__main__":

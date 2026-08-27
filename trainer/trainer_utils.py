@@ -16,6 +16,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import Sampler
 from transformers import AutoTokenizer, AutoModel
 from model.model_instinct import InstinctForCausalLM, InstinctConfig
+from model.model_instinct_linear import InstinctConfig as LinearInstinctConfig, InstinctForCausalLM as LinearInstinctForCausalLM
 from model.model_instinct_loop import InstinctConfig as LoopedInstinctConfig, InstinctForCausalLM as LoopedInstinctForCausalLM
 
 def get_model_params(model: torch.nn.Module, config) -> None:
@@ -44,15 +45,25 @@ def config_from_args(args, **overrides):
 
     说明:
         - 指定 config_path 时，以 JSON 为基底再叠加命令行覆盖；
-        - 按 use_looped（或配置中的 model_architecture）选择 Looped / 普通配置类。
+        - 按 model_architecture（兼容 use_looped）选择 Dense / Linear / Looped 配置类。
     """
     overrides.setdefault('param_dtype', getattr(args, 'param_dtype', 'fp32'))
     overrides.setdefault('kv_cache_dtype', getattr(args, 'kv_cache_dtype', 'fp32'))
     overrides.setdefault("use_grad_checkpoint", int(getattr(args, "use_grad_checkpoint", 0)))
+    for field in (
+        "residual_type", "hc_mult", "hc_sinkhorn_iters", "hc_eps",
+        "attnres_variant", "attnres_block_size",
+    ):
+        value = getattr(args, field, None)
+        if value is not None:
+            overrides.setdefault(field, value)
     hidden_size = overrides.pop('hidden_size', getattr(args, 'hidden_size', 768))
     num_hidden_layers = overrides.pop('num_hidden_layers', getattr(args, 'num_hidden_layers', 8))
     use_moe = overrides.pop('use_moe', bool(getattr(args, 'use_moe', 0)))
     use_looped = overrides.pop('use_looped', bool(getattr(args, 'use_looped', 0)))
+    architecture = getattr(args, 'model_architecture', None)
+    if use_looped:
+        architecture = 'looped'
     config_path = getattr(args, 'config_path', None)
     if config_path and os.path.exists(config_path):
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -61,14 +72,25 @@ def config_from_args(args, **overrides):
         cfg_dict['num_hidden_layers'] = num_hidden_layers
         cfg_dict['use_moe'] = use_moe
         cfg_dict.update(overrides)
-        use_looped = use_looped or cfg_dict.get('model_architecture') == 'looped'
-        cfg_cls = LoopedInstinctConfig if use_looped else InstinctConfig
+        architecture = architecture or cfg_dict.get('model_architecture', 'standard')
+        cfg_dict['model_architecture'] = architecture
+        cfg_cls = {
+            'standard': InstinctConfig,
+            'linear': LinearInstinctConfig,
+            'looped': LoopedInstinctConfig,
+        }[architecture]
         return cfg_cls(**cfg_dict)
-    cfg_cls = LoopedInstinctConfig if use_looped else InstinctConfig
+    architecture = architecture or 'standard'
+    cfg_cls = {
+        'standard': InstinctConfig,
+        'linear': LinearInstinctConfig,
+        'looped': LoopedInstinctConfig,
+    }[architecture]
     return cfg_cls(
         hidden_size=hidden_size,
         num_hidden_layers=num_hidden_layers,
         use_moe=use_moe,
+        model_architecture=architecture,
         **overrides,
     )
 
@@ -374,9 +396,47 @@ def lm_checkpoint(lm_config, weight: str = 'full_sft', model=None, optimizer=Non
         return None
 
 
+def pause_save_checkpoint(args, lm_config, *, weight, model, optimizer, epoch, step, scaler=None, wandb=None, lora_save=False, **lm_ckpt_kwargs) -> None:
+    """暂停时保存检查点（与各训练脚本的周期保存语义完全一致）。
+
+    参数:
+        args: 训练参数（需含 save_dir，决定权重 .pth 的输出目录）
+        lm_config: 模型配置（决定文件名中的 hidden_size / _moe 后缀）
+        weight: 权重前缀名
+        model: 当前模型（传入 lm_checkpoint 保存 resume 检查点）
+        optimizer: 优化器
+        epoch / step: 当前训练位置
+        scaler: GradScaler（可为 None，PPO / GRPO / Agent 训练不传）
+        wandb: 日志对象（可为 None）
+        lora_save: 为 True 时仅保存 LoRA 分支权重（save_lora），不保存完整 state_dict
+        **lm_ckpt_kwargs: 额外随 resume 检查点保存的状态（如 ref_model / teacher_model / scheduler / critic_model 等）
+
+    说明:
+        - 先写 out/ 下的权重 .pth（fp16，或 LoRA 专用权重），再经 lm_checkpoint 原子写入 resume 检查点；
+        - 与周期保存语义一致：不冲刷梯度，由调用方以 is_main_process() 守护后再调用。
+    """
+    model.eval()
+    if lora_save:
+        from model.model_lora import save_lora
+        moe_suffix = '_moe' if lm_config.use_moe else ''
+        save_lora(model, f'{args.save_dir}/{weight}_{lm_config.hidden_size}{moe_suffix}.pth')
+    else:
+        moe_suffix = '_moe' if lm_config.use_moe else ''
+        ckp = f'{args.save_dir}/{weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+        raw_model = model.module if isinstance(model, DistributedDataParallel) else model
+        raw_model = getattr(raw_model, '_orig_mod', raw_model)
+        state_dict = raw_model.state_dict()
+        torch.save({k: v.half().cpu() for k, v in state_dict.items()}, ckp)
+        del state_dict
+    lm_checkpoint(lm_config, weight=weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints', **lm_ckpt_kwargs)
+    model.train()
+
+
 def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = './model', save_dir: str = './out', device: str = 'cuda') -> tuple:
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    if isinstance(lm_config, LoopedInstinctConfig):
+    if isinstance(lm_config, LinearInstinctConfig):
+        model = LinearInstinctForCausalLM(lm_config)
+    elif isinstance(lm_config, LoopedInstinctConfig):
         model = LoopedInstinctForCausalLM(lm_config)
     else:
         model = InstinctForCausalLM(lm_config)

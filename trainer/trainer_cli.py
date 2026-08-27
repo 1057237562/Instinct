@@ -19,6 +19,9 @@ from trainer.trainer_utils import (
     get_lr, is_main_process, init_distributed_mode, setup_seed,
 )
 
+# 暂停退出码：与 0=成功 / 非0=失败 相区分，供 WebUI 识别“已暂停”状态。
+PAUSE_EXIT_CODE: int = 42
+
 
 def build_trainer_parser(description: str, *, defaults: dict | None = None) -> argparse.ArgumentParser:
     """构建训练脚本共用的命令行参数解析器。
@@ -56,6 +59,13 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     parser.add_argument('--max_seq_len', default=340, type=int, help="训练的最大截断长度（中文1token≈1.5~1.7字符）")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument('--use_looped', default=0, type=int, choices=[0, 1], help="是否使用LoopUS循环架构（0=否，1=是）")
+    parser.add_argument('--model_architecture', default=None, choices=['standard', 'linear', 'looped'], help="模型主干（默认读取config；--use_looped 1仍可兼容切换LoopUS）")
+    parser.add_argument('--residual_type', default=None, choices=['standard', 'mhc', 'attnres'], help="残差拓扑（默认读取config或standard）")
+    parser.add_argument('--hc_mult', default=None, type=int, help="mHC并行残差流数量")
+    parser.add_argument('--hc_sinkhorn_iters', default=None, type=int, help="mHC Sinkhorn-Knopp迭代次数")
+    parser.add_argument('--hc_eps', default=None, type=float, help="mHC数值稳定项")
+    parser.add_argument('--attnres_variant', default=None, choices=['full', 'block'], help="Attention Residuals变体")
+    parser.add_argument('--attnres_block_size', default=None, type=int, help="Block AttnRes块大小（按Attention/MLP子层计）")
     parser.add_argument('--depth_reward', default=-1.0, type=float, help="深度reward权重λ（>0时覆盖config，-1用config默认；可随训练退火）")
     parser.add_argument('--distill_weight', default=-1.0, type=float, help="自蒸馏权重（>0时启用：浅层循环深度向最终深度输出分布学习；建议配合exit_in_training=0跑满循环）")
     parser.add_argument('--distill_temperature', default=2.0, type=float, help="自蒸馏温度T（软化教师/学生分布）")
@@ -72,9 +82,37 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     parser.add_argument("--use_grad_checkpoint", default=0, type=int, choices=[0, 1, 2], help="梯度检查点模式（0=关闭, 1=选择性重算注意力/FFN, 2=整层checkpoint）")
     parser.add_argument("--compile_mode", type=str, default="default", choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"], help="torch.compile 模式（default=Triton 编译；reduce-overhead=叠加 CUDA graph，小模型首选；max-autotune=极限调优，编译极慢）")
     parser.add_argument('--config_path', default='', type=str, help="JSON配置文件路径")
+    parser.add_argument('--pause_file', type=str, default='./checkpoints/.pause_request', help='暂停请求标记文件；存在时在下个 step 边界保存检查点并退出(码42)')
     if defaults is not None:
         parser.set_defaults(**defaults)
     return parser
+
+
+def pause_requested(args) -> bool:
+    """检查是否存在暂停请求标记文件（--pause_file），存在则训练应在下个 step 边界暂停。
+
+    参数:
+        args: argparse 解析出的命令行参数对象（需含 pause_file）
+
+    返回:
+        标记文件存在返回 True，否则返回 False。
+    """
+    return os.path.exists(args.pause_file)
+
+
+def clear_pause_request(args) -> None:
+    """删除暂停请求标记文件（--pause_file），防止残留标记在下次启动时误触发暂停。
+
+    参数:
+        args: argparse 解析出的命令行参数对象（需含 pause_file）
+
+    说明:
+        标记文件已不存在时静默通过（FileNotFoundError 忽略），保证重复清理 / 陈旧标记安全。
+    """
+    try:
+        os.remove(args.pause_file)
+    except FileNotFoundError:
+        pass
 
 
 def setup_dist_and_seed(args) -> int:
