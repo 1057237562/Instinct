@@ -958,7 +958,12 @@ def parse_training_metrics(log_text):
         ep = re.search(r"Epoch:\[(\d+)/(\d+)\]\((\d+)/(\d+)\)", line)
         if not ep:
             continue
-        row = {}
+        epoch, _epochs, epoch_step, epoch_steps = map(int, ep.groups())
+        row = {
+            "_epoch": epoch,
+            "_epoch_step": epoch_step,
+            "_global_step": (epoch - 1) * epoch_steps + epoch_step,
+        }
         for m in re.finditer(r"([a-zA-Z_]\w*):\s*([\d.eE+-]+)", line):
             try:
                 row[m.group(1)] = float(m.group(2))
@@ -969,33 +974,43 @@ def parse_training_metrics(log_text):
     return rows
 
 
-def render_metrics_charts(metrics, columns=3):
-    """Render loss, lr, epoch_time into separate charts to avoid scale mismatch."""
+def render_log_metrics_charts(metrics):
+    """Render loss, learning rate and epoch time separately for one log."""
     if not metrics:
         return
 
-    loss_keys = [k for k in metrics[0] if k.endswith("loss") or k == "loss"]
-    lr_key = "lr" if "lr" in metrics[0] else "learning_rate"
-    time_key = "epoch_time"
+    loss_keys = sorted({
+        key for metric in metrics for key in metric
+        if key == "loss" or key.endswith("_loss")
+    })
+    lr_keys = [
+        key for key in ("lr", "learning_rate")
+        if any(key in metric for metric in metrics)
+    ]
+    time_keys = ["epoch_time"] if any("epoch_time" in metric for metric in metrics) else []
+    chart_groups = [
+        ("Loss", loss_keys),
+        ("Learning Rate", lr_keys[:1]),
+        ("Epoch Time (min)", time_keys),
+    ]
 
-    chart_groups = []
-    if loss_keys:
-        chart_groups.append(("Loss", loss_keys))
-    if lr_key in metrics[0]:
-        chart_groups.append(("Learning Rate", [lr_key]))
-    if time_key in metrics[0]:
-        chart_groups.append(("Epoch Time (min)", [time_key]))
+    rendered = False
+    for title, keys in chart_groups:
+        if not keys:
+            continue
+        rendered = True
+        st.caption(title)
+        chart_data = [
+            {
+                "step": metric.get("_global_step", index + 1),
+                **{key: metric[key] for key in keys if key in metric},
+            }
+            for index, metric in enumerate(metrics)
+        ]
+        st.line_chart(chart_data, x="step", use_container_width=True)
 
-    if not chart_groups:
-        return
-
-    cols = st.columns(min(len(chart_groups), columns))
-    for col, (title, keys) in zip(cols, chart_groups):
-        with col:
-            st.caption(title)
-            chart_data = [{"step": i + 1, **{k: m[k] for k in keys if k in m}}
-                          for i, m in enumerate(metrics)]
-            st.line_chart(chart_data, x="step", use_container_width=True)
+    if not rendered:
+        st.info("This log has no plottable training metrics yet.")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1147,7 +1162,7 @@ if not st.session_state.get("_config_auto_loaded"):
     if os.path.exists(state_file):
         with open(state_file, "r", encoding="utf-8") as f:
             for k, v in json.load(f).items():
-                if k.startswith("btn_"):
+                if k.startswith("btn_") or k == "clear_train_log":
                     continue  # 兼容旧 state 文件里已保存的按钮 key，赋值会报错
                 st.session_state[k] = v
         st.rerun()
@@ -1262,7 +1277,7 @@ def _persist_panel_state(trainer_dir):
         k: v for k, v in st.session_state.items()
         if not k.startswith("_")
         and not k.startswith("btn_")  # 按钮状态只读，恢复赋值会抛 StreamlitValueAssignmentNotAllowedError
-        and k not in ("train_proc", "train_status", "train_log_path")
+        and k not in ("train_proc", "train_status", "train_log_path", "clear_train_log")
         and not k.startswith("save_prefix_")
         and _serializable(v)
     }
@@ -2090,6 +2105,48 @@ with st.sidebar:
             help="训练最大截断长度（token 数）。mini 数据建议 768（旧默认 340 过低，"
                  "导致 GEMM 尺寸小、GPU 利用率低）",
         )
+        _packing_supported = train_type in ("pretrain", "full_sft", "lora", "distillation")
+        st.checkbox(
+            "Sequence packing",
+            value=st.session_state.get("sequence_packing", False),
+            key="sequence_packing",
+            disabled=not _packing_supported,
+            help="把多个完整 Pretrain/SFT 样本装入固定长度 block，保留 BOS/EOS 与 SFT loss mask，"
+                 "显著减少 padding。首次启用会构建并缓存 Arrow 数据集；packing 与非 packing "
+                 "的 step 坐标不同时，resume 会在当前 epoch 内先训练未对齐的原始数据行，"
+                 "到达 packing 分组边界后再切换 packed blocks。",
+        )
+        st.number_input(
+            "Packing cache batch size",
+            min_value=32, max_value=10000,
+            value=st.session_state.get("packing_batch_size", 1000),
+            step=100, key="packing_batch_size",
+            disabled=not (_packing_supported and st.session_state.get("sequence_packing", False)),
+            help="首次构建 Arrow cache 时每批处理的原始样本数；越大通常填充率越高，但占用更多 CPU 内存。",
+        )
+        if st.session_state.get("sequence_packing", False) and st.session_state.get("from_resume", False):
+            st.info(
+                "从非 packing checkpoint 切换时会保留模型、优化器与 GradScaler，并还原当前 "
+                "epoch 的 shuffle 顺序。未对齐的数据行继续使用原始 batch，抵达下一个 packing "
+                "分组边界后，同一 epoch 的剩余数据立即切换为 packed blocks。"
+            )
+        st.number_input(
+            "Gradient accumulation steps",
+            min_value=1, max_value=128,
+            value=st.session_state.get("accumulation_steps", 1),
+            step=1, key="accumulation_steps",
+            help="1 = 每个 batch 立即更新（不做梯度累积）。大于 1 会放大有效 batch，"
+                 "但与 reduce-overhead 的 CUDA Graph 梯度缓冲不兼容，建议改用 default compile mode。",
+        )
+        if (
+            st.session_state.get("residual_type") == "attnres"
+            and st.session_state.get("batch_size", 32)
+            * st.session_state.get("max_seq_len", 768) > 8192
+        ):
+            st.warning(
+                "AttnRes 会保留残差 source bank；当前 batch×seq 偏高。"
+                "16 GB GPU 建议先用 batch_size=4–8，再通过梯度累积放大有效批量。"
+            )
         st.selectbox(
             "Optimizer",
             ["adamw", "adafactor", "muon"],
@@ -2108,16 +2165,63 @@ with st.sidebar:
         )
         st.selectbox(
             "torch.compile mode",
-            ["default", "reduce-overhead", "max-autotune"],
-            index=["default", "reduce-overhead", "max-autotune"].index(
+            ["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
+            index=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"].index(
                 st.session_state.get("compile_mode", "reduce-overhead")
             ),
             key="compile_mode",
             disabled=not st.session_state.get("use_compile", True),
             help="default=Triton 编译（现状）；reduce-overhead=叠加 CUDA graph，"
                  "消除 kernel launch 间隙，小模型首选（MoE 动态路由可能部分 fallback，无碍）；"
-                 "max-autotune=极限调优，编译极慢",
+                 "max-autotune=搜索更多 kernel，首次编译较慢；"
+                 "max-autotune-no-cudagraphs=保留 autotune 但关闭 CUDA Graph",
         )
+        if (
+            st.session_state.get("use_compile", True)
+            and st.session_state.get("compile_mode", "reduce-overhead")
+            in ("reduce-overhead", "max-autotune")
+            and st.session_state.get("accumulation_steps", 1) > 1
+        ):
+            st.error(
+                "当前 compile mode 使用 CUDA Graph，不能安全地跨 step 累积梯度。"
+                "请把 Gradient accumulation steps 设为 1，或改用 default / "
+                "max-autotune-no-cudagraphs。"
+            )
+        st.selectbox(
+            "Training profiler",
+            ["off", "timing", "torch"],
+            index=["off", "timing", "torch"].index(
+                st.session_state.get("profile", "off")
+            ),
+            key="profile",
+            help="timing：低开销统计真实 step、tokens/s、前向/反向/优化器耗时和峰值显存；"
+                 "torch：额外采集一个短窗口的算子/kernel trace，文件写入 profiler_traces。",
+        )
+        _profile_enabled = st.session_state.get("profile", "off") != "off"
+        _profile_col1, _profile_col2 = st.columns(2)
+        with _profile_col1:
+            st.number_input(
+                "Profiler warmup steps", min_value=0, max_value=1000,
+                value=st.session_state.get("profile_warmup", 10), step=1,
+                key="profile_warmup", disabled=not _profile_enabled,
+                help="每次启动或 resume 后先跳过这些编译/预热 step。",
+            )
+            st.number_input(
+                "Profiler report interval", min_value=1, max_value=10000,
+                value=st.session_state.get("profile_interval", 100), step=10,
+                key="profile_interval", disabled=not _profile_enabled,
+                help="每隔多少个稳定 step 输出一次 [PROFILE] 汇总。",
+            )
+        with _profile_col2:
+            st.number_input(
+                "Trace active steps", min_value=1, max_value=100,
+                value=st.session_state.get("profile_active_steps", 5), step=1,
+                key="profile_active_steps",
+                disabled=st.session_state.get("profile", "off") != "torch",
+                help="torch 模式实际记录到 trace 的 step 数；建议 3–10。",
+            )
+        if st.session_state.get("profile", "off") == "torch":
+            st.warning("算子 trace 会明显拖慢采集窗口，只建议短时诊断；其余训练会继续正常运行。")
         st.selectbox(
             "梯度检查点模式（0关闭/1选择性/2整层）",
             [0, 1, 2],
@@ -2140,6 +2244,31 @@ with st.sidebar:
             key="activation_dtype",
             help="激活层计算精度：bfloat16(推荐) / float16 / fp32(纯精度，慢)",
         )
+        st.selectbox(
+            "TorchAO FP8 training",
+            ["off", "tensorwise", "rowwise", "rowwise_with_gw_hp"],
+            index=["off", "tensorwise", "rowwise", "rowwise_with_gw_hp"].index(
+                st.session_state.get("fp8_training", "off")
+            ),
+            key="fp8_training",
+            help="仅量化兼容 Linear 的前向/反向 GEMM，权重与优化器状态仍保持 BF16/FP32。"
+                 "tensorwise 最快；rowwise 数值更稳健，但部分消费级 GPU 暂不支持。",
+        )
+        st.selectbox(
+            "TorchAO FP8 Linear filter",
+            ["auto", "eligible"],
+            index=["auto", "eligible"].index(st.session_state.get("fp8_filter", "auto")),
+            key="fp8_filter",
+            disabled=st.session_state.get("fp8_training", "off") == "off",
+            help="auto 跳过预计量化开销大于收益的小 GEMM；eligible 转换全部尺寸可被 FP8 支持的 Linear。",
+        )
+        if (
+            st.session_state.get("fp8_training", "off") != "off"
+            and st.session_state.get("activation_dtype", "bfloat16") != "bfloat16"
+        ):
+            st.error("TorchAO FP8 training 需要将激活层精度设为 bfloat16。")
+        if st.session_state.get("fp8_training", "off").startswith("rowwise"):
+            st.info("部分消费级 Blackwell GPU 暂不支持 TorchAO rowwise；启动时会先实测，不支持则降级为 tensorwise。")
         st.selectbox(
             "KV Cache 精度 (kv_cache_dtype)",
             ["fp32", "bf16", "fp16", "fp8_e4m3", "fp8_e5m2"],
@@ -2171,7 +2300,24 @@ with st.sidebar:
         elif st.session_state.get("train_status") == "success":
             st.success("Training completed")
         elif st.session_state.get("train_status") == "failed":
-            st.error("Failed to start training")
+            st.error("Training process exited with an error")
+            _failed_log_path = st.session_state.get("train_log_path")
+            if _failed_log_path and os.path.exists(_failed_log_path):
+                with open(_failed_log_path, "r", encoding="utf-8", errors="replace") as _failed_log:
+                    _failed_tail = "".join(_failed_log.readlines()[-80:])
+                if "out of memory" in _failed_tail.lower() or "CUBLAS_STATUS_INTERNAL_ERROR" in _failed_tail:
+                    st.warning(
+                        "检测到 CUDA OOM。请降低 batch_size；AttnRes + 1024 tokens "
+                        "在 16 GB GPU 上建议从 batch_size=4 开始。"
+                    )
+                if "gradient tensor output of CUDAGraphs" in _failed_tail:
+                    st.warning(
+                        "检测到 CUDA Graph 梯度缓冲被覆盖。无需梯度累积时请将 "
+                        "Gradient accumulation steps 设为 1；需要累积时请改用 default "
+                        "或 max-autotune-no-cudagraphs。"
+                    )
+                with st.expander("Failure log (last 80 lines)", expanded=True):
+                    st.code(_failed_tail, language="text")
         elif st.session_state.get("train_status") == "paused":
             st.warning("⏸ Training paused — model state saved. Tick 'Resume from checkpoint' and press Start Training to continue.")
             st.caption("Pause saves out/ + checkpoints/*_resume.pth so training can continue later.")
@@ -2256,10 +2402,19 @@ if st.session_state.get("train_triggered", False):
                     cmd.extend(["--from_weight", from_weight])
                 cmd.extend(["--batch_size", str(st.session_state.get("batch_size", 32))])
                 cmd.extend(["--max_seq_len", str(st.session_state.get("max_seq_len", 768))])
+                cmd.extend(["--sequence_packing", "1" if st.session_state.get("sequence_packing", False) else "0"])
+                cmd.extend(["--packing_batch_size", str(st.session_state.get("packing_batch_size", 1000))])
+                cmd.extend(["--accumulation_steps", str(st.session_state.get("accumulation_steps", 1))])
                 cmd.extend(["--optimizer", st.session_state.get("optimizer", "adamw")])
                 cmd.extend(["--dtype", st.session_state.get("activation_dtype", "bfloat16")])
                 cmd.extend(["--param_dtype", st.session_state.get("param_dtype", "fp32")])
                 cmd.extend(["--kv_cache_dtype", st.session_state.get("kv_cache_dtype", "fp32")])
+                cmd.extend(["--fp8_training", st.session_state.get("fp8_training", "off")])
+                cmd.extend(["--fp8_filter", st.session_state.get("fp8_filter", "auto")])
+                cmd.extend(["--profile", st.session_state.get("profile", "off")])
+                cmd.extend(["--profile_warmup", str(st.session_state.get("profile_warmup", 10))])
+                cmd.extend(["--profile_interval", str(st.session_state.get("profile_interval", 100))])
+                cmd.extend(["--profile_active_steps", str(st.session_state.get("profile_active_steps", 5))])
                 if st.session_state.get("use_compile", True):
                     cmd.extend(["--use_compile", "1"])
                     cmd.extend(["--compile_mode", st.session_state.get("compile_mode", "reduce-overhead")])
@@ -2293,6 +2448,21 @@ if st.session_state.get("train_triggered", False):
                             log_path = os.path.join(logs_dir, f"train_{save_prefix}_{seq}.log")
                     log_file = open(log_path, "a" if from_resume else "w", encoding="utf-8")
                     log_file.write(f"# torch.compile (Triton): {'ON' if st.session_state.get('use_compile', True) else 'OFF'}\n")
+                    log_file.write(f"# gradient accumulation steps: {st.session_state.get('accumulation_steps', 1)}\n")
+                    log_file.write(
+                        f"# Sequence packing: {'ON' if st.session_state.get('sequence_packing', False) else 'OFF'} "
+                        f"(cache_batch={st.session_state.get('packing_batch_size', 1000)})\n"
+                    )
+                    log_file.write(
+                        f"# TorchAO FP8 training: {st.session_state.get('fp8_training', 'off')} "
+                        f"(filter={st.session_state.get('fp8_filter', 'auto')})\n"
+                    )
+                    log_file.write(
+                        f"# Training profiler: {st.session_state.get('profile', 'off')} "
+                        f"(warmup={st.session_state.get('profile_warmup', 10)}, "
+                        f"interval={st.session_state.get('profile_interval', 100)}, "
+                        f"trace_steps={st.session_state.get('profile_active_steps', 5)})\n"
+                    )
                     log_file.flush()
                     st.session_state.train_log_path = log_path
                     st.session_state.train_proc = subprocess.Popen(
@@ -2505,13 +2675,16 @@ py_code = gen_python_code(cfg)
 st.code(py_code, language="python", line_numbers=False)
 
 # ── Training Log ──
+_auto_refresh_training_log = False
 if st.session_state.get("train_status") == "running":
     st.markdown('<div class="section-title">📊 Training Monitor</div>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
-        auto = st.checkbox("Auto-refresh 2s", value=True, key="auto_refresh_log")
+        _auto_refresh_training_log = st.checkbox(
+            "Auto-refresh 2s", value=True, key="auto_refresh_log"
+        )
     with c2:
-        if st.button("Clear Log", key="clear_train_log"):
+        if st.button("Clear Log", key="btn_clear_train_log"):
             log_path = st.session_state.get("train_log_path")
             if log_path and os.path.exists(log_path):
                 open(log_path, "w").close()
@@ -2524,13 +2697,8 @@ if st.session_state.get("train_status") == "running":
         with open(log_path, "r", encoding="utf-8") as f:
             log = f.read()
         metrics = parse_training_metrics(log)
-        if metrics:
-            render_metrics_charts(metrics)
         with st.expander("📄 Raw Log", expanded=len(metrics) == 0):
             st.code(log[-10000:] if len(log) > 10000 else log or "(empty)", language="text", line_numbers=False)
-    if auto:
-        time.sleep(2)
-        st.rerun()
 elif st.session_state.get("train_status") == "paused":
     tt = st.session_state.get("train_type", "pretrain")
     cfg_local = build_config_dict()
@@ -2543,10 +2711,6 @@ elif st.session_state.get("train_status") == "success":
     if log_path and os.path.exists(log_path):
         with open(log_path, "r", encoding="utf-8") as f:
             log = f.read()
-        metrics = parse_training_metrics(log)
-        if metrics:
-            st.markdown('<div class="section-title">📊 Training Metrics</div>', unsafe_allow_html=True)
-            render_metrics_charts(metrics)
         with st.expander("📄 Training Log", expanded=False):
             st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
 elif st.session_state.get("train_status") == "failed":
@@ -2559,30 +2723,85 @@ elif st.session_state.get("train_status") == "failed":
             with st.expander("📄 Error Log", expanded=True):
                 st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
 
-# ── Previous Training Logs (kept from every run) ──
-if st.session_state.get("train_status") != "running":
-    trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
-    logs_dir = os.path.join(trainer_dir, "logs")
-    prev_logs = []
-    if os.path.isdir(logs_dir):
-        prev_logs += [os.path.join(logs_dir, f) for f in os.listdir(logs_dir) if f.endswith(".log")]
-    legacy = os.path.join(trainer_dir, "train_output.log")
-    if os.path.exists(legacy):
-        prev_logs.append(legacy)
-    if prev_logs:
-        prev_logs = sorted(prev_logs, key=os.path.getmtime, reverse=True)
-        with st.expander(f"📁 Previous Training Logs ({len(prev_logs)})", expanded=False):
-            names = [os.path.basename(p) for p in prev_logs]
-            sel_name = st.selectbox("Select a log", names, key="prev_log_select")
-            sel_path = next(p for p in prev_logs if os.path.basename(p) == sel_name)
-            with open(sel_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            metrics = parse_training_metrics(content)
-            if metrics:
-                render_metrics_charts(metrics)
-            with st.expander("📄 Raw Log", expanded=False):
-                st.code(content[-5000:] if len(content) > 5000 else content,
-                        language="text", line_numbers=False)
+# ── Training Data: exactly one historical log + the current log ──
+trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
+logs_dir = os.path.join(trainer_dir, "logs")
+current_log_path = st.session_state.get("train_log_path")
+if not current_log_path or not os.path.exists(current_log_path):
+    current_log_path = None
+
+log_candidates = []
+if os.path.isdir(logs_dir):
+    log_candidates.extend(
+        os.path.join(logs_dir, filename)
+        for filename in os.listdir(logs_dir)
+        if filename.endswith(".log")
+    )
+legacy_log = os.path.join(trainer_dir, "train_output.log")
+if os.path.exists(legacy_log):
+    log_candidates.append(legacy_log)
+
+current_log_key = (
+    os.path.normcase(os.path.abspath(current_log_path)) if current_log_path else None
+)
+history_logs = sorted(
+    (
+        path for path in log_candidates
+        if os.path.normcase(os.path.abspath(path)) != current_log_key
+    ),
+    key=os.path.getmtime,
+    reverse=True,
+)
+
+# Failed/compile-only logs have no Epoch metrics and should not occupy the one
+# historical comparison slot.
+history_data = {}
+for history_path in history_logs:
+    with open(history_path, "r", encoding="utf-8", errors="replace") as history_file:
+        history_content = history_file.read()
+    history_metrics = parse_training_metrics(history_content)
+    if history_metrics:
+        history_data[history_path] = (history_content, history_metrics)
+
+current_content, current_metrics = "", []
+if current_log_path:
+    with open(current_log_path, "r", encoding="utf-8", errors="replace") as current_file:
+        current_content = current_file.read()
+    current_metrics = parse_training_metrics(current_content)
+
+if history_data or current_log_path:
+    st.markdown('<div class="section-title">📊 Training Data</div>', unsafe_allow_html=True)
+    history_column, current_column = st.columns(2)
+
+    with history_column:
+        st.markdown("#### Historical log")
+        if history_data:
+            if st.session_state.get("history_log_select") not in history_data:
+                st.session_state.history_log_select = next(iter(history_data))
+            selected_history = st.selectbox(
+                "Compare against",
+                list(history_data),
+                format_func=os.path.basename,
+                key="history_log_select",
+            )
+            historical_content, historical_metrics = history_data[selected_history]
+            st.caption(os.path.basename(selected_history))
+            render_log_metrics_charts(historical_metrics)
+            with st.expander("📄 Historical raw log", expanded=False):
+                st.code(
+                    historical_content[-5000:] if len(historical_content) > 5000 else historical_content,
+                    language="text", line_numbers=False,
+                )
+        else:
+            st.info("No earlier log with training metrics is available.")
+
+    with current_column:
+        st.markdown("#### Current training")
+        if current_log_path:
+            st.caption(os.path.basename(current_log_path))
+            render_log_metrics_charts(current_metrics)
+        else:
+            st.info("No current training log is selected.")
 
 # Footer
 st.markdown(
@@ -2596,3 +2815,7 @@ unsafe_allow_html=True,
 # 每次交互后持久化面板参数（widget 变更触发 rerun，此时 session_state 即当前值）
 _trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
 _persist_panel_state(_trainer_dir)
+
+if _auto_refresh_training_log:
+    time.sleep(2)
+    st.rerun()

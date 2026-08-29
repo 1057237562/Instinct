@@ -9,6 +9,7 @@ import json
 import random
 import math
 import inspect
+import importlib.metadata
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -16,8 +17,17 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import Sampler
 from transformers import AutoTokenizer, AutoModel
 from model.model_instinct import InstinctForCausalLM, InstinctConfig
-from model.model_instinct_linear import InstinctConfig as LinearInstinctConfig, InstinctForCausalLM as LinearInstinctForCausalLM
-from model.model_instinct_loop import InstinctConfig as LoopedInstinctConfig, InstinctForCausalLM as LoopedInstinctForCausalLM
+
+
+def _architecture_classes(architecture):
+    """Import optional backbones only when selected (important for Windows workers)."""
+    if architecture == 'linear':
+        from model.model_instinct_linear import InstinctConfig as Config, InstinctForCausalLM as Model
+        return Config, Model
+    if architecture == 'looped':
+        from model.model_instinct_loop import InstinctConfig as Config, InstinctForCausalLM as Model
+        return Config, Model
+    return InstinctConfig, InstinctForCausalLM
 
 def get_model_params(model: torch.nn.Module, config) -> None:
     total = sum(p.numel() for p in model.parameters()) / 1e6
@@ -30,6 +40,150 @@ def get_model_params(model: torch.nn.Module, config) -> None:
     active = base + (expert * n_active) + (shared_expert * n_shared)
     if active < total: Logger(f'Model Params: {total:.2f}M-A{active:.2f}M')
     else: Logger(f'Model Params: {total:.2f}M')
+
+
+_TORCHAO_FP8_RECIPES = {"tensorwise", "rowwise", "rowwise_with_gw_hp"}
+_TORCHAO_FP8_PROBE_CACHE = {}
+
+
+def _fp8_linear_is_eligible(module: torch.nn.Module, fqn: str) -> bool:
+    """Return whether a Linear has hardware-compatible FP8 GEMM dimensions.
+
+    The language-model output projection stays in high precision for numerical
+    stability (and because it shares its weight with the token embedding).
+    LoRA adapters also stay high precision; only their base Linear is eligible.
+    """
+    if not isinstance(module, torch.nn.Linear):
+        return False
+    if fqn == "lm_head" or fqn.endswith(".lm_head") or ".lora." in fqn:
+        return False
+    return module.in_features % 16 == 0 and module.out_features % 16 == 0
+
+
+def _probe_torchao_fp8_recipe(recipe: str, device: torch.device, config_cls, convert_fn):
+    """Exercise one real FP8 forward/backward before converting the full model."""
+    cache_key = (recipe, device.type, device.index)
+    cached = _TORCHAO_FP8_PROBE_CACHE.get(cache_key)
+    if cached is not None:
+        if isinstance(cached, Exception):
+            raise cached
+        return
+
+    try:
+        with torch.cuda.device(device):
+            probe = torch.nn.Sequential(
+                torch.nn.Linear(64, 64, bias=False, device=device, dtype=torch.bfloat16)
+            )
+            convert_fn(probe, config=config_cls.from_recipe_name(recipe))
+            x = torch.randn(32, 64, device=device, dtype=torch.bfloat16, requires_grad=True)
+            probe(x).float().square().mean().backward()
+            torch.cuda.synchronize(device)
+            del probe, x
+        _TORCHAO_FP8_PROBE_CACHE[cache_key] = True
+    except Exception as exc:
+        _TORCHAO_FP8_PROBE_CACHE[cache_key] = exc
+        raise
+
+
+def apply_torchao_fp8_training(model: torch.nn.Module, args, *, label: str = "model") -> torch.nn.Module:
+    """Convert eligible Linear layers to TorchAO Float8Linear for training.
+
+    Conversion is state-dict compatible: Float8Linear reuses the original
+    Parameters and only changes the forward/backward GEMMs.  Call this after
+    loading model/optimizer resume state and before DDP/torch.compile wrapping.
+    """
+    requested_recipe = getattr(args, "fp8_training", "off")
+    if requested_recipe == "off":
+        return model
+    if requested_recipe not in _TORCHAO_FP8_RECIPES:
+        raise ValueError(f"Unknown --fp8_training recipe: {requested_recipe}")
+    if getattr(args, "dtype", "bfloat16") != "bfloat16":
+        raise ValueError("TorchAO FP8 training requires --dtype bfloat16")
+    if not torch.cuda.is_available() or not str(getattr(args, "device", "cuda")).startswith("cuda"):
+        raise RuntimeError("TorchAO FP8 training requires a CUDA GPU")
+
+    device = next(model.parameters()).device
+    if device.type != "cuda":
+        raise RuntimeError(f"TorchAO FP8 training requires a CUDA model, got {device}")
+    major, minor = torch.cuda.get_device_capability(device)
+    if (major, minor) < (8, 9):
+        raise RuntimeError(
+            f"TorchAO FP8 training requires NVIDIA compute capability >= 8.9, got {major}.{minor}"
+        )
+
+    try:
+        import torchao
+        from torchao.float8 import Float8LinearConfig, convert_to_float8_training
+    except ImportError as exc:
+        raise ImportError(
+            "--fp8_training requires TorchAO. Install the project FP8 dependencies "
+            "with: python -m pip install -r requirements-fp8.txt"
+        ) from exc
+
+    active_recipe = requested_recipe
+    try:
+        _probe_torchao_fp8_recipe(
+            active_recipe, device, Float8LinearConfig, convert_to_float8_training
+        )
+    except Exception as exc:
+        if active_recipe.startswith("rowwise"):
+            Logger(
+                f"[TorchAO FP8] {active_recipe} is unavailable on "
+                f"{torch.cuda.get_device_name(device)} ({exc}); falling back to tensorwise"
+            )
+            active_recipe = "tensorwise"
+            _probe_torchao_fp8_recipe(
+                active_recipe, device, Float8LinearConfig, convert_to_float8_training
+            )
+        else:
+            raise RuntimeError(f"TorchAO FP8 tensorwise preflight failed: {exc}") from exc
+
+    filter_mode = getattr(args, "fp8_filter", "auto")
+    auto_filter = None
+    if filter_mode == "auto":
+        try:
+            from torchao.float8 import _auto_filter_for_recipe
+            auto_filter = _auto_filter_for_recipe(active_recipe, filter_fqns=["lm_head"])
+        except (ImportError, AttributeError):
+            Logger("[TorchAO FP8] auto filter unavailable; using all eligible Linear layers")
+    elif filter_mode != "eligible":
+        raise ValueError(f"Unknown --fp8_filter mode: {filter_mode}")
+
+    def module_filter_fn(module: torch.nn.Module, fqn: str) -> bool:
+        if not _fp8_linear_is_eligible(module, fqn):
+            return False
+        return auto_filter(module, fqn) if auto_filter is not None else True
+
+    converted_names = [
+        name for name, module in model.named_modules() if module_filter_fn(module, name)
+    ]
+    if not converted_names and auto_filter is not None:
+        Logger(
+            f"[TorchAO FP8] auto filter selected no layers for {label}; "
+            "falling back to all eligible Linear layers"
+        )
+        auto_filter = None
+        converted_names = [
+            name for name, module in model.named_modules() if module_filter_fn(module, name)
+        ]
+    if not converted_names:
+        raise RuntimeError(
+            f"TorchAO FP8 filter {filter_mode!r} selected no Linear layers for {label}; "
+            "use --fp8_filter eligible or disable FP8"
+        )
+
+    config = Float8LinearConfig.from_recipe_name(active_recipe)
+    convert_to_float8_training(model, module_filter_fn=module_filter_fn, config=config)
+    version = getattr(torchao, "__version__", importlib.metadata.version("torchao"))
+    if getattr(args, "use_compile", 0) != 1:
+        Logger("[TorchAO FP8] warning: torch.compile is disabled; FP8 may be slower than BF16")
+    Logger(
+        f"[TorchAO FP8] enabled for {label}: requested={requested_recipe}, "
+        f"active={active_recipe}, filter={filter_mode}, linear_layers={len(converted_names)}, "
+        f"torchao={version}"
+    )
+    setattr(args, "fp8_training_active", active_recipe)
+    return model
 
 
 def is_main_process() -> bool:
@@ -74,18 +228,10 @@ def config_from_args(args, **overrides):
         cfg_dict.update(overrides)
         architecture = architecture or cfg_dict.get('model_architecture', 'standard')
         cfg_dict['model_architecture'] = architecture
-        cfg_cls = {
-            'standard': InstinctConfig,
-            'linear': LinearInstinctConfig,
-            'looped': LoopedInstinctConfig,
-        }[architecture]
+        cfg_cls, _ = _architecture_classes(architecture)
         return cfg_cls(**cfg_dict)
     architecture = architecture or 'standard'
-    cfg_cls = {
-        'standard': InstinctConfig,
-        'linear': LinearInstinctConfig,
-        'looped': LoopedInstinctConfig,
-    }[architecture]
+    cfg_cls, _ = _architecture_classes(architecture)
     return cfg_cls(
         hidden_size=hidden_size,
         num_hidden_layers=num_hidden_layers,
@@ -93,6 +239,57 @@ def config_from_args(args, **overrides):
         model_architecture=architecture,
         **overrides,
     )
+
+
+_TOPOLOGY_CONFIG_FIELDS = (
+    "model_architecture", "residual_type",
+    "hc_mult", "hc_sinkhorn_iters", "hc_eps", "mhc_init_std",
+    "attnres_variant", "attnres_block_size",
+    "full_attention_interval", "linear_conv_kernel_dim",
+    "linear_key_head_dim", "linear_value_head_dim",
+    "linear_num_key_heads", "linear_num_value_heads",
+    "loop_iters", "prelude_layers", "coda_layers", "use_input_injection",
+)
+
+
+def restore_config_from_checkpoint(current_config, checkpoint_data, *,
+                                   config_key="config", fallback_topology_key=None):
+    """Rebuild the model config before loading a resume checkpoint.
+
+    Resume state is authoritative for architecture and residual topology. This
+    prevents a refreshed WebUI/CLI config from constructing a Standard model
+    and then trying to load mHC/AttnRes parameters into it.
+
+    ``fallback_topology_key`` supports legacy distillation checkpoints that
+    stored the student config but not a separate teacher config: teacher shape
+    fields stay current while topology fields follow the saved student.
+    """
+    if not checkpoint_data:
+        return current_config
+    saved_config = checkpoint_data.get(config_key)
+    if saved_config is None and fallback_topology_key:
+        topology = checkpoint_data.get(fallback_topology_key)
+        if topology is not None:
+            saved_config = current_config.to_dict()
+            for field in _TOPOLOGY_CONFIG_FIELDS:
+                if field in topology:
+                    saved_config[field] = topology[field]
+    if saved_config is None:
+        Logger(f"[Resume] checkpoint has no {config_key!r}; using current model config")
+        return current_config
+
+    saved_config = dict(saved_config)
+    architecture = saved_config.get(
+        "model_architecture", getattr(current_config, "model_architecture", "standard")
+    )
+    saved_config["model_architecture"] = architecture
+    config_cls, _ = _architecture_classes(architecture)
+    restored = config_cls(**saved_config)
+    Logger(
+        f"[Resume] restored checkpoint config: architecture={architecture}, "
+        f"residual={getattr(restored, 'residual_type', 'standard')}"
+    )
+    return restored
 
 
 def Logger(content: str) -> None:
@@ -391,6 +588,9 @@ def lm_checkpoint(lm_config, weight: str = 'full_sft', model=None, optimizer=Non
             current_ws = dist.get_world_size() if dist.is_initialized() else 1
             if saved_ws != current_ws:
                 ckp_data['step'] = ckp_data['step'] * saved_ws // current_ws
+                data_config = ckp_data.get('data_config')
+                if data_config and data_config.get('epoch_steps'):
+                    data_config['epoch_steps'] = data_config['epoch_steps'] * saved_ws // current_ws
                 Logger(f'GPU数量变化({saved_ws}→{current_ws})，step已自动转换为{ckp_data["step"]}')
             return ckp_data
         return None
@@ -434,12 +634,9 @@ def pause_save_checkpoint(args, lm_config, *, weight, model, optimizer, epoch, s
 
 def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = './model', save_dir: str = './out', device: str = 'cuda') -> tuple:
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    if isinstance(lm_config, LinearInstinctConfig):
-        model = LinearInstinctForCausalLM(lm_config)
-    elif isinstance(lm_config, LoopedInstinctConfig):
-        model = LoopedInstinctForCausalLM(lm_config)
-    else:
-        model = InstinctForCausalLM(lm_config)
+    architecture = getattr(lm_config, 'model_architecture', 'standard')
+    _, model_cls = _architecture_classes(architecture)
+    model = model_cls(lm_config)
 
     if from_weight != 'none':
         if from_weight.endswith('.pth'):
@@ -448,7 +645,7 @@ def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = '
             moe_suffix = '_moe' if lm_config.use_moe else ''
             weight_path = f'{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
         weights = torch.load(weight_path, map_location=device)
-        if isinstance(model, LoopedInstinctForCausalLM):
+        if architecture == 'looped':
             model.load_pretrained_weights(weights)
         else:
             model.load_state_dict(weights, strict=False)

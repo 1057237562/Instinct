@@ -2,8 +2,11 @@
 
 import ast
 import io
+import os
 from pathlib import Path
 import re
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -24,7 +27,7 @@ from model.model_instinct_loop import (
     InstinctForCausalLM as LoopedInstinctForCausalLM,
 )
 from trainer.trainer_cli import build_trainer_parser
-from trainer.trainer_utils import config_from_args
+from trainer.trainer_utils import config_from_args, restore_config_from_checkpoint
 import trainer.trainer_utils as trainer_utils
 
 
@@ -245,6 +248,110 @@ def test_standard_weight_discovery_rejects_other_topologies():
     ):
         assert not matches(prefix, "")
     assert matches("pretrain_20260828_120000_looped_mhc", "_looped_mhc")
+
+
+def test_dense_trainer_import_does_not_load_linear_backbone():
+    repo_root = Path(__file__).parents[1]
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import trainer.trainer_utils; "
+            "print('model.model_instinct_linear' in sys.modules)",
+        ],
+        cwd=repo_root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == "False"
+    assert "causal-conv1d" not in result.stderr
+
+
+def test_block_attnres_compile_offset_reuses_graph_patterns():
+    config = InstinctConfig(
+        hidden_size=32,
+        num_hidden_layers=16,
+        vocab_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        intermediate_size=64,
+        max_position_embeddings=32,
+        flash_attn=False,
+        residual_type="attnres",
+        attnres_variant="block",
+        attnres_block_size=4,
+    )
+    model = InstinctForCausalLM(config)
+    offsets = [layer.attnres_partial_count for layer in model.model.layers]
+    assert set(offsets) == {0, 2}
+    assert len(set(offsets)) < 8
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    [
+        "train_pretrain.py",
+        "train_full_sft.py",
+        "train_dpo.py",
+        "train_ppo.py",
+        "train_grpo.py",
+        "train_agent.py",
+        "train_distillation.py",
+    ],
+)
+def test_attnres_training_compile_uses_dynamic_shapes(script_name):
+    source = (Path(__file__).parents[1] / "trainer" / script_name).read_text(
+        encoding="utf-8"
+    )
+    assert "dynamic=getattr(" in source
+    assert "'residual_type', 'standard') == 'attnres'" in source
+
+
+@pytest.mark.parametrize("architecture", ["dense", "linear", "looped"])
+@pytest.mark.parametrize(
+    ("residual_type", "extra"),
+    [
+        ("mhc", {"hc_mult": 2, "hc_sinkhorn_iters": 3}),
+        ("attnres", {"attnres_variant": "block", "attnres_block_size": 3}),
+    ],
+)
+def test_resume_rebuilds_checkpoint_topology_before_strict_load(
+    architecture, residual_type, extra
+):
+    saved_model = tiny_model(architecture, residual_type, **extra)
+    current = tiny_config("standard")
+    restored_config = restore_config_from_checkpoint(
+        current, {"config": saved_model.config.to_dict()}
+    )
+    model_cls = {
+        "standard": InstinctForCausalLM,
+        "linear": LinearInstinctForCausalLM,
+        "looped": LoopedInstinctForCausalLM,
+    }[restored_config.model_architecture]
+    restored_model = model_cls(restored_config)
+    restored_model.load_state_dict(saved_model.state_dict(), strict=True)
+    assert type(restored_model.config) is type(saved_model.config)
+    assert restored_config.residual_type == residual_type
+
+
+def test_legacy_distillation_teacher_inherits_saved_topology_only():
+    current_teacher = InstinctConfig(hidden_size=48, num_hidden_layers=3)
+    saved_student = tiny_config("mhc", hc_mult=3).to_dict()
+    restored = restore_config_from_checkpoint(
+        current_teacher,
+        {"config": saved_student},
+        config_key="teacher_config",
+        fallback_topology_key="config",
+    )
+    assert restored.hidden_size == 48
+    assert restored.num_hidden_layers == 3
+    assert restored.residual_type == "mhc"
+    assert restored.hc_mult == 3
 
 
 @pytest.mark.parametrize("architecture", ["dense", "linear", "looped"])

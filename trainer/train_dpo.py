@@ -24,12 +24,14 @@ from dataset.lm_dataset import DPODataset
 from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
     setup_seed, init_model, SkipBatchSampler, config_from_args, build_optimizer,
+    restore_config_from_checkpoint, apply_torchao_fp8_training,
 )
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx,
     init_wandb_logger, set_cosine_lr, step_with_scaler, flush_remaining_grad,
     PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
 )
+from trainer.training_profiler import TrainingProfiler
 
 warnings.filterwarnings('ignore')
 
@@ -101,36 +103,49 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, ref_model, lm_config
 
     for step, batch in enumerate(loader, start=start_step + 1):
         last_step = step
-        x_chosen = batch['x_chosen'].to(args.device)
-        x_rejected = batch['x_rejected'].to(args.device)
-        y_chosen = batch['y_chosen'].to(args.device)
-        y_rejected = batch['y_rejected'].to(args.device)
-        mask_chosen = batch['mask_chosen'].to(args.device)
-        mask_rejected = batch['mask_rejected'].to(args.device)
-        x = torch.cat([x_chosen, x_rejected], dim=0)
-        y = torch.cat([y_chosen, y_rejected], dim=0)
-        mask = torch.cat([mask_chosen, mask_rejected], dim=0)
+        profiler.begin_step(
+            tokens=batch['x_chosen'].numel() + batch['x_rejected'].numel(),
+            useful_tokens=int(batch['mask_chosen'].sum().item() + batch['mask_rejected'].sum().item()),
+        )
+        with profiler.phase("data_transfer"):
+            x_chosen = batch['x_chosen'].to(args.device)
+            x_rejected = batch['x_rejected'].to(args.device)
+            y_chosen = batch['y_chosen'].to(args.device)
+            y_rejected = batch['y_rejected'].to(args.device)
+            mask_chosen = batch['mask_chosen'].to(args.device)
+            mask_rejected = batch['mask_rejected'].to(args.device)
+            x = torch.cat([x_chosen, x_rejected], dim=0)
+            y = torch.cat([y_chosen, y_rejected], dim=0)
+            mask = torch.cat([mask_chosen, mask_rejected], dim=0)
 
         set_cosine_lr(optimizer, epoch, step, iters, args)
 
         with autocast_ctx:
-            with torch.no_grad():
-                ref_outputs = ref_model(x)
-                ref_logits = ref_outputs.logits
-            ref_log_probs = logits_to_log_probs(ref_logits, y)
+            with profiler.phase("reference_forward"):
+                with torch.no_grad():
+                    ref_outputs = ref_model(x)
+                    ref_logits = ref_outputs.logits
+                ref_log_probs = logits_to_log_probs(ref_logits, y)
 
-            outputs = model(x)
-            logits = outputs.logits
-            policy_log_probs = logits_to_log_probs(logits, y)
+            with profiler.phase("policy_forward"):
+                outputs = model(x)
+                logits = outputs.logits
+                policy_log_probs = logits_to_log_probs(logits, y)
 
-            dpo_loss_val = dpo_loss(ref_log_probs, policy_log_probs, mask, beta=beta)
-            loss = dpo_loss_val + outputs.aux_loss
-            loss = loss / args.accumulation_steps
+                dpo_loss_val = dpo_loss(ref_log_probs, policy_log_probs, mask, beta=beta)
+                loss = dpo_loss_val + outputs.aux_loss
+                loss = loss / args.accumulation_steps
 
-        scaler.scale(loss).backward()
+        with profiler.phase("backward"):
+            scaler.scale(loss).backward()
 
         if step % args.accumulation_steps == 0:
-            step_with_scaler(scaler, optimizer, model.parameters(), args.grad_clip)
+            with profiler.phase("optimizer"):
+                step_with_scaler(scaler, optimizer, model.parameters(), args.grad_clip)
+
+        profile_metrics = profiler.end_step()
+        if profile_metrics and wandb:
+            wandb.log(profile_metrics)
 
         if step % args.log_interval == 0 or step == iters:
             spend_time = time.time() - start_time
@@ -161,6 +176,7 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, ref_model, lm_config
 
         if pause_requested(args):
             clear_pause_request(args)
+            profiler.finish()
             if is_main_process():
                 pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, ref_model=ref_model)
             Logger('[PAUSED] Training paused — resume checkpoint saved.')
@@ -195,6 +211,7 @@ if __name__ == "__main__":
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = config_from_args(args)
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='./checkpoints') if args.from_resume==1 else None
+    lm_config = restore_config_from_checkpoint(lm_config, ckp_data)
 
     # 3. 设置混合精度
     autocast_ctx = build_autocast_ctx(args)
@@ -233,12 +250,19 @@ if __name__ == "__main__":
         start_epoch = ckp_data['epoch']
         start_step = ckp_data.get('step', 0)
 
+    model = apply_torchao_fp8_training(model, args, label="policy")
+
     # 7. 编译和分布式包装
     if args.use_compile == 1:
-        model = torch.compile(model, mode=args.compile_mode)
+        model = torch.compile(
+            model, mode=args.compile_mode,
+            dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
+        )
         Logger('torch.compile enabled')
     if dist.is_initialized():
         model = DistributedDataParallel(model, device_ids=[local_rank])
+
+    profiler = TrainingProfiler(args, name="dpo")
 
     # 8. 开始训练
     for epoch in range(start_epoch, args.epochs):
@@ -252,6 +276,10 @@ if __name__ == "__main__":
             train_epoch(epoch, loader, len(loader) + skip, ref_model, lm_config, start_step, wandb, args.beta)
         else:
             train_epoch(epoch, loader, len(loader), ref_model, lm_config, 0, wandb, args.beta)
+
+    final_profile_metrics = profiler.finish()
+    if final_profile_metrics and wandb:
+        wandb.log(final_profile_metrics)
 
     # 9. 清理分布进程
     if dist.is_initialized():

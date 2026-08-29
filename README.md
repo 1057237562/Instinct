@@ -115,6 +115,7 @@ python trainer/train_pretrain.py --from_resume 1
 | 参数 | 说明 |
 |------|------|
 | `--max_seq_len` | 最大截断长度(单位 token;中文约 1.5~1.7 字符/token)。轻量数据建议 768 |
+| `--sequence_packing 0\|1` | Pretrain/SFT 固定 block packing，减少 padding（别名 `--packing`） |
 | `--use_moe 1` | 启用 MoE 架构 |
 | `--use_looped 1` | 启用循环深度架构(LoopUS) |
 | `--use_grad_checkpoint 0\|1\|2` | 梯度检查点(0=关闭, 1=选择性重算注意力QKᵀ/FFN, 2=整层checkpoint) |
@@ -122,6 +123,7 @@ python trainer/train_pretrain.py --from_resume 1
 | `--use_wandb` | 开启训练日志(默认 SwanLab,兼容 WandB 接口) |
 | `--from_weight` | 基于哪个权重继续训练(`none` = 从头) |
 | `--optimizer` | `adamw` / `adafactor` / `muon` |
+| `--profile off\|timing\|torch` | 训练性能分析：低开销阶段计时或官方 PyTorch/Kineto trace |
 | `--config_path` | 读取 JSON 训练配置 |
 
 ---
@@ -224,6 +226,60 @@ cd scripts && python convert_model.py
 ---
 
 ## 注意事项
+
+### TorchAO FP8 训练（可选）
+
+```bash
+python -m pip install -r requirements-fp8.txt
+python trainer/train_pretrain.py --dtype bfloat16 --param_dtype bf16 \
+  --use_compile 1 --fp8_training tensorwise --fp8_filter auto
+```
+
+- `tensorwise` 速度优先；`rowwise` 数值精度优先；`rowwise_with_gw_hp` 保留高精度权重梯度计算。
+- 启动时会执行一次真实 FP8 前向/反向探测；当前设备不支持 rowwise 时自动回退到 tensorwise。
+- `auto` 只转换预计有收益的 Linear；`eligible` 转换所有维度为 16 倍数的兼容 Linear。
+- `lm_head`、LoRA adapter、Embedding、Norm、Attention softmax、残差拓扑以及优化器状态保持 BF16/FP32。
+- FP8 包装不改变 state_dict 键名，普通权重、暂停检查点和恢复训练可在 FP8/BF16 间切换。
+
+### 训练性能分析
+
+持续比较 BF16 / FP8 时使用低开销 timing 模式：
+
+```bash
+python trainer/train_pretrain.py --profile timing \
+  --profile_warmup 10 --profile_interval 100
+```
+
+日志中的 `[PROFILE]` 会报告真实 step 时间、物理/有效 tokens/s、前向、反向、优化器、
+数据传输、step 间 host gap 和 CUDA 峰值显存。统计使用 `torch.cuda.Event`，仅在汇总间隔同步一次。
+
+需要查看具体算子和 kernel 时，使用官方 `torch.profiler` 短窗口 trace：
+
+```bash
+python trainer/train_pretrain.py --profile torch \
+  --profile_warmup 10 --profile_active_steps 5
+```
+
+trace 默认写入 `./profiler_traces/*.pt.trace.json`，可用 Chrome trace viewer、
+Perfetto 或 TensorBoard Profiler 打开。`torch` 模式的采集窗口开销较高，不建议增加
+`profile_active_steps` 后长期采集；窗口结束后仍保留低开销 timing 汇总。
+
+### Pretrain / SFT Sequence Packing
+
+```bash
+python trainer/train_pretrain.py --sequence_packing 1 --max_seq_len 1024
+python trainer/train_full_sft.py --sequence_packing 1 --max_seq_len 768
+```
+
+- 首次启动会按 `--packing_batch_size`（默认 1000）分批 tokenization，并在 Hugging Face
+  cache 中生成定长 Arrow blocks；后续启动直接复用 cache。
+- 使用 best-fit packing，完整样本不会被拆到两个 block；Pretrain 保留每篇文档的 BOS/EOS，
+  SFT 同步保留 assistant-only `-100` loss mask。
+- block 形状保持固定，因此兼容 `torch.compile`、DDP 和 profiler，不会因动态 batch 反复编译。
+- Packing 会改变每个 epoch 的 step 数。从 non-packed checkpoint 使用 `--from_resume` 切换时，
+  会保留模型、优化器与 GradScaler，并还原当前 epoch 的 shuffle 顺序：未到 packing 分组边界
+  的数据行继续按原始 batch 训练，到达边界后将同一 epoch 尚未训练的后缀构造成 packed blocks。
+  迁移起点和游标会写入 checkpoint，因此迁移途中暂停后仍可精确继续。
 
 - **工作目录**: 训练脚本在仓库根目录运行,数据默认指向 `./dataset/`,权重输出到 `./out/`;API / WebUI 需在 `scripts/` 下运行
 - **Windows**: 训练脚本先 import `datasets` 再 import `torch`,以规避 pyarrow/torch DLL 冲突,勿调整顺序

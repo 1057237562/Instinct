@@ -24,13 +24,15 @@ from dataset.lm_dataset import PretrainDataset
 from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint,
     setup_seed, init_model, SkipBatchSampler, config_from_args, build_optimizer,
-    pause_save_checkpoint,
+    pause_save_checkpoint, restore_config_from_checkpoint, apply_torchao_fp8_training,
 )
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx, init_wandb_logger,
     set_cosine_lr, step_with_scaler, flush_remaining_grad,
     PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
 )
+from trainer.packing_transition import packing_data_config, SequencePackingPlan
+from trainer.training_profiler import TrainingProfiler
 
 warnings.filterwarnings('ignore')
 
@@ -50,22 +52,34 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
         → 按 accumulation_steps 累积后裁剪梯度并更新参数 → 周期性打日志 / 存检查点。
     """
     start_time = time.time()
+    data_config['epoch_steps'] = int(iters)
     last_step = start_step
     for step, (input_ids, labels) in enumerate(loader, start=start_step + 1):
-        input_ids = input_ids.to(args.device)
-        labels = labels.to(args.device)
+        profiler.begin_step(
+            tokens=input_ids.numel(), useful_tokens=(labels != -100).sum().item()
+        )
+        with profiler.phase("data_transfer"):
+            input_ids = input_ids.to(args.device)
+            labels = labels.to(args.device)
         last_step = step
         set_cosine_lr(optimizer, epoch, step, iters, args)
 
-        with autocast_ctx:
-            res = model(input_ids, labels=labels, early_exit=bool(args.early_exit))
-            loss = res.loss + res.aux_loss
-            loss = loss / args.accumulation_steps
+        with profiler.phase("forward"):
+            with autocast_ctx:
+                res = model(input_ids, labels=labels, early_exit=bool(args.early_exit))
+                loss = res.loss + res.aux_loss
+                loss = loss / args.accumulation_steps
 
-        scaler.scale(loss).backward()
+        with profiler.phase("backward"):
+            scaler.scale(loss).backward()
 
         if step % args.accumulation_steps == 0:
-            step_with_scaler(scaler, optimizer, model.parameters(), args.grad_clip)
+            with profiler.phase("optimizer"):
+                step_with_scaler(scaler, optimizer, model.parameters(), args.grad_clip)
+
+        profile_metrics = profiler.end_step()
+        if profile_metrics and wandb:
+            wandb.log(profile_metrics)
 
         if step % args.log_interval == 0 or step == iters:
             spend_time = time.time() - start_time
@@ -89,7 +103,7 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
             raw_model = getattr(raw_model, '_orig_mod', raw_model)
             state_dict = raw_model.state_dict()
             torch.save({k: v.half().cpu() for k, v in state_dict.items()}, ckp)
-            lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints')
+            lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints', data_config=data_config)
             model.train()
             del state_dict
 
@@ -98,8 +112,9 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
         # 暂停分支：检测到暂停请求标记时，清标记并保存检查点后以 42 退出（WebUI 据此识别“已暂停”）。
         if pause_requested(args):
             clear_pause_request(args)
+            profiler.finish()
             if is_main_process():
-                pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb)
+                pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, data_config=data_config)
             Logger('[PAUSED] Training paused — resume checkpoint saved.')
             sys.exit(PAUSE_EXIT_CODE)
 
@@ -115,7 +130,10 @@ if __name__ == "__main__":
             'batch_size': 32,
             'learning_rate': 5e-4,
             'num_workers': 8,
-            'accumulation_steps': 8,
+            # A physical batch is one optimizer step by default.  Apart from being
+            # the least surprising behaviour, this keeps CUDA Graph gradient
+            # buffers from being reused across accumulation steps.
+            'accumulation_steps': 1,
             'max_seq_len': 340,
             'wandb_project': 'Instinct-Pretrain',
         },
@@ -130,6 +148,8 @@ if __name__ == "__main__":
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = config_from_args(args)
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='./checkpoints') if args.from_resume==1 else None
+    data_config = packing_data_config(args)
+    lm_config = restore_config_from_checkpoint(lm_config, ckp_data)
 
     # 3. 设置混合精度
     autocast_ctx = build_autocast_ctx(args)
@@ -155,10 +175,20 @@ if __name__ == "__main__":
                f'stop_grad={args.teacher_stop_grad} | depth-gain reward={args.depth_gain_reward} '
                f'| exit_in_training={model.config.exit_in_training} '
                f'| n_supervision={model.config.n_supervision}')
-    train_ds = PretrainDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
-    train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
+    packing_plan = SequencePackingPlan(
+        args, ckp_data,
+        lambda packing, sample_indices=None: PretrainDataset(
+            args.data_path, tokenizer, max_length=args.max_seq_len,
+            packing=packing,
+            packing_batch_size=args.packing_batch_size,
+            sample_indices=sample_indices,
+        ),
+    )
     scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))
     optimizer = build_optimizer(model.parameters(), lr=args.learning_rate, optimizer=args.optimizer)
+    # Make the first compiled backward obey the same no-accumulation invariant
+    # as every backward following optimizer.step().
+    optimizer.zero_grad(set_to_none=True)
 
     # 6. 从ckp恢复状态
     start_epoch, start_step = 0, 0
@@ -169,25 +199,44 @@ if __name__ == "__main__":
         start_epoch = ckp_data['epoch']
         start_step = ckp_data.get('step', 0)
 
+    model = apply_torchao_fp8_training(model, args)
+
     # 7. 编译和分布式包装
     if args.use_compile == 1:
-        model = torch.compile(model, mode=args.compile_mode)
+        model = torch.compile(
+            model, mode=args.compile_mode,
+            dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
+        )
         Logger('torch.compile enabled')
     if dist.is_initialized():
         model = DistributedDataParallel(model, device_ids=[local_rank])
 
+    profiler = TrainingProfiler(args, name="pretrain")
+
     # 8. 开始训练
     for epoch in range(start_epoch, args.epochs):
-        train_sampler and train_sampler.set_epoch(epoch)
-        setup_seed(42 + epoch); indices = torch.randperm(len(train_ds)).tolist()
         skip = start_step if (epoch == start_epoch and start_step > 0) else 0
-        batch_sampler = SkipBatchSampler(train_sampler or indices, args.batch_size, skip)
+        train_ds, transition_batches, active_packing = packing_plan.epoch_data(
+            epoch, skip, args.batch_size,
+        )
+        packing_plan.update_checkpoint_config(data_config, epoch=epoch, active=active_packing)
+        if transition_batches is None:
+            train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
+            train_sampler and train_sampler.set_epoch(epoch)
+            setup_seed(42 + epoch); indices = torch.randperm(len(train_ds)).tolist()
+            batch_sampler = SkipBatchSampler(train_sampler or indices, args.batch_size, skip)
+        else:
+            batch_sampler = transition_batches
         loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
         if skip > 0:
             Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
             train_epoch(epoch, loader, len(loader) + skip, start_step, wandb)
         else:
             train_epoch(epoch, loader, len(loader), 0, wandb)
+
+    final_profile_metrics = profiler.finish()
+    if final_profile_metrics and wandb:
+        wandb.log(final_profile_metrics)
 
     # 9. 清理分布进程
     if dist.is_initialized():

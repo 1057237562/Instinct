@@ -3,11 +3,24 @@ import torch
 import json
 import os
 import random
+import bisect
 os.environ.setdefault("HF_HOME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".cache", "huggingface"))
 from datasets import load_dataset, Features, Sequence, Value
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-def pre_processing_chat(conversations, add_system_ratio=0.2):
+_PACKED_PRETRAIN_FEATURES = Features({
+    'input_ids': Sequence(Value('int32')),
+    'valid_tokens': Value('int32'),
+    'train_tokens': Value('int32'),
+})
+_PACKED_SFT_FEATURES = Features({
+    'input_ids': Sequence(Value('int32')),
+    'labels': Sequence(Value('int32')),
+    'valid_tokens': Value('int32'),
+    'train_tokens': Value('int32'),
+})
+
+def pre_processing_chat(conversations, add_system_ratio=0.2, rng=None):
     # tool use 数据完整保留不做处理
     if any(conv.get('tools') for conv in conversations): return conversations
 
@@ -24,29 +37,129 @@ def pre_processing_chat(conversations, add_system_ratio=0.2):
         "You are Instinct, a small but useful language model."
     ]
     # 概率性添加system
+    rng = rng or random
     if conversations[0].get('role') != 'system':
-        if random.random() < add_system_ratio:
-            return [{'role': 'system', 'content': random.choice(SYSTEM_PROMPTS)}] + conversations
+        if rng.random() < add_system_ratio:
+            return [{'role': 'system', 'content': rng.choice(SYSTEM_PROMPTS)}] + conversations
     return conversations
 
-def post_processing_chat(prompt_content, empty_think_ratio=0.2):
+def post_processing_chat(prompt_content, empty_think_ratio=0.2, rng=None):
     # 以80%概率移除空思考标签
-    if '<think>\n\n</think>\n\n' in prompt_content and random.random() > empty_think_ratio:
+    rng = rng or random
+    if '<think>\n\n</think>\n\n' in prompt_content and rng.random() > empty_think_ratio:
         prompt_content = prompt_content.replace('<think>\n\n</think>\n\n', '')
     return prompt_content
 
+
+def _best_fit_pack(input_sequences, label_sequences, max_length, pad_token_id):
+    """Pack complete examples into fixed blocks without splitting an example.
+
+    Best-fit decreasing keeps SFT conversations intact while filling blocks far
+    more densely than ordered next-fit.  Every source sequence is at most one
+    block long because callers preserve the previous per-example truncation.
+    """
+    examples = sorted(
+        zip(input_sequences, label_sequences), key=lambda pair: len(pair[0]), reverse=True
+    )
+    bins = []
+    # Sorted ``(remaining_capacity, stable_bin_id)`` pairs support O(log n)
+    # selection of the tightest block that can hold the next example.
+    remaining = []
+    for input_ids, labels in examples:
+        length = len(input_ids)
+        if length == 0:
+            continue
+        pos = bisect.bisect_left(remaining, (length, -1))
+        if pos == len(remaining):
+            bin_id = len(bins)
+            bins.append([list(input_ids), list(labels)])
+            bisect.insort(remaining, (max_length - length, bin_id))
+        else:
+            capacity, bin_id = remaining.pop(pos)
+            bins[bin_id][0].extend(input_ids)
+            bins[bin_id][1].extend(labels)
+            bisect.insort(remaining, (capacity - length, bin_id))
+
+    packed_inputs, packed_labels, valid_tokens, train_tokens = [], [], [], []
+    for input_ids, labels in bins:
+        valid = len(input_ids)
+        pad = max_length - valid
+        packed_inputs.append(input_ids + [pad_token_id] * pad)
+        packed_labels.append(labels + [-100] * pad)
+        valid_tokens.append(valid)
+        train_tokens.append(sum(label != -100 for label in labels))
+    return {
+        'input_ids': packed_inputs,
+        'labels': packed_labels,
+        'valid_tokens': valid_tokens,
+        'train_tokens': train_tokens,
+    }
+
+
+def _print_packing_stats(name, raw_count, samples, max_length):
+    valid = sum(samples['valid_tokens']) if len(samples) else 0
+    train = sum(samples['train_tokens']) if len(samples) else 0
+    capacity = max(len(samples) * max_length, 1)
+    print(
+        f"[Packing] {name}: raw_samples={raw_count}, blocks={len(samples)}, "
+        f"fill={100.0 * valid / capacity:.2f}%, train_tokens={train:,}, "
+        f"cache={getattr(samples, 'cache_files', [])}",
+        flush=True,
+    )
+
 class PretrainDataset(Dataset):
-    def __init__(self, data_path, tokenizer, max_length=512):
+    def __init__(self, data_path, tokenizer, max_length=512, packing=False,
+                 packing_batch_size=1000, sample_indices=None):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.samples = load_dataset('json', data_files=data_path, split='train')
+        self.full_raw_sample_count = len(self.samples)
+        if sample_indices is not None:
+            self.samples = self.samples.select([int(index) for index in sample_indices])
+        self.raw_sample_count = len(self.samples)
+        if packing:
+            raw_count = self.raw_sample_count
+            pad_token_id = tokenizer.pad_token_id
+
+            def tokenize_and_pack(batch):
+                input_sequences, label_sequences = [], []
+                for text in batch['text']:
+                    tokens = tokenizer(
+                        str(text), add_special_tokens=False,
+                        max_length=max_length - 2, truncation=True,
+                    ).input_ids
+                    tokens = [tokenizer.bos_token_id] + tokens + [tokenizer.eos_token_id]
+                    input_sequences.append(tokens)
+                    label_sequences.append(tokens.copy())
+                packed = _best_fit_pack(
+                    input_sequences, label_sequences, max_length, pad_token_id
+                )
+                # Pretrain labels equal input_ids except for trailing padding;
+                # reconstructing them in __getitem__ halves Arrow cache size.
+                packed.pop('labels')
+                return packed
+
+            self.samples = self.samples.map(
+                tokenize_and_pack,
+                batched=True,
+                batch_size=max(1, int(packing_batch_size)),
+                remove_columns=self.samples.column_names,
+                features=_PACKED_PRETRAIN_FEATURES,
+                desc=f'Packing pretrain into {max_length}-token blocks',
+            )
+            _print_packing_stats('pretrain', raw_count, self.samples, max_length)
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, index):
         sample = self.samples[index]
+        if 'input_ids' in sample:
+            input_ids = torch.tensor(sample['input_ids'], dtype=torch.long)
+            labels = input_ids.clone()
+            labels[input_ids == self.tokenizer.pad_token_id] = -100
+            return input_ids, labels
         tokens = self.tokenizer(str(sample['text']), add_special_tokens=False, max_length=self.max_length - 2, truncation=True).input_ids
         tokens = [self.tokenizer.bos_token_id] + tokens + [self.tokenizer.eos_token_id]
         input_ids = tokens + [self.tokenizer.pad_token_id] * (self.max_length - len(tokens))
@@ -57,14 +170,47 @@ class PretrainDataset(Dataset):
 
 
 class SFTDataset(Dataset):
-    def __init__(self, jsonl_path, tokenizer, max_length=1024):
+    def __init__(self, jsonl_path, tokenizer, max_length=1024, packing=False,
+                 packing_batch_size=1000, packing_seed=42, sample_indices=None):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
         features = Features({'conversations': [{'role': Value('string'), 'content': Value('string'), 'reasoning_content': Value('string'), 'tools': Value('string'), 'tool_calls': Value('string')}]})
         self.samples = load_dataset('json', data_files=jsonl_path, split='train', features=features)
+        self.full_raw_sample_count = len(self.samples)
+        if sample_indices is not None:
+            self.samples = self.samples.select([int(index) for index in sample_indices])
+        self.raw_sample_count = len(self.samples)
         self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids
         self.eos_id = tokenizer(f'{tokenizer.eos_token}\n', add_special_tokens=False).input_ids
+        if packing:
+            raw_count = self.raw_sample_count
+            pad_token_id = tokenizer.pad_token_id
+
+            def tokenize_and_pack(batch, indices):
+                input_sequences, label_sequences = [], []
+                for conversations, index in zip(batch['conversations'], indices):
+                    rng = random.Random(int(packing_seed) + int(index))
+                    conversations = pre_processing_chat(conversations, rng=rng)
+                    prompt = self.create_chat_prompt(conversations)
+                    prompt = post_processing_chat(prompt, rng=rng)
+                    input_ids = tokenizer(prompt).input_ids[:max_length]
+                    input_sequences.append(input_ids)
+                    label_sequences.append(self.generate_labels(input_ids))
+                return _best_fit_pack(
+                    input_sequences, label_sequences, max_length, pad_token_id
+                )
+
+            self.samples = self.samples.map(
+                tokenize_and_pack,
+                batched=True,
+                with_indices=True,
+                batch_size=max(1, int(packing_batch_size)),
+                remove_columns=self.samples.column_names,
+                features=_PACKED_SFT_FEATURES,
+                desc=f'Packing SFT into {max_length}-token blocks',
+            )
+            _print_packing_stats('sft', raw_count, self.samples, max_length)
 
     def __len__(self):
         return len(self.samples)
@@ -106,6 +252,11 @@ class SFTDataset(Dataset):
 
     def __getitem__(self, index):
         sample = self.samples[index]
+        if 'input_ids' in sample:
+            return (
+                torch.tensor(sample['input_ids'], dtype=torch.long),
+                torch.tensor(sample['labels'], dtype=torch.long),
+            )
         conversations = pre_processing_chat(sample['conversations'])
         prompt = self.create_chat_prompt(conversations)
         prompt = post_processing_chat(prompt)

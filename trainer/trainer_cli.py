@@ -16,7 +16,7 @@ import torch
 import torch.distributed as dist
 from contextlib import nullcontext
 from trainer.trainer_utils import (
-    get_lr, is_main_process, init_distributed_mode, setup_seed,
+    Logger, get_lr, is_main_process, init_distributed_mode, setup_seed,
 )
 
 # 暂停退出码：与 0=成功 / 非0=失败 相区分，供 WebUI 识别“已暂停”状态。
@@ -49,6 +49,15 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     parser.add_argument("--dtype", type=str, default="bfloat16", help="激活层计算精度（bfloat16/float16/fp32）")
     parser.add_argument("--param_dtype", type=str, default="fp32", choices=["fp32", "bf16", "fp16"], help="模型参数精度（fp32=主权重，bf16/fp16=训练时权重直接 cast）")
     parser.add_argument("--kv_cache_dtype", type=str, default="fp32", choices=["fp32", "bf16", "fp16", "fp8_e4m3", "fp8_e5m2"], help="KV Cache 精度（fp8 时缓存量化，decode 带宽减半）")
+    parser.add_argument(
+        "--fp8_training", type=str, default="off",
+        choices=["off", "tensorwise", "rowwise", "rowwise_with_gw_hp"],
+        help="TorchAO FP8 Linear 训练方案（off=关闭；tensorwise=最快；rowwise=更稳健）",
+    )
+    parser.add_argument(
+        "--fp8_filter", type=str, default="auto", choices=["auto", "eligible"],
+        help="FP8 Linear 筛选（auto=跳过预计无加速的小 GEMM；eligible=转换全部尺寸兼容层）",
+    )
     parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程数")
     parser.add_argument("--accumulation_steps", type=int, default=8, help="梯度累积步数")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
@@ -57,6 +66,15 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     parser.add_argument('--hidden_size', default=768, type=int, help="隐藏层维度")
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
     parser.add_argument('--max_seq_len', default=340, type=int, help="训练的最大截断长度（中文1token≈1.5~1.7字符）")
+    parser.add_argument(
+        '--sequence_packing', '--packing', dest='sequence_packing',
+        default=0, type=int, choices=[0, 1],
+        help='Pretrain/SFT 序列 packing（1=把完整样本装入定长 block，显著减少 padding）',
+    )
+    parser.add_argument(
+        '--packing_batch_size', default=1000, type=int,
+        help='首次构建 packing Arrow cache 时每批处理的原始样本数',
+    )
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument('--use_looped', default=0, type=int, choices=[0, 1], help="是否使用LoopUS循环架构（0=否，1=是）")
     parser.add_argument('--model_architecture', default=None, choices=['standard', 'linear', 'looped'], help="模型主干（默认读取config；--use_looped 1仍可兼容切换LoopUS）")
@@ -81,6 +99,14 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
     parser.add_argument("--use_grad_checkpoint", default=0, type=int, choices=[0, 1, 2], help="梯度检查点模式（0=关闭, 1=选择性重算注意力/FFN, 2=整层checkpoint）")
     parser.add_argument("--compile_mode", type=str, default="default", choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"], help="torch.compile 模式（default=Triton 编译；reduce-overhead=叠加 CUDA graph，小模型首选；max-autotune=极限调优，编译极慢）")
+    parser.add_argument(
+        "--profile", type=str, default="off", choices=["off", "timing", "torch"],
+        help="训练性能分析（timing=低开销阶段计时；torch=额外导出短窗口算子 trace）",
+    )
+    parser.add_argument("--profile_interval", type=int, default=100, help="timing profiler 汇总间隔")
+    parser.add_argument("--profile_warmup", type=int, default=10, help="启动/续训后跳过的 profiler 预热步数")
+    parser.add_argument("--profile_active_steps", type=int, default=5, help="torch profiler trace 采集步数")
+    parser.add_argument("--profile_dir", type=str, default="./profiler_traces", help="PyTorch profiler trace 输出目录")
     parser.add_argument('--config_path', default='', type=str, help="JSON配置文件路径")
     parser.add_argument('--pause_file', type=str, default='./checkpoints/.pause_request', help='暂停请求标记文件；存在时在下个 step 边界保存检查点并退出(码42)')
     if defaults is not None:

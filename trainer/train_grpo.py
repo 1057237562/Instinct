@@ -27,12 +27,14 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from dataset.lm_dataset import RLAIFDataset
 from trainer.trainer_utils import (Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
                                    setup_seed, SkipBatchSampler, init_model, LMForRewardModel,
-                                   config_from_args, build_optimizer)
+                                   config_from_args, build_optimizer, restore_config_from_checkpoint,
+                                   apply_torchao_fp8_training)
 from trainer.rollout_engine import create_rollout_engine
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx, init_wandb_logger,
     PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
 )
+from trainer.training_profiler import TrainingProfiler
 
 warnings.filterwarnings('ignore')
 
@@ -104,6 +106,7 @@ def grpo_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model, 
     4. 按 completion mask 对响应 token 聚合求均值得到 policy loss，梯度累积更新。
     """
     for step, batch in enumerate(loader, start=start_step + 1):
+        profiler.begin_step(tokens=0, useful_tokens=0)
         prompts = batch['prompt']  # list[str], length B
         prompt_inputs = tokenizer(prompts, return_tensors="pt", padding=True, return_token_type_ids=False,
                                   padding_side="left", add_special_tokens=False).to(args.device)
@@ -111,13 +114,14 @@ def grpo_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model, 
             prompt_inputs["input_ids"] = prompt_inputs["input_ids"][:, -args.max_seq_len:]
             prompt_inputs["attention_mask"] = prompt_inputs["attention_mask"][:, -args.max_seq_len:]
 
-        rollout_result = rollout_engine.rollout(
-            prompt_ids=prompt_inputs["input_ids"],
-            attention_mask=prompt_inputs["attention_mask"],
-            num_generations=args.num_generations,
-            max_new_tokens=args.max_gen_len,
-            temperature=0.8,
-        )
+        with profiler.phase("rollout"):
+            rollout_result = rollout_engine.rollout(
+                prompt_ids=prompt_inputs["input_ids"],
+                attention_mask=prompt_inputs["attention_mask"],
+                num_generations=args.num_generations,
+                max_new_tokens=args.max_gen_len,
+                temperature=0.8,
+            )
         outputs = rollout_result.output_ids
         completion_ids = rollout_result.completion_ids
         completions = rollout_result.completions
@@ -126,16 +130,19 @@ def grpo_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model, 
         full_mask = (outputs != tokenizer.pad_token_id).long()
         logp_pos = prompt_lens.unsqueeze(1) - 1 + torch.arange(completion_ids.size(1), device=args.device).unsqueeze(0)
 
-        rewards = calculate_rewards(prompts, completions, reward_model).to(args.device)  # [B*num_gen]
+        with profiler.phase("reward"):
+            rewards = calculate_rewards(prompts, completions, reward_model).to(args.device)  # [B*num_gen]
 
         model_unwrapped = model.module if isinstance(model, DistributedDataParallel) else model
-        with autocast_ctx:
-            res = model_unwrapped(outputs, attention_mask=full_mask)
-            aux_loss = res.aux_loss if lm_config.use_moe else torch.tensor(0.0, device=args.device)
-            per_token_logps = F.log_softmax(res.logits[:, :-1, :], dim=-1).gather(2, outputs[:, 1:].unsqueeze(-1)).squeeze(-1).gather(1, logp_pos)
+        with profiler.phase("policy_forward"):
+            with autocast_ctx:
+                res = model_unwrapped(outputs, attention_mask=full_mask)
+                aux_loss = res.aux_loss if lm_config.use_moe else torch.tensor(0.0, device=args.device)
+                per_token_logps = F.log_softmax(res.logits[:, :-1, :], dim=-1).gather(2, outputs[:, 1:].unsqueeze(-1)).squeeze(-1).gather(1, logp_pos)
 
-        with torch.no_grad():
-            ref_per_token_logps = F.log_softmax(ref_model(outputs, attention_mask=full_mask).logits[:, :-1, :], dim=-1).gather(2, outputs[:, 1:].unsqueeze(-1)).squeeze(-1).gather(1, logp_pos)
+        with profiler.phase("reference_forward"):
+            with torch.no_grad():
+                ref_per_token_logps = F.log_softmax(ref_model(outputs, attention_mask=full_mask).logits[:, :-1, :], dim=-1).gather(2, outputs[:, 1:].unsqueeze(-1)).squeeze(-1).gather(1, logp_pos)
 
         if args.debug_mode and is_main_process() and step % args.debug_interval == 0:
             for i in range(len(prompts)):
@@ -162,6 +169,9 @@ def grpo_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model, 
         eos_idx = torch.full((is_eos.size(0),), is_eos.size(1) - 1, dtype=torch.long, device=args.device)
         eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
         completion_mask = ((torch.arange(is_eos.size(1), device=args.device).expand(is_eos.size(0), -1) <= eos_idx.unsqueeze(1)) & completion_pad_mask).int()  # [B*num_gen, R]
+        # Dynamic rollouts are already padded to their batch maximum; avoid a
+        # per-step .item() synchronization in the profiler hot path.
+        profiler.set_tokens(outputs.numel(), outputs.numel())
 
         kl_div = ref_per_token_logps - per_token_logps
         per_token_kl = torch.exp(kl_div) - kl_div - 1  # [B*num_gen, R]
@@ -176,14 +186,20 @@ def grpo_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model, 
             per_token_loss = -(torch.min(per_token_loss1, per_token_loss2) - args.beta * per_token_kl)
         policy_loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1).clamp(min=1)).mean()
         loss = (policy_loss + aux_loss) / args.accumulation_steps  # scalar
-        loss.backward()
+        with profiler.phase("backward"):
+            loss.backward()
 
         if step % args.accumulation_steps == 0:
-            if args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
+            with profiler.phase("optimizer"):
+                if args.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+
+        profile_metrics = profiler.end_step()
+        if profile_metrics and wandb:
+            wandb.log(profile_metrics)
 
         if step % args.log_interval == 0 or step == iters:
             policy_loss_val = loss.item() * args.accumulation_steps
@@ -231,6 +247,7 @@ def grpo_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model, 
 
         if pause_requested(args):
             clear_pause_request(args)
+            profiler.finish()
             if is_main_process():
                 pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model, optimizer=optimizer, epoch=epoch, step=step, wandb=wandb, scheduler=scheduler, ref_model=ref_model)
             Logger('[PAUSED] Training paused — resume checkpoint saved.')
@@ -284,6 +301,7 @@ if __name__ == "__main__":
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = config_from_args(args, max_seq_len=args.max_seq_len + args.max_gen_len)
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='./checkpoints') if args.from_resume==1 else None
+    lm_config = restore_config_from_checkpoint(lm_config, ckp_data)
 
     # 3. 设置混合精度
     autocast_ctx = build_autocast_ctx(args)
@@ -336,14 +354,21 @@ if __name__ == "__main__":
         start_epoch = ckp_data['epoch']
         start_step = ckp_data.get('step', 0)
 
+    model = apply_torchao_fp8_training(model, args, label="policy")
+
     # 7. 编译和分布式包装
     if args.use_compile == 1:
-        model = torch.compile(model, mode=args.compile_mode)
+        model = torch.compile(
+            model, mode=args.compile_mode,
+            dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
+        )
         Logger('torch.compile enabled')
         rollout_engine.update_policy(model)
     if dist.is_initialized():
         model = DistributedDataParallel(model, device_ids=[local_rank])
     rollout_engine.update_policy(model)
+
+    profiler = TrainingProfiler(args, name="grpo")
 
     # 8. 开始训练
     for epoch in range(start_epoch, args.epochs):
@@ -357,6 +382,10 @@ if __name__ == "__main__":
             grpo_train_epoch(epoch, loader, len(loader) + skip, rollout_engine, ref_model, reward_model, start_step, wandb, use_sglang = (args.rollout_engine == "sglang"))
         else:
             grpo_train_epoch(epoch, loader, len(loader), rollout_engine, ref_model, reward_model, 0, wandb, use_sglang = (args.rollout_engine == "sglang"))
+
+    final_profile_metrics = profiler.finish()
+    if final_profile_metrics and wandb:
+        wandb.log(final_profile_metrics)
 
     # 9. 清理分布进程
     if dist.is_initialized():

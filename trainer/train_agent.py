@@ -31,12 +31,14 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from dataset.lm_dataset import AgentRLDataset
 from trainer.trainer_utils import (Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
                                    setup_seed, SkipBatchSampler, init_model, LMForRewardModel,
-                                   config_from_args, build_optimizer)
+                                   config_from_args, build_optimizer, restore_config_from_checkpoint,
+                                   apply_torchao_fp8_training)
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx, init_wandb_logger,
     PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
 )
 from trainer.rollout_engine import create_rollout_engine, compute_per_token_logps
+from trainer.training_profiler import TrainingProfiler
 
 warnings.filterwarnings('ignore')
 
@@ -385,18 +387,20 @@ def rl_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model,
     """
     last_step = start_step
     for step, batch in enumerate(loader, start=start_step + 1):
+        profiler.begin_step(tokens=0, useful_tokens=0)
         messages_batch = batch['messages']
         tools_batch = batch['tools']
         gt_batch = batch['gt']
         last_step = step
 
-        with torch.no_grad():
-            (completions, contexts, prompt_ids_batch, response_ids_batch, response_masks_batch,
-             response_old_logps_batch, turn_outputs_batch, unfinished_batch) = rollout_batch(
-                rollout_engine, tokenizer, messages_batch, tools_batch, args.num_generations,
-                max_turns=3, max_new_tokens=args.max_gen_len,
-                thinking_ratio=args.thinking_ratio, device=args.device,
-            )
+        with profiler.phase("rollout"):
+            with torch.no_grad():
+                (completions, contexts, prompt_ids_batch, response_ids_batch, response_masks_batch,
+                 response_old_logps_batch, turn_outputs_batch, unfinished_batch) = rollout_batch(
+                    rollout_engine, tokenizer, messages_batch, tools_batch, args.num_generations,
+                    max_turns=3, max_new_tokens=args.max_gen_len,
+                    thinking_ratio=args.thinking_ratio, device=args.device,
+                )
 
         prompts = [tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=True, tools=t) for m, t in zip(messages_batch, tools_batch)]
         packed_samples = []
@@ -423,6 +427,7 @@ def rl_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model,
             device=args.device, dtype=torch.float32,
         )
         full_mask = (input_ids != tokenizer.pad_token_id).long()
+        profiler.set_tokens(input_ids.numel(), input_ids.numel())
 
         rewards = calculate_rewards(
             prompts, completions, gt_batch, tools_batch, args.num_generations, reward_model,
@@ -488,11 +493,17 @@ def rl_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model,
         policy_loss = (((per_token_loss * completion_mask).sum(dim=1)[valid_rows] / token_counts[valid_rows].clamp(min=1)).mean()
                        if valid_rows.any() else per_token_loss.sum() * 0.0)
         loss = (policy_loss + aux_loss) / args.accumulation_steps
-        loss.backward()
+        with profiler.phase("backward"):
+            loss.backward()
 
         if step % args.accumulation_steps == 0:
-            if args.grad_clip > 0: torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            optimizer.step(); scheduler.step(); optimizer.zero_grad()
+            with profiler.phase("optimizer"):
+                if args.grad_clip > 0: torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                optimizer.step(); scheduler.step(); optimizer.zero_grad()
+
+        profile_metrics = profiler.end_step()
+        if profile_metrics and wandb:
+            wandb.log(profile_metrics)
 
         if step % args.log_interval == 0 or step == iters:
             pl = loss.item() * args.accumulation_steps
@@ -532,6 +543,7 @@ def rl_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model,
 
         if pause_requested(args):
             clear_pause_request(args)
+            profiler.finish()
             if is_main_process():
                 pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model, optimizer=optimizer, epoch=epoch, step=step, wandb=wandb, scheduler=scheduler, ref_model=ref_model)
             Logger('[PAUSED] Training paused — resume checkpoint saved.')
@@ -582,6 +594,7 @@ if __name__ == "__main__":
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = config_from_args(args, max_seq_len=args.max_seq_len + args.max_gen_len)
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='./checkpoints') if args.from_resume == 1 else None
+    lm_config = restore_config_from_checkpoint(lm_config, ckp_data)
 
     # 2. 设置混合精度
     autocast_ctx = build_autocast_ctx(args)
@@ -633,13 +646,20 @@ if __name__ == "__main__":
         start_epoch = ckp_data['epoch']
         start_step = ckp_data.get('step', 0)
 
+    model = apply_torchao_fp8_training(model, args, label="policy")
+
     if args.use_compile == 1:
-        model = torch.compile(model, mode=args.compile_mode)
+        model = torch.compile(
+            model, mode=args.compile_mode,
+            dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
+        )
         Logger('torch.compile enabled')
         rollout_engine.update_policy(model)
     if dist.is_initialized():
         model = DistributedDataParallel(model, device_ids=[local_rank])
     rollout_engine.update_policy(model)
+
+    profiler = TrainingProfiler(args, name="agent")
 
     for epoch in range(start_epoch, args.epochs):
         train_sampler and train_sampler.set_epoch(epoch)
@@ -656,6 +676,10 @@ if __name__ == "__main__":
             rl_train_epoch(epoch, loader, len(loader), rollout_engine, ref_model,
                            reward_model, 0, wandb,
                            use_sglang=(args.rollout_engine == "sglang"))
+
+    final_profile_metrics = profiler.finish()
+    if final_profile_metrics and wandb:
+        wandb.log(final_profile_metrics)
 
     if dist.is_initialized():
         dist.barrier()

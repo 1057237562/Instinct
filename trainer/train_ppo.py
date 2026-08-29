@@ -29,12 +29,14 @@ from model.model_instinct import InstinctForCausalLM
 from dataset.lm_dataset import RLAIFDataset
 from trainer.trainer_utils import (Logger, is_main_process, lm_checkpoint,
                                    pause_save_checkpoint, setup_seed, SkipBatchSampler, init_model,
-                                   LMForRewardModel, config_from_args, build_optimizer)
+                                   LMForRewardModel, config_from_args, build_optimizer,
+                                   restore_config_from_checkpoint, apply_torchao_fp8_training)
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx, init_wandb_logger,
     PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
 )
 from trainer.rollout_engine import create_rollout_engine
+from trainer.training_profiler import TrainingProfiler
 
 warnings.filterwarnings('ignore')
 
@@ -126,22 +128,25 @@ def ppo_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model, a
     grad_accum_step = 0
 
     for step, batch in enumerate(loader, start=start_step + 1):
+        profiler.begin_step(tokens=0, useful_tokens=0)
         prompts = batch["prompt"]  # list[str], length B
         enc = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True, max_length=args.max_seq_len,
                         padding_side="left").to(args.device)  # input_ids: [B, P], attention_mask: [B, P]
 
-        rollout_result = rollout_engine.rollout(
-            prompt_ids=enc.input_ids,
-            attention_mask=enc.attention_mask,
-            num_generations=1,
-            max_new_tokens=args.max_gen_len,
-            temperature=0.8,
-        )
+        with profiler.phase("rollout"):
+            rollout_result = rollout_engine.rollout(
+                prompt_ids=enc.input_ids,
+                attention_mask=enc.attention_mask,
+                num_generations=1,
+                max_new_tokens=args.max_gen_len,
+                temperature=0.8,
+            )
         gen_out = rollout_result.output_ids
         completion_ids = rollout_result.completion_ids
         prompt_lens = rollout_result.prompt_lens.to(args.device)
         responses_text = rollout_result.completions
         old_resp_logp = rollout_result.per_token_logps.to(args.device)
+        profiler.set_tokens(gen_out.numel(), gen_out.numel())
         rewards = calculate_rewards(prompts, responses_text, reward_model)  # [B]
 
         if args.debug_mode and is_main_process() and step % args.debug_interval == 0:
@@ -289,6 +294,10 @@ def ppo_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model, a
 
         if step % args.save_interval == 0 or step == iters: rollout_engine.update_policy(actor_model)
 
+        profile_metrics = profiler.end_step()
+        if profile_metrics and wandb:
+            wandb.log(profile_metrics)
+
         if is_main_process():
             critic_loss_val = value_loss_sum / max(log_count, 1)
             reward_val = rewards.mean().item()
@@ -338,6 +347,7 @@ def ppo_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model, a
 
         if pause_requested(args):
             clear_pause_request(args)
+            profiler.finish()
             if is_main_process():
                 pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=actor_model, optimizer=actor_optimizer, epoch=epoch, step=step, wandb=wandb, scheduler=actor_scheduler, critic_model=critic_model, critic_optimizer=critic_optimizer, critic_scheduler=critic_scheduler, ref_model=ref_model)
             Logger('[PAUSED] Training paused — resume checkpoint saved.')
@@ -389,6 +399,7 @@ if __name__ == "__main__":
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = config_from_args(args)
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='./checkpoints') if args.from_resume==1 else None
+    lm_config = restore_config_from_checkpoint(lm_config, ckp_data)
 
     # 3. 设置混合精度
     autocast_ctx = build_autocast_ctx(args)
@@ -450,15 +461,28 @@ if __name__ == "__main__":
         start_epoch = ckp_data['epoch']
         start_step = ckp_data.get('step', 0)
 
+    actor_model = apply_torchao_fp8_training(actor_model, args, label="actor")
+    critic_model = apply_torchao_fp8_training(critic_model, args, label="critic")
+
     # 7. 编译和分布式包装
     if args.use_compile == 1:
-        actor_model = torch.compile(actor_model, mode=args.compile_mode)
+        actor_model = torch.compile(
+            actor_model, mode=args.compile_mode,
+            dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
+        )
+        if getattr(args, 'fp8_training', 'off') != 'off':
+            critic_model = torch.compile(
+                critic_model, mode=args.compile_mode,
+                dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
+            )
         Logger('torch.compile enabled')
         rollout_engine.update_policy(actor_model)
     if dist.is_initialized():
         actor_model = DistributedDataParallel(actor_model, device_ids=[local_rank])
         critic_model = DistributedDataParallel(critic_model, device_ids=[local_rank])
     rollout_engine.update_policy(actor_model)
+
+    profiler = TrainingProfiler(args, name="ppo")
 
     # 8. 开始训练
     for epoch in range(start_epoch, args.epochs):
@@ -472,6 +496,10 @@ if __name__ == "__main__":
             ppo_train_epoch(epoch, loader, len(loader) + skip, rollout_engine, ref_model, actor_scheduler, critic_scheduler, reward_model, start_step, wandb, use_sglang = (args.rollout_engine == "sglang"))
         else:
             ppo_train_epoch(epoch, loader, len(loader), rollout_engine, ref_model, actor_scheduler, critic_scheduler, reward_model, 0, wandb, use_sglang = (args.rollout_engine == "sglang"))
+
+    final_profile_metrics = profiler.finish()
+    if final_profile_metrics and wandb:
+        wandb.log(final_profile_metrics)
 
     # 9. 清理分布进程
     if dist.is_initialized():

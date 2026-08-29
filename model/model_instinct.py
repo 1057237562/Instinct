@@ -30,6 +30,7 @@ class InstinctConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.use_moe = use_moe
+        self.model_architecture = kwargs.get("model_architecture", "standard")
         self.dropout = kwargs.get("dropout", 0.0)
         self.vocab_size = kwargs.get("vocab_size", 6400)
         self.bos_token_id = kwargs.get("bos_token_id", 1)
@@ -337,6 +338,10 @@ class InstinctBlock(nn.Module):
             self.attn_residual = AttentionResidual(config)
             self.mlp_residual = AttentionResidual(config)
             self.attnres_block_size = config.attnres_block_size
+            # Cache the modulo offset rather than reading layer_id in forward.
+            # torch.compile otherwise specializes on every layer_id and hits its
+            # recompilation limit on models deeper than eight layers.
+            self.attnres_partial_count = (2 * layer_id) % self.attnres_block_size
 
     def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
         if self.residual_type == "mhc":
@@ -405,7 +410,7 @@ class InstinctBlock(nn.Module):
 
     def forward_attnres_block(self, source_bank, position_embeddings, past_key_value=None,
                               use_cache=False, attention_mask=None):
-        partial_count = (2 * self.layer_id) % self.attnres_block_size
+        partial_count = self.attnres_partial_count
         hidden_states = self.attn_residual(self._block_sources(source_bank, partial_count))
         attn_output, present_key_value = self.self_attn(
             self.input_layernorm(hidden_states), position_embeddings,
