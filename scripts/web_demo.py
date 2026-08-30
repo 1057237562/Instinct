@@ -494,7 +494,7 @@ slogan = "Instinct Chat"
 
 if not st.session_state.get('model_loaded', False):
     if ready:
-        if st.sidebar.button(get_text('load_model'), use_container_width=True, type="primary"):
+        if st.sidebar.button(get_text('load_model'), width="stretch", type="primary"):
             with st.spinner(get_text('loading_model')):
                 try:
                     model, tokenizer = load_model_tokenizer(
@@ -515,7 +515,7 @@ else:
     st.sidebar.success(f"✅ {get_text('model_loaded')}: {loaded_name}")
     if st.session_state.get('loaded_weight_path', '') != weight_path:
         st.sidebar.warning(get_text('path_changed'))
-    if st.sidebar.button(get_text('unload_model'), use_container_width=True):
+    if st.sidebar.button(get_text('unload_model'), width="stretch"):
         keys_to_clear = ['model', 'tokenizer', 'model_loaded', 'loaded_weight_path',
                          'messages', 'chat_messages']
         for k in keys_to_clear:

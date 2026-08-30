@@ -22,6 +22,9 @@ from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from model.flash_attn_4 import flash_attention
 from model.kv_cache_quant import parse_cache, make_cache
 from model.checkpointing import recompute_attention, checkpoint_ffn
+from model.sequence_packing import (
+    apply_attention_mask, merge_packed_attention_mask, positions_from_sequence_ids,
+)
 from model.model_instinct import AttentionResidual, ManifoldHyperConnection, ManifoldHyperHead
 
 # ═══════════════════════════════════════════════════════════════
@@ -146,6 +149,8 @@ def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float =
 def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, unsqueeze_dim: int = 1):
     """对 q/k 施加旋转位置编码（rotate_half 拼接实现）。"""
     def rotate_half(x): return torch.cat((-x[..., x.shape[-1] // 2:], x[..., : x.shape[-1] // 2]), dim=-1)
+    if cos.ndim == 3:
+        unsqueeze_dim = 2
     q_embed = ((q * cos.unsqueeze(unsqueeze_dim)) + (rotate_half(q) * sin.unsqueeze(unsqueeze_dim))).to(q.dtype)
     k_embed = ((k * cos.unsqueeze(unsqueeze_dim)) + (rotate_half(k) * sin.unsqueeze(unsqueeze_dim))).to(k.dtype)
     return q_embed, k_embed
@@ -195,10 +200,12 @@ class Attention(nn.Module):
             xv = torch.cat([v_past, xv], dim=1)
         past_kv = make_cache(xk, xv, self.kv_cache_dtype) if use_cache else None
         if (self.flash and (seq_len > 1)
-                and (not self.is_causal or past_key_value is None)
-                and (attention_mask is None or torch.all(attention_mask == 1))):
-            # FA4 / SDPA fused fast path: 输入输出布局 (bs, seq, heads, hd),kernel 内部处理 GQA
-            output = flash_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=self.is_causal)
+                and (not self.is_causal or past_key_value is None)):
+            # Keep packed attention fused; mode 1 checkpoints the FFN only.
+            output = flash_attention(
+                xq, xk, xv, dropout_p=self.dropout if self.training else 0.0,
+                is_causal=self.is_causal, attention_mask=attention_mask,
+            )
             output = output.reshape(bsz, seq_len, -1)
         else:
             if self.use_grad_checkpoint == 1 and self.training and past_key_value is None:
@@ -209,7 +216,7 @@ class Attention(nn.Module):
                 xq, xk, xv = (xq.transpose(1, 2), repeat_kv(xk, self.n_rep).transpose(1, 2), repeat_kv(xv, self.n_rep).transpose(1, 2))
                 scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
                 if self.is_causal: scores[:, :, :, -seq_len:] += torch.full((seq_len, seq_len), float("-inf"), device=scores.device).triu(1)
-                if attention_mask is not None: scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
+                if attention_mask is not None: scores = apply_attention_mask(scores, attention_mask)
                 output = self.attn_dropout(F.softmax(scores.float(), dim=-1).type_as(xq)) @ xv
                 output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
         output = self.resid_dropout(self.o_proj(output))
@@ -459,7 +466,8 @@ class InstinctLoopModel(nn.Module):
         return self.output_residual(hidden_states)
 
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False,
-                return_intermediate=False, layer_callback=None, **kwargs):
+                return_intermediate=False, layer_callback=None, sequence_ids=None,
+                position_ids=None, **kwargs):
         batch_size, seq_length = input_ids.shape
 
         # Normalize past_key_values: must match total effective layers (each loop iter = 1 slot)
@@ -491,10 +499,19 @@ class InstinctLoopModel(nn.Module):
             )
             self.freqs_cos, self.freqs_sin = freqs_cos.to(hidden_states.device), freqs_sin.to(hidden_states.device)
 
-        position_embeddings = (
-            self.freqs_cos[start_pos:start_pos + seq_length],
-            self.freqs_sin[start_pos:start_pos + seq_length]
-        )
+        if sequence_ids is not None:
+            if any(pkv is not None for pkv in past_key_values):
+                raise ValueError("sequence_ids cannot be used together with a KV cache")
+            if position_ids is None:
+                position_ids = positions_from_sequence_ids(sequence_ids)
+            attention_mask = merge_packed_attention_mask(sequence_ids, attention_mask)
+        if position_ids is None:
+            position_embeddings = (
+                self.freqs_cos[start_pos:start_pos + seq_length],
+                self.freqs_sin[start_pos:start_pos + seq_length]
+            )
+        else:
+            position_embeddings = (self.freqs_cos[position_ids], self.freqs_sin[position_ids])
 
         presents = []
         intermediates = []

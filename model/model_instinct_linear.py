@@ -22,6 +22,7 @@ from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from model.flash_attn_4 import flash_attention
 from model.kv_cache_quant import parse_cache, make_cache
 from model.checkpointing import recompute_attention, checkpoint_ffn
+from model.sequence_packing import apply_attention_mask
 from model.model_instinct import AttentionResidual, ManifoldHyperConnection, ManifoldHyperHead
 
 logger = logging.getLogger(__name__)
@@ -340,6 +341,8 @@ def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float =
 def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, unsqueeze_dim: int = 1):
     """对 q/k 施加旋转位置编码（rotate_half 拼接实现）。"""
     def rotate_half(x): return torch.cat((-x[..., x.shape[-1] // 2:], x[..., : x.shape[-1] // 2]), dim=-1)
+    if cos.ndim == 3:
+        unsqueeze_dim = 2
     q_embed = (q * cos.unsqueeze(unsqueeze_dim)) + (rotate_half(q) * sin.unsqueeze(unsqueeze_dim))
     k_embed = (k * cos.unsqueeze(unsqueeze_dim)) + (rotate_half(k) * sin.unsqueeze(unsqueeze_dim))
     return q_embed, k_embed
@@ -396,9 +399,12 @@ class Attention(nn.Module):
             xk = torch.cat([k_past, xk], dim=1)
             xv = torch.cat([v_past, xv], dim=1)
         past_kv = make_cache(xk, xv, self.kv_cache_dtype) if use_cache else None
-        if self.flash and (seq_len > 1) and (past_key_value is None) and (attention_mask is None or torch.all(attention_mask == 1)):
-            # FA4 / SDPA fused fast path: 输入输出布局 (bs, seq, heads, hd),kernel 内部处理 GQA
-            output = flash_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
+        if self.flash and (seq_len > 1) and (past_key_value is None):
+            # Keep packed attention fused; mode 1 checkpoints the FFN only.
+            output = flash_attention(
+                xq, xk, xv, dropout_p=self.dropout if self.training else 0.0,
+                is_causal=True, attention_mask=attention_mask,
+            )
             output = output.reshape(bsz, seq_len, -1)
         else:
             if self.use_grad_checkpoint == 1 and self.training and past_key_value is None:
@@ -411,7 +417,7 @@ class Attention(nn.Module):
                 xq, xk, xv = (xq.transpose(1, 2), repeat_kv(xk, self.n_rep).transpose(1, 2), repeat_kv(xv, self.n_rep).transpose(1, 2))
                 scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
                 scores[:, :, :, -seq_len:] += torch.full((seq_len, seq_len), float("-inf"), device=scores.device).triu(1)
-                if attention_mask is not None: scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
+                if attention_mask is not None: scores = apply_attention_mask(scores, attention_mask)
                 output = self.attn_dropout(F.softmax(scores.float(), dim=-1).type_as(xq)) @ xv
                 output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
         output = self.resid_dropout(self.o_proj(output))
@@ -605,12 +611,79 @@ class InstinctModel(nn.Module):
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
-    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, **kwargs):
+    @staticmethod
+    def _restore_packed_tensor(tensor, mappings, batch_size, seq_length):
+        restored = tensor.new_zeros((batch_size, seq_length) + tensor.shape[2:])
+        for packed_index, (batch_index, start, end) in enumerate(mappings):
+            restored[batch_index, start:end] = tensor[packed_index, :end - start]
+        return restored
+
+    @torch.compiler.disable
+    def _forward_packed_segments(self, input_ids, sequence_ids, **kwargs):
+        """Run every packed example as an independent recurrent sequence.
+
+        GatedDeltaNet carries convolution and recurrent state along the sequence,
+        so a block-diagonal softmax mask alone cannot isolate examples.  Flattening
+        the segments into a temporary batch resets both states exactly, then the
+        hidden states are restored to the original packed layout for LM loss.
+        """
+        batch_size, seq_length = input_ids.shape
+        mappings, segments = [], []
+        for batch_index, row in enumerate(sequence_ids.detach().cpu().tolist()):
+            start = 0
+            while start < seq_length and row[start] >= 0:
+                end = start + 1
+                while end < seq_length and row[end] == row[start]:
+                    end += 1
+                mappings.append((batch_index, start, end))
+                segments.append(input_ids[batch_index, start:end])
+                start = end
+        if not segments:
+            raise ValueError("packed batch does not contain any real sequence")
+        max_length = max(segment.numel() for segment in segments)
+        pad_token_id = self.config.pad_token_id
+        pad_token_id = 0 if pad_token_id is None else pad_token_id
+        flat_input_ids = input_ids.new_full((len(segments), max_length), pad_token_id)
+        flat_attention_mask = torch.zeros(
+            (len(segments), max_length), dtype=torch.bool, device=input_ids.device
+        )
+        for packed_index, segment in enumerate(segments):
+            length = segment.numel()
+            flat_input_ids[packed_index, :length] = segment
+            flat_attention_mask[packed_index, :length] = True
+        result = self.forward(
+            flat_input_ids, attention_mask=flat_attention_mask,
+            sequence_ids=None, **kwargs
+        )
+        hidden_states, presents, aux_loss = result[:3]
+        hidden_states = self._restore_packed_tensor(
+            hidden_states, mappings, batch_size, seq_length
+        )
+        presents = [None] * len(presents)
+        if len(result) == 4:
+            intermediates = [
+                self._restore_packed_tensor(h, mappings, batch_size, seq_length)
+                for h in result[3]
+            ]
+            return hidden_states, presents, aux_loss, intermediates
+        return hidden_states, presents, aux_loss
+
+    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False,
+                sequence_ids=None, position_ids=None, **kwargs):
         """前向:推导 start_pos（首个有 KV 的全注意力层）→ embedding → 逐层前向。
 
         逐层收集 presents / intermediates,累加 MoE aux_loss;支持 mode-2 整层 checkpoint、
         layer_callback 流式钩子与 exit_check_fn 早退（早退时用 None 补齐剩余层 KV 槽位）。
         """
+        if sequence_ids is not None:
+            if attention_mask is not None or past_key_values is not None or use_cache:
+                raise ValueError(
+                    "packed linear attention cannot be combined with an external mask or KV cache"
+                )
+            if position_ids is not None:
+                raise ValueError("position_ids are derived from packed sequence boundaries")
+            return self._forward_packed_segments(input_ids, sequence_ids, **kwargs)
+
         batch_size, seq_length = input_ids.shape
         if hasattr(past_key_values, 'layers'): past_key_values = None
         past_key_values = past_key_values or [None] * len(self.layers)

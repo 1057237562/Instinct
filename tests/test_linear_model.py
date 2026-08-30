@@ -150,6 +150,22 @@ def test_mode2_linear_attn_loss_equal():
     assert_grads_equal(m2, m0)
 
 
+def test_packed_linear_segment_matches_standalone_forward():
+    """Packing resets GatedDeltaNet convolution and recurrent state per segment."""
+    model = _make_model(0)
+    model.eval()
+    second = torch.tensor([[20, 21, 22]])
+    packed = torch.tensor([[5, 6, 7, 20, 21, 22]])
+    sequence_ids = torch.tensor([[0, 0, 0, 1, 1, 1]])
+
+    with torch.no_grad():
+        standalone_logits = model(second).logits
+        packed_logits = model(packed, sequence_ids=sequence_ids).logits[:, 3:]
+
+    # Batched fallback kernels can differ from batch-size-1 by a few fp32 ulps.
+    torch.testing.assert_close(packed_logits, standalone_logits, rtol=2e-4, atol=2e-6)
+
+
 def test_moe_router_grad():
     """MoE top-1 normalization makes ``gate.weight`` depend only on the aux
     loss. Under Mode 1/2 the checkpointed aux_loss must flow back so

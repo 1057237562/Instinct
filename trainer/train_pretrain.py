@@ -25,6 +25,7 @@ from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint,
     setup_seed, init_model, SkipBatchSampler, config_from_args, build_optimizer,
     pause_save_checkpoint, restore_config_from_checkpoint, apply_torchao_fp8_training,
+    prepare_lm_batch,
 )
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx, init_wandb_logger,
@@ -54,19 +55,22 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
     start_time = time.time()
     data_config['epoch_steps'] = int(iters)
     last_step = start_step
-    for step, (input_ids, labels) in enumerate(loader, start=start_step + 1):
+    for step, batch in enumerate(loader, start=start_step + 1):
+        input_ids, labels = batch[:2]
         profiler.begin_step(
             tokens=input_ids.numel(), useful_tokens=(labels != -100).sum().item()
         )
         with profiler.phase("data_transfer"):
-            input_ids = input_ids.to(args.device)
-            labels = labels.to(args.device)
+            input_ids, labels, sequence_ids = prepare_lm_batch(batch, args.device)
         last_step = step
         set_cosine_lr(optimizer, epoch, step, iters, args)
 
         with profiler.phase("forward"):
             with autocast_ctx:
-                res = model(input_ids, labels=labels, early_exit=bool(args.early_exit))
+                res = model(
+                    input_ids, labels=labels, sequence_ids=sequence_ids,
+                    early_exit=bool(args.early_exit),
+                )
                 loss = res.loss + res.aux_loss
                 loss = loss / args.accumulation_steps
 
@@ -107,7 +111,7 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
             model.train()
             del state_dict
 
-        del input_ids, labels, res, loss
+        del input_ids, labels, sequence_ids, res, loss
 
         # 暂停分支：检测到暂停请求标记时，清标记并保存检查点后以 42 退出（WebUI 据此识别“已暂停”）。
         if pause_requested(args):

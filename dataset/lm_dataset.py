@@ -10,12 +10,14 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 _PACKED_PRETRAIN_FEATURES = Features({
     'input_ids': Sequence(Value('int32')),
+    'sequence_ids': Sequence(Value('int32')),
     'valid_tokens': Value('int32'),
     'train_tokens': Value('int32'),
 })
 _PACKED_SFT_FEATURES = Features({
     'input_ids': Sequence(Value('int32')),
     'labels': Sequence(Value('int32')),
+    'sequence_ids': Sequence(Value('int32')),
     'valid_tokens': Value('int32'),
     'train_tokens': Value('int32'),
 })
@@ -72,25 +74,37 @@ def _best_fit_pack(input_sequences, label_sequences, max_length, pad_token_id):
         pos = bisect.bisect_left(remaining, (length, -1))
         if pos == len(remaining):
             bin_id = len(bins)
-            bins.append([list(input_ids), list(labels)])
+            bins.append([list(input_ids), list(labels), [0] * length])
             bisect.insort(remaining, (max_length - length, bin_id))
         else:
             capacity, bin_id = remaining.pop(pos)
+            sequence_id = bins[bin_id][2][-1] + 1
+            # Shifted causal-LM loss would otherwise train the final token of
+            # the previous example to predict this example's first token.
+            labels = list(labels)
+            labels[0] = -100
             bins[bin_id][0].extend(input_ids)
             bins[bin_id][1].extend(labels)
+            bins[bin_id][2].extend([sequence_id] * length)
             bisect.insort(remaining, (capacity - length, bin_id))
 
-    packed_inputs, packed_labels, valid_tokens, train_tokens = [], [], [], []
-    for input_ids, labels in bins:
+    packed_inputs, packed_labels, packed_sequence_ids = [], [], []
+    valid_tokens, train_tokens = [], []
+    for input_ids, labels, sequence_ids in bins:
         valid = len(input_ids)
         pad = max_length - valid
         packed_inputs.append(input_ids + [pad_token_id] * pad)
         packed_labels.append(labels + [-100] * pad)
+        # Padding is its own segment.  This keeps it isolated without ever
+        # creating a fully-masked attention row (padding tokens can attend one
+        # another, while real examples cannot attend padding).
+        packed_sequence_ids.append(sequence_ids + [-1] * pad)
         valid_tokens.append(valid)
         train_tokens.append(sum(label != -100 for label in labels))
     return {
         'input_ids': packed_inputs,
         'labels': packed_labels,
+        'sequence_ids': packed_sequence_ids,
         'valid_tokens': valid_tokens,
         'train_tokens': train_tokens,
     }
@@ -159,7 +173,14 @@ class PretrainDataset(Dataset):
             input_ids = torch.tensor(sample['input_ids'], dtype=torch.long)
             labels = input_ids.clone()
             labels[input_ids == self.tokenizer.pad_token_id] = -100
-            return input_ids, labels
+            sequence_ids = torch.tensor(sample['sequence_ids'], dtype=torch.long)
+            # _best_fit_pack masks every non-first example boundary.  Pretrain
+            # reconstructs labels to keep its Arrow cache small, so restore the
+            # same mask here.
+            boundaries = sequence_ids[1:] != sequence_ids[:-1]
+            real_boundaries = boundaries & (sequence_ids[1:] >= 0)
+            labels[1:][real_boundaries] = -100
+            return input_ids, labels, sequence_ids
         tokens = self.tokenizer(str(sample['text']), add_special_tokens=False, max_length=self.max_length - 2, truncation=True).input_ids
         tokens = [self.tokenizer.bos_token_id] + tokens + [self.tokenizer.eos_token_id]
         input_ids = tokens + [self.tokenizer.pad_token_id] * (self.max_length - len(tokens))
@@ -256,6 +277,7 @@ class SFTDataset(Dataset):
             return (
                 torch.tensor(sample['input_ids'], dtype=torch.long),
                 torch.tensor(sample['labels'], dtype=torch.long),
+                torch.tensor(sample['sequence_ids'], dtype=torch.long),
             )
         conversations = pre_processing_chat(sample['conversations'])
         prompt = self.create_chat_prompt(conversations)

@@ -29,6 +29,29 @@ def _architecture_classes(architecture):
         return Config, Model
     return InstinctConfig, InstinctForCausalLM
 
+
+def prepare_lm_batch(batch, device):
+    """Move an LM batch to device and surface packing metadata when needed.
+
+    Plain datasets keep their historical ``(input_ids, labels)`` API. Packed
+    datasets add ``sequence_ids``; blocks containing only one real example can
+    still use the ordinary fused causal-attention path.
+    """
+    if len(batch) == 2:
+        input_ids, labels = batch
+        sequence_ids = None
+    elif len(batch) == 3:
+        input_ids, labels, sequence_ids = batch
+        if not torch.any(sequence_ids > 0).item():
+            sequence_ids = None
+    else:
+        raise ValueError(f"expected an LM batch with 2 or 3 tensors, got {len(batch)}")
+    input_ids = input_ids.to(device)
+    labels = labels.to(device)
+    if sequence_ids is not None:
+        sequence_ids = sequence_ids.to(device)
+    return input_ids, labels, sequence_ids
+
 def get_model_params(model: torch.nn.Module, config) -> None:
     total = sum(p.numel() for p in model.parameters()) / 1e6
     n_routed = getattr(config, 'n_routed_experts', getattr(config, 'num_experts', 0))

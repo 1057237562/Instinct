@@ -49,7 +49,10 @@ def eager_attention(q, k, v, attention_mask, is_causal, dropout_p):
     if is_causal:
         scores[:, :, :, -seq_len:] += torch.full((seq_len, seq_len), float("-inf"), device=scores.device).triu(1)
     if attention_mask is not None:
-        scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
+        if attention_mask.ndim == 2:
+            scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
+        else:
+            scores = scores.masked_fill(~attention_mask.unsqueeze(1).bool(), -1e9)
     out = F.dropout(F.softmax(scores.float(), dim=-1).type_as(q_t), p=dropout_p) @ v_t
     return out.transpose(1, 2).reshape(bs, seq_len, -1)
 
@@ -99,6 +102,24 @@ def test_output_no_causal_with_mask():
     out = RecomputeAttention.apply(q, k, v, mask, False, 0.0, _scale(q.shape[-1]))
     ref = eager_attention(q, k, v, mask, False, 0.0)
     assert torch.equal(out, ref)
+
+
+def test_output_and_grad_with_block_diagonal_mask():
+    """Packed [batch, query, key] masks work in selective recomputation."""
+    q, k, v = _make_qkv()
+    sequence_ids = torch.tensor([[0, 0, 0, 1, 1, 1], [0, 0, 1, 1, 2, 2]])
+    mask = sequence_ids.unsqueeze(-1) == sequence_ids.unsqueeze(-2)
+    qg, kg, vg = q.clone(), k.clone(), v.clone()
+    qg.requires_grad = kg.requires_grad = vg.requires_grad = True
+
+    out = RecomputeAttention.apply(qg, kg, vg, mask, True, 0.0, _scale(q.shape[-1]))
+    ref = eager_attention(q, k, v, mask, True, 0.0)
+    assert torch.equal(out, ref)
+    out.sum().backward()
+    rq, rk, rv = eager_backward(q, k, v, mask, True, 0.0)
+    assert torch.equal(qg.grad, rq)
+    assert torch.equal(kg.grad, rk)
+    assert torch.equal(vg.grad, rv)
 
 
 def test_grad_output():

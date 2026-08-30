@@ -31,6 +31,7 @@ from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint, init_model, SkipBatchSampler,
     config_from_args, build_optimizer, setup_seed, pause_save_checkpoint,
     restore_config_from_checkpoint, apply_torchao_fp8_training,
+    prepare_lm_batch,
 )
 from trainer.training_profiler import TrainingProfiler
 
@@ -71,26 +72,28 @@ def train_epoch(epoch, loader, iters, teacher_model, lm_config_student, start_st
         teacher_model.eval()
         teacher_model.requires_grad_(False)
 
-    for step, (input_ids, labels) in enumerate(loader, start=start_step + 1):
+    for step, batch in enumerate(loader, start=start_step + 1):
+        input_ids, labels = batch[:2]
         last_step = step
         profiler.begin_step(tokens=input_ids.numel(), useful_tokens=(labels != -100).sum().item())
         with profiler.phase("data_transfer"):
-            input_ids = input_ids.to(args.device)
-            labels = labels.to(args.device)
+            input_ids, labels, sequence_ids = prepare_lm_batch(batch, args.device)
         loss_mask = (labels[..., 1:] != -100).float()
         set_cosine_lr(optimizer, epoch, step, iters, args)
 
         # 前向传播（学生模型）
         with profiler.phase("student_forward"):
             with autocast_ctx:
-                res = model(input_ids)
+                res = model(input_ids, sequence_ids=sequence_ids)
                 student_logits = res.logits[..., :-1, :].contiguous()
 
         # 教师模型前向传播（只在eval & no_grad）
         if teacher_model is not None:
             with profiler.phase("teacher_forward"):
                 with torch.no_grad():
-                    teacher_logits = teacher_model(input_ids).logits[..., :-1, :].contiguous()
+                    teacher_logits = teacher_model(
+                        input_ids, sequence_ids=sequence_ids
+                    ).logits[..., :-1, :].contiguous()
                     vocab_size_student = student_logits.size(-1)
                     teacher_logits = teacher_logits[..., :vocab_size_student]
 
@@ -164,7 +167,7 @@ def train_epoch(epoch, loader, iters, teacher_model, lm_config_student, start_st
             model.train()
             del state_dict
 
-        del input_ids, labels, loss_mask, res, student_logits, ce_loss, distill_loss, loss
+        del input_ids, labels, sequence_ids, loss_mask, res, student_logits, ce_loss, distill_loss, loss
 
         if pause_requested(args):
             clear_pause_request(args)

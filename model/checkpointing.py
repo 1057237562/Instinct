@@ -1,13 +1,9 @@
-"""Selective attention recomputation — gradient-checkpointing Mode 1 (plan T2).
+"""Selective attention recomputation — gradient-checkpointing Mode 1.
 
-``RecomputeAttention`` is a custom ``torch.autograd.Function`` that keeps only
-Q/K/V (plus attention mask and RNG state) across the forward pass and
-recomputes the attention core in backward:
-
-    QK^T -> *scale -> causal / attention mask -> softmax -> dropout -> @V
-
-The large intermediates (scores ``[bs, heads, seq, seq]``, softmax probabilities,
-dropout mask) are never saved — the memory win grows with ``seq``.
+``RecomputeAttention`` keeps only Q/K/V (plus attention mask and RNG state)
+across the explicit eager-attention fallback and recomputes its core in
+backward. The fused FA4/SDPA fast path performs its own memory-efficient
+attention and is intentionally not wrapped here; mode 1 checkpoints its FFN.
 
 Semantics are a byte-for-byte re-implementation of the eager math-attention
 branch of ``Attention.forward`` in ``model/model_instinct.py:142-147``;
@@ -34,6 +30,7 @@ from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+from model.sequence_packing import apply_attention_mask
 
 
 def _repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -134,7 +131,7 @@ class RecomputeAttention(torch.autograd.Function):
                 (seq_len, seq_len), float("-inf"), device=scores.device
             ).triu(1)
         if attention_mask is not None:
-            scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
+            scores = apply_attention_mask(scores, attention_mask)
         out = F.dropout(F.softmax(scores.float(), dim=-1).type_as(q_t), p=dropout_p) @ v_t
         return out.transpose(1, 2).reshape(bs, seq_len, -1)
 

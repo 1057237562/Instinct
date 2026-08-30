@@ -11,6 +11,7 @@ Run from the scripts/ directory:
 """
 
 import streamlit as st
+import inspect
 import math
 import json
 import os
@@ -23,6 +24,40 @@ import time
 # Page config
 # ═══════════════════════════════════════════════════════════════
 st.set_page_config(page_title="Instinct Config", layout="wide")
+
+
+def _state_aware_widget(widget, default_argument, *args, **kwargs):
+    """Let Session State win without also passing a widget default."""
+    key = kwargs.get("key")
+    if key is not None and key in st.session_state:
+        bound = inspect.signature(widget).bind_partial(*args, **kwargs)
+        bound.arguments.pop(default_argument, None)
+        return widget(*bound.args, **bound.kwargs)
+    return widget(*args, **kwargs)
+
+
+def _slider(*args, **kwargs):
+    return _state_aware_widget(st.slider, "value", *args, **kwargs)
+
+
+def _number_input(*args, **kwargs):
+    return _state_aware_widget(st.number_input, "value", *args, **kwargs)
+
+
+def _checkbox(*args, **kwargs):
+    return _state_aware_widget(st.checkbox, "value", *args, **kwargs)
+
+
+def _selectbox(*args, **kwargs):
+    return _state_aware_widget(st.selectbox, "index", *args, **kwargs)
+
+
+def _radio(*args, **kwargs):
+    return _state_aware_widget(st.radio, "index", *args, **kwargs)
+
+
+def _text_input(*args, **kwargs):
+    return _state_aware_widget(st.text_input, "value", *args, **kwargs)
 
 # ═══════════════════════════════════════════════════════════════
 # Preset definitions
@@ -1007,7 +1042,7 @@ def render_log_metrics_charts(metrics):
             }
             for index, metric in enumerate(metrics)
         ]
-        st.line_chart(chart_data, x="step", use_container_width=True)
+        st.line_chart(chart_data, x="step", width="stretch")
 
     if not rendered:
         st.info("This log has no plottable training metrics yet.")
@@ -1234,6 +1269,17 @@ _DEFAULT_WEIGHT_PREFIX = {
     "distillation": "full_dist",
 }
 
+_DEFAULT_EPOCHS = {
+    "pretrain": 2,
+    "full_sft": 2,
+    "lora": 10,
+    "dpo": 1,
+    "ppo": 1,
+    "grpo": 1,
+    "agent": 1,
+    "distillation": 6,
+}
+
 # 暂停退出码：训练进程识别到 .pause_request 标记后保存检查点并以 42 退出，
 # 与 0=成功 / 其他=失败 相区分，WebUI 轮询时据此把状态置为 "paused"。
 PAUSE_EXIT_CODE = 42
@@ -1241,6 +1287,10 @@ PAUSE_EXIT_CODE = 42
 
 def _default_weight_prefix(train_type):
     return _DEFAULT_WEIGHT_PREFIX.get(train_type, train_type)
+
+
+def _default_epochs(train_type):
+    return _DEFAULT_EPOCHS.get(train_type, 2)
 
 
 def _arch_tag():
@@ -1527,7 +1577,7 @@ with st.sidebar:
             if current_preset in preset_options
             else 5
         )
-        chosen = st.radio(
+        chosen = _radio(
             "Quick-select preset",
             preset_options,
             index=default_idx,
@@ -1546,7 +1596,7 @@ with st.sidebar:
         arch_options = ["Standard Transformer", "MoE Transformer", "GatedDeltaNet (Linear)", "Looped Transformer"]
         current_arch = st.session_state.get("model_architecture", "standard")
         arch_index = {"standard": 0, "moe": 1, "linear": 2, "looped": 3}.get(current_arch, 0)
-        chosen_arch = st.radio(
+        chosen_arch = _radio(
             "Architecture type",
             arch_options,
             index=arch_index,
@@ -1569,7 +1619,7 @@ with st.sidebar:
 
     # ── Core Architecture ──
     with st.expander("Core Architecture", expanded=True):
-        st.slider(
+        _slider(
             "hidden_size",
             128,
             2048,
@@ -1577,14 +1627,14 @@ with st.sidebar:
             step=64,
             key="hidden_size",
         )
-        st.slider(
+        _slider(
             "num_hidden_layers",
             1,
             64,
             st.session_state.get("num_hidden_layers", 8),
             key="num_hidden_layers",
         )
-        st.number_input(
+        _number_input(
             "vocab_size",
             1000,
             100000,
@@ -1592,7 +1642,7 @@ with st.sidebar:
             step=100,
             key="vocab_size",
         )
-        st.slider(
+        _slider(
             "dropout",
             0.0,
             0.5,
@@ -1600,7 +1650,7 @@ with st.sidebar:
             step=0.05,
             key="dropout",
         )
-        st.selectbox(
+        _selectbox(
             "hidden_act",
             ["silu", "gelu", "relu"],
             index=["silu", "gelu", "relu"].index(
@@ -1608,7 +1658,7 @@ with st.sidebar:
             ),
             key="hidden_act",
         )
-        st.checkbox(
+        _checkbox(
             "tie_word_embeddings",
             value=st.session_state.get("tie_word_embeddings", False),
             key="tie_word_embeddings",
@@ -1623,7 +1673,7 @@ with st.sidebar:
         }
         _residual_options = list(_residual_labels)
         _current_residual = st.session_state.get("residual_type", "standard")
-        _chosen_residual = st.radio(
+        _chosen_residual = _radio(
             "Residual topology",
             _residual_options,
             index=_residual_options.index(_current_residual),
@@ -1634,23 +1684,23 @@ with st.sidebar:
 
         if _chosen_residual == "mhc":
             st.caption("Keeps parallel residual streams and projects their mixer onto a doubly-stochastic manifold.")
-            st.slider(
+            _slider(
                 "hc_mult (parallel streams)", 1, 8,
                 st.session_state.get("hc_mult", 4), key="hc_mult",
             )
-            st.slider(
+            _slider(
                 "hc_sinkhorn_iters", 1, 50,
                 st.session_state.get("hc_sinkhorn_iters", 20), key="hc_sinkhorn_iters",
                 help="Alternating row/column normalizations used by the Sinkhorn-Knopp projection.",
             )
-            st.number_input(
+            _number_input(
                 "hc_eps", min_value=1e-9, max_value=1e-3,
                 value=float(st.session_state.get("hc_eps", 1e-6)),
                 format="%.1e", key="hc_eps",
             )
         elif _chosen_residual == "attnres":
             st.caption("Uses learned pseudo-queries to select residual sources along model depth.")
-            st.radio(
+            _radio(
                 "AttnRes variant", ["block", "full"],
                 index=["block", "full"].index(st.session_state.get("attnres_variant", "block")),
                 format_func=lambda value: "Block AttnRes (recommended)" if value == "block" else "Full AttnRes",
@@ -1666,7 +1716,7 @@ with st.sidebar:
                     _max_attnres_block,
                     max(1, st.session_state.get("attnres_block_size", _default_attnres_block)),
                 )
-                st.number_input(
+                _number_input(
                     "attnres_block_size (sublayers)", min_value=1,
                     max_value=_max_attnres_block,
                     value=st.session_state.get("attnres_block_size", _default_attnres_block),
@@ -1676,14 +1726,14 @@ with st.sidebar:
 
     # ── Attention ──
     with st.expander("Attention", expanded=True):
-        st.slider(
+        _slider(
             "num_attention_heads",
             1,
             32,
             st.session_state.get("num_attention_heads", 8),
             key="num_attention_heads",
         )
-        st.slider(
+        _slider(
             "num_key_value_heads",
             1,
             32,
@@ -1711,27 +1761,27 @@ with st.sidebar:
             _h = st.session_state.get("hidden_size", 768)
             _q = st.session_state.get("num_attention_heads", 8)
             _hd = compute_head_dim(_h, _q)
-            st.slider(
+            _slider(
                 "full_attention_interval",
                 1, 16,
                 st.session_state.get("full_attention_interval", 4),
                 key="full_attention_interval",
                 help="Every Nth layer uses standard full attention",
             )
-            st.slider(
+            _slider(
                 "linear_conv_kernel_dim",
                 1, 8,
                 st.session_state.get("linear_conv_kernel_dim", 4),
                 key="linear_conv_kernel_dim",
                 help="Conv1d kernel size for GatedDeltaNet",
             )
-            override_lin_kd = st.checkbox(
+            override_lin_kd = _checkbox(
                 "Override linear_key_head_dim",
                 value=st.session_state.get("_override_lin_kd", False),
                 key="_override_lin_kd",
             )
             if override_lin_kd:
-                st.number_input(
+                _number_input(
                     "linear_key_head_dim",
                     value=st.session_state.get("linear_key_head_dim", _hd),
                     step=8, key="linear_key_head_dim",
@@ -1746,13 +1796,13 @@ with st.sidebar:
                     f'font-size:18px;color:#e2e8f0;">{_hd}</span>'
                     f"</div>", unsafe_allow_html=True,
                 )
-            override_lin_vd = st.checkbox(
+            override_lin_vd = _checkbox(
                 "Override linear_value_head_dim",
                 value=st.session_state.get("_override_lin_vd", False),
                 key="_override_lin_vd",
             )
             if override_lin_vd:
-                st.number_input(
+                _number_input(
                     "linear_value_head_dim",
                     value=st.session_state.get("linear_value_head_dim", _hd),
                     step=8, key="linear_value_head_dim",
@@ -1767,12 +1817,12 @@ with st.sidebar:
                     f'font-size:18px;color:#e2e8f0;">{_hd}</span>'
                     f"</div>", unsafe_allow_html=True,
                 )
-            st.number_input(
+            _number_input(
                 "linear_num_key_heads",
                 value=st.session_state.get("linear_num_key_heads", _q),
                 step=1, key="linear_num_key_heads",
             )
-            st.number_input(
+            _number_input(
                 "linear_num_value_heads",
                 value=st.session_state.get("linear_num_value_heads", _q),
                 step=1, key="linear_num_value_heads",
@@ -1782,7 +1832,7 @@ with st.sidebar:
     if st.session_state.get("model_architecture") == "looped":
         with st.expander("Looped (LoopUS) Config", expanded=True):
             _n_layers = st.session_state.get("num_hidden_layers", 8)
-            st.number_input(
+            _number_input(
                 "loop_max_steps (safety cap)",
                 min_value=1, max_value=128,
                 value=st.session_state.get("loop_max_steps", 32),
@@ -1790,7 +1840,7 @@ with st.sidebar:
                 help="Dynamic loop safety cap. The loop exits when q >= threshold; "
                      "this only bounds worst-case (effectively infinite for trained models).",
             )
-            st.slider(
+            _slider(
                 "loop_q_threshold",
                 0.1, 1.0,
                 st.session_state.get("loop_q_threshold", 0.9),
@@ -1798,14 +1848,14 @@ with st.sidebar:
                 key="loop_q_threshold",
                 help="Confidence threshold for early exit (q > threshold halts)",
             )
-            st.number_input(
+            _number_input(
                 "loop_n_supervision",
                 min_value=1, max_value=128,
                 value=st.session_state.get("loop_n_supervision", 6),
                 key="loop_n_supervision",
                 help="How many of the loop steps get gradients (random deep supervision)",
             )
-            st.slider(
+            _slider(
                 "loop_depth_reward (λ)",
                 0.0, 0.5,
                 st.session_state.get("loop_depth_reward", 0.01),
@@ -1814,14 +1864,14 @@ with st.sidebar:
                 help="Reward weight on expected loop depth λ·E[steps]. "
                      "Higher λ → stronger incentive to exit early. Anneal upward for faster exit.",
             )
-            st.checkbox(
+            _checkbox(
                 "exit_in_training",
                 value=st.session_state.get("exit_in_training", True),
                 key="exit_in_training",
                 help="Allow per-sample early exit during training (q > threshold stops the loop). "
                      "Disable to always run the full cap and only reward via λ.",
             )
-            st.slider(
+            _slider(
                 "loop_beta (monotonicity weight)",
                 0.0, 2.0,
                 st.session_state.get("loop_beta", 0.5),
@@ -1831,7 +1881,7 @@ with st.sidebar:
             st.markdown("#### Deep-Thinking Rewards")
             st.caption("Self-distillation + depth-gain reward. Train with "
                        "exit_in_training OFF so every loop state is visited.")
-            st.slider(
+            _slider(
                 "loop_distill_weight",
                 0.0, 2.0,
                 st.session_state.get("loop_distill_weight", 0.0),
@@ -1841,7 +1891,7 @@ with st.sidebar:
                      "final depth's output distribution (KL), forcing deeper states "
                      "to carry richer representation. 0 = off.",
             )
-            st.slider(
+            _slider(
                 "loop_distill_temperature",
                 0.5, 5.0,
                 st.session_state.get("loop_distill_temperature", 2.0),
@@ -1850,14 +1900,14 @@ with st.sidebar:
                 help="Self-distillation temperature T (soften teacher/student "
                      "distributions; KL scaled by T²)",
             )
-            st.checkbox(
+            _checkbox(
                 "teacher_stop_grad",
                 value=st.session_state.get("teacher_stop_grad", True),
                 key="teacher_stop_grad",
                 help="Stop gradient on teacher (final-depth) logits to avoid the "
                      "trivial self-KL solution. 1 = recommended.",
             )
-            st.slider(
+            _slider(
                 "loop_depth_gain_reward",
                 0.0, 1.0,
                 st.session_state.get("loop_depth_gain_reward", 0.0),
@@ -1868,17 +1918,17 @@ with st.sidebar:
                      "(L1 − Lb)_+. 0 = off.",
             )
             st.caption(f"Layer partition (total: {_n_layers})")
-            enc_s = st.text_input(
+            enc_s = _text_input(
                 "Encoder layers (comma-separated)",
                 value=",".join(str(x) for x in st.session_state.get("loop_encoder_layers", [0, 1])),
                 key="_loop_encoder_layers_str",
             )
-            body_s = st.text_input(
+            body_s = _text_input(
                 "Loop body layers (comma-separated)",
                 value=",".join(str(x) for x in st.session_state.get("loop_body_layers", [2, 3, 4])),
                 key="_loop_body_layers_str",
             )
-            out_s = st.text_input(
+            out_s = _text_input(
                 "Output layers (comma-separated)",
                 value=",".join(str(x) for x in st.session_state.get("loop_output_layers", [5, 6, 7])),
                 key="_loop_output_layers_str",
@@ -1892,14 +1942,14 @@ with st.sidebar:
 
     # ── Position Encoding ──
     with st.expander("Position Encoding", expanded=True):
-        st.number_input(
+        _number_input(
             "max_position_embeddings",
             value=st.session_state.get("max_position_embeddings", 32768),
             step=1024,
             key="max_position_embeddings",
             format="%d",
         )
-        st.number_input(
+        _number_input(
             "rope_theta",
             10000.0,
             10000000.0,
@@ -1907,7 +1957,7 @@ with st.sidebar:
             format="%.0e",
             key="rope_theta",
         )
-        st.checkbox(
+        _checkbox(
             "YaRN (inference_rope_scaling)",
             value=st.session_state.get("inference_rope_scaling", False),
             key="inference_rope_scaling",
@@ -1915,30 +1965,30 @@ with st.sidebar:
         if st.session_state.get("inference_rope_scaling", False):
             c1, c2 = st.columns(2)
             with c1:
-                st.number_input(
+                _number_input(
                     "beta_fast",
                     value=st.session_state.get("beta_fast", 32),
                     key="beta_fast",
                 )
-                st.number_input(
+                _number_input(
                     "beta_slow",
                     value=st.session_state.get("beta_slow", 1),
                     key="beta_slow",
                 )
-                st.number_input(
+                _number_input(
                     "factor",
                     value=st.session_state.get("factor", 16),
                     key="factor",
                 )
             with c2:
-                st.number_input(
+                _number_input(
                     "original_max_pos",
                     value=st.session_state.get(
                         "original_max_position_embeddings", 2048
                     ),
                     key="original_max_position_embeddings",
                 )
-                st.number_input(
+                _number_input(
                     "attention_factor",
                     value=st.session_state.get("attention_factor", 1.0),
                     step=0.1,
@@ -1948,20 +1998,20 @@ with st.sidebar:
 
     # ── MoE ──
     with st.expander("MoE (Experimental)", expanded=True):
-        st.checkbox(
+        _checkbox(
             "use_moe",
             value=st.session_state.get("use_moe", False),
             key="use_moe",
         )
         if st.session_state.get("use_moe", False):
-            st.slider(
+            _slider(
                 "num_experts",
                 2,
                 16,
                 st.session_state.get("num_experts", 4),
                 key="num_experts",
             )
-            st.slider(
+            _slider(
                 "num_experts_per_tok",
                 1,
                 4,
@@ -1971,13 +2021,13 @@ with st.sidebar:
             _moe_int = st.session_state.get(
                 "moe_intermediate_size", compute_intermediate_size(_h)
             )
-            override_moe = st.checkbox(
+            override_moe = _checkbox(
                 "Override moe_intermediate_size",
                 value=st.session_state.get("_override_moe_int", False),
                 key="_override_moe_int",
             )
             if override_moe:
-                st.number_input(
+                _number_input(
                     "moe_intermediate_size",
                     value=_moe_int,
                     step=64,
@@ -1998,12 +2048,12 @@ with st.sidebar:
                     f"</div>",
                     unsafe_allow_html=True,
                 )
-            st.checkbox(
+            _checkbox(
                 "norm_topk_prob",
                 value=st.session_state.get("norm_topk_prob", True),
                 key="norm_topk_prob",
             )
-            st.number_input(
+            _number_input(
                 "router_aux_loss_coef",
                 0.0,
                 0.01,
@@ -2014,7 +2064,7 @@ with st.sidebar:
 
     # ── Early Exit (training only) ──
     with st.expander("Early Exit (Training)", expanded=False):
-        st.checkbox(
+        _checkbox(
             "Enable Early Exit Loss",
             value=st.session_state.get("early_exit_enabled", False),
             key="early_exit_enabled",
@@ -2022,7 +2072,7 @@ with st.sidebar:
         )
         if st.session_state.get("early_exit_enabled", False):
             ee_default = st.session_state.get("early_exit_layers", [4, 5, 6, 7])
-            layers_str = st.text_input(
+            layers_str = _text_input(
                 "early_exit_layers (comma-separated)",
                 value=",".join(str(x) for x in ee_default),
                 key="_early_exit_layers_str",
@@ -2031,7 +2081,7 @@ with st.sidebar:
                 st.session_state.early_exit_layers = [int(x.strip()) for x in layers_str.split(",") if x.strip()]
             except ValueError:
                 st.session_state.early_exit_layers = [4, 5, 6, 7]
-            st.slider(
+            _slider(
                 "early_exit_loss_weight",
                 0.0, 1.0,
                 st.session_state.get("early_exit_loss_weight", 0.3),
@@ -2041,13 +2091,13 @@ with st.sidebar:
 
     # ── Misc ──
     with st.expander("Misc"):
-        st.number_input(
+        _number_input(
             "rms_norm_eps",
             value=st.session_state.get("rms_norm_eps", 1e-6),
             format="%.0e",
             key="rms_norm_eps",
         )
-        st.checkbox(
+        _checkbox(
             "flash_attn",
             value=st.session_state.get("flash_attn", True),
             key="flash_attn",
@@ -2055,23 +2105,23 @@ with st.sidebar:
 
     # ── Training ──
     with st.expander("🚀 Training", expanded=(st.session_state.get("train_status") == "running")):
-        train_type = st.selectbox(
+        train_type = _selectbox(
             "Training type",
             ["pretrain", "full_sft", "lora", "dpo", "ppo", "grpo", "agent", "distillation"],
             key="train_type",
         )
         if train_type in ("pretrain", "full_sft", "distillation"):
-            st.radio("Dataset size", ["mini", "normal"], key="dataset_size", horizontal=True)
+            _radio("Dataset size", ["mini", "normal"], key="dataset_size", horizontal=True)
         config_file = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", "trainer", f"config_{train_type}.json"
         )
         if os.path.exists(config_file):
-            if st.button("📂 Load config from file", use_container_width=True, key="btn_load_config",
+            if st.button("📂 Load config from file", width="stretch", key="btn_load_config",
                          help=f"Load model architecture from {config_file}"):
                 with open(config_file, "r", encoding="utf-8") as f:
                     st.session_state._pending_config_load = json.load(f)
                 st.rerun()
-        st.checkbox("Resume from checkpoint (--from_resume)", value=False, key="from_resume",
+        _checkbox("Resume from checkpoint (--from_resume)", value=False, key="from_resume",
                     help="Auto-detect and resume from checkpoints/{weight}_{dim}{_moe}_resume.pth")
         _weight_files = _available_weight_files()
         _auto_label = "auto (newest matching base)"
@@ -2080,7 +2130,7 @@ with st.sidebar:
             st.session_state.base_weight = "none" if train_type == "pretrain" else _auto_label
         elif st.session_state.base_weight not in _base_options:
             st.session_state.base_weight = _auto_label
-        st.selectbox(
+        _selectbox(
             "Base weights (--from_weight)",
             _base_options,
             key="base_weight",
@@ -2089,7 +2139,7 @@ with st.sidebar:
                  "或 'auto' 自动选择最新匹配权重；'none' 从随机初始化开始。"
                  "选中 Resume 且检查点含完整状态时，基础权重会自动跳过。",
         )
-        st.number_input(
+        _number_input(
             "batch_size",
             min_value=1, max_value=512,
             value=st.session_state.get("batch_size", 32),
@@ -2097,7 +2147,15 @@ with st.sidebar:
             help="批次大小。小模型 GPU 利用率低时，可提升到 64/128 放大单步 GEMM "
                  "(注意：batch×seq 与激活显存成正比，过高会 OOM)",
         )
-        st.number_input(
+        epochs_key = f"epochs_{train_type}"
+        _number_input(
+            "epochs (训练轮数)",
+            min_value=1, max_value=1000,
+            value=int(st.session_state.get(epochs_key, _default_epochs(train_type))),
+            step=1, key=epochs_key,
+            help="完整遍历训练数据的次数。续训时表示目标总 Epoch 数，而不是额外增加的轮数。",
+        )
+        _number_input(
             "max_seq_len (训练截断长度)",
             min_value=64, max_value=8192,
             value=st.session_state.get("max_seq_len", 768),
@@ -2106,7 +2164,7 @@ with st.sidebar:
                  "导致 GEMM 尺寸小、GPU 利用率低）",
         )
         _packing_supported = train_type in ("pretrain", "full_sft", "lora", "distillation")
-        st.checkbox(
+        _checkbox(
             "Sequence packing",
             value=st.session_state.get("sequence_packing", False),
             key="sequence_packing",
@@ -2116,7 +2174,7 @@ with st.sidebar:
                  "的 step 坐标不同时，resume 会在当前 epoch 内先训练未对齐的原始数据行，"
                  "到达 packing 分组边界后再切换 packed blocks。",
         )
-        st.number_input(
+        _number_input(
             "Packing cache batch size",
             min_value=32, max_value=10000,
             value=st.session_state.get("packing_batch_size", 1000),
@@ -2130,7 +2188,7 @@ with st.sidebar:
                 "epoch 的 shuffle 顺序。未对齐的数据行继续使用原始 batch，抵达下一个 packing "
                 "分组边界后，同一 epoch 的剩余数据立即切换为 packed blocks。"
             )
-        st.number_input(
+        _number_input(
             "Gradient accumulation steps",
             min_value=1, max_value=128,
             value=st.session_state.get("accumulation_steps", 1),
@@ -2147,7 +2205,7 @@ with st.sidebar:
                 "AttnRes 会保留残差 source bank；当前 batch×seq 偏高。"
                 "16 GB GPU 建议先用 batch_size=4–8，再通过梯度累积放大有效批量。"
             )
-        st.selectbox(
+        _selectbox(
             "Optimizer",
             ["adamw", "adafactor", "muon"],
             index=["adamw", "adafactor", "muon"].index(
@@ -2157,13 +2215,13 @@ with st.sidebar:
             help="AdamW (默认) / Adafactor (torch 内置) / Muon (torch>=2.10 内置，"
                  "否则自动回退到原生纯 PyTorch 实现)",
         )
-        st.checkbox(
+        _checkbox(
             "Use torch.compile (Triton)",
             value=st.session_state.get("use_compile", True),
             key="use_compile",
             help="启用 torch.compile (Triton 后端)，实测约 40% 提速；MoE/Loop 变体兼容性请自行验证",
         )
-        st.selectbox(
+        _selectbox(
             "torch.compile mode",
             ["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
             index=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"].index(
@@ -2187,7 +2245,7 @@ with st.sidebar:
                 "请把 Gradient accumulation steps 设为 1，或改用 default / "
                 "max-autotune-no-cudagraphs。"
             )
-        st.selectbox(
+        _selectbox(
             "Training profiler",
             ["off", "timing", "torch"],
             index=["off", "timing", "torch"].index(
@@ -2200,20 +2258,20 @@ with st.sidebar:
         _profile_enabled = st.session_state.get("profile", "off") != "off"
         _profile_col1, _profile_col2 = st.columns(2)
         with _profile_col1:
-            st.number_input(
+            _number_input(
                 "Profiler warmup steps", min_value=0, max_value=1000,
                 value=st.session_state.get("profile_warmup", 10), step=1,
                 key="profile_warmup", disabled=not _profile_enabled,
                 help="每次启动或 resume 后先跳过这些编译/预热 step。",
             )
-            st.number_input(
+            _number_input(
                 "Profiler report interval", min_value=1, max_value=10000,
                 value=st.session_state.get("profile_interval", 100), step=10,
                 key="profile_interval", disabled=not _profile_enabled,
                 help="每隔多少个稳定 step 输出一次 [PROFILE] 汇总。",
             )
         with _profile_col2:
-            st.number_input(
+            _number_input(
                 "Trace active steps", min_value=1, max_value=100,
                 value=st.session_state.get("profile_active_steps", 5), step=1,
                 key="profile_active_steps",
@@ -2222,7 +2280,7 @@ with st.sidebar:
             )
         if st.session_state.get("profile", "off") == "torch":
             st.warning("算子 trace 会明显拖慢采集窗口，只建议短时诊断；其余训练会继续正常运行。")
-        st.selectbox(
+        _selectbox(
             "梯度检查点模式（0关闭/1选择性/2整层）",
             [0, 1, 2],
             index=st.session_state.get("use_grad_checkpoint", 0),
@@ -2230,21 +2288,21 @@ with st.sidebar:
             help="Gradient checkpointing mode: 0 = off, 1 = selectively recompute "
                  "attention/FFN activations, 2 = full-layer checkpointing.",
         )
-        st.selectbox(
+        _selectbox(
             "参数精度 (param_dtype)",
             ["fp32", "bf16", "fp16"],
             index=["fp32", "bf16", "fp16"].index(st.session_state.get("param_dtype", "fp32")),
             key="param_dtype",
             help="模型参数精度：fp32=主权重(推荐)；bf16/fp16=训练时权重直接 cast",
         )
-        st.selectbox(
+        _selectbox(
             "激活层精度 (dtype)",
             ["bfloat16", "float16", "fp32"],
             index=["bfloat16", "float16", "fp32"].index(st.session_state.get("activation_dtype", "bfloat16")),
             key="activation_dtype",
             help="激活层计算精度：bfloat16(推荐) / float16 / fp32(纯精度，慢)",
         )
-        st.selectbox(
+        _selectbox(
             "TorchAO FP8 training",
             ["off", "tensorwise", "rowwise", "rowwise_with_gw_hp"],
             index=["off", "tensorwise", "rowwise", "rowwise_with_gw_hp"].index(
@@ -2254,7 +2312,7 @@ with st.sidebar:
             help="仅量化兼容 Linear 的前向/反向 GEMM，权重与优化器状态仍保持 BF16/FP32。"
                  "tensorwise 最快；rowwise 数值更稳健，但部分消费级 GPU 暂不支持。",
         )
-        st.selectbox(
+        _selectbox(
             "TorchAO FP8 Linear filter",
             ["auto", "eligible"],
             index=["auto", "eligible"].index(st.session_state.get("fp8_filter", "auto")),
@@ -2269,17 +2327,17 @@ with st.sidebar:
             st.error("TorchAO FP8 training 需要将激活层精度设为 bfloat16。")
         if st.session_state.get("fp8_training", "off").startswith("rowwise"):
             st.info("部分消费级 Blackwell GPU 暂不支持 TorchAO rowwise；启动时会先实测，不支持则降级为 tensorwise。")
-        st.selectbox(
+        _selectbox(
             "KV Cache 精度 (kv_cache_dtype)",
             ["fp32", "bf16", "fp16", "fp8_e4m3", "fp8_e5m2"],
             index=["fp32", "bf16", "fp16", "fp8_e4m3", "fp8_e5m2"].index(st.session_state.get("kv_cache_dtype", "fp32")),
             key="kv_cache_dtype",
             help="KV Cache 精度：fp8 量化缓存，decode 带宽减半(影响 RL rollouts 与推理)",
         )
-        if st.button("Start Training", use_container_width=True, key="btn_start_train"):
+        if st.button("Start Training", width="stretch", key="btn_start_train"):
             st.session_state.train_triggered = True
         if st.session_state.get("train_status") == "running":
-            if st.button("⏸ Pause Training", use_container_width=True, key="btn_pause_train",
+            if st.button("⏸ Pause Training", width="stretch", key="btn_pause_train",
                          help="写入 checkpoints/.pause_request，训练进程在下一个 step 边界保存检查点并退出(码42)"):
                 _request_pause(st.session_state.get("train_type", "pretrain"))
                 st.rerun()
@@ -2401,6 +2459,10 @@ if st.session_state.get("train_triggered", False):
                 else:
                     cmd.extend(["--from_weight", from_weight])
                 cmd.extend(["--batch_size", str(st.session_state.get("batch_size", 32))])
+                epochs = int(st.session_state.get(
+                    f"epochs_{train_type}", _default_epochs(train_type)
+                ))
+                cmd.extend(["--epochs", str(epochs)])
                 cmd.extend(["--max_seq_len", str(st.session_state.get("max_seq_len", 768))])
                 cmd.extend(["--sequence_packing", "1" if st.session_state.get("sequence_packing", False) else "0"])
                 cmd.extend(["--packing_batch_size", str(st.session_state.get("packing_batch_size", 1000))])
@@ -2448,6 +2510,7 @@ if st.session_state.get("train_triggered", False):
                             log_path = os.path.join(logs_dir, f"train_{save_prefix}_{seq}.log")
                     log_file = open(log_path, "a" if from_resume else "w", encoding="utf-8")
                     log_file.write(f"# torch.compile (Triton): {'ON' if st.session_state.get('use_compile', True) else 'OFF'}\n")
+                    log_file.write(f"# epochs: {epochs}\n")
                     log_file.write(f"# gradient accumulation steps: {st.session_state.get('accumulation_steps', 1)}\n")
                     log_file.write(
                         f"# Sequence packing: {'ON' if st.session_state.get('sequence_packing', False) else 'OFF'} "
@@ -2625,7 +2688,7 @@ for name, info in breakdown.items():
     )
 st.dataframe(
     table_data,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     column_config={
         "Component": st.column_config.TextColumn("Component", width="medium"),
@@ -2648,7 +2711,7 @@ for name, info in breakdown.items():
     )
 st.dataframe(
     pct_rows,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     column_config={
         "Component": st.column_config.TextColumn("Component", width="medium"),
@@ -2680,7 +2743,7 @@ if st.session_state.get("train_status") == "running":
     st.markdown('<div class="section-title">📊 Training Monitor</div>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
-        _auto_refresh_training_log = st.checkbox(
+        _auto_refresh_training_log = _checkbox(
             "Auto-refresh 2s", value=True, key="auto_refresh_log"
         )
     with c2:
@@ -2778,7 +2841,7 @@ if history_data or current_log_path:
         if history_data:
             if st.session_state.get("history_log_select") not in history_data:
                 st.session_state.history_log_select = next(iter(history_data))
-            selected_history = st.selectbox(
+            selected_history = _selectbox(
                 "Compare against",
                 list(history_data),
                 format_func=os.path.basename,

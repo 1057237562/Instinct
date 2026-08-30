@@ -19,10 +19,10 @@
   "head_dim": 96,
   "rope_scaling": {
     "type": "yarn",
-    "beta_fast": 32,
-    "beta_slow": 1,
-    "factor": 16,
-    "original_max_position_embeddings": 2048,
+    "beta_fast": 32.0,
+    "beta_slow": 1.0,
+    "factor": 16.0,
+    "original_max_position_embeddings": 2048.0,
     "attention_factor": 1.0
   },
   "model_architecture": "standard"
