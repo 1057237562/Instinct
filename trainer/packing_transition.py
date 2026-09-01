@@ -101,6 +101,7 @@ class SequencePackingPlan:
         self.args = args
         self.dataset_factory = dataset_factory
         self.target = bool(getattr(args, 'sequence_packing', 0))
+        self.packing_mode = str(getattr(args, 'sequence_packing_mode', 'fixed'))
         saved = (ckp_data or {}).get('data_config') or {}
         self.source = bool(saved.get('active_sequence_packing', saved.get('sequence_packing', False)))
         self.transition = validate_packing_resume(args, ckp_data)
@@ -165,7 +166,19 @@ class SequencePackingPlan:
         ]
 
     @staticmethod
-    def _packed_batches(dataset, batch_size: int, epoch: int, *, offset: int = 0):
+    def _fixed_batches(dataset, batch_size: int, epoch: int, *, offset: int = 0):
+        """Reproduce the original fixed-packing sampler exactly."""
+        if dist.is_initialized():
+            sampler = DistributedSampler(dataset)
+            sampler.set_epoch(epoch)
+            order = list(sampler)
+        else:
+            generator = torch.Generator().manual_seed(42 + int(epoch))
+            order = torch.randperm(len(dataset), generator=generator).tolist()
+        return SequencePackingPlan._batches(order, batch_size, offset=offset)
+
+    @staticmethod
+    def _bucket_batches(dataset, batch_size: int, epoch: int, *, offset: int = 0):
         """Build homogeneous-length batches and shard every bucket for DDP."""
         ranges = getattr(dataset, 'bucket_ranges', None)
         if not ranges:
@@ -194,11 +207,19 @@ class SequencePackingPlan:
             batches = [batches[index] for index in permutation]
         return batches
 
+    def _packing_batches(self, dataset, batch_size: int, epoch: int, *, offset: int = 0):
+        mode = getattr(dataset, 'packing_mode', None) or self.packing_mode
+        if mode == 'fixed':
+            return self._fixed_batches(dataset, batch_size, epoch, offset=offset)
+        if mode == 'bucket':
+            return self._bucket_batches(dataset, batch_size, epoch, offset=offset)
+        raise ValueError(f'unknown sequence packing mode: {mode!r}')
+
     def batch_sampler(self, dataset, *, active_packing: bool, epoch: int,
                       batch_size: int, skip_batches: int = 0):
         """Return a resume-aware sampler, grouping packed rows by block length."""
         if active_packing:
-            batches = self._packed_batches(dataset, batch_size, epoch)
+            batches = self._packing_batches(dataset, batch_size, epoch)
             return batches[skip_batches:]
         if dist.is_initialized():
             sampler = DistributedSampler(dataset)
@@ -240,7 +261,7 @@ class SequencePackingPlan:
             packed_dataset = self._dataset(True, remaining_indices)
             packed_offset = len(raw_dataset)
             datasets.append(packed_dataset)
-            packed_batches = self._packed_batches(
+            packed_batches = self._packing_batches(
                 packed_dataset, batch_size, epoch, offset=packed_offset,
             )
 

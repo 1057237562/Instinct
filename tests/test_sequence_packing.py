@@ -155,6 +155,7 @@ def test_slope_optimized_bucket_dp_matches_quadratic_reference():
 
 class _BucketedDataset(Dataset):
     def __init__(self):
+        self.packing_mode = "bucket"
         self.lengths = [8] * 5 + [16] * 7
         self.bucket_ranges = [
             {"start": 0, "end": 5, "max_length": 8},
@@ -166,6 +167,40 @@ class _BucketedDataset(Dataset):
 
     def __getitem__(self, index):
         return torch.zeros(self.lengths[index], dtype=torch.long)
+
+
+class _FixedPackedDataset(Dataset):
+    packing_mode = "fixed"
+
+    def __init__(self, size):
+        self.size = size
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, index):
+        return index
+
+
+def test_fixed_sampler_matches_legacy_order_and_resume_suffix(tmp_path):
+    args = SimpleNamespace(
+        sequence_packing=1, sequence_packing_mode="fixed", seq_bucket=2,
+        packing_batch_size=100, max_seq_len=64, batch_size=3,
+        data_path=str(tmp_path / "data.jsonl"),
+    )
+    dataset = _FixedPackedDataset(14)
+    plan = SequencePackingPlan(args, None, lambda *_: dataset)
+    generator = torch.Generator().manual_seed(42 + 2)
+    legacy_order = torch.randperm(len(dataset), generator=generator).tolist()
+    expected = [legacy_order[pos:pos + 3] for pos in range(0, len(dataset), 3)]
+
+    batches = plan.batch_sampler(
+        dataset, active_packing=True, epoch=2, batch_size=3, skip_batches=0,
+    )
+    assert batches == expected
+    assert plan.batch_sampler(
+        dataset, active_packing=True, epoch=2, batch_size=3, skip_batches=2,
+    ) == expected[2:]
 
 
 def test_packed_batch_sampler_never_mixes_bucket_lengths(tmp_path):

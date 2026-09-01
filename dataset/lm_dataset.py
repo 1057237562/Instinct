@@ -215,6 +215,7 @@ class PretrainDataset(Dataset):
             self.samples = self.samples.select([int(index) for index in sample_indices])
         self.raw_sample_count = len(self.samples)
         self.bucket_ranges = []
+        self.packing_mode = packing_mode if packing else None
         if packing:
             if packing_mode not in ('fixed', 'bucket'):
                 raise ValueError("packing_mode must be 'fixed' or 'bucket'")
@@ -309,6 +310,7 @@ class SFTDataset(Dataset):
             self.samples = self.samples.select([int(index) for index in sample_indices])
         self.raw_sample_count = len(self.samples)
         self.bucket_ranges = []
+        self.packing_mode = packing_mode if packing else None
         self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids
         self.eos_id = tokenizer(f'{tokenizer.eos_token}\n', add_special_tokens=False).input_ids
         if packing:
