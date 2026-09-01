@@ -5,7 +5,8 @@ import os
 import random
 import bisect
 os.environ.setdefault("HF_HOME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".cache", "huggingface"))
-from datasets import load_dataset, Features, Sequence, Value
+from datasets import load_dataset, concatenate_datasets, Features, Sequence, Value
+from dataset.sequence_bucket import optimal_sequence_buckets
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 _PACKED_PRETRAIN_FEATURES = Features({
@@ -13,6 +14,7 @@ _PACKED_PRETRAIN_FEATURES = Features({
     'sequence_ids': Sequence(Value('int32')),
     'valid_tokens': Value('int32'),
     'train_tokens': Value('int32'),
+    'block_length': Value('int32'),
 })
 _PACKED_SFT_FEATURES = Features({
     'input_ids': Sequence(Value('int32')),
@@ -20,6 +22,16 @@ _PACKED_SFT_FEATURES = Features({
     'sequence_ids': Sequence(Value('int32')),
     'valid_tokens': Value('int32'),
     'train_tokens': Value('int32'),
+    'block_length': Value('int32'),
+})
+_TOKENIZED_PRETRAIN_FEATURES = Features({
+    'input_ids': Sequence(Value('int32')),
+    'length': Value('int32'),
+})
+_TOKENIZED_SFT_FEATURES = Features({
+    'input_ids': Sequence(Value('int32')),
+    'labels': Sequence(Value('int32')),
+    'length': Value('int32'),
 })
 
 def pre_processing_chat(conversations, add_system_ratio=0.2, rng=None):
@@ -107,23 +119,93 @@ def _best_fit_pack(input_sequences, label_sequences, max_length, pad_token_id):
         'sequence_ids': packed_sequence_ids,
         'valid_tokens': valid_tokens,
         'train_tokens': train_tokens,
+        'block_length': [max_length] * len(packed_inputs),
     }
 
 
-def _print_packing_stats(name, raw_count, samples, max_length):
+def _print_packing_stats(name, raw_count, samples, bucket_ranges):
+    # torchrun gives every worker the same stdout destination.  Emit the plan
+    # once from rank 0 so multi-GPU logs remain readable.
+    if os.environ.get('RANK', '0') not in ('0', '-1'):
+        return
     valid = sum(samples['valid_tokens']) if len(samples) else 0
     train = sum(samples['train_tokens']) if len(samples) else 0
-    capacity = max(len(samples) * max_length, 1)
+    capacity = max(sum(samples['block_length']), 1)
+    max_lengths = [int(item['max_length']) for item in bucket_ranges]
+    print(
+        f"[Packing Plan] {name}: bucket_count={len(bucket_ranges)}, "
+        f"max_seq_len={max_lengths}",
+        flush=True,
+    )
+    for number, item in enumerate(bucket_ranges, start=1):
+        print(
+            f"[Packing Bucket] {name} {number}/{len(bucket_ranges)}: "
+            f"max_seq_len={int(item['max_length'])}, "
+            f"raw_samples={int(item['raw_samples'])}, "
+            f"packed_blocks={int(item['blocks'])}",
+            flush=True,
+        )
+    bucket_text = ', '.join(
+        f"{item['max_length']}t/{item['blocks']} blocks" for item in bucket_ranges
+    )
     print(
         f"[Packing] {name}: raw_samples={raw_count}, blocks={len(samples)}, "
         f"fill={100.0 * valid / capacity:.2f}%, train_tokens={train:,}, "
-        f"cache={getattr(samples, 'cache_files', [])}",
+        f"buckets=[{bucket_text}], cache={getattr(samples, 'cache_files', [])}",
         flush=True,
     )
 
+def _pack_tokenized_buckets(samples, lengths, seq_bucket, packing_batch_size,
+                            pad_token_id, features, name):
+    """Partition tokenized rows globally, then pack each length bucket."""
+    sorted_indices, buckets = optimal_sequence_buckets(lengths, seq_bucket)
+    packed_parts, bucket_ranges = [], []
+    offset = 0
+    for bucket in buckets:
+        source_indices = sorted_indices[bucket.start:bucket.end]
+        source = samples.select(source_indices)
+        block_length = bucket.max_length
+
+        def pack_batch(batch):
+            return _best_fit_pack(
+                batch['input_ids'], batch['labels'], block_length, pad_token_id
+            )
+
+        # Pretrain tokenized caches omit labels; they are identical to inputs.
+        if 'labels' not in source.column_names:
+            def pack_batch(batch):
+                packed = _best_fit_pack(
+                    batch['input_ids'], batch['input_ids'], block_length, pad_token_id
+                )
+                packed.pop('labels')
+                return packed
+
+        part = source.map(
+            pack_batch,
+            batched=True,
+            batch_size=max(1, int(packing_batch_size)),
+            remove_columns=source.column_names,
+            features=features,
+            desc=f'Packing {name} bucket at {block_length} tokens',
+        )
+        packed_parts.append(part)
+        bucket_ranges.append({
+            'start': offset,
+            'end': offset + len(part),
+            'max_length': block_length,
+            'blocks': len(part),
+            'raw_samples': len(source_indices),
+            'estimated_cost': bucket.estimated_cost,
+        })
+        offset += len(part)
+    packed = packed_parts[0] if len(packed_parts) == 1 else concatenate_datasets(packed_parts)
+    return packed, bucket_ranges
+
+
 class PretrainDataset(Dataset):
     def __init__(self, data_path, tokenizer, max_length=512, packing=False,
-                 packing_batch_size=1000, sample_indices=None):
+                 packing_batch_size=1000, packing_mode='fixed', seq_bucket=2,
+                 sample_indices=None):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -132,12 +214,15 @@ class PretrainDataset(Dataset):
         if sample_indices is not None:
             self.samples = self.samples.select([int(index) for index in sample_indices])
         self.raw_sample_count = len(self.samples)
+        self.bucket_ranges = []
         if packing:
+            if packing_mode not in ('fixed', 'bucket'):
+                raise ValueError("packing_mode must be 'fixed' or 'bucket'")
             raw_count = self.raw_sample_count
             pad_token_id = tokenizer.pad_token_id
 
-            def tokenize_and_pack(batch):
-                input_sequences, label_sequences = [], []
+            def tokenize_batch(batch):
+                input_sequences, lengths = [], []
                 for text in batch['text']:
                     tokens = tokenizer(
                         str(text), add_special_tokens=False,
@@ -145,24 +230,44 @@ class PretrainDataset(Dataset):
                     ).input_ids
                     tokens = [tokenizer.bos_token_id] + tokens + [tokenizer.eos_token_id]
                     input_sequences.append(tokens)
-                    label_sequences.append(tokens.copy())
-                packed = _best_fit_pack(
-                    input_sequences, label_sequences, max_length, pad_token_id
-                )
-                # Pretrain labels equal input_ids except for trailing padding;
-                # reconstructing them in __getitem__ halves Arrow cache size.
-                packed.pop('labels')
-                return packed
+                    lengths.append(len(tokens))
+                return {'input_ids': input_sequences, 'length': lengths}
 
-            self.samples = self.samples.map(
-                tokenize_and_pack,
-                batched=True,
-                batch_size=max(1, int(packing_batch_size)),
-                remove_columns=self.samples.column_names,
-                features=_PACKED_PRETRAIN_FEATURES,
-                desc=f'Packing pretrain into {max_length}-token blocks',
-            )
-            _print_packing_stats('pretrain', raw_count, self.samples, max_length)
+            if packing_mode == 'bucket':
+                self.samples = self.samples.map(
+                    tokenize_batch,
+                    batched=True,
+                    batch_size=max(1, int(packing_batch_size)),
+                    remove_columns=self.samples.column_names,
+                    features=_TOKENIZED_PRETRAIN_FEATURES,
+                    desc='Tokenizing pretrain for sequence buckets',
+                )
+                self.samples, self.bucket_ranges = _pack_tokenized_buckets(
+                    self.samples, self.samples['length'], seq_bucket,
+                    packing_batch_size, pad_token_id, _PACKED_PRETRAIN_FEATURES, 'pretrain',
+                )
+            else:
+                def tokenize_and_pack(batch):
+                    tokenized = tokenize_batch(batch)
+                    packed = _best_fit_pack(
+                        tokenized['input_ids'], tokenized['input_ids'], max_length, pad_token_id
+                    )
+                    packed.pop('labels')
+                    return packed
+
+                self.samples = self.samples.map(
+                    tokenize_and_pack,
+                    batched=True,
+                    batch_size=max(1, int(packing_batch_size)),
+                    remove_columns=self.samples.column_names,
+                    features=_PACKED_PRETRAIN_FEATURES,
+                    desc=f'Packing pretrain into {max_length}-token blocks',
+                )
+                self.bucket_ranges = [{
+                    'start': 0, 'end': len(self.samples), 'max_length': max_length,
+                    'blocks': len(self.samples), 'raw_samples': raw_count,
+                }]
+            _print_packing_stats('pretrain', raw_count, self.samples, self.bucket_ranges)
 
     def __len__(self):
         return len(self.samples)
@@ -192,7 +297,8 @@ class PretrainDataset(Dataset):
 
 class SFTDataset(Dataset):
     def __init__(self, jsonl_path, tokenizer, max_length=1024, packing=False,
-                 packing_batch_size=1000, packing_seed=42, sample_indices=None):
+                 packing_batch_size=1000, packing_seed=42, packing_mode='fixed',
+                 seq_bucket=2, sample_indices=None):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -202,14 +308,17 @@ class SFTDataset(Dataset):
         if sample_indices is not None:
             self.samples = self.samples.select([int(index) for index in sample_indices])
         self.raw_sample_count = len(self.samples)
+        self.bucket_ranges = []
         self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids
         self.eos_id = tokenizer(f'{tokenizer.eos_token}\n', add_special_tokens=False).input_ids
         if packing:
+            if packing_mode not in ('fixed', 'bucket'):
+                raise ValueError("packing_mode must be 'fixed' or 'bucket'")
             raw_count = self.raw_sample_count
             pad_token_id = tokenizer.pad_token_id
 
-            def tokenize_and_pack(batch, indices):
-                input_sequences, label_sequences = [], []
+            def tokenize_batch(batch, indices):
+                input_sequences, label_sequences, lengths = [], [], []
                 for conversations, index in zip(batch['conversations'], indices):
                     rng = random.Random(int(packing_seed) + int(index))
                     conversations = pre_processing_chat(conversations, rng=rng)
@@ -218,20 +327,48 @@ class SFTDataset(Dataset):
                     input_ids = tokenizer(prompt).input_ids[:max_length]
                     input_sequences.append(input_ids)
                     label_sequences.append(self.generate_labels(input_ids))
-                return _best_fit_pack(
-                    input_sequences, label_sequences, max_length, pad_token_id
-                )
+                    lengths.append(len(input_ids))
+                return {
+                    'input_ids': input_sequences,
+                    'labels': label_sequences,
+                    'length': lengths,
+                }
 
-            self.samples = self.samples.map(
-                tokenize_and_pack,
-                batched=True,
-                with_indices=True,
-                batch_size=max(1, int(packing_batch_size)),
-                remove_columns=self.samples.column_names,
-                features=_PACKED_SFT_FEATURES,
-                desc=f'Packing SFT into {max_length}-token blocks',
-            )
-            _print_packing_stats('sft', raw_count, self.samples, max_length)
+            if packing_mode == 'bucket':
+                self.samples = self.samples.map(
+                    tokenize_batch,
+                    batched=True,
+                    with_indices=True,
+                    batch_size=max(1, int(packing_batch_size)),
+                    remove_columns=self.samples.column_names,
+                    features=_TOKENIZED_SFT_FEATURES,
+                    desc='Tokenizing SFT for sequence buckets',
+                )
+                self.samples, self.bucket_ranges = _pack_tokenized_buckets(
+                    self.samples, self.samples['length'], seq_bucket,
+                    packing_batch_size, pad_token_id, _PACKED_SFT_FEATURES, 'SFT',
+                )
+            else:
+                def tokenize_and_pack(batch, indices):
+                    tokenized = tokenize_batch(batch, indices)
+                    return _best_fit_pack(
+                        tokenized['input_ids'], tokenized['labels'], max_length, pad_token_id
+                    )
+
+                self.samples = self.samples.map(
+                    tokenize_and_pack,
+                    batched=True,
+                    with_indices=True,
+                    batch_size=max(1, int(packing_batch_size)),
+                    remove_columns=self.samples.column_names,
+                    features=_PACKED_SFT_FEATURES,
+                    desc=f'Packing SFT into {max_length}-token blocks',
+                )
+                self.bucket_ranges = [{
+                    'start': 0, 'end': len(self.samples), 'max_length': max_length,
+                    'blocks': len(self.samples), 'raw_samples': raw_count,
+                }]
+            _print_packing_stats('sft', raw_count, self.samples, self.bucket_ranges)
 
     def __len__(self):
         return len(self.samples)

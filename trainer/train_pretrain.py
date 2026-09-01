@@ -12,6 +12,7 @@ import sys
 __package__ = "trainer"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import trainer.compile_cache  # noqa: F401  # configure Inductor before torch import
 os.environ.setdefault("HF_HOME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".cache", "huggingface"))
 import datasets  # noqa: F401  # Windows pyarrow/torch DLL conflict workaround (issue #771)
 import time
@@ -19,11 +20,11 @@ import warnings
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 from dataset.lm_dataset import PretrainDataset
 from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint,
-    setup_seed, init_model, SkipBatchSampler, config_from_args, build_optimizer,
+    init_model, config_from_args, build_optimizer,
     pause_save_checkpoint, restore_config_from_checkpoint, apply_torchao_fp8_training,
     prepare_lm_batch,
 )
@@ -182,9 +183,14 @@ if __name__ == "__main__":
     packing_plan = SequencePackingPlan(
         args, ckp_data,
         lambda packing, sample_indices=None: PretrainDataset(
-            args.data_path, tokenizer, max_length=args.max_seq_len,
+            args.data_path, tokenizer,
+            max_length=(lm_config.max_position_embeddings
+                        if packing and args.sequence_packing_mode == 'bucket'
+                        else args.max_seq_len),
             packing=packing,
             packing_batch_size=args.packing_batch_size,
+            packing_mode=args.sequence_packing_mode,
+            seq_bucket=args.seq_bucket,
             sample_indices=sample_indices,
         ),
     )
@@ -211,7 +217,7 @@ if __name__ == "__main__":
             model, mode=args.compile_mode,
             dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
         )
-        Logger('torch.compile enabled')
+        Logger(f"torch.compile enabled; cache={os.environ['TORCHINDUCTOR_CACHE_DIR']}")
     if dist.is_initialized():
         model = DistributedDataParallel(model, device_ids=[local_rank])
 
@@ -225,10 +231,10 @@ if __name__ == "__main__":
         )
         packing_plan.update_checkpoint_config(data_config, epoch=epoch, active=active_packing)
         if transition_batches is None:
-            train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
-            train_sampler and train_sampler.set_epoch(epoch)
-            setup_seed(42 + epoch); indices = torch.randperm(len(train_ds)).tolist()
-            batch_sampler = SkipBatchSampler(train_sampler or indices, args.batch_size, skip)
+            batch_sampler = packing_plan.batch_sampler(
+                train_ds, active_packing=active_packing, epoch=epoch,
+                batch_size=args.batch_size, skip_batches=skip,
+            )
         else:
             batch_sampler = transition_batches
         loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)

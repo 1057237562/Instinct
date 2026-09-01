@@ -67,6 +67,14 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
     parser.add_argument('--max_seq_len', default=340, type=int, help="训练的最大截断长度（中文1token≈1.5~1.7字符）")
     parser.add_argument(
+        '--seq_bucket', default=2, type=int,
+        help='Sequence packing 自动长度桶数量；使用排序 + DP + 斜率优化求桶边界',
+    )
+    parser.add_argument(
+        '--sequence_packing_mode', default='fixed', choices=['fixed', 'bucket'],
+        help='Packing 形式：fixed=原固定长度；bucket=实验性自动长度桶',
+    )
+    parser.add_argument(
         '--sequence_packing', '--packing', dest='sequence_packing',
         default=0, type=int, choices=[0, 1],
         help='Pretrain/SFT 序列 packing（1=把完整样本装入定长 block，显著减少 padding）',

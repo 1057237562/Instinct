@@ -7,18 +7,23 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import ConcatDataset, DistributedSampler
 
-from trainer.trainer_utils import Logger
+from trainer.trainer_utils import Logger, SkipBatchSampler
 
 
 def packing_data_config(args) -> dict:
     """Return resume-critical dataset settings stored with checkpoints."""
     target = bool(getattr(args, 'sequence_packing', 0))
+    packing_mode = str(getattr(args, 'sequence_packing_mode', 'fixed'))
+    if packing_mode not in ('fixed', 'bucket'):
+        raise ValueError("sequence_packing_mode must be 'fixed' or 'bucket'")
     return {
         'sequence_packing': target,
         'active_sequence_packing': target,
         'target_sequence_packing': target,
         'packing_alignment_pending': False,
         'packing_batch_size': int(getattr(args, 'packing_batch_size', 1000)),
+        'sequence_packing_mode': packing_mode,
+        'seq_bucket': int(getattr(args, 'seq_bucket', 2)),
         'batch_size': int(getattr(args, 'batch_size', 1)),
         'max_seq_len': int(getattr(args, 'max_seq_len', 0)),
         'data_path': os.path.normcase(os.path.abspath(getattr(args, 'data_path', ''))),
@@ -42,8 +47,17 @@ def validate_packing_resume(args, ckp_data) -> bool:
     transition = pending or saved_active != current['target_sequence_packing']
     if transition:
         # Reconstructing an in-epoch migration requires the original raw cursor
-        # and exactly the same packed suffix after another pause/resume.
-        for key in ('batch_size', 'packing_batch_size', 'max_seq_len', 'data_path'):
+        # and exactly the same packed side after another pause/resume.  A first
+        # switch from raw -> packed may choose either packing strategy because
+        # no packed rows from the checkpoint need reconstruction yet.
+        keys = ['batch_size', 'data_path']
+        if not saved_active:
+            keys.append('max_seq_len')
+        if pending or saved_active:
+            keys.extend(['packing_batch_size', 'sequence_packing_mode'])
+            saved_mode = saved.get('sequence_packing_mode', 'fixed')
+            keys.append('seq_bucket' if saved_mode == 'bucket' else 'max_seq_len')
+        for key in keys:
             if key in saved and saved[key] != current[key]:
                 raise ValueError(
                     f'Cannot resume a packing transition with changed {key}: '
@@ -52,11 +66,21 @@ def validate_packing_resume(args, ckp_data) -> bool:
         return True
     if not saved_active:
         return False
-    for key in ('packing_batch_size', 'max_seq_len', 'data_path'):
-        if saved.get(key) != current[key]:
+    current_mode = current['sequence_packing_mode']
+    saved_mode = saved.get('sequence_packing_mode', 'fixed')
+    if saved_mode != current_mode:
+        raise ValueError(
+            'Cannot resume packed training with changed sequence_packing_mode: '
+            f"checkpoint={saved_mode!r}, requested={current_mode!r}."
+        )
+    keys = ['packing_batch_size', 'data_path']
+    keys.append('seq_bucket' if current_mode == 'bucket' else 'max_seq_len')
+    for key in keys:
+        saved_value = saved.get(key, 1 if key == 'seq_bucket' else None)
+        if saved_value != current[key]:
             raise ValueError(
                 f'Cannot resume packed training with changed {key}: '
-                f"checkpoint={saved.get(key)!r}, requested={current[key]!r}."
+                f"checkpoint={saved_value!r}, requested={current[key]!r}."
             )
     return False
 
@@ -140,6 +164,50 @@ class SequencePackingPlan:
             for pos in range(0, len(indices), batch_size)
         ]
 
+    @staticmethod
+    def _packed_batches(dataset, batch_size: int, epoch: int, *, offset: int = 0):
+        """Build homogeneous-length batches and shard every bucket for DDP."""
+        ranges = getattr(dataset, 'bucket_ranges', None)
+        if not ranges:
+            # Legacy packed datasets used one fixed block length and therefore
+            # did not publish bucket metadata.
+            ranges = [{'start': 0, 'end': len(dataset)}]
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        generator = torch.Generator().manual_seed(42 + int(epoch))
+        batches = []
+        for bucket in ranges:
+            start, end = int(bucket['start']), int(bucket['end'])
+            count = end - start
+            order = (torch.randperm(count, generator=generator) + start).tolist()
+            if world_size > 1:
+                padding = (-len(order)) % world_size
+                if padding:
+                    order += (order * math.ceil(padding / max(len(order), 1)))[:padding]
+                order = order[rank::world_size]
+            batches.extend(SequencePackingPlan._batches(order, batch_size, offset=offset))
+
+        # All ranks use the same permutation of their corresponding batches,
+        # retaining stochastic bucket order without ever mixing tensor shapes.
+        if batches:
+            permutation = torch.randperm(len(batches), generator=generator).tolist()
+            batches = [batches[index] for index in permutation]
+        return batches
+
+    def batch_sampler(self, dataset, *, active_packing: bool, epoch: int,
+                      batch_size: int, skip_batches: int = 0):
+        """Return a resume-aware sampler, grouping packed rows by block length."""
+        if active_packing:
+            batches = self._packed_batches(dataset, batch_size, epoch)
+            return batches[skip_batches:]
+        if dist.is_initialized():
+            sampler = DistributedSampler(dataset)
+            sampler.set_epoch(epoch)
+        else:
+            generator = torch.Generator().manual_seed(42 + int(epoch))
+            sampler = torch.randperm(len(dataset), generator=generator).tolist()
+        return SkipBatchSampler(sampler, batch_size, skip_batches)
+
     def epoch_data(self, epoch: int, resume_step: int, batch_size: int):
         """Return the dataset and optional hybrid batch list for one epoch."""
         if not (self.intra_epoch and epoch == self.start_epoch):
@@ -172,17 +240,8 @@ class SequencePackingPlan:
             packed_dataset = self._dataset(True, remaining_indices)
             packed_offset = len(raw_dataset)
             datasets.append(packed_dataset)
-            if world_size > 1:
-                sampler = DistributedSampler(packed_dataset)
-                sampler.set_epoch(epoch)
-                packed_order = list(sampler)
-            else:
-                generator = torch.Generator().manual_seed(42 + epoch)
-                packed_order = torch.randperm(
-                    len(packed_dataset), generator=generator
-                ).tolist()
-            packed_batches = self._batches(
-                packed_order, batch_size, offset=packed_offset,
+            packed_batches = self._packed_batches(
+                packed_dataset, batch_size, epoch, offset=packed_offset,
             )
 
         all_batches = raw_batches + packed_batches

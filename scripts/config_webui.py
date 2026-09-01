@@ -2187,14 +2187,6 @@ with st.sidebar:
             step=1, key=epochs_key,
             help="完整遍历训练数据的次数。续训时表示目标总 Epoch 数，而不是额外增加的轮数。",
         )
-        _number_input(
-            "max_seq_len (训练截断长度)",
-            min_value=64, max_value=8192,
-            value=st.session_state.get("max_seq_len", 768),
-            step=32, key="max_seq_len",
-            help="训练最大截断长度（token 数）。mini 数据建议 768（旧默认 340 过低，"
-                 "导致 GEMM 尺寸小、GPU 利用率低）",
-        )
         _packing_supported = train_type in ("pretrain", "full_sft", "lora", "distillation")
         _checkbox(
             "Sequence packing",
@@ -2206,15 +2198,59 @@ with st.sidebar:
                  "的 step 坐标不同时，resume 会在当前 epoch 内先训练未对齐的原始数据行，"
                  "到达 packing 分组边界后再切换 packed blocks。",
         )
+        _packing_enabled = _packing_supported and st.session_state.get("sequence_packing", False)
+        _show_packing_mode = (
+            _packing_supported
+            and (_packing_enabled or st.session_state.get("from_resume", False))
+        )
+        if _show_packing_mode:
+            _packing_mode_labels = {
+                "fixed": "Fixed max_seq_len (stable)",
+                "bucket": "Auto sequence buckets (experimental)",
+            }
+            _packing_mode_options = list(_packing_mode_labels)
+            _current_packing_mode = st.session_state.get("sequence_packing_mode", "fixed")
+            if _current_packing_mode not in _packing_mode_options:
+                _current_packing_mode = "fixed"
+            _packing_mode = _radio(
+                "Packing strategy",
+                _packing_mode_options,
+                index=_packing_mode_options.index(_current_packing_mode),
+                format_func=lambda value: _packing_mode_labels[value],
+                key="sequence_packing_mode",
+                horizontal=True,
+                help="Fixed 保持原有定长 packing；Auto buckets 是实验性动态桶方案。",
+            )
+        else:
+            _packing_mode = "fixed"
+        _bucket_packing = _packing_enabled and _packing_mode == "bucket"
+        if _bucket_packing:
+            _number_input(
+                "Sequence buckets",
+                min_value=1, max_value=32,
+                value=st.session_state.get("seq_bucket", 2),
+                step=1, key="seq_bucket",
+                help="按 token 长度排序后，用分组 DP + 斜率优化自动求各桶的 block 长度。"
+                     "每个桶独立 packing；默认 2 桶。",
+            )
+            st.caption("Packing 模式不使用手动 max_seq_len；仅按模型 32K 上下文自动截断异常长样本。")
+        else:
+            _number_input(
+                "max_seq_len (训练截断长度)",
+                min_value=64, max_value=8192,
+                value=st.session_state.get("max_seq_len", 768),
+                step=32, key="max_seq_len",
+                help="未启用 packing 或使用 Fixed packing 时的固定训练截断长度（token 数）。",
+            )
         _number_input(
             "Packing cache batch size",
             min_value=32, max_value=10000,
             value=st.session_state.get("packing_batch_size", 1000),
             step=100, key="packing_batch_size",
-            disabled=not (_packing_supported and st.session_state.get("sequence_packing", False)),
+            disabled=not _packing_enabled,
             help="首次构建 Arrow cache 时每批处理的原始样本数；越大通常填充率越高，但占用更多 CPU 内存。",
         )
-        if st.session_state.get("sequence_packing", False) and st.session_state.get("from_resume", False):
+        if _packing_enabled and st.session_state.get("from_resume", False):
             st.info(
                 "从非 packing checkpoint 切换时会保留模型、优化器与 GradScaler，并还原当前 "
                 "epoch 的 shuffle 顺序。未对齐的数据行继续使用原始 batch，抵达下一个 packing "
@@ -2230,6 +2266,7 @@ with st.sidebar:
         )
         if (
             st.session_state.get("residual_type") == "attnres"
+            and not _packing_enabled
             and st.session_state.get("batch_size", 32)
             * st.session_state.get("max_seq_len", 768) > 8192
         ):
@@ -2277,6 +2314,8 @@ with st.sidebar:
                  "max-autotune=搜索更多 kernel，首次编译较慢；"
                  "max-autotune-no-cudagraphs=保留 autotune 但关闭 CUDA Graph",
         )
+        if st.session_state.get("use_compile", True):
+            st.caption("编译缓存持久化到项目目录：./.cache/torch_compile/")
         _compile_invalid = (
             st.session_state.get("use_compile", True)
             and st.session_state.get("compile_mode", "reduce-overhead")
@@ -2524,8 +2563,17 @@ if st.session_state.get("train_triggered", False):
                     f"epochs_{train_type}", _default_epochs(train_type)
                 ))
                 cmd.extend(["--epochs", str(epochs)])
+                packing_enabled = bool(
+                    train_type in ("pretrain", "full_sft", "lora", "distillation")
+                    and st.session_state.get("sequence_packing", False)
+                )
+                packing_mode = st.session_state.get("sequence_packing_mode", "fixed")
+                # Hidden in bucket mode, but retained for exact migration from
+                # a non-packed checkpoint during the current epoch.
                 cmd.extend(["--max_seq_len", str(st.session_state.get("max_seq_len", 768))])
-                cmd.extend(["--sequence_packing", "1" if st.session_state.get("sequence_packing", False) else "0"])
+                cmd.extend(["--sequence_packing", "1" if packing_enabled else "0"])
+                cmd.extend(["--sequence_packing_mode", packing_mode])
+                cmd.extend(["--seq_bucket", str(st.session_state.get("seq_bucket", 2))])
                 cmd.extend(["--packing_batch_size", str(st.session_state.get("packing_batch_size", 1000))])
                 cmd.extend(["--accumulation_steps", str(st.session_state.get("accumulation_steps", 1))])
                 cmd.extend(["--optimizer", st.session_state.get("optimizer", "adamw")])
@@ -2577,8 +2625,9 @@ if st.session_state.get("train_triggered", False):
                     log_file.write(f"# epochs: {epochs}\n")
                     log_file.write(f"# gradient accumulation steps: {st.session_state.get('accumulation_steps', 1)}\n")
                     log_file.write(
-                        f"# Sequence packing: {'ON' if st.session_state.get('sequence_packing', False) else 'OFF'} "
-                        f"(cache_batch={st.session_state.get('packing_batch_size', 1000)})\n"
+                        f"# Sequence packing: {'ON' if packing_enabled else 'OFF'} "
+                        f"(mode={packing_mode}, buckets={st.session_state.get('seq_bucket', 2)}, "
+                        f"cache_batch={st.session_state.get('packing_batch_size', 1000)})\n"
                     )
                     log_file.write(
                         f"# TorchAO FP8 training: {st.session_state.get('fp8_training', 'off')} "

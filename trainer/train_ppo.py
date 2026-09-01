@@ -11,6 +11,7 @@ import sys
 __package__ = "trainer"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import trainer.compile_cache  # noqa: F401  # configure Inductor before torch import
 os.environ.setdefault("HF_HOME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".cache", "huggingface"))
 import datasets  # noqa: F401  # Windows pyarrow/torch DLL conflict workaround (issue #771)
 import math
@@ -475,7 +476,7 @@ if __name__ == "__main__":
                 critic_model, mode=args.compile_mode,
                 dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
             )
-        Logger('torch.compile enabled')
+        Logger(f"torch.compile enabled; cache={os.environ['TORCHINDUCTOR_CACHE_DIR']}")
         rollout_engine.update_policy(actor_model)
     if dist.is_initialized():
         actor_model = DistributedDataParallel(actor_model, device_ids=[local_rank])

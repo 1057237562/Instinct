@@ -7,6 +7,7 @@ from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
 from dataset.lm_dataset import PretrainDataset, SFTDataset, _best_fit_pack
+from dataset.sequence_bucket import optimal_sequence_buckets
 from model.model_instinct import InstinctConfig, InstinctForCausalLM
 from model.model_instinct_loop import (
     InstinctConfig as LoopConfig, InstinctForCausalLM as LoopForCausalLM,
@@ -35,6 +36,7 @@ def test_best_fit_pack_keeps_examples_whole_and_labels_aligned():
     assert all(len(row) == 10 for row in packed["sequence_ids"])
     assert sum(packed["valid_tokens"]) == 14
     assert sum(packed["train_tokens"]) == 12
+    assert packed["block_length"] == [10, 10]
 
     # Each source uses a unique token id.  Contiguous runs prove no example was
     # split across packed blocks.
@@ -44,35 +46,59 @@ def test_best_fit_pack_keeps_examples_whole_and_labels_aligned():
                    for row in flattened_rows for i in range(len(row) - length + 1))
 
 
-def test_pretrain_packing_preserves_tokens_and_reuses_cache(tmp_path, tokenizer):
+def test_pretrain_packing_preserves_tokens_reuses_cache_and_logs_buckets(
+        tmp_path, tokenizer, capsys):
     path = tmp_path / "pretrain.jsonl"
     texts = ["alpha beta", "gamma", "delta epsilon zeta", "eta", "theta iota"]
     path.write_text("".join(json.dumps({"text": text}) + "\n" for text in texts), encoding="utf-8")
 
     plain = PretrainDataset(str(path), tokenizer, max_length=32)
     packed = PretrainDataset(
-        str(path), tokenizer, max_length=32, packing=True, packing_batch_size=100
+        str(path), tokenizer, max_length=32, packing=True, packing_mode="bucket",
+        packing_batch_size=100,
     )
     packed_again = PretrainDataset(
-        str(path), tokenizer, max_length=32, packing=True, packing_batch_size=100
+        str(path), tokenizer, max_length=32, packing=True, packing_mode="bucket",
+        packing_batch_size=100,
     )
+    fixed = PretrainDataset(
+        str(path), tokenizer, max_length=32, packing=True,
+        packing_mode="fixed", packing_batch_size=100,
+    )
+    packing_log = capsys.readouterr().out
 
     # Compare actual shifted-loss targets. Every standalone BOS is naturally
     # outside the loss; packed non-first BOS labels must be masked explicitly.
     plain_tokens = sum(int((plain[i][1][1:] != -100).sum()) for i in range(len(plain)))
     packed_tokens = sum(int((packed[i][1][1:] != -100).sum()) for i in range(len(packed)))
     assert packed_tokens == plain_tokens
-    assert len(packed) < len(plain)
+    assert len(packed) <= len(plain)
     assert packed.samples.cache_files == packed_again.samples.cache_files
+    assert all(fixed[index][0].numel() == 32 for index in range(len(fixed)))
+    assert fixed.bucket_ranges == [{
+        "start": 0, "end": len(fixed), "max_length": 32,
+        "blocks": len(fixed), "raw_samples": len(texts),
+    }]
+    bucket_lengths = {bucket["max_length"] for bucket in packed.bucket_ranges}
+    ordered_lengths = [bucket["max_length"] for bucket in packed.bucket_ranges]
+    assert f"[Packing Plan] pretrain: bucket_count={len(ordered_lengths)}, " \
+           f"max_seq_len={ordered_lengths}" in packing_log
+    for number, bucket in enumerate(packed.bucket_ranges, start=1):
+        assert (
+            f"[Packing Bucket] pretrain {number}/{len(packed.bucket_ranges)}: "
+            f"max_seq_len={bucket['max_length']}"
+        ) in packing_log
+    assert 1 <= len(bucket_lengths) <= 2
     for input_ids, labels, sequence_ids in packed:
-        assert input_ids.shape == labels.shape == torch.Size([32])
-        assert sequence_ids.shape == torch.Size([32])
+        assert input_ids.shape == labels.shape
+        assert sequence_ids.shape == input_ids.shape
+        assert input_ids.numel() in bucket_lengths
         assert torch.equal(labels[input_ids == tokenizer.pad_token_id], torch.full_like(labels[input_ids == tokenizer.pad_token_id], -100))
         boundaries = (sequence_ids[1:] != sequence_ids[:-1]) & (sequence_ids[1:] >= 0)
         assert torch.all(labels[1:][boundaries] == -100)
 
 
-def test_sft_packing_preserves_loss_mask_and_fixed_shapes(tmp_path, tokenizer):
+def test_sft_packing_preserves_loss_mask_and_bucket_shapes(tmp_path, tokenizer):
     path = tmp_path / "sft.jsonl"
     rows = []
     for i in range(8):
@@ -87,18 +113,77 @@ def test_sft_packing_preserves_loss_mask_and_fixed_shapes(tmp_path, tokenizer):
 
     packed = SFTDataset(
         str(path), tokenizer, max_length=96, packing=True,
-        packing_batch_size=100, packing_seed=7,
+        packing_batch_size=100, packing_seed=7, packing_mode="bucket",
     )
-    assert len(packed) < len(rows)
-    assert sum(packed.samples["valid_tokens"]) <= len(packed) * 96
+    assert len(packed) <= len(rows)
+    assert sum(packed.samples["valid_tokens"]) <= sum(packed.samples["block_length"])
     assert sum(packed.samples["train_tokens"]) > 0
     observed_train_tokens = 0
+    bucket_lengths = {bucket["max_length"] for bucket in packed.bucket_ranges}
     for input_ids, labels, sequence_ids in packed:
-        assert input_ids.shape == labels.shape == torch.Size([96])
-        assert sequence_ids.shape == torch.Size([96])
+        assert input_ids.shape == labels.shape
+        assert sequence_ids.shape == input_ids.shape
+        assert input_ids.numel() in bucket_lengths
         observed_train_tokens += int((labels != -100).sum())
         assert torch.all(labels[input_ids == tokenizer.pad_token_id] == -100)
     assert observed_train_tokens == sum(packed.samples["train_tokens"])
+
+
+def test_slope_optimized_bucket_dp_matches_quadratic_reference():
+    lengths = [11, 2, 7, 3, 19, 5, 13, 3]
+    sorted_lengths = sorted(lengths)
+    prefix = [0]
+    for length in sorted_lengths:
+        prefix.append(prefix[-1] + length)
+    bucket_count = 3
+    infinity = 10 ** 30
+    dp = [[infinity] * (len(lengths) + 1) for _ in range(bucket_count + 1)]
+    dp[0][0] = 0
+    for used in range(1, bucket_count + 1):
+        for end in range(used, len(lengths) + 1):
+            dp[used][end] = min(
+                dp[used - 1][split]
+                + (prefix[end] - prefix[split]) * sorted_lengths[end - 1]
+                for split in range(used - 1, end)
+            )
+
+    sorted_indices, buckets = optimal_sequence_buckets(lengths, bucket_count)
+    assert [lengths[index] for index in sorted_indices] == sorted_lengths
+    assert sum(bucket.estimated_cost for bucket in buckets) == dp[bucket_count][-1]
+    assert buckets[-1].end == len(lengths)
+
+
+class _BucketedDataset(Dataset):
+    def __init__(self):
+        self.lengths = [8] * 5 + [16] * 7
+        self.bucket_ranges = [
+            {"start": 0, "end": 5, "max_length": 8},
+            {"start": 5, "end": 12, "max_length": 16},
+        ]
+
+    def __len__(self):
+        return len(self.lengths)
+
+    def __getitem__(self, index):
+        return torch.zeros(self.lengths[index], dtype=torch.long)
+
+
+def test_packed_batch_sampler_never_mixes_bucket_lengths(tmp_path):
+    args = SimpleNamespace(
+        sequence_packing=1, packing_batch_size=100, seq_bucket=2,
+        sequence_packing_mode="bucket", max_seq_len=64, batch_size=3,
+        data_path=str(tmp_path / "data.jsonl"),
+    )
+    dataset = _BucketedDataset()
+    plan = SequencePackingPlan(args, None, lambda *_: dataset)
+    batches = plan.batch_sampler(
+        dataset, active_packing=True, epoch=2, batch_size=3, skip_batches=0,
+    )
+    assert sorted(index for batch in batches for index in batch) == list(range(len(dataset)))
+    assert all(len({dataset.lengths[index] for index in batch}) == 1 for batch in batches)
+    assert plan.batch_sampler(
+        dataset, active_packing=True, epoch=2, batch_size=3, skip_batches=2,
+    ) == batches[2:]
 
 
 def test_packed_positions_reset_and_attention_is_block_diagonal():
@@ -256,3 +341,30 @@ def test_resume_aligns_then_packs_inside_same_epoch(tmp_path):
     changed.max_seq_len = 768
     with pytest.raises(ValueError, match="changed max_seq_len"):
         validate_packing_resume(changed, {"data_config": packed_saved})
+    changed.max_seq_len = args.max_seq_len
+    changed.sequence_packing_mode = "bucket"
+    with pytest.raises(ValueError, match="changed sequence_packing_mode"):
+        validate_packing_resume(changed, {"data_config": packed_saved})
+    bucket_args = SimpleNamespace(**vars(args))
+    bucket_args.sequence_packing_mode = "bucket"
+    packed_saved = packing_data_config(bucket_args)
+    changed = SimpleNamespace(**vars(bucket_args))
+    changed.seq_bucket = 3
+    with pytest.raises(ValueError, match="changed seq_bucket"):
+        validate_packing_resume(changed, {"data_config": packed_saved})
+
+
+def test_raw_checkpoint_can_enable_experimental_bucket_mode(tmp_path):
+    saved_args = SimpleNamespace(
+        sequence_packing=0, sequence_packing_mode="fixed", seq_bucket=2,
+        packing_batch_size=1000, max_seq_len=512, batch_size=8,
+        data_path=str(tmp_path / "data.jsonl"),
+    )
+    requested = SimpleNamespace(**vars(saved_args))
+    requested.sequence_packing = 1
+    requested.sequence_packing_mode = "bucket"
+    requested.seq_bucket = 4
+    requested.packing_batch_size = 2000
+    assert validate_packing_resume(
+        requested, {"data_config": packing_data_config(saved_args)}
+    ) is True
