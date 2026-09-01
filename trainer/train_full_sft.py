@@ -159,7 +159,7 @@ if __name__ == "__main__":
         ),
     )
     scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))
-    optimizer = build_optimizer(model.parameters(), lr=args.learning_rate, optimizer=args.optimizer)
+    optimizer = build_optimizer(model.named_parameters(), lr=args.learning_rate, optimizer=args.optimizer)
 
     # 6. 从ckp恢复状态
     start_epoch, start_step = 0, 0

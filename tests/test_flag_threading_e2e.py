@@ -128,6 +128,11 @@ def test_lm_checkpoint_roundtrip_preserves_flag(tmp_path):
     assert ckp_data["config"]["use_grad_checkpoint"] == 1  # persisted in to_dict()
     rebuilt = InstinctConfig(**ckp_data["config"])
     assert rebuilt.use_grad_checkpoint == 1
+    assert {tensor.dtype for tensor in ckp_data["model"].values()} == {torch.float32}
+    inference_state = torch.load(
+        tmp_path / f"t13_resume_{config.hidden_size}.pth", weights_only=True
+    )
+    assert {tensor.dtype for tensor in inference_state.values()} == {torch.float16}
 
 
 def test_resume_config_rebuilt_from_args_not_checkpoint(tmp_path):

@@ -189,7 +189,7 @@ if __name__ == "__main__":
         ),
     )
     scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))
-    optimizer = build_optimizer(model.parameters(), lr=args.learning_rate, optimizer=args.optimizer)
+    optimizer = build_optimizer(model.named_parameters(), lr=args.learning_rate, optimizer=args.optimizer)
     # Make the first compiled backward obey the same no-accumulation invariant
     # as every backward following optimizer.step().
     optimizer.zero_grad(set_to_none=True)

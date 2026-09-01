@@ -16,8 +16,9 @@ from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from model.flash_attn_4 import flash_attention
 from model.kv_cache_quant import parse_cache, make_cache
 from model.checkpointing import recompute_attention, checkpoint_ffn
+from model.attention_mask import apply_attention_mask
 from model.sequence_packing import (
-    apply_attention_mask, merge_packed_attention_mask, positions_from_sequence_ids,
+    merge_packed_attention_mask, positions_from_sequence_ids,
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -45,6 +46,12 @@ class InstinctConfig(PretrainedConfig):
         self.use_grad_checkpoint = kwargs.get("use_grad_checkpoint", 0)
         self.num_attention_heads = kwargs.get("num_attention_heads", 8)
         self.num_key_value_heads = kwargs.get("num_key_value_heads", 4)
+        if self.num_attention_heads < 1 or self.num_key_value_heads < 1:
+            raise ValueError("attention head counts must be >= 1")
+        if self.num_key_value_heads > self.num_attention_heads:
+            raise ValueError("num_key_value_heads must not exceed num_attention_heads")
+        if self.num_attention_heads % self.num_key_value_heads != 0:
+            raise ValueError("num_attention_heads must be divisible by num_key_value_heads")
         self.head_dim = kwargs.get("head_dim", self.hidden_size // self.num_attention_heads)
         self.hidden_act = kwargs.get("hidden_act", 'silu')
         self.intermediate_size = kwargs.get("intermediate_size", math.ceil(hidden_size * math.pi / 64) * 64)
@@ -362,7 +369,7 @@ class InstinctBlock(nn.Module):
             self.input_layernorm(hidden_states), position_embeddings,
             past_key_value, use_cache, attention_mask
         )
-        hidden_states += residual
+        hidden_states = hidden_states + residual
         normed = self.post_attention_layernorm(hidden_states)
         if self.use_grad_checkpoint == 1 and self.training:
             ffn_out, aux = checkpoint_ffn(self.mlp, normed)

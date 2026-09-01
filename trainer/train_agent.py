@@ -629,7 +629,7 @@ if __name__ == "__main__":
     )
     train_ds = AgentRLDataset(args.data_path, tokenizer, max_length=lm_config.max_seq_len)
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
-    optimizer = build_optimizer(model.parameters(), lr=args.learning_rate, optimizer=args.optimizer)
+    optimizer = build_optimizer(model.named_parameters(), lr=args.learning_rate, optimizer=args.optimizer)
     def collate_fn(batch): return {'messages': [b['messages'] for b in batch], 'tools': [b['tools'] for b in batch], 'gt': [b['gt'] for b in batch]}
     loader_for_count = DataLoader(train_ds, batch_size=args.batch_size, sampler=train_sampler, collate_fn=collate_fn)
     iters = len(loader_for_count)

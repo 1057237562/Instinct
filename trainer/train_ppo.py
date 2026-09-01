@@ -439,8 +439,8 @@ if __name__ == "__main__":
     )
     train_ds = RLAIFDataset(args.data_path, tokenizer, max_length=(args.max_seq_len + args.max_gen_len), thinking_ratio=args.thinking_ratio)
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
-    actor_optimizer = build_optimizer(actor_model.parameters(), lr=args.learning_rate, optimizer=args.optimizer)
-    critic_optimizer = build_optimizer(critic_model.parameters(), lr=args.critic_learning_rate, optimizer=args.optimizer)
+    actor_optimizer = build_optimizer(actor_model.named_parameters(), lr=args.learning_rate, optimizer=args.optimizer)
+    critic_optimizer = build_optimizer(critic_model.named_parameters(), lr=args.critic_learning_rate, optimizer=args.optimizer)
     loader_for_count = DataLoader(train_ds, batch_size=args.batch_size, sampler=train_sampler)
     iters = len(loader_for_count)
     mb_factor = max(1, math.ceil(args.batch_size / args.mini_batch_size))

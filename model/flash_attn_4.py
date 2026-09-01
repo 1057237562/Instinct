@@ -19,7 +19,7 @@ from typing import Any, Callable, Optional
 
 import torch
 import torch.nn.functional as F
-from model.sequence_packing import normalize_attention_mask
+from model.attention_mask import normalize_attention_mask
 
 _flash_attn_4_func = None
 _tried_import = False

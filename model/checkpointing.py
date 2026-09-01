@@ -30,7 +30,7 @@ from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-from model.sequence_packing import apply_attention_mask
+from model.attention_mask import apply_attention_mask
 
 
 def _repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:

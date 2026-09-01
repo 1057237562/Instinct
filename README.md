@@ -240,6 +240,9 @@ python trainer/train_pretrain.py --dtype bfloat16 --param_dtype bf16 \
 - `auto` 只转换预计有收益的 Linear；`eligible` 转换所有维度为 16 倍数的兼容 Linear。
 - `lm_head`、LoRA adapter、Embedding、Norm、Attention softmax、残差拓扑以及优化器状态保持 BF16/FP32。
 - FP8 包装不改变 state_dict 键名，普通权重、暂停检查点和恢复训练可在 FP8/BF16 间切换。
+- Full SFT / DPO / PPO 等低学习率阶段应使用 `--param_dtype fp32` 保存可更新的主权重；
+  `--dtype bfloat16` 与 TorchAO FP8 GEMM 仍然有效。直接更新 BF16/FP16 参数时，低于其量化间隔的
+  optimizer update 会被舍入为零，训练器会对此类危险组合提前报错。
 
 ### 训练性能分析
 

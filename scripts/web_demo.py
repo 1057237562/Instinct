@@ -16,6 +16,7 @@ import numpy as np
 import streamlit as st
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 from model.model_instinct import InstinctConfig, InstinctForCausalLM
+from scripts.web_demo_utils import resolve_model_config_path
 
 st.set_page_config(page_title="Instinct", initial_sidebar_state="collapsed")
 
@@ -476,14 +477,7 @@ if weight_labels:
 else:
     weight_path = st.sidebar.text_input("weight .pth", value=st.session_state.weight_path, key="wt_path")
 
-derived_config = weight_path.replace(".pth", ".json") if weight_path.endswith(".pth") else None
-fallback_config = os.path.join(repo_root, "trainer", "config_pretrain.json")
-if derived_config and os.path.exists(derived_config):
-    config_path = derived_config
-elif os.path.exists(fallback_config):
-    config_path = fallback_config
-else:
-    config_path = ""
+config_path = resolve_model_config_path(weight_path, repo_root)
 
 st.session_state.config_path = config_path
 st.session_state.tokenizer_path = tokenizer_path

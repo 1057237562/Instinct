@@ -2,6 +2,8 @@
 
 import torch
 
+from model.attention_mask import normalize_attention_mask as _normalize_attention_mask
+
 
 def positions_from_sequence_ids(sequence_ids: torch.Tensor) -> torch.Tensor:
     """Return per-example positions, resetting to zero at every segment."""
@@ -37,7 +39,7 @@ def merge_packed_attention_mask(
     packed_mask = block_diagonal_attention_mask(sequence_ids)
     if attention_mask is None:
         return packed_mask
-    allowed = normalize_attention_mask(attention_mask)
+    allowed = _normalize_attention_mask(attention_mask)
     if allowed.ndim == 4:
         allowed = allowed.squeeze(1)
     if allowed.ndim == 2:
@@ -45,20 +47,3 @@ def merge_packed_attention_mask(
     if allowed.ndim != 3:
         raise ValueError("attention_mask must have 2, 3, or 4 dimensions")
     return packed_mask & allowed
-
-
-def normalize_attention_mask(attention_mask: torch.Tensor) -> torch.Tensor:
-    """Normalize 2D/3D/4D 0/1 masks to an SDPA-compatible boolean mask."""
-    allowed = attention_mask if attention_mask.dtype == torch.bool else attention_mask != 0
-    if allowed.ndim == 2:
-        return allowed[:, None, None, :]
-    if allowed.ndim == 3:
-        return allowed[:, None, :, :]
-    if allowed.ndim == 4:
-        return allowed
-    raise ValueError("attention_mask must have 2, 3, or 4 dimensions")
-
-
-def apply_attention_mask(scores: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-    """Apply a 2D padding mask or a 3D/4D full attention mask to scores."""
-    return scores.masked_fill(~normalize_attention_mask(attention_mask), -1e9)

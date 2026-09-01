@@ -302,6 +302,12 @@ def restore_config_from_checkpoint(current_config, checkpoint_data, *,
         return current_config
 
     saved_config = dict(saved_config)
+    # Architecture comes from the checkpoint, while runtime precision choices
+    # come from the current launch. This allows a low-precision run to resume
+    # safely with FP32 master parameters without changing model topology.
+    for field in ("param_dtype", "kv_cache_dtype", "use_grad_checkpoint"):
+        if hasattr(current_config, field):
+            saved_config[field] = getattr(current_config, field)
     architecture = saved_config.get(
         "model_architecture", getattr(current_config, "model_architecture", "standard")
     )
@@ -312,6 +318,49 @@ def restore_config_from_checkpoint(current_config, checkpoint_data, *,
         f"[Resume] restored checkpoint config: architecture={architecture}, "
         f"residual={getattr(restored, 'residual_type', 'standard')}"
     )
+    return restored
+
+
+def restore_config_from_weight(current_config, from_weight: str, save_dir: str = './out'):
+    """Restore model topology from the JSON belonging to a raw ``.pth`` base weight.
+
+    A base checkpoint is just as topology-sensitive as a resume checkpoint.  The
+    WebUI's current architecture controls must therefore not silently change GQA,
+    layer count, or other tensor shapes while loading an existing weight file.
+    Runtime precision choices remain current through
+    :func:`restore_config_from_checkpoint`.
+    """
+    if not from_weight or from_weight == 'none':
+        return current_config
+
+    if from_weight.endswith('.pth'):
+        weight_path = os.path.abspath(from_weight)
+    else:
+        moe_suffix = '_moe' if current_config.use_moe else ''
+        weight_path = os.path.abspath(
+            os.path.join(save_dir, f'{from_weight}_{current_config.hidden_size}{moe_suffix}.pth')
+        )
+
+    stem = os.path.splitext(os.path.basename(weight_path))[0]
+    weight_dir = os.path.dirname(weight_path)
+    parent_dir = os.path.dirname(weight_dir)
+    candidates = [
+        os.path.join(weight_dir, f'{stem}.json'),
+        os.path.join(parent_dir, 'checkpoints', f'{stem}.json'),
+        os.path.abspath(os.path.join('./checkpoints', f'{stem}.json')),
+    ]
+    config_path = next((path for path in candidates if os.path.isfile(path)), None)
+    if config_path is None:
+        Logger(
+            f"[Base weight] no saved config JSON found for {weight_path}; "
+            "using current model topology"
+        )
+        return current_config
+
+    with open(config_path, 'r', encoding='utf-8') as config_file:
+        saved_config = json.load(config_file)
+    restored = restore_config_from_checkpoint(current_config, {'config': saved_config})
+    Logger(f"[Base weight] restored model topology from {config_path}")
     return restored
 
 
@@ -349,55 +398,51 @@ def setup_seed(seed: int) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 def _zeropower_via_newtonschulz5(G, steps=5, eps=1e-7):
-    """Newton-Schulz 迭代求矩阵的 0 次幂（正交化），使用全局收敛的 5 阶迭代系数。
-
-    与 torch 官方 `torch.optim.Muon` 内部的 `_orthogonalize` 语义保持一致：
-    对矩阵（ndim>=2）的梯度做正交化，只保留方向信息、去掉幅度。
-    """
+    """Match ``torch.optim.Muon``'s quintic Newton-Schulz update."""
     a, b, c = (3.4445, -4.7750, 2.0315)
-    X = G.float()
+    X = G.bfloat16()
     if G.size(0) > G.size(1):
         X = X.T
-    X = X / (X.norm() + eps)
+    X = X / X.norm().clamp(min=eps)
     for _ in range(steps):
         A = X @ X.T
-        B = b * A + c * A @ A
-        X = a * X + B @ X
+        B = torch.addmm(A, A, A, beta=b, alpha=c)
+        X = torch.addmm(X, B, X, beta=a)
     if G.size(0) > G.size(1):
         X = X.T
     return X.to(G.dtype)
 
 
 class MuonOptimizer(torch.optim.Optimizer):
-    """Muon (MomentUm Orthogonalized by Newton-schulz) 的纯 PyTorch 原生实现。
+    """Fallback matching the public ``torch.optim.Muon`` algorithm.
 
     用于 torch < 2.10（此时 `torch.optim.Muon` 尚不存在）时的回退方案。
-    默认超参与 `torch.optim.Muon` 完全对齐，API 兼容，升级 torch 后可直接切换内置版本：
-
-    - lr=0.02, momentum=0.95, nesterov=True, ns_steps=5
-    - orthogonalize_scale='weight_decay', weight_decay=0.01
-
-    更新规则：
-    - ndim >= 2 的权重（矩阵）使用「动量 + Newton-Schulz 正交化」的更新；
-    - 其余 1D 参数退化为带 Nesterov 动量的 SGD；
-    - 采用解耦权重衰减（decoupled weight decay）。
+    和官方实现一样只接受隐藏层二维矩阵；embedding、输出头、Norm 等参数
+    由 ``build_optimizer`` 分配给 AdamW。
     """
 
-    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5,
-                 orthogonalize_scale='weight_decay', weight_decay=0.01):
+    def __init__(self, params, lr=1e-3, weight_decay=0.1, momentum=0.95,
+                 nesterov=True, ns_steps=5, eps=1e-7, adjust_lr_fn=None):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
         if momentum < 0.0:
             raise ValueError(f"Invalid momentum value: {momentum}")
         if ns_steps < 0:
             raise ValueError(f"Invalid ns_steps value: {ns_steps}")
-        if orthogonalize_scale not in ('lr', 'weight_decay'):
-            raise ValueError(f"Invalid orthogonalize_scale value: {orthogonalize_scale}")
+        if adjust_lr_fn not in (None, 'original', 'match_rms_adamw'):
+            raise ValueError(f"Invalid adjust_lr_fn value: {adjust_lr_fn}")
         if weight_decay < 0.0:
             raise ValueError(f"Invalid weight_decay value: {weight_decay}")
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps,
-                        orthogonalize_scale=orthogonalize_scale, weight_decay=weight_decay)
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum,
+                        nesterov=nesterov, ns_steps=ns_steps, eps=eps,
+                        adjust_lr_fn=adjust_lr_fn)
         super().__init__(params, defaults)
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.ndim != 2:
+                    raise ValueError(
+                        f"Muon only supports 2D parameters, found shape {tuple(p.shape)}"
+                    )
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -410,7 +455,8 @@ class MuonOptimizer(torch.optim.Optimizer):
             momentum = group['momentum']
             nesterov = group['nesterov']
             ns_steps = group['ns_steps']
-            orthogonalize_scale = group['orthogonalize_scale']
+            eps = group['eps']
+            adjust_lr_fn = group['adjust_lr_fn']
             weight_decay = group['weight_decay']
             for p in group['params']:
                 if p.grad is None:
@@ -423,16 +469,16 @@ class MuonOptimizer(torch.optim.Optimizer):
                     if 'momentum_buffer' not in state:
                         state['momentum_buffer'] = torch.zeros_like(g)
                     buf = state['momentum_buffer']
-                    buf.mul_(momentum).add_(g)
-                    g = g.add(buf, alpha=momentum) if nesterov else buf
-                if p.ndim >= 2:
-                    g = _zeropower_via_newtonschulz5(g, ns_steps)
-                    scale = lr if orthogonalize_scale == 'lr' else lr * weight_decay
-                    p.add_(g, alpha=-scale)
-                else:
-                    p.add_(g, alpha=-lr)
+                    buf.lerp_(g, 1 - momentum)
+                    g = g.lerp(buf, momentum) if nesterov else buf
+                g = _zeropower_via_newtonschulz5(g, ns_steps, eps)
+                if adjust_lr_fn == 'match_rms_adamw':
+                    scale = lr * 0.2 * math.sqrt(max(p.shape[:2]))
+                else:  # None / "original"
+                    scale = lr * math.sqrt(max(1.0, p.shape[0] / p.shape[1]))
                 if weight_decay != 0:
                     p.mul_(1 - lr * weight_decay)
+                p.add_(g, alpha=-scale)
         return loss
 
 
@@ -480,7 +526,29 @@ class CombinedOptimizer(torch.optim.Optimizer):
                 "MuonOptimizer 或其它优化器保存）。跨格式恢复 Muon 训练状态不受支持，"
                 "请改用 --from_weight 从模型权重继续，而非 --from_resume。"
             )
-        for opt, sd in zip(self.optimizers, state_dict["optimizers"]):
+        saved_optimizers = state_dict["optimizers"]
+        if len(saved_optimizers) != len(self.optimizers):
+            Logger(
+                "[Resume] optimizer layout changed; keeping fresh optimizer state "
+                "while restoring model/progress"
+            )
+            return
+        current_group_sizes = [
+            [len(group["params"]) for group in opt.param_groups]
+            for opt in self.optimizers
+        ]
+        saved_group_sizes = [
+            [len(group["params"]) for group in sd.get("param_groups", [])]
+            for sd in saved_optimizers
+        ]
+        if current_group_sizes != saved_group_sizes:
+            Logger(
+                "[Resume] optimizer parameter groups changed (for example, embeddings "
+                "moved from Muon to AdamW); keeping fresh optimizer state while "
+                "restoring model/progress"
+            )
+            return
+        for opt, sd in zip(self.optimizers, saved_optimizers):
             opt.load_state_dict(sd)
         self.param_groups = [g for opt in self.optimizers for g in opt.param_groups]
 
@@ -491,6 +559,46 @@ _OPTIMIZER_ALIASES = {
     'adafactory': 'adafactor',  # 兼容 "AdaFactory" 拼写
     'muon': 'muon',
 }
+
+
+_LOW_PRECISION_LR_FLOORS = {
+    torch.bfloat16: 1e-4,
+    torch.float16: 1e-5,
+}
+
+
+def _materialize_named_params(params):
+    """Return ``[(name, parameter)]`` for parameter or named-parameter inputs."""
+    items = list(params)
+    if items and isinstance(items[0], tuple):
+        return [(str(name), param) for name, param in items if param.requires_grad]
+    return [("", param) for param in items if param.requires_grad]
+
+
+def _validate_optimizer_param_precision(named_params, lr: float) -> None:
+    """Reject learning rates that deterministically vanish in direct low-precision weights."""
+    dtypes = {param.dtype for _, param in named_params}
+    unsafe = [
+        (dtype, floor) for dtype, floor in _LOW_PRECISION_LR_FLOORS.items()
+        if dtype in dtypes and lr <= floor
+    ]
+    if not unsafe:
+        return
+    dtype, floor = unsafe[0]
+    raise ValueError(
+        f"learning_rate={lr:g} is too small for directly updated {dtype} parameters "
+        f"(safety floor: > {floor:g}); updates may round to zero. Use "
+        "--param_dtype fp32 (recommended; compatible with BF16 autocast and TorchAO FP8), "
+        "or deliberately choose a larger learning rate."
+    )
+
+
+def _is_muon_hidden_matrix(name: str, param: torch.nn.Parameter) -> bool:
+    """Keep embeddings/output heads out of Muon, as required by the algorithm."""
+    if param.ndim != 2:
+        return False
+    lowered = name.lower()
+    return not any(part in lowered for part in ("embed", "embedding", "lm_head", "output_head"))
 
 
 def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> torch.optim.Optimizer:
@@ -509,9 +617,12 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
                       否则回退到原生 MuonOptimizer）；1D 参数（RMSNorm 权重/bias 等）
                       交给 AdamW。两类都存在时组合为 CombinedOptimizer 返回。
     """
+    named_params = _materialize_named_params(params)
+    _validate_optimizer_param_precision(named_params, lr)
+    trainable_params = [param for _, param in named_params]
     name = _OPTIMIZER_ALIASES.get(str(optimizer).strip().lower(), str(optimizer).strip().lower())
     if name == 'adamw':
-        return torch.optim.AdamW(params, lr=lr, **kwargs)
+        return torch.optim.AdamW(trainable_params, lr=lr, **kwargs)
     if name == 'adafactor':
         if 'relative_step' in inspect.signature(torch.optim.Adafactor.__init__).parameters:
             # 旧版 API（torch < 2.8）：关闭 relative_step / scale_parameter，使 lr 显式生效
@@ -521,17 +632,25 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
             # 新版 API（torch >= 2.8）：lr 直接生效，无需额外开关
             defaults = dict(lr=lr)
             defaults.update(kwargs)
-        return torch.optim.Adafactor(params, **defaults)
+        return torch.optim.Adafactor(trainable_params, **defaults)
     if name == 'muon':
-        params = list(params)
-        matrix_params = [p for p in params if p.ndim == 2]
-        other_params = [p for p in params if p.ndim != 2]
+        matrix_params = [
+            param for param_name, param in named_params
+            if _is_muon_hidden_matrix(param_name, param)
+        ]
+        matrix_ids = {id(param) for param in matrix_params}
+        other_params = [param for param in trainable_params if id(param) not in matrix_ids]
         if not matrix_params:
             return torch.optim.AdamW(other_params, lr=lr)
         if hasattr(torch.optim, 'Muon'):
-            muon_opt = torch.optim.Muon(matrix_params, lr=lr, **kwargs)
+            muon_kwargs = dict(kwargs)
+            if 'adjust_lr_fn' in inspect.signature(torch.optim.Muon.__init__).parameters:
+                muon_kwargs.setdefault('adjust_lr_fn', 'match_rms_adamw')
+            muon_opt = torch.optim.Muon(matrix_params, lr=lr, **muon_kwargs)
         else:
-            muon_opt = MuonOptimizer(matrix_params, lr=lr, **kwargs)
+            muon_kwargs = dict(kwargs)
+            muon_kwargs.setdefault('adjust_lr_fn', 'match_rms_adamw')
+            muon_opt = MuonOptimizer(matrix_params, lr=lr, **muon_kwargs)
         if not other_params:
             return muon_opt
         return CombinedOptimizer([muon_opt, torch.optim.AdamW(other_params, lr=lr)])
@@ -561,8 +680,12 @@ def lm_checkpoint(lm_config, weight: str = 'full_sft', model=None, optimizer=Non
     if model is not None:
         raw_model = model.module if isinstance(model, DistributedDataParallel) else model
         raw_model = getattr(raw_model, '_orig_mod', raw_model)
-        state_dict = raw_model.state_dict()
-        state_dict = {k: v.half().cpu() for k, v in state_dict.items()}
+        raw_state_dict = raw_model.state_dict()
+        state_dict = {
+            k: (v.detach().half().cpu() if v.is_floating_point() else v.detach().cpu())
+            for k, v in raw_state_dict.items()
+        }
+        resume_state_dict = {k: v.detach().cpu() for k, v in raw_state_dict.items()}
         ckp_tmp = ckp_path + '.tmp'
         torch.save(state_dict, ckp_tmp)
         os.replace(ckp_tmp, ckp_path)
@@ -575,7 +698,7 @@ def lm_checkpoint(lm_config, weight: str = 'full_sft', model=None, optimizer=Non
                 wandb_id = getattr(wandb, 'id', None)
 
         resume_data = {
-            'model': state_dict,
+            'model': resume_state_dict,
             'optimizer': optimizer.state_dict(),
             'epoch': epoch,
             'step': step,
@@ -602,7 +725,7 @@ def lm_checkpoint(lm_config, weight: str = 'full_sft', model=None, optimizer=Non
             json.dump(lm_config.to_dict(), f, ensure_ascii=False, indent=2)
         os.replace(config_json_tmp, config_json_path)
 
-        del state_dict, resume_data
+        del raw_state_dict, state_dict, resume_state_dict, resume_data
         torch.cuda.empty_cache()
     else:  # 加载模式
         if os.path.exists(resume_path):
@@ -656,6 +779,17 @@ def pause_save_checkpoint(args, lm_config, *, weight, model, optimizer, epoch, s
 
 
 def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = './model', save_dir: str = './out', device: str = 'cuda') -> tuple:
+    restored_config = restore_config_from_weight(lm_config, from_weight, save_dir=save_dir)
+    if restored_config is not lm_config:
+        if type(restored_config) is not type(lm_config):
+            raise ValueError(
+                "Base weight architecture differs from the selected model architecture; "
+                "select the matching architecture before loading this checkpoint."
+            )
+        # Keep the object identity because training callers retain ``lm_config``
+        # for checkpoint naming/saving after ``init_model`` returns.
+        lm_config.__dict__.clear()
+        lm_config.__dict__.update(restored_config.__dict__)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     architecture = getattr(lm_config, 'model_architecture', 'standard')
     _, model_cls = _architecture_classes(architecture)

@@ -2,6 +2,7 @@
 
 import ast
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -27,7 +28,11 @@ from model.model_instinct_loop import (
     InstinctForCausalLM as LoopedInstinctForCausalLM,
 )
 from trainer.trainer_cli import build_trainer_parser
-from trainer.trainer_utils import config_from_args, restore_config_from_checkpoint
+from trainer.trainer_utils import (
+    config_from_args,
+    restore_config_from_checkpoint,
+    restore_config_from_weight,
+)
 import trainer.trainer_utils as trainer_utils
 
 
@@ -165,6 +170,15 @@ def test_residual_topology_kv_cache_matches_full_decode(residual_type, extra):
 def test_invalid_residual_config_is_rejected(field, value):
     with pytest.raises(ValueError):
         InstinctConfig(**{field: value})
+
+
+@pytest.mark.parametrize(
+    "config_cls", [InstinctConfig, LinearInstinctConfig, LoopedInstinctConfig]
+)
+@pytest.mark.parametrize("kv_heads", [16, 3])
+def test_invalid_gqa_head_geometry_is_rejected(config_cls, kv_heads):
+    with pytest.raises(ValueError, match="num_key_value_heads|divisible"):
+        config_cls(num_attention_heads=8, num_key_value_heads=kv_heads)
 
 
 @pytest.mark.parametrize(
@@ -337,6 +351,61 @@ def test_resume_rebuilds_checkpoint_topology_before_strict_load(
     restored_model.load_state_dict(saved_model.state_dict(), strict=True)
     assert type(restored_model.config) is type(saved_model.config)
     assert restored_config.residual_type == residual_type
+
+
+def test_resume_keeps_current_runtime_precision_over_checkpoint_values():
+    current = InstinctConfig(
+        hidden_size=48, num_hidden_layers=2,
+        param_dtype="fp32", kv_cache_dtype="fp8_e5m2", use_grad_checkpoint=2,
+    )
+    saved = current.to_dict()
+    saved.update({
+        "param_dtype": "bf16",
+        "kv_cache_dtype": "fp32",
+        "use_grad_checkpoint": 1,
+    })
+
+    restored = restore_config_from_checkpoint(current, {"config": saved})
+
+    assert restored.param_dtype == "fp32"
+    assert restored.kv_cache_dtype == "fp8_e5m2"
+    assert restored.use_grad_checkpoint == 2
+
+
+def test_base_weight_restores_saved_gqa_topology_and_keeps_runtime_precision(tmp_path):
+    out_dir = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoints"
+    out_dir.mkdir()
+    checkpoint_dir.mkdir()
+    weight_path = out_dir / "pretrain_demo_768.pth"
+    weight_path.touch()
+
+    saved = InstinctConfig(
+        hidden_size=768,
+        num_hidden_layers=16,
+        num_attention_heads=8,
+        num_key_value_heads=4,
+        head_dim=96,
+        param_dtype="bf16",
+    ).to_dict()
+    (checkpoint_dir / "pretrain_demo_768.json").write_text(
+        json.dumps(saved), encoding="utf-8"
+    )
+    current = InstinctConfig(
+        hidden_size=768,
+        num_hidden_layers=16,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        head_dim=96,
+        param_dtype="fp32",
+        kv_cache_dtype="fp8_e5m2",
+    )
+
+    restored = restore_config_from_weight(current, str(weight_path))
+
+    assert restored.num_key_value_heads == 4
+    assert restored.param_dtype == "fp32"
+    assert restored.kv_cache_dtype == "fp8_e5m2"
 
 
 def test_legacy_distillation_teacher_inherits_saved_topology_only():

@@ -1280,6 +1280,17 @@ _DEFAULT_EPOCHS = {
     "distillation": 6,
 }
 
+_DEFAULT_LEARNING_RATES = {
+    "pretrain": 5e-4,
+    "full_sft": 1e-5,
+    "lora": 1e-4,
+    "dpo": 4e-8,
+    "ppo": 3e-7,
+    "grpo": 3e-7,
+    "agent": 3e-7,
+    "distillation": 5e-6,
+}
+
 # 暂停退出码：训练进程识别到 .pause_request 标记后保存检查点并以 42 退出，
 # 与 0=成功 / 其他=失败 相区分，WebUI 轮询时据此把状态置为 "paused"。
 PAUSE_EXIT_CODE = 42
@@ -1291,6 +1302,10 @@ def _default_weight_prefix(train_type):
 
 def _default_epochs(train_type):
     return _DEFAULT_EPOCHS.get(train_type, 2)
+
+
+def _default_learning_rate(train_type):
+    return _DEFAULT_LEARNING_RATES.get(train_type, 5e-4)
 
 
 def _arch_tag():
@@ -1373,9 +1388,18 @@ def _resolve_save_prefix(train_type, hidden_size, use_moe, from_resume, stamp):
                 st.session_state[f"save_prefix_{train_type}"] = weight
                 return weight
         # 2. 会话内已选择的 save_prefix（同会话续训无需重新扫描磁盘）。
-        prefix = st.session_state.get(f"save_prefix_{train_type}")
+        session_key = f"save_prefix_{train_type}"
+        prefix = st.session_state.get(session_key)
         if prefix:
-            return prefix
+            # A fresh run updates this session value before it has necessarily
+            # produced a resume checkpoint.  Do not let that stale value mask
+            # an older, valid checkpoint already present on disk.
+            if (
+                _resume_checkpoint_exists(prefix, hidden_size, use_moe)
+                and _matches_arch_tag(prefix, arch_tag)
+            ):
+                return prefix
+            st.session_state.pop(session_key, None)
         # 3. 磁盘扫描最新匹配检查点（仍按默认前缀 stem 匹配，保持 train_type 隔离）。
         prefix = _latest_checkpoint_prefix(train_type, hidden_size, use_moe, arch_tag)
         if prefix:
@@ -1726,19 +1750,27 @@ with st.sidebar:
 
     # ── Attention ──
     with st.expander("Attention", expanded=True):
-        _slider(
+        _q_heads = _slider(
             "num_attention_heads",
             1,
             32,
             st.session_state.get("num_attention_heads", 8),
             key="num_attention_heads",
         )
-        _slider(
+        _valid_kv_heads = [value for value in range(1, _q_heads + 1) if _q_heads % value == 0]
+        _current_kv_heads = st.session_state.get("num_key_value_heads", 4)
+        if _current_kv_heads not in _valid_kv_heads:
+            _current_kv_heads = max(
+                (value for value in _valid_kv_heads if value <= _current_kv_heads),
+                default=1,
+            )
+            st.session_state.num_key_value_heads = _current_kv_heads
+        _selectbox(
             "num_key_value_heads",
-            1,
-            32,
-            st.session_state.get("num_key_value_heads", 4),
+            options=_valid_kv_heads,
+            index=_valid_kv_heads.index(_current_kv_heads),
             key="num_key_value_heads",
+            help="KV heads must divide Q heads; use fewer KV heads for GQA.",
         )
         _h = st.session_state.get("hidden_size", 768)
         _q = st.session_state.get("num_attention_heads", 8)
@@ -2215,6 +2247,17 @@ with st.sidebar:
             help="AdamW (默认) / Adafactor (torch 内置) / Muon (torch>=2.10 内置，"
                  "否则自动回退到原生纯 PyTorch 实现)",
         )
+        learning_rate_key = f"learning_rate_{train_type}"
+        _number_input(
+            "learning_rate",
+            min_value=1e-9, max_value=1.0,
+            value=float(st.session_state.get(
+                learning_rate_key, _default_learning_rate(train_type)
+            )),
+            step=1e-6, format="%.2e", key=learning_rate_key,
+            help="各训练阶段使用独立学习率。Muon 使用 match_rms_adamw 调整，"
+                 "可直接沿用 AdamW 调好的学习率。",
+        )
         _checkbox(
             "Use torch.compile (Triton)",
             value=st.session_state.get("use_compile", True),
@@ -2234,12 +2277,13 @@ with st.sidebar:
                  "max-autotune=搜索更多 kernel，首次编译较慢；"
                  "max-autotune-no-cudagraphs=保留 autotune 但关闭 CUDA Graph",
         )
-        if (
+        _compile_invalid = (
             st.session_state.get("use_compile", True)
             and st.session_state.get("compile_mode", "reduce-overhead")
             in ("reduce-overhead", "max-autotune")
             and st.session_state.get("accumulation_steps", 1) > 1
-        ):
+        )
+        if _compile_invalid:
             st.error(
                 "当前 compile mode 使用 CUDA Graph，不能安全地跨 step 累积梯度。"
                 "请把 Gradient accumulation steps 设为 1，或改用 default / "
@@ -2320,10 +2364,11 @@ with st.sidebar:
             disabled=st.session_state.get("fp8_training", "off") == "off",
             help="auto 跳过预计量化开销大于收益的小 GEMM；eligible 转换全部尺寸可被 FP8 支持的 Linear。",
         )
-        if (
+        _fp8_invalid = (
             st.session_state.get("fp8_training", "off") != "off"
             and st.session_state.get("activation_dtype", "bfloat16") != "bfloat16"
-        ):
+        )
+        if _fp8_invalid:
             st.error("TorchAO FP8 training 需要将激活层精度设为 bfloat16。")
         if st.session_state.get("fp8_training", "off").startswith("rowwise"):
             st.info("部分消费级 Blackwell GPU 暂不支持 TorchAO rowwise；启动时会先实测，不支持则降级为 tensorwise。")
@@ -2334,7 +2379,23 @@ with st.sidebar:
             key="kv_cache_dtype",
             help="KV Cache 精度：fp8 量化缓存，decode 带宽减半(影响 RL rollouts 与推理)",
         )
-        if st.button("Start Training", width="stretch", key="btn_start_train"):
+        _selected_lr = float(st.session_state.get(
+            learning_rate_key, _default_learning_rate(train_type)
+        ))
+        _selected_param_dtype = st.session_state.get("param_dtype", "fp32")
+        _low_precision_floor = {"bf16": 1e-4, "fp16": 1e-5}.get(_selected_param_dtype)
+        _low_precision_invalid = (
+            _low_precision_floor is not None and _selected_lr <= _low_precision_floor
+        )
+        if _low_precision_invalid:
+            st.error(
+                f"当前 learning_rate={_selected_lr:g} 会被 {_selected_param_dtype} 参数舍入吞掉。"
+                "请将参数精度设为 fp32；激活仍可使用 BF16，TorchAO FP8 训练也仍然有效。"
+            )
+        if st.button(
+            "Start Training", width="stretch", key="btn_start_train",
+            disabled=_compile_invalid or _fp8_invalid or _low_precision_invalid,
+        ):
             st.session_state.train_triggered = True
         if st.session_state.get("train_status") == "running":
             if st.button("⏸ Pause Training", width="stretch", key="btn_pause_train",
@@ -2468,6 +2529,9 @@ if st.session_state.get("train_triggered", False):
                 cmd.extend(["--packing_batch_size", str(st.session_state.get("packing_batch_size", 1000))])
                 cmd.extend(["--accumulation_steps", str(st.session_state.get("accumulation_steps", 1))])
                 cmd.extend(["--optimizer", st.session_state.get("optimizer", "adamw")])
+                cmd.extend(["--learning_rate", str(st.session_state.get(
+                    f"learning_rate_{train_type}", _default_learning_rate(train_type)
+                ))])
                 cmd.extend(["--dtype", st.session_state.get("activation_dtype", "bfloat16")])
                 cmd.extend(["--param_dtype", st.session_state.get("param_dtype", "fp32")])
                 cmd.extend(["--kv_cache_dtype", st.session_state.get("kv_cache_dtype", "fp32")])
