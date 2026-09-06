@@ -16,7 +16,11 @@ import numpy as np
 import streamlit as st
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 from model.model_instinct import InstinctConfig, InstinctForCausalLM
-from scripts.web_demo_utils import resolve_model_config_path
+from scripts.web_demo_utils import (
+    clear_conversation_state,
+    queue_last_response_regeneration,
+    resolve_model_config_path,
+)
 
 st.set_page_config(page_title="Instinct", initial_sidebar_state="collapsed")
 
@@ -85,6 +89,8 @@ LANG_TEXTS = {
         'history_rounds': '历史对话轮次',
         'max_length': '最大输出 Tokens',
         'temperature': '温度',
+        'repetition_penalty': '重复性惩罚',
+        'repetition_penalty_tip': '1.0 表示关闭；建议 1.05–1.20，过高可能降低回答质量',
         'thinking': '思考',
         'tools': '工具',
         'language': '语言',
@@ -94,6 +100,8 @@ LANG_TEXTS = {
         'tool_select': '工具选择（最多4个）',
         'load_model': '🚀 加载模型',
         'unload_model': '🔄 卸载模型',
+        'new_chat': '✨ 新对话',
+        'regenerate_last': '重新生成最后一条回复',
         'loading_model': '正在加载模型，请稍候...',
         'configure_first': '请先配置模型路径，然后点击"加载模型"开始对话',
         'path_changed': '路径已变更，点击加载模型以重新加载',
@@ -111,6 +119,8 @@ LANG_TEXTS = {
         'history_rounds': 'History Rounds',
         'max_length': 'Max Output Tokens',
         'temperature': 'Temperature',
+        'repetition_penalty': 'Repetition Penalty',
+        'repetition_penalty_tip': '1.0 disables it; 1.05–1.20 is recommended, while high values may reduce quality',
         'thinking': 'Thinking',
         'tools': 'Tools',
         'language': 'Language',
@@ -120,6 +130,8 @@ LANG_TEXTS = {
         'tool_select': 'Tool Selection (max 4)',
         'load_model': '🚀 Load Model',
         'unload_model': '🔄 Unload Model',
+        'new_chat': '✨ New Chat',
+        'regenerate_last': 'Regenerate the last response',
         'loading_model': 'Loading model, please wait...',
         'configure_first': 'Please configure model paths and click "Load Model" to start',
         'path_changed': 'Path changed. Click Load Model to reload',
@@ -255,7 +267,9 @@ class LogitLensStreamer(TextIteratorStreamer):
         self.gen_ids.extend(value.tolist())
 
 
-def setup_logit_lens(model, tokenizer, temperature=None, top_p=None, top_k_sampling=None):
+def setup_logit_lens(model, tokenizer, temperature=None, top_p=None,
+                     top_k_sampling=None, repetition_penalty=1.0,
+                     prompt_token_ids=None):
     """把"逐层解释"挂在真实生成过程上，构建 层 × 已生成token 的 Top-1 表。
 
     布局（区别于标准 Logit Lens）：
@@ -267,7 +281,8 @@ def setup_logit_lens(model, tokenizer, temperature=None, top_p=None, top_k_sampl
     实现：Instinct 的 generate() 会把额外 kwargs 原样透传给 forward，而 forward 支持
     layer_callback 钩子（每层算完即回调 normed 状态）。借助它即可在不复写生成循环的
     前提下，逐步采集每一生成步的各层 Top-1。最终层额外做与 generate() 相同的采样对齐
-    （温度→top-k→top-p），使末行展示的正是采样器实际面对的分布；中间层保持原始 softmax。
+    （温度→重复性惩罚→top-k→top-p），使末行展示的正是采样器实际面对的分布；
+    中间层保持原始 softmax。
 
     返回 SimpleNamespace，暴露：
       * streamer : 可替代 TextIteratorStreamer 的流式对象（记录实际生成的 token id）
@@ -278,6 +293,7 @@ def setup_logit_lens(model, tokenizer, temperature=None, top_p=None, top_k_sampl
     ph = st.empty()
     steps = []          # 每个生成步一个 dict: {'tops': [(token_text, prob, token_id) × n_layers]}
     gen_ids = []        # 实际生成的 token id（由 streamer 线程填充）
+    prompt_token_ids = list(prompt_token_ids or [])
     last_rendered = [0]  # 节流：已渲染到的列数
     broken = [False]    # 采集异常后静默降级（生成线程内禁止抛异常，否则流式对话会卡死）
 
@@ -308,6 +324,18 @@ def setup_logit_lens(model, tokenizer, temperature=None, top_p=None, top_k_sampl
             if n_layers > 0 and layer_idx == n_layers:
                 if temperature is not None and temperature > 0:
                     lg = lg / temperature
+                if repetition_penalty != 1.0:
+                    seen = torch.tensor(
+                        prompt_token_ids + gen_ids,
+                        dtype=torch.long,
+                        device=lg.device,
+                    ).unique()
+                    score = lg[seen]
+                    lg[seen] = torch.where(
+                        score > 0,
+                        score / repetition_penalty,
+                        score * repetition_penalty,
+                    )
                 if top_k_sampling is not None and top_k_sampling > 0:
                     k = min(top_k_sampling, lg.shape[-1])
                     lg = torch.where(lg < torch.topk(lg, k).values[-1], torch.full_like(lg, float('-inf')), lg)
@@ -397,8 +425,8 @@ def load_model_tokenizer(config_path, tokenizer_path, weight_path=None):
 
 
 def clear_chat_messages():
-    del st.session_state.messages
-    del st.session_state.chat_messages
+    """Start a clean conversation while keeping the loaded model and settings."""
+    clear_conversation_state(st.session_state)
 
 
 def init_chat_messages():
@@ -417,10 +445,19 @@ def init_chat_messages():
 
     return st.session_state.messages
 
-def regenerate_answer(index):
-    st.session_state.messages.pop()
-    st.session_state.chat_messages.pop()
-    st.rerun()
+def regenerate_answer():
+    if queue_last_response_regeneration(st.session_state):
+        st.rerun()
+
+
+def render_regenerate_button(message_index):
+    """Render the action only for the final completed assistant response."""
+    if st.button(
+        "↻",
+        key=f"regenerate_response_{message_index}",
+        help=get_text('regenerate_last'),
+    ):
+        regenerate_answer()
 
 
 # 模型路径配置
@@ -516,6 +553,9 @@ else:
             if k in st.session_state:
                 del st.session_state[k]
         st.rerun()
+    if st.sidebar.button(get_text('new_chat'), width="stretch"):
+        clear_chat_messages()
+        st.rerun()
 
 st.sidebar.markdown('<hr style="margin: 12px 0 16px 0;">', unsafe_allow_html=True)
 
@@ -534,6 +574,10 @@ st.sidebar.markdown('<hr style="margin: 12px 0 16px 0;">', unsafe_allow_html=Tru
 st.session_state.history_chat_num = st.sidebar.slider(get_text('history_rounds'), 0, 8, 0, step=2)
 st.session_state.max_new_tokens = st.sidebar.slider(get_text('max_length'), 128, 16384, 2048, step=128)
 st.session_state.temperature = st.sidebar.slider(get_text('temperature'), 0.6, 1.2, 0.90, step=0.01)
+st.session_state.repetition_penalty = st.sidebar.slider(
+    get_text('repetition_penalty'), 1.0, 2.0, 1.0, step=0.01,
+    help=get_text('repetition_penalty_tip'),
+)
 
 st.sidebar.markdown('<hr style="margin: 12px 0 16px 0;">', unsafe_allow_html=True)
 
@@ -595,6 +639,8 @@ def main():
     for i, message in enumerate(messages):
         if message["role"] == "assistant":
             st.markdown(process_assistant_content(message["content"]), unsafe_allow_html=True)
+            if i == len(messages) - 1:
+                render_regenerate_button(i)
         else:
             st.markdown(
                 f'<div style="display: flex; justify-content: flex-end;"><div style="display: inline-block; margin: 10px 0; padding: 8px 12px 8px 12px; background-color: #3d4450; border-radius: 22px; color: white;">{message["content"]}</div></div>',
@@ -602,12 +648,9 @@ def main():
 
     prompt = st.chat_input(key="input", placeholder=get_text('send'))
 
-    if hasattr(st.session_state, 'regenerate') and st.session_state.regenerate:
-        prompt = st.session_state.last_user_message
-        regenerate_index = st.session_state.regenerate_index
-        delattr(st.session_state, 'regenerate')
-        delattr(st.session_state, 'last_user_message')
-        delattr(st.session_state, 'regenerate_index')
+    if st.session_state.pop('regenerate', False):
+        prompt = st.session_state.pop('last_user_message', None)
+        st.session_state.pop('regenerate_index', None)
 
     if prompt:
         st.markdown(
@@ -639,7 +682,9 @@ def main():
             with logit_lens_slot:
                 lens = setup_logit_lens(model, tokenizer,
                                         temperature=st.session_state.get('temperature', 0.9),
-                                        top_p=0.85, top_k_sampling=50)
+                                        top_p=0.85, top_k_sampling=50,
+                                        repetition_penalty=st.session_state.get('repetition_penalty', 1.0),
+                                        prompt_token_ids=inputs.input_ids[0].tolist())
 
         streamer = lens.streamer if lens is not None else TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
         generation_kwargs = {
@@ -651,6 +696,7 @@ def main():
             "pad_token_id": tokenizer.pad_token_id,
             "eos_token_id": tokenizer.eos_token_id,
             "temperature": st.session_state.temperature,
+            "repetition_penalty": st.session_state.repetition_penalty,
             "top_p": 0.85,
             "streamer": streamer,
         }
@@ -704,6 +750,7 @@ def main():
 
         messages.append({"role": "assistant", "content": answer})
         st.session_state.chat_messages.append({"role": "assistant", "content": answer})
+        render_regenerate_button(len(messages) - 1)
 
 
 if __name__ == "__main__":

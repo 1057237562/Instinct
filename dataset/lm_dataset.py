@@ -4,9 +4,14 @@ import json
 import os
 import random
 import bisect
+import time
 os.environ.setdefault("HF_HOME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".cache", "huggingface"))
 from datasets import load_dataset, concatenate_datasets, Features, Sequence, Value
-from dataset.sequence_bucket import optimal_sequence_buckets
+from dataset.sequence_bucket import (
+    bucket_token_budget,
+    optimal_sequence_buckets,
+    packing_preprocess_workers,
+)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 _PACKED_PRETRAIN_FEATURES = Features({
@@ -33,6 +38,26 @@ _TOKENIZED_SFT_FEATURES = Features({
     'labels': Sequence(Value('int32')),
     'length': Value('int32'),
 })
+
+# TorchAO float8 scaled GEMMs require their reduction dimensions to be a
+# multiple of 16.  During LM training the relevant dimension is commonly
+# batch_size * sequence_length, so aligning sequence_length itself keeps every
+# full or partial batch valid while adding at most 15 padding tokens per block.
+_SEQUENCE_BUCKET_ALIGNMENT = 16
+
+
+def _packing_map_num_proc(requested, sample_count):
+    """Resolve Hugging Face map workers without spawning for trivial inputs."""
+    workers = packing_preprocess_workers(requested, sample_count)
+    return workers if workers > 1 else None
+
+
+def _print_packing_workers(name, num_proc):
+    if os.environ.get('RANK', '0') in ('0', '-1'):
+        print(
+            f"[Packing Workers] {name}: tokenization_num_proc={num_proc or 1}",
+            flush=True,
+        )
 
 def pre_processing_chat(conversations, add_system_ratio=0.2, rng=None):
     # tool use 数据完整保留不做处理
@@ -63,6 +88,89 @@ def post_processing_chat(prompt_content, empty_think_ratio=0.2, rng=None):
     if '<think>\n\n</think>\n\n' in prompt_content and rng.random() > empty_think_ratio:
         prompt_content = prompt_content.replace('<think>\n\n</think>\n\n', '')
     return prompt_content
+
+
+def _create_chat_prompt(tokenizer, conversations):
+    """Render one chat without capturing a dataset instance in map workers."""
+    messages = []
+    tools = None
+    for message in conversations:
+        message = dict(message)
+        if message.get('role') == 'system' and message.get('tools'):
+            tools = (
+                json.loads(message['tools'])
+                if isinstance(message['tools'], str)
+                else message['tools']
+            )
+        if message.get('tool_calls') and isinstance(message['tool_calls'], str):
+            message['tool_calls'] = json.loads(message['tool_calls'])
+        messages.append(message)
+    return tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=False, tools=tools,
+    )
+
+
+def _generate_sft_labels(input_ids, bos_id, eos_id, max_length):
+    labels = [-100] * len(input_ids)
+    i = 0
+    while i < len(input_ids):
+        if input_ids[i:i + len(bos_id)] == bos_id:
+            start = i + len(bos_id)
+            end = start
+            while end < len(input_ids):
+                if input_ids[end:end + len(eos_id)] == eos_id:
+                    break
+                end += 1
+            for j in range(start, min(end + len(eos_id), max_length)):
+                labels[j] = input_ids[j]
+            i = end + len(eos_id) if end < len(input_ids) else len(input_ids)
+        else:
+            i += 1
+    return labels
+
+
+def _tokenize_pretrain_batch(batch, tokenizer, max_length):
+    input_sequences, lengths = [], []
+    for text in batch['text']:
+        tokens = tokenizer(
+            str(text), add_special_tokens=False,
+            max_length=max_length - 2, truncation=True,
+        ).input_ids
+        tokens = [tokenizer.bos_token_id] + tokens + [tokenizer.eos_token_id]
+        input_sequences.append(tokens)
+        lengths.append(len(tokens))
+    return {'input_ids': input_sequences, 'length': lengths}
+
+
+def _tokenize_sft_batch(batch, indices, tokenizer, max_length, packing_seed,
+                        bos_id, eos_id, discard_overlength=False):
+    input_sequences, label_sequences, lengths = [], [], []
+    for conversations, index in zip(batch['conversations'], indices):
+        rng = random.Random(int(packing_seed) + int(index))
+        conversations = pre_processing_chat(conversations, rng=rng)
+        prompt = _create_chat_prompt(tokenizer, conversations)
+        prompt = post_processing_chat(prompt, rng=rng)
+        # Reading at most one token beyond the cap is enough to distinguish an
+        # accepted example from an overlength one without materializing an
+        # arbitrarily large token list.  Bucket packing drops the whole example
+        # so code/math responses are never trained after silent truncation.
+        input_ids = tokenizer(
+            prompt,
+            max_length=max_length + 1 if discard_overlength else max_length,
+            truncation=True,
+        ).input_ids
+        if discard_overlength and len(input_ids) > max_length:
+            continue
+        input_sequences.append(input_ids)
+        label_sequences.append(_generate_sft_labels(
+            input_ids, bos_id, eos_id, max_length,
+        ))
+        lengths.append(len(input_ids))
+    return {
+        'input_ids': input_sequences,
+        'labels': label_sequences,
+        'length': lengths,
+    }
 
 
 def _best_fit_pack(input_sequences, label_sequences, max_length, pad_token_id):
@@ -138,11 +246,17 @@ def _print_packing_stats(name, raw_count, samples, bucket_ranges):
         flush=True,
     )
     for number, item in enumerate(bucket_ranges, start=1):
+        start, end = int(item['start']), int(item['end'])
+        bucket_valid = sum(samples['valid_tokens'][start:end])
+        bucket_capacity = max(
+            int(item['blocks']) * int(item['max_length']), 1,
+        )
         print(
             f"[Packing Bucket] {name} {number}/{len(bucket_ranges)}: "
             f"max_seq_len={int(item['max_length'])}, "
             f"raw_samples={int(item['raw_samples'])}, "
-            f"packed_blocks={int(item['blocks'])}",
+            f"packed_blocks={int(item['blocks'])}, "
+            f"fill={100.0 * bucket_valid / bucket_capacity:.2f}%",
             flush=True,
         )
     bucket_text = ', '.join(
@@ -156,13 +270,47 @@ def _print_packing_stats(name, raw_count, samples, bucket_ranges):
     )
 
 def _pack_tokenized_buckets(samples, lengths, seq_bucket, packing_batch_size,
-                            pad_token_id, features, name):
+                            pad_token_id, features, name, packing_num_proc=1,
+                            bucket_gpu_memory_gb=16.0, packing_seed=42):
     """Partition tokenized rows globally, then pack each length bucket."""
-    sorted_indices, buckets = optimal_sequence_buckets(lengths, seq_bucket)
+    dp_started = time.perf_counter()
+    if os.environ.get('RANK', '0') in ('0', '-1'):
+        print(
+            f"[Packing DP] {name}: starting, samples={len(lengths)}, "
+            f"requested_buckets={int(seq_bucket)}, cost_model=wall_time_bfd_v2",
+            flush=True,
+        )
+    sorted_indices, buckets = optimal_sequence_buckets(
+        lengths, seq_bucket, alignment=_SEQUENCE_BUCKET_ALIGNMENT,
+        token_budget=bucket_token_budget(bucket_gpu_memory_gb),
+    )
+    if os.environ.get('RANK', '0') in ('0', '-1'):
+        estimated_seconds = sum(bucket.estimated_cost for bucket in buckets)
+        print(
+            f"[Packing DP] {name}: completed, samples={len(lengths)}, "
+            f"buckets={len(buckets)}, elapsed={time.perf_counter() - dp_started:.2f}s, "
+            f"estimated_epoch_time={estimated_seconds / 60:.2f}min",
+            flush=True,
+        )
+        for number, bucket in enumerate(buckets, start=1):
+            print(
+                f"[Packing DP Bucket] {name} {number}/{len(buckets)}: "
+                f"max_seq_len={bucket.max_length}, "
+                f"estimated_blocks={bucket.estimated_blocks}, "
+                f"batch_size={bucket.batch_size}, "
+                f"estimated_time={bucket.estimated_cost / 60:.2f}min",
+                flush=True,
+            )
     packed_parts, bucket_ranges = [], []
     offset = 0
     for bucket in buckets:
-        source_indices = sorted_indices[bucket.start:bucket.end]
+        source_indices = list(sorted_indices[bucket.start:bucket.end])
+        # The time model assumes well-mixed BFD blocks. Keeping global length
+        # order would make each map chunk nearly homogeneous and prevent short
+        # examples from filling the slack left by longer examples.
+        random.Random(
+            int(packing_seed) + int(bucket.max_length)
+        ).shuffle(source_indices)
         source = samples.select(source_indices)
         block_length = bucket.max_length
 
@@ -184,6 +332,7 @@ def _pack_tokenized_buckets(samples, lengths, seq_bucket, packing_batch_size,
             pack_batch,
             batched=True,
             batch_size=max(1, int(packing_batch_size)),
+            num_proc=_packing_map_num_proc(packing_num_proc, len(source)),
             remove_columns=source.column_names,
             features=features,
             desc=f'Packing {name} bucket at {block_length} tokens',
@@ -196,6 +345,7 @@ def _pack_tokenized_buckets(samples, lengths, seq_bucket, packing_batch_size,
             'blocks': len(part),
             'raw_samples': len(source_indices),
             'estimated_cost': bucket.estimated_cost,
+            'estimated_blocks': bucket.estimated_blocks,
         })
         offset += len(part)
     packed = packed_parts[0] if len(packed_parts) == 1 else concatenate_datasets(packed_parts)
@@ -205,6 +355,7 @@ def _pack_tokenized_buckets(samples, lengths, seq_bucket, packing_batch_size,
 class PretrainDataset(Dataset):
     def __init__(self, data_path, tokenizer, max_length=512, packing=False,
                  packing_batch_size=1000, packing_mode='fixed', seq_bucket=2,
+                 packing_num_proc=1, bucket_gpu_memory_gb=16.0,
                  sample_indices=None):
         super().__init__()
         self.tokenizer = tokenizer
@@ -222,23 +373,20 @@ class PretrainDataset(Dataset):
             raw_count = self.raw_sample_count
             pad_token_id = tokenizer.pad_token_id
 
-            def tokenize_batch(batch):
-                input_sequences, lengths = [], []
-                for text in batch['text']:
-                    tokens = tokenizer(
-                        str(text), add_special_tokens=False,
-                        max_length=max_length - 2, truncation=True,
-                    ).input_ids
-                    tokens = [tokenizer.bos_token_id] + tokens + [tokenizer.eos_token_id]
-                    input_sequences.append(tokens)
-                    lengths.append(len(tokens))
-                return {'input_ids': input_sequences, 'length': lengths}
-
             if packing_mode == 'bucket':
+                tokenization_num_proc = _packing_map_num_proc(
+                    packing_num_proc, len(self.samples),
+                )
+                _print_packing_workers('pretrain', tokenization_num_proc)
                 self.samples = self.samples.map(
-                    tokenize_batch,
+                    _tokenize_pretrain_batch,
                     batched=True,
                     batch_size=max(1, int(packing_batch_size)),
+                    num_proc=tokenization_num_proc,
+                    fn_kwargs={
+                        'tokenizer': tokenizer,
+                        'max_length': max_length,
+                    },
                     remove_columns=self.samples.column_names,
                     features=_TOKENIZED_PRETRAIN_FEATURES,
                     desc='Tokenizing pretrain for sequence buckets',
@@ -246,10 +394,13 @@ class PretrainDataset(Dataset):
                 self.samples, self.bucket_ranges = _pack_tokenized_buckets(
                     self.samples, self.samples['length'], seq_bucket,
                     packing_batch_size, pad_token_id, _PACKED_PRETRAIN_FEATURES, 'pretrain',
+                    packing_num_proc, bucket_gpu_memory_gb,
                 )
             else:
                 def tokenize_and_pack(batch):
-                    tokenized = tokenize_batch(batch)
+                    tokenized = _tokenize_pretrain_batch(
+                        batch, tokenizer, max_length,
+                    )
                     packed = _best_fit_pack(
                         tokenized['input_ids'], tokenized['input_ids'], max_length, pad_token_id
                     )
@@ -299,7 +450,8 @@ class PretrainDataset(Dataset):
 class SFTDataset(Dataset):
     def __init__(self, jsonl_path, tokenizer, max_length=1024, packing=False,
                  packing_batch_size=1000, packing_seed=42, packing_mode='fixed',
-                 seq_bucket=2, sample_indices=None):
+                 seq_bucket=2, packing_num_proc=1, bucket_gpu_memory_gb=16.0,
+                 sample_indices=None):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -309,6 +461,7 @@ class SFTDataset(Dataset):
         if sample_indices is not None:
             self.samples = self.samples.select([int(index) for index in sample_indices])
         self.raw_sample_count = len(self.samples)
+        self.discarded_long_sample_count = 0
         self.bucket_ranges = []
         self.packing_mode = packing_mode if packing else None
         self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids
@@ -317,42 +470,56 @@ class SFTDataset(Dataset):
             if packing_mode not in ('fixed', 'bucket'):
                 raise ValueError("packing_mode must be 'fixed' or 'bucket'")
             raw_count = self.raw_sample_count
+            packing_raw_count = raw_count
             pad_token_id = tokenizer.pad_token_id
 
-            def tokenize_batch(batch, indices):
-                input_sequences, label_sequences, lengths = [], [], []
-                for conversations, index in zip(batch['conversations'], indices):
-                    rng = random.Random(int(packing_seed) + int(index))
-                    conversations = pre_processing_chat(conversations, rng=rng)
-                    prompt = self.create_chat_prompt(conversations)
-                    prompt = post_processing_chat(prompt, rng=rng)
-                    input_ids = tokenizer(prompt).input_ids[:max_length]
-                    input_sequences.append(input_ids)
-                    label_sequences.append(self.generate_labels(input_ids))
-                    lengths.append(len(input_ids))
-                return {
-                    'input_ids': input_sequences,
-                    'labels': label_sequences,
-                    'length': lengths,
-                }
-
             if packing_mode == 'bucket':
+                tokenization_num_proc = _packing_map_num_proc(
+                    packing_num_proc, len(self.samples),
+                )
+                _print_packing_workers('SFT', tokenization_num_proc)
                 self.samples = self.samples.map(
-                    tokenize_batch,
+                    _tokenize_sft_batch,
                     batched=True,
                     with_indices=True,
                     batch_size=max(1, int(packing_batch_size)),
+                    num_proc=tokenization_num_proc,
+                    fn_kwargs={
+                        'tokenizer': tokenizer,
+                        'max_length': max_length,
+                        'packing_seed': packing_seed,
+                        'bos_id': self.bos_id,
+                        'eos_id': self.eos_id,
+                        'discard_overlength': True,
+                    },
                     remove_columns=self.samples.column_names,
                     features=_TOKENIZED_SFT_FEATURES,
                     desc='Tokenizing SFT for sequence buckets',
                 )
+                self.discarded_long_sample_count = raw_count - len(self.samples)
+                packing_raw_count = len(self.samples)
+                if os.environ.get('RANK', '0') in ('0', '-1'):
+                    print(
+                        f"[Length Filter] SFT: kept={len(self.samples)}, "
+                        f"discarded={self.discarded_long_sample_count}, "
+                        f"max_seq_len={max_length}",
+                        flush=True,
+                    )
+                if not len(self.samples):
+                    raise ValueError(
+                        f"All SFT samples exceed max_seq_len={max_length}"
+                    )
                 self.samples, self.bucket_ranges = _pack_tokenized_buckets(
                     self.samples, self.samples['length'], seq_bucket,
                     packing_batch_size, pad_token_id, _PACKED_SFT_FEATURES, 'SFT',
+                    packing_num_proc, bucket_gpu_memory_gb, packing_seed,
                 )
             else:
                 def tokenize_and_pack(batch, indices):
-                    tokenized = tokenize_batch(batch, indices)
+                    tokenized = _tokenize_sft_batch(
+                        batch, indices, tokenizer, max_length, packing_seed,
+                        self.bos_id, self.eos_id,
+                    )
                     return _best_fit_pack(
                         tokenized['input_ids'], tokenized['labels'], max_length, pad_token_id
                     )
@@ -370,45 +537,20 @@ class SFTDataset(Dataset):
                     'start': 0, 'end': len(self.samples), 'max_length': max_length,
                     'blocks': len(self.samples), 'raw_samples': raw_count,
                 }]
-            _print_packing_stats('sft', raw_count, self.samples, self.bucket_ranges)
+            _print_packing_stats(
+                'sft', packing_raw_count, self.samples, self.bucket_ranges,
+            )
 
     def __len__(self):
         return len(self.samples)
 
     def create_chat_prompt(self, conversations):
-        messages = []
-        tools = None
-        for message in conversations:
-            message = dict(message)
-            if message.get("role") == "system" and message.get("tools"):
-                tools = json.loads(message["tools"]) if isinstance(message["tools"], str) else message["tools"]
-            if message.get("tool_calls") and isinstance(message["tool_calls"], str):
-                message["tool_calls"] = json.loads(message["tool_calls"])
-            messages.append(message)
-        return self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=False,
-            tools=tools
-        )
+        return _create_chat_prompt(self.tokenizer, conversations)
 
     def generate_labels(self, input_ids):
-        labels = [-100] * len(input_ids)
-        i = 0
-        while i < len(input_ids):
-            if input_ids[i:i + len(self.bos_id)] == self.bos_id:
-                start = i + len(self.bos_id)
-                end = start
-                while end < len(input_ids):
-                    if input_ids[end:end + len(self.eos_id)] == self.eos_id:
-                        break
-                    end += 1
-                for j in range(start, min(end + len(self.eos_id), self.max_length)):
-                    labels[j] = input_ids[j]
-                i = end + len(self.eos_id) if end < len(input_ids) else len(input_ids)
-            else:
-                i += 1
-        return labels
+        return _generate_sft_labels(
+            input_ids, self.bos_id, self.eos_id, self.max_length,
+        )
 
     def __getitem__(self, index):
         sample = self.samples[index]

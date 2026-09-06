@@ -8,8 +8,8 @@ if exist ".venv\Scripts\activate.bat" (
 
 cd scripts
 echo Starting Instinct Config WebUI...
-echo Open http://localhost:8501 in your browser
+echo Open http://localhost:8500 in your browser
 echo Press Ctrl+C to stop
 echo.
-streamlit run config_webui.py --server.port 8501
+streamlit run config_webui.py --server.port 8500
 pause

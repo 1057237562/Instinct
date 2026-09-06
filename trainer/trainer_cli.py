@@ -59,6 +59,10 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
         help="FP8 Linear 筛选（auto=跳过预计无加速的小 GEMM；eligible=转换全部尺寸兼容层）",
     )
     parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程数")
+    parser.add_argument(
+        '--bucket_loader_workers', default=-1, type=int,
+        help='Bucket 训练 DataLoader 进程数（-1=自动；Windows 默认 0，避免每个 worker 重复提交 PyTorch 内存）',
+    )
     parser.add_argument("--accumulation_steps", type=int, default=8, help="梯度累积步数")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
     parser.add_argument("--log_interval", type=int, default=100, help="日志打印间隔")
@@ -69,6 +73,18 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     parser.add_argument(
         '--seq_bucket', default=2, type=int,
         help='Sequence packing 自动长度桶数量；使用排序 + DP + 斜率优化求桶边界',
+    )
+    parser.add_argument(
+        '--bucket_gpu_memory_gb', default=16.0, type=float,
+        help='自动长度桶可用的单卡显存（GB）；基于 16GB/2048 tokens/batch 12 标定每桶 batch_size',
+    )
+    parser.add_argument(
+        '--bucket_max_seq_len', default=16384, type=int,
+        help='自动长度桶允许的最大单样本 token 数；SFT 超限样本整条丢弃（默认 16384）',
+    )
+    parser.add_argument(
+        '--bucket_large_threshold', default=8192, type=int,
+        help='大桶集中训练阈值（token）；长度严格超过该值的桶会排在每个 epoch 开头，阶段结束后释放其专属 GPU 内存',
     )
     parser.add_argument(
         '--sequence_packing_mode', default='fixed', choices=['fixed', 'bucket'],
@@ -82,6 +98,10 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     parser.add_argument(
         '--packing_batch_size', default=1000, type=int,
         help='首次构建 packing Arrow cache 时每批处理的原始样本数',
+    )
+    parser.add_argument(
+        '--packing_num_proc', default=0, type=int,
+        help='Bucket token 统计和桶内 packing 的并行进程数（0=自动；Windows 为避免提交内存耗尽，最多使用 4）',
     )
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument('--use_looped', default=0, type=int, choices=[0, 1], help="是否使用LoopUS循环架构（0=否，1=是）")

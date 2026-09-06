@@ -8,6 +8,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import json
 import random
 import math
+import gc
 import inspect
 import importlib.metadata
 import numpy as np
@@ -367,6 +368,40 @@ def restore_config_from_weight(current_config, from_weight: str, save_dir: str =
 def Logger(content: str) -> None:
     if is_main_process():
         print(content)
+
+
+def release_compiled_cuda_memory(reason: str) -> None:
+    """Destroy compiled graph objects and return their unused VRAM to CUDA.
+
+    The live model parameters and optimizer state are intentionally retained:
+    subsequent buckets continue training the exact same updated model.  Resetting
+    the compiler drops shape-specialized CUDA Graph pools/static tensors; the
+    next shape recompiles lazily and can reuse the persistent on-disk kernel
+    cache.
+    """
+    if not torch.cuda.is_available():
+        return
+    torch.cuda.synchronize()
+    before_allocated = torch.cuda.memory_allocated()
+    before_reserved = torch.cuda.memory_reserved()
+    before_free, total = torch.cuda.mem_get_info()
+
+    torch.compiler.reset()
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+
+    after_allocated = torch.cuda.memory_allocated()
+    after_reserved = torch.cuda.memory_reserved()
+    after_free, _ = torch.cuda.mem_get_info()
+    gib = 1024 ** 3
+    Logger(
+        '[GPU Memory Release] '
+        f'{reason}; allocated={before_allocated / gib:.2f}->{after_allocated / gib:.2f}GB, '
+        f'reserved={before_reserved / gib:.2f}->{after_reserved / gib:.2f}GB, '
+        f'device_free={before_free / gib:.2f}->{after_free / gib:.2f}GB/'
+        f'{total / gib:.2f}GB'
+    )
 
 
 def get_lr(current_step: int, total_steps: int, lr: float) -> float:
@@ -864,7 +899,7 @@ class LMForRewardModel:
 
     def __init__(self, model_path, device="cuda", dtype=torch.float16):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        self.model = AutoModel.from_pretrained(model_path, torch_dtype=dtype, trust_remote_code=True)
+        self.model = AutoModel.from_pretrained(model_path, dtype=dtype, trust_remote_code=True)
         self.model = self.model.to(device).eval()
         self.device = device
 

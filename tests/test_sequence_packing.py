@@ -1,4 +1,5 @@
 import json
+from itertools import combinations
 from types import SimpleNamespace
 
 import pytest
@@ -7,7 +8,10 @@ from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
 from dataset.lm_dataset import PretrainDataset, SFTDataset, _best_fit_pack
-from dataset.sequence_bucket import optimal_sequence_buckets
+from dataset.sequence_bucket import (
+    optimal_sequence_buckets,
+    packing_preprocess_workers,
+)
 from model.model_instinct import InstinctConfig, InstinctForCausalLM
 from model.model_instinct_loop import (
     InstinctConfig as LoopConfig, InstinctForCausalLM as LoopForCausalLM,
@@ -18,11 +22,33 @@ from model.sequence_packing import (
 from trainer.packing_transition import (
     packing_data_config, SequencePackingPlan, validate_packing_resume,
 )
+from trainer.trainer_utils import release_compiled_cuda_memory
 
 
 @pytest.fixture(scope="module")
 def tokenizer():
     return AutoTokenizer.from_pretrained("./model")
+
+
+def test_packing_preprocess_workers_caps_windows_spawn_processes():
+    assert packing_preprocess_workers(
+        32, platform_name='nt', cpu_count=64,
+    ) == 4
+    assert packing_preprocess_workers(
+        0, platform_name='nt', cpu_count=64,
+    ) == 4
+    assert packing_preprocess_workers(
+        32, sample_count=2, platform_name='nt', cpu_count=64,
+    ) == 2
+
+
+def test_packing_preprocess_workers_keeps_linux_parallelism():
+    assert packing_preprocess_workers(
+        32, platform_name='posix', cpu_count=64,
+    ) == 32
+    assert packing_preprocess_workers(
+        0, platform_name='posix', cpu_count=64,
+    ) == 8
 
 
 def test_best_fit_pack_keeps_examples_whole_and_labels_aligned():
@@ -55,11 +81,11 @@ def test_pretrain_packing_preserves_tokens_reuses_cache_and_logs_buckets(
     plain = PretrainDataset(str(path), tokenizer, max_length=32)
     packed = PretrainDataset(
         str(path), tokenizer, max_length=32, packing=True, packing_mode="bucket",
-        packing_batch_size=100,
+        packing_batch_size=100, packing_num_proc=2,
     )
     packed_again = PretrainDataset(
         str(path), tokenizer, max_length=32, packing=True, packing_mode="bucket",
-        packing_batch_size=100,
+        packing_batch_size=100, packing_num_proc=2,
     )
     fixed = PretrainDataset(
         str(path), tokenizer, max_length=32, packing=True,
@@ -114,6 +140,7 @@ def test_sft_packing_preserves_loss_mask_and_bucket_shapes(tmp_path, tokenizer):
     packed = SFTDataset(
         str(path), tokenizer, max_length=96, packing=True,
         packing_batch_size=100, packing_seed=7, packing_mode="bucket",
+        packing_num_proc=2,
     )
     assert len(packed) <= len(rows)
     assert sum(packed.samples["valid_tokens"]) <= sum(packed.samples["block_length"])
@@ -129,28 +156,95 @@ def test_sft_packing_preserves_loss_mask_and_bucket_shapes(tmp_path, tokenizer):
     assert observed_train_tokens == sum(packed.samples["train_tokens"])
 
 
-def test_slope_optimized_bucket_dp_matches_quadratic_reference():
+def test_sft_bucket_discards_whole_overlength_samples(tmp_path, tokenizer, capsys):
+    path = tmp_path / "sft_long.jsonl"
+    rows = [
+        {"conversations": [
+            {"role": "user", "content": "short question"},
+            {"role": "assistant", "content": "short answer"},
+        ]},
+        {"conversations": [
+            {"role": "user", "content": "long question"},
+            {"role": "assistant", "content": "token " * 500},
+        ]},
+    ]
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+    packed = SFTDataset(
+        str(path), tokenizer, max_length=64, packing=True,
+        packing_batch_size=100, packing_seed=7, packing_mode="bucket",
+        packing_num_proc=1,
+    )
+
+    assert packed.discarded_long_sample_count == 1
+    assert all(bucket["max_length"] <= 64 for bucket in packed.bucket_ranges)
+    assert "[Length Filter] SFT: kept=1, discarded=1, max_seq_len=64" in capsys.readouterr().out
+
+
+def _brute_force_time_cost(lengths, bucket_count, alignment=1,
+                           token_budget=24576):
+    sorted_lengths = sorted(lengths)
+    boundaries = [
+        index for index in range(1, len(sorted_lengths))
+        if (
+            (sorted_lengths[index - 1] + alignment - 1) // alignment
+            != (sorted_lengths[index] + alignment - 1) // alignment
+        )
+    ]
+    best = float('inf')
+    for splits in combinations(boundaries, bucket_count - 1):
+        cost = 0.0
+        start = 0
+        for end in (*splits, len(sorted_lengths)):
+            _, one_bucket = optimal_sequence_buckets(
+                sorted_lengths[start:end], 1, alignment=alignment,
+                token_budget=token_budget,
+            )
+            cost += one_bucket[0].estimated_cost
+            start = end
+        best = min(best, cost)
+    return best
+
+
+def test_time_cost_bucket_dp_matches_brute_force_reference():
     lengths = [11, 2, 7, 3, 19, 5, 13, 3]
     sorted_lengths = sorted(lengths)
-    prefix = [0]
-    for length in sorted_lengths:
-        prefix.append(prefix[-1] + length)
     bucket_count = 3
-    infinity = 10 ** 30
-    dp = [[infinity] * (len(lengths) + 1) for _ in range(bucket_count + 1)]
-    dp[0][0] = 0
-    for used in range(1, bucket_count + 1):
-        for end in range(used, len(lengths) + 1):
-            dp[used][end] = min(
-                dp[used - 1][split]
-                + (prefix[end] - prefix[split]) * sorted_lengths[end - 1]
-                for split in range(used - 1, end)
-            )
 
     sorted_indices, buckets = optimal_sequence_buckets(lengths, bucket_count)
     assert [lengths[index] for index in sorted_indices] == sorted_lengths
-    assert sum(bucket.estimated_cost for bucket in buckets) == dp[bucket_count][-1]
+    assert sum(bucket.estimated_cost for bucket in buckets) == pytest.approx(
+        _brute_force_time_cost(lengths, bucket_count)
+    )
+    assert all(bucket.estimated_blocks > 0 for bucket in buckets)
     assert buckets[-1].end == len(lengths)
+
+
+def test_bucket_lengths_align_for_fp8_scaled_mm():
+    lengths = [101, 103, 620, 623, 941, 947, 3201, 3210]
+    sorted_indices, buckets = optimal_sequence_buckets(
+        lengths, bucket_count=3, alignment=16,
+    )
+    assert sorted(sorted_indices) == list(range(len(lengths)))
+    assert all(bucket.max_length % 16 == 0 for bucket in buckets)
+    for bucket in buckets:
+        source_lengths = [
+            lengths[index] for index in sorted_indices[bucket.start:bucket.end]
+        ]
+        assert max(source_lengths) <= bucket.max_length
+
+
+def test_aligned_time_cost_dp_matches_brute_force_reference():
+    lengths = sorted([15, 17, 33, 34, 61, 79, 95])
+    alignment = 16
+    bucket_count = 3
+
+    _, buckets = optimal_sequence_buckets(lengths, bucket_count, alignment=alignment)
+    assert sum(bucket.estimated_cost for bucket in buckets) == pytest.approx(
+        _brute_force_time_cost(lengths, bucket_count, alignment=alignment)
+    )
 
 
 class _BucketedDataset(Dataset):
@@ -203,22 +297,191 @@ def test_fixed_sampler_matches_legacy_order_and_resume_suffix(tmp_path):
     ) == expected[2:]
 
 
-def test_packed_batch_sampler_never_mixes_bucket_lengths(tmp_path):
+def test_packed_batch_sampler_never_mixes_bucket_lengths_and_scales_memory(
+        tmp_path, capsys):
     args = SimpleNamespace(
         sequence_packing=1, packing_batch_size=100, seq_bucket=2,
         sequence_packing_mode="bucket", max_seq_len=64, batch_size=3,
+        bucket_gpu_memory_gb=16.0,
         data_path=str(tmp_path / "data.jsonl"),
     )
     dataset = _BucketedDataset()
+    dataset.lengths = [2048] * 12 + [4096] * 12
+    dataset.bucket_ranges = [
+        {"start": 0, "end": 12, "max_length": 2048},
+        {"start": 12, "end": 24, "max_length": 4096},
+    ]
     plan = SequencePackingPlan(args, None, lambda *_: dataset)
     batches = plan.batch_sampler(
         dataset, active_packing=True, epoch=2, batch_size=3, skip_batches=0,
     )
     assert sorted(index for batch in batches for index in batch) == list(range(len(dataset)))
     assert all(len({dataset.lengths[index] for index in batch}) == 1 for batch in batches)
+    assert max(len(batch) for batch in batches if dataset.lengths[batch[0]] == 2048) == 12
+    assert max(len(batch) for batch in batches if dataset.lengths[batch[0]] == 4096) == 6
+    log = capsys.readouterr().out
+    assert 'memory_model=B*L' in log
+    assert 'gpu_memory=16GB, token_budget=24576' in log
+    assert '[Packing Batch] 1/2: max_seq_len=2048, batch_size=12' in log
+    assert '[Packing Batch] 2/2: max_seq_len=4096, batch_size=6' in log
     assert plan.batch_sampler(
         dataset, active_packing=True, epoch=2, batch_size=3, skip_batches=2,
     ) == batches[2:]
+
+
+def test_large_buckets_run_first_and_expose_one_release_boundary(tmp_path, capsys):
+    args = SimpleNamespace(
+        sequence_packing=1, packing_batch_size=100, seq_bucket=2,
+        sequence_packing_mode="bucket", max_seq_len=16384, batch_size=3,
+        bucket_gpu_memory_gb=16.0, bucket_max_seq_len=16384,
+        bucket_large_threshold=8192,
+        data_path=str(tmp_path / "data.jsonl"),
+    )
+    dataset = _BucketedDataset()
+    dataset.lengths = [4096] * 12 + [16368] * 6
+    dataset.bucket_ranges = [
+        {"start": 0, "end": 12, "max_length": 4096},
+        {"start": 12, "end": 18, "max_length": 16368},
+    ]
+    plan = SequencePackingPlan(args, None, lambda *_: dataset)
+
+    batches = plan.batch_sampler(
+        dataset, active_packing=True, epoch=0, batch_size=3,
+    )
+    batch_lengths = [dataset.lengths[batch[0]] for batch in batches]
+    large_batch_count = sum(length > 8192 for length in batch_lengths)
+
+    assert batch_lengths[:large_batch_count] == [16368] * large_batch_count
+    assert all(length <= 8192 for length in batch_lengths[large_batch_count:])
+    assert sorted(index for batch in batches for index in batch) == list(range(len(dataset)))
+    assert plan.has_large_phase(0) is True
+    assert plan.should_release_large_cuda_memory(
+        epoch=0, step=large_batch_count - 1,
+    ) is False
+    assert plan.should_release_large_cuda_memory(
+        epoch=0, step=large_batch_count,
+    ) is True
+    assert plan.should_release_large_cuda_memory(
+        epoch=0, step=large_batch_count,
+    ) is False
+    assert (
+        '[Packing Large Phase] epoch=1, threshold=8192, '
+        f'large_batches={large_batch_count}, regular_batches='
+    ) in capsys.readouterr().out
+
+
+def test_release_compiled_cuda_memory_returns_unused_vram(monkeypatch, capsys):
+    import trainer.trainer_utils as trainer_utils
+
+    gib = 1024 ** 3
+    allocated = iter([14 * gib, 4 * gib])
+    reserved = iter([19 * gib, 5 * gib])
+    free = iter([(1 * gib, 24 * gib), (15 * gib, 24 * gib)])
+    calls = []
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: True)
+    monkeypatch.setattr(torch.cuda, 'synchronize', lambda: calls.append('synchronize'))
+    monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda: next(allocated))
+    monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda: next(reserved))
+    monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda: next(free))
+    monkeypatch.setattr(torch.cuda, 'empty_cache', lambda: calls.append('empty_cache'))
+    monkeypatch.setattr(torch.compiler, 'reset', lambda: calls.append('compiler_reset'))
+    monkeypatch.setattr(trainer_utils.gc, 'collect', lambda: calls.append('gc_collect'))
+
+    release_compiled_cuda_memory('large phase complete')
+
+    assert calls == [
+        'synchronize', 'compiler_reset', 'gc_collect', 'empty_cache', 'synchronize',
+    ]
+    log = capsys.readouterr().out
+    assert '[GPU Memory Release] large phase complete' in log
+    assert 'reserved=19.00->5.00GB' in log
+    assert 'device_free=1.00->15.00GB/24.00GB' in log
+
+
+def test_bucket_loader_workers_avoid_windows_spawn_commit(tmp_path):
+    args = SimpleNamespace(
+        sequence_packing=1, sequence_packing_mode='bucket',
+        num_workers=8, bucket_loader_workers=0,
+        packing_batch_size=100, seq_bucket=2, max_seq_len=64,
+        batch_size=3, bucket_gpu_memory_gb=16.0,
+        data_path=str(tmp_path / 'data.jsonl'),
+    )
+    plan = SequencePackingPlan(args, None, lambda *_: _BucketedDataset())
+    assert plan.loader_num_workers() == 0
+
+    args.bucket_loader_workers = 2
+    plan = SequencePackingPlan(args, None, lambda *_: _BucketedDataset())
+    assert plan.loader_num_workers() == 2
+
+    args.sequence_packing_mode = 'fixed'
+    plan = SequencePackingPlan(args, None, lambda *_: _BucketedDataset())
+    assert plan.loader_num_workers() == 8
+
+
+def test_bucket_runtime_log_reports_first_use_and_describes_each_batch(
+        tmp_path, capsys):
+    args = SimpleNamespace(
+        sequence_packing=1, sequence_packing_mode='bucket',
+        packing_batch_size=100, seq_bucket=2, max_seq_len=64,
+        batch_size=3, bucket_gpu_memory_gb=16.0,
+        data_path=str(tmp_path / 'data.jsonl'),
+    )
+    dataset = _BucketedDataset()
+    dataset.lengths = [2048] * 12 + [4096] * 12
+    dataset.bucket_ranges = [
+        {'start': 0, 'end': 12, 'max_length': 2048},
+        {'start': 12, 'end': 24, 'max_length': 4096},
+    ]
+    plan = SequencePackingPlan(args, None, lambda *_: dataset)
+    plan.batch_sampler(
+        dataset, active_packing=True, epoch=0, batch_size=3,
+    )
+    capsys.readouterr()
+
+    batch = (torch.zeros((12, 2048), dtype=torch.long),)
+    status = plan.observe_batch(batch, epoch=0, step=1)
+    assert status == 'bucket: 1/2 (2048x12)'
+    assert '[Packing Bucket Active] epoch=1, step=1, bucket=1/2' in capsys.readouterr().out
+
+    plan.observe_batch(batch, epoch=0, step=2)
+    assert capsys.readouterr().out == ''
+
+
+@pytest.mark.parametrize(
+    ('gpu_memory_gb', 'expected'),
+    [
+        (16.0, {624: 39, 960: 25, 3216: 7}),
+        (8.0, {624: 19, 960: 12, 3216: 3}),
+        (24.0, {624: 59, 960: 38, 3216: 11}),
+    ],
+)
+def test_bucket_batch_size_scales_measured_budget_with_vram(
+        tmp_path, gpu_memory_gb, expected):
+    args = SimpleNamespace(
+        sequence_packing=1, packing_batch_size=100, seq_bucket=3,
+        sequence_packing_mode="bucket", max_seq_len=64, batch_size=12,
+        bucket_gpu_memory_gb=gpu_memory_gb,
+        data_path=str(tmp_path / "data.jsonl"),
+    )
+    dataset = _BucketedDataset()
+    dataset.lengths = [624] * 80 + [960] * 80 + [3216] * 80
+    dataset.bucket_ranges = [
+        {'start': 0, 'end': 80, 'max_length': 624},
+        {'start': 80, 'end': 160, 'max_length': 960},
+        {'start': 160, 'end': 240, 'max_length': 3216},
+    ]
+    plan = SequencePackingPlan(args, None, lambda *_: dataset)
+    batches = plan.batch_sampler(
+        dataset, active_packing=True, epoch=0, batch_size=12,
+    )
+    largest = {
+        length: max(
+            len(batch) for batch in batches
+            if dataset.lengths[batch[0]] == length
+        )
+        for length in (624, 960, 3216)
+    }
+    assert largest == expected
 
 
 def test_packed_positions_reset_and_attention_is_block_diagonal():

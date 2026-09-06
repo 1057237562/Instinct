@@ -23,7 +23,7 @@ def convert_torch2transformers_instinct(torch_path, transformers_path, dtype=tor
     lm_model = lm_model.to(dtype)  # 转换模型权重精度
     model_params = sum(p.numel() for p in lm_model.parameters() if p.requires_grad)
     print(f'模型参数: {model_params / 1e6} 百万 = {model_params / 1e9} B (Billion)')
-    lm_model.save_pretrained(transformers_path, safe_serialization=False)
+    lm_model.save_pretrained(transformers_path)
     tokenizer = AutoTokenizer.from_pretrained('../model/')
     tokenizer.save_pretrained(transformers_path)
     # ======= transformers-5.0的兼容低版本写法 =======
@@ -31,7 +31,7 @@ def convert_torch2transformers_instinct(torch_path, transformers_path, dtype=tor
         tokenizer_config_path, config_path = os.path.join(transformers_path, "tokenizer_config.json"), os.path.join(transformers_path, "config.json")
         json.dump({**json.load(open(tokenizer_config_path, 'r', encoding='utf-8')), "tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": {}}, open(tokenizer_config_path, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
         config = json.load(open(config_path, 'r', encoding='utf-8'))
-        config['rope_theta'] = lm_config.rope_theta; config['rope_scaling'] = None; del config['rope_parameters']
+        config['rope_theta'] = lm_config.rope_theta; config['rope_scaling'] = None; config.pop('rope_parameters', None)
         json.dump(config, open(config_path, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
     print(f"模型已保存为 Transformers-Instinct 格式: {transformers_path}")
 
@@ -91,7 +91,7 @@ def convert_torch2transformers(torch_path, transformers_path, dtype=torch.float1
         tokenizer_config_path, config_path = os.path.join(transformers_path, "tokenizer_config.json"), os.path.join(transformers_path, "config.json")
         json.dump({**json.load(open(tokenizer_config_path, 'r', encoding='utf-8')), "tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": {}}, open(tokenizer_config_path, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
         config = json.load(open(config_path, 'r', encoding='utf-8'))
-        config['rope_theta'] = lm_config.rope_theta; config['rope_scaling'] = None; del config['rope_parameters']
+        config['rope_theta'] = lm_config.rope_theta; config['rope_scaling'] = None; config.pop('rope_parameters', None)
         json.dump(config, open(config_path, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
     print(f"模型已保存为 Transformers 格式: {transformers_path}")
 

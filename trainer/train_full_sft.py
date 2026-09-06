@@ -25,7 +25,7 @@ from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
     init_model, config_from_args, build_optimizer,
     restore_config_from_checkpoint, apply_torchao_fp8_training,
-    prepare_lm_batch,
+    prepare_lm_batch, release_compiled_cuda_memory,
 )
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx,
@@ -38,7 +38,8 @@ from trainer.training_profiler import TrainingProfiler
 warnings.filterwarnings('ignore')
 
 
-def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0, wandb=None) -> None:
+def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
+                wandb=None, packing_plan=None) -> None:
     """执行一个 epoch 的全量微调循环。
 
     参数:
@@ -56,6 +57,9 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
     data_config['epoch_steps'] = int(iters)
     last_step = start_step
     for step, batch in enumerate(loader, start=start_step + 1):
+        bucket_status = packing_plan.observe_batch(
+            batch, epoch=epoch, step=step,
+        ) if packing_plan is not None else ''
         input_ids, labels = batch[:2]
         profiler.begin_step(tokens=input_ids.numel(), useful_tokens=(labels != -100).sum().item())
         with profiler.phase("data_transfer"):
@@ -86,9 +90,11 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
             current_aux_loss = res.aux_loss.item() if res.aux_loss is not None else 0.0
             current_logits_loss = current_loss - current_aux_loss
             current_lr = optimizer.param_groups[-1]['lr']
-            eta_min = spend_time / max(step - start_step, 1) * (iters - step) // 60
-            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min')
-            if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
+            eta_min = spend_time / max(step - start_step, 1) * (iters - step) / 60
+            elapsed_min = spend_time / 60
+            bucket_text = f', {bucket_status}' if bucket_status else ''
+            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}{bucket_text}, epoch_time: {eta_min:.1f}min, elapsed_time: {elapsed_min:.1f}min')
+            if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min, "elapsed_time": elapsed_min})
 
         if (step % args.save_interval == 0 or step == iters) and is_main_process():
             model.eval()
@@ -105,6 +111,15 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
             del state_dict
 
         del input_ids, labels, sequence_ids, res, loss
+
+        if (
+            args.use_compile == 1
+            and packing_plan is not None
+            and packing_plan.should_release_large_cuda_memory(epoch=epoch, step=step)
+        ):
+            release_compiled_cuda_memory(
+                f'epoch={epoch + 1}, completed buckets >{args.bucket_large_threshold} tokens'
+            )
 
         if pause_requested(args):
             clear_pause_request(args)
@@ -154,13 +169,16 @@ if __name__ == "__main__":
         args, ckp_data,
         lambda packing, sample_indices=None: SFTDataset(
             args.data_path, tokenizer,
-            max_length=(lm_config.max_position_embeddings
+            max_length=(min(lm_config.max_position_embeddings,
+                            args.bucket_max_seq_len)
                         if packing and args.sequence_packing_mode == 'bucket'
                         else args.max_seq_len),
             packing=packing,
             packing_batch_size=args.packing_batch_size,
             packing_mode=args.sequence_packing_mode,
             seq_bucket=args.seq_bucket,
+            packing_num_proc=args.packing_num_proc,
+            bucket_gpu_memory_gb=args.bucket_gpu_memory_gb,
             sample_indices=sample_indices,
         ),
     )
@@ -204,12 +222,23 @@ if __name__ == "__main__":
             )
         else:
             batch_sampler = transition_batches
-        loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
+        loader = DataLoader(
+            train_ds, batch_sampler=batch_sampler,
+            num_workers=packing_plan.loader_num_workers(), pin_memory=True,
+        )
         if skip > 0:
             Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
-            train_epoch(epoch, loader, len(loader) + skip, start_step, wandb)
+            train_epoch(epoch, loader, len(loader) + skip, start_step, wandb, packing_plan)
         else:
-            train_epoch(epoch, loader, len(loader), 0, wandb)
+            train_epoch(epoch, loader, len(loader), 0, wandb, packing_plan)
+        if (
+            args.use_compile == 1
+            and epoch + 1 < args.epochs
+            and packing_plan.has_large_phase(epoch)
+        ):
+            release_compiled_cuda_memory(
+                f'epoch={epoch + 1} complete, preparing next long-bucket phase'
+            )
 
     final_profile_metrics = profiler.finish()
     if final_profile_metrics and wandb:

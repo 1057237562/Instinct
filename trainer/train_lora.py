@@ -38,7 +38,8 @@ from trainer.training_profiler import TrainingProfiler
 warnings.filterwarnings('ignore')
 
 
-def train_epoch(epoch: int, loader: DataLoader, iters: int, lora_params: list, start_step: int = 0, wandb=None) -> None:
+def train_epoch(epoch: int, loader: DataLoader, iters: int, lora_params: list,
+                start_step: int = 0, wandb=None, packing_plan=None) -> None:
     """执行一个 epoch 的 LoRA 微调循环。
 
     参数:
@@ -57,6 +58,9 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, lora_params: list, s
     data_config['epoch_steps'] = int(iters)
     last_step = start_step
     for step, batch in enumerate(loader, start=start_step + 1):
+        bucket_status = packing_plan.observe_batch(
+            batch, epoch=epoch, step=step,
+        ) if packing_plan is not None else ''
         input_ids, labels = batch[:2]
         profiler.begin_step(tokens=input_ids.numel(), useful_tokens=(labels != -100).sum().item())
         with profiler.phase("data_transfer"):
@@ -87,9 +91,11 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, lora_params: list, s
             current_aux_loss = res.aux_loss.item() if res.aux_loss is not None else 0.0
             current_logits_loss = current_loss - current_aux_loss
             current_lr = optimizer.param_groups[-1]['lr']
-            eta_min = spend_time / max(step - start_step, 1) * (iters - step) // 60
-            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min')
-            if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
+            eta_min = spend_time / max(step - start_step, 1) * (iters - step) / 60
+            elapsed_min = spend_time / 60
+            bucket_text = f', {bucket_status}' if bucket_status else ''
+            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}{bucket_text}, epoch_time: {eta_min:.1f}min, elapsed_time: {elapsed_min:.1f}min')
+            if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min, "elapsed_time": elapsed_min})
 
         if (step % args.save_interval == 0 or step == iters) and is_main_process():
             model.eval()
@@ -174,13 +180,16 @@ if __name__ == "__main__":
         args, ckp_data,
         lambda packing, sample_indices=None: SFTDataset(
             args.data_path, tokenizer,
-            max_length=(lm_config.max_position_embeddings
+            max_length=(min(lm_config.max_position_embeddings,
+                            args.bucket_max_seq_len)
                         if packing and args.sequence_packing_mode == 'bucket'
                         else args.max_seq_len),
             packing=packing,
             packing_batch_size=args.packing_batch_size,
             packing_mode=args.sequence_packing_mode,
             seq_bucket=args.seq_bucket,
+            packing_num_proc=args.packing_num_proc,
+            bucket_gpu_memory_gb=args.bucket_gpu_memory_gb,
             sample_indices=sample_indices,
         ),
     )
@@ -216,12 +225,15 @@ if __name__ == "__main__":
             )
         else:
             batch_sampler = transition_batches
-        loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
+        loader = DataLoader(
+            train_ds, batch_sampler=batch_sampler,
+            num_workers=packing_plan.loader_num_workers(), pin_memory=True,
+        )
         if skip > 0:
             Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
-            train_epoch(epoch, loader, len(loader) + skip, lora_params, start_step, wandb)
+            train_epoch(epoch, loader, len(loader) + skip, lora_params, start_step, wandb, packing_plan)
         else:
-            train_epoch(epoch, loader, len(loader), lora_params, 0, wandb)
+            train_epoch(epoch, loader, len(loader), lora_params, 0, wandb, packing_plan)
 
     final_profile_metrics = profiler.finish()
     if final_profile_metrics and wandb:

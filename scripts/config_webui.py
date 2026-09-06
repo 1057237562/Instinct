@@ -59,6 +59,17 @@ def _radio(*args, **kwargs):
 def _text_input(*args, **kwargs):
     return _state_aware_widget(st.text_input, "value", *args, **kwargs)
 
+
+def _packing_preprocess_workers(value=None, *, platform_name=None, cpu_count=None):
+    """Mirror the trainer's platform-aware packing worker safety limit."""
+    platform_name = os.name if platform_name is None else str(platform_name)
+    cpu_count = (os.cpu_count() or 1) if cpu_count is None else int(cpu_count)
+    cpu_count = max(1, cpu_count)
+    maximum = min(4 if platform_name == "nt" else 32, cpu_count)
+    automatic = min(4 if platform_name == "nt" else 8, cpu_count)
+    requested = automatic if value is None else int(value)
+    return max(1, min(requested, maximum))
+
 # ═══════════════════════════════════════════════════════════════
 # Preset definitions
 # ═══════════════════════════════════════════════════════════════
@@ -1218,21 +1229,51 @@ if "_pending_config_load" in st.session_state:
 # ═══════════════════════════════════════════════════════════════
 # Refresh recovery — detect running training process on page reload
 # ═══════════════════════════════════════════════════════════════
+def _training_script_from_argv(argv):
+    """Return a ``train_*`` script stem from a real ``.py`` argv entry."""
+    for argument in argv or ():
+        candidate = str(argument).strip('"\'')
+        if not candidate.lower().endswith('.py'):
+            continue
+        stem = os.path.splitext(os.path.basename(candidate))[0]
+        if re.fullmatch(r'train_[A-Za-z0-9_]+', stem):
+            return stem
+    return None
+
+
 def _find_running_train_process():
     """Check if a train_*.py process is still alive. Returns (pid, script_name) or (None, None)."""
     import subprocess as _sp
+    # psutil is already installed with Streamlit in the supported environment
+    # and avoids WMIC quoting/encoding differences across Windows releases.
+    try:
+        import psutil
+        for process in psutil.process_iter(['pid', 'name', 'cmdline']):
+            name = (process.info.get('name') or '').lower()
+            if name not in ('python', 'python.exe'):
+                continue
+            script = _training_script_from_argv(process.info.get('cmdline'))
+            if script:
+                return int(process.info['pid']), script
+    except (ImportError, OSError):
+        pass
+
     try:
         if sys.platform == "win32":
+            # Do not use ``where name=...``: WMIC parses that expression
+            # differently when passed as a subprocess argv list and returns
+            # "Invalid alias verb" on current Windows builds.
             result = _sp.run(
-                ['wmic', 'process', 'where', 'name="python.exe"', 'get', 'ProcessId,CommandLine'],
-                capture_output=True, text=True, timeout=5,
+                ['wmic', 'process', 'get', 'ProcessId,CommandLine'],
+                capture_output=True, timeout=5,
             )
-            for line in result.stdout.splitlines():
-                if 'train_' in line and '.py' in line:
+            output = result.stdout.decode('utf-8', errors='replace')
+            for line in output.splitlines():
+                match = re.search(r'(train_[A-Za-z0-9_]+)\.py(?:\s|$)', line)
+                if match:
                     parts = line.strip().rsplit(None, 1)
                     if len(parts) == 2 and parts[1].isdigit():
-                        script = line.split('train_')[1].split('.py')[0] if 'train_' in line else '?'
-                        return int(parts[1]), f"train_{script}"
+                        return int(parts[1]), match.group(1)
         else:
             result = _sp.run(['pgrep', '-f', 'train_.*\\.py'], capture_output=True, text=True, timeout=5)
             pids = result.stdout.strip().split()
@@ -1291,6 +1332,28 @@ _DEFAULT_LEARNING_RATES = {
     "distillation": 5e-6,
 }
 
+_DATASET_KINDS_BY_TRAIN_TYPE = {
+    "pretrain": {"pretrain"},
+    "full_sft": {"sft"},
+    "lora": {"sft", "lora"},
+    "dpo": {"dpo"},
+    "ppo": {"rlaif"},
+    "grpo": {"rlaif"},
+    "agent": {"agent"},
+    "distillation": {"sft"},
+}
+
+_DEFAULT_DATASET_NAMES = {
+    "pretrain": "pretrain_t2t_mini.jsonl",
+    "full_sft": "sft_t2t_mini.jsonl",
+    "lora": "lora_identity.jsonl",
+    "dpo": "dpo.jsonl",
+    "ppo": "rlaif.jsonl",
+    "grpo": "rlaif.jsonl",
+    "agent": "agent_rl.jsonl",
+    "distillation": "sft_t2t_mini.jsonl",
+}
+
 # 暂停退出码：训练进程识别到 .pause_request 标记后保存检查点并以 42 退出，
 # 与 0=成功 / 其他=失败 相区分，WebUI 轮询时据此把状态置为 "paused"。
 PAUSE_EXIT_CODE = 42
@@ -1306,6 +1369,53 @@ def _default_epochs(train_type):
 
 def _default_learning_rate(train_type):
     return _DEFAULT_LEARNING_RATES.get(train_type, 5e-4)
+
+
+def _dataset_kind(filename):
+    """Classify top-level JSONL files by their filename prefix."""
+    name = os.path.basename(os.fspath(filename)).lower()
+    if not name.endswith(".jsonl"):
+        return None
+    for prefix in ("pretrain", "sft", "lora", "dpo", "rlaif", "agent"):
+        if name.startswith(prefix):
+            return prefix
+    return None
+
+
+def _available_training_datasets(train_type, dataset_dir=None):
+    """Return JSONL datasets compatible with a trainer; ``sft*`` means SFT."""
+    if dataset_dir is None:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+        dataset_dir = os.path.join(repo_root, "dataset")
+        display_prefix = dataset_dir
+    else:
+        dataset_dir = os.fspath(dataset_dir)
+        display_prefix = dataset_dir
+    accepted = _DATASET_KINDS_BY_TRAIN_TYPE.get(train_type, set())
+    try:
+        names = os.listdir(dataset_dir)
+    except OSError:
+        return []
+    paths = [
+        os.path.join(display_prefix, name)
+        for name in names
+        if _dataset_kind(name) in accepted
+        and os.path.isfile(os.path.join(dataset_dir, name))
+    ]
+    default_name = _DEFAULT_DATASET_NAMES.get(train_type)
+    return sorted(
+        paths,
+        key=lambda path: (os.path.basename(path) != default_name, os.path.basename(path).lower()),
+    )
+
+
+def _dataset_option_label(path):
+    kind = (_dataset_kind(path) or "unknown").upper()
+    try:
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+        return f"{kind} · {os.path.basename(path)} ({size_mb:,.1f} MiB)"
+    except OSError:
+        return f"{kind} · {os.path.basename(path)}"
 
 
 def _arch_tag():
@@ -1426,6 +1536,82 @@ def _resume_checkpoint_exists(weight, hidden_size, use_moe):
     ))
 
 
+def _training_log_is_complete(log_path):
+    """Whether the last logged epoch/step reached the declared end of training."""
+    if not log_path or not os.path.exists(log_path):
+        return False
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as log_file:
+            progress = re.findall(
+                r"Epoch:\[(\d+)/(\d+)\]\((\d+)/(\d+)\)",
+                log_file.read(),
+            )
+    except OSError:
+        return False
+    if not progress:
+        return False
+    epoch, epochs, step, steps = map(int, progress[-1])
+    return epoch >= epochs and step >= steps
+
+
+def _completed_checkpoint_exists(log_path):
+    """Check that this log's final atomic resume checkpoint was written.
+
+    A fresh-run log is named ``train_{save_prefix}.log`` and the corresponding
+    resume file starts with ``{save_prefix}_``.  The checkpoint must be at least
+    as new as the final log write, which prevents an older periodic checkpoint
+    from making a crashed run look successful.
+    """
+    if not log_path or not os.path.exists(log_path):
+        return False
+    log_name = os.path.basename(log_path)
+    if not log_name.startswith("train_") or not log_name.endswith(".log"):
+        return False
+
+    save_prefix = log_name[len("train_"):-len(".log")]
+    prefixes = [save_prefix]
+    # Fresh logs add _2, _3, ... only on a rare filename collision; the trainer
+    # still receives the original save prefix.
+    collision_suffix = re.match(r"^(.*)_([2-9]\d*)$", save_prefix)
+    if collision_suffix:
+        prefixes.append(collision_suffix.group(1))
+
+    try:
+        log_mtime = os.path.getmtime(log_path)
+        checkpoint_names = os.listdir(_checkpoints_dir())
+    except OSError:
+        return False
+
+    for prefix in prefixes:
+        for name in checkpoint_names:
+            if not (name.startswith(prefix + "_") and name.endswith("_resume.pth")):
+                continue
+            checkpoint_path = os.path.join(_checkpoints_dir(), name)
+            try:
+                if os.path.getmtime(checkpoint_path) >= log_mtime:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def _detached_training_status(log_path, process_found, paused_state, now=None):
+    """Resolve a recovered run for which this WebUI has no ``Popen`` object."""
+    if process_found:
+        return "running"
+    if paused_state is not None:
+        return "paused"
+    if _training_log_is_complete(log_path) and _completed_checkpoint_exists(log_path):
+        return "success"
+    try:
+        age = (time.time() if now is None else now) - os.path.getmtime(log_path)
+    except (OSError, TypeError):
+        return "failed"
+    # A process scan can transiently fail.  Keep polling while the log is fresh;
+    # once it becomes stale, an incomplete run is treated as failed.
+    return "running" if age < 60 else "failed"
+
+
 def _pause_flag_path():
     """暂停请求标记：训练进程在每个 step 边界检查该文件，存在则保存检查点并以 42 退出。"""
     return os.path.join(_checkpoints_dir(), ".pause_request")
@@ -1484,6 +1670,17 @@ _BASE_WEIGHT_TYPE = {
 }
 
 
+def _base_weight_type(train_type, continue_completed_sft=False):
+    if train_type == "full_sft" and continue_completed_sft:
+        return "full_sft"
+    return _BASE_WEIGHT_TYPE.get(train_type, train_type)
+
+
+def _is_completed_sft_weight(path):
+    name = os.path.basename(os.fspath(path)).lower()
+    return name.startswith("full_sft_") and name.endswith(".pth") and "_resume.pth" not in name
+
+
 def _available_weight_files():
     """Scan out/ + checkpoints/ for loadable base-weight .pth files (excludes _resume.pth)."""
     repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -1522,48 +1719,37 @@ def _latest_weight_file(base_type, hidden_size, use_moe, arch_tag=""):
 
 
 def _try_recover_training_state():
-    if "train_status" in st.session_state:
-        return
-
     trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
     log_path = _latest_train_log(trainer_dir)
+
+    # A browser tab/session may retain a terminal status from an earlier failed
+    # launch while another tab has successfully started the trainer.  The live
+    # OS process is authoritative and must override that stale session value.
+    pid, script = _find_running_train_process()
+    if pid is not None:
+        st.session_state.train_status = "running"
+        if log_path is not None:
+            st.session_state.train_log_path = log_path
+        if script:
+            st.session_state.train_type = script.removeprefix("train_")
+        return
+
+    if "train_status" in st.session_state:
+        return
 
     if log_path is None:
         return
 
-    mtime = os.path.getmtime(log_path)
-    recently_modified = (time.time() - mtime) < 60
-
-    pid, script = _find_running_train_process()
     paused_state = _read_paused_state()
-
-    if pid is not None:
-        st.session_state.train_status = "running"
-        st.session_state.train_log_path = log_path
-        if pid and script:
-            st.session_state.train_type = script
-    elif paused_state is not None:
-        # 必须先于 recently_modified 检查：刚暂停的日志 (<60s 新) 否则会被误判为 running。
-        st.session_state.train_status = "paused"
-        st.session_state.train_log_path = log_path
-        if paused_state.get("train_type"):
-            train_type = paused_state["train_type"]
-            st.session_state.train_type = train_type
-        else:
-            train_type = st.session_state.get("train_type", "pretrain")
+    st.session_state.train_status = _detached_training_status(
+        log_path, False, paused_state
+    )
+    st.session_state.train_log_path = log_path
+    if paused_state is not None:
+        train_type = paused_state.get("train_type") or st.session_state.get("train_type", "pretrain")
+        st.session_state.train_type = train_type
         if paused_state.get("weight"):
             st.session_state[f"save_prefix_{train_type}"] = paused_state.get("weight")
-    elif recently_modified:
-        st.session_state.train_status = "running"
-        st.session_state.train_log_path = log_path
-        if pid and script:
-            st.session_state.train_type = script
-    else:
-        with open(log_path, "r", encoding="utf-8") as f:
-            log = f.read()
-        if log.strip():
-            st.session_state.train_status = "success"
-            st.session_state.train_log_path = log_path
 
 _try_recover_training_state()
 
@@ -2142,8 +2328,22 @@ with st.sidebar:
             ["pretrain", "full_sft", "lora", "dpo", "ppo", "grpo", "agent", "distillation"],
             key="train_type",
         )
-        if train_type in ("pretrain", "full_sft", "distillation"):
-            _radio("Dataset size", ["mini", "normal"], key="dataset_size", horizontal=True)
+        _dataset_options = _available_training_datasets(train_type)
+        _dataset_key = f"data_path_{train_type}"
+        if _dataset_options:
+            if st.session_state.get(_dataset_key) not in _dataset_options:
+                st.session_state[_dataset_key] = _dataset_options[0]
+            _selectbox(
+                "Training dataset",
+                _dataset_options,
+                key=_dataset_key,
+                format_func=_dataset_option_label,
+                help="自动扫描 dataset/ 顶层 JSONL；文件名以 sft 开头的文件会被判定为 SFT 数据集。",
+            )
+            _dataset_missing = False
+        else:
+            st.error(f"No compatible JSONL dataset found for {train_type} in dataset/.")
+            _dataset_missing = True
         config_file = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", "trainer", f"config_{train_type}.json"
         )
@@ -2153,11 +2353,42 @@ with st.sidebar:
                 with open(config_file, "r", encoding="utf-8") as f:
                     st.session_state._pending_config_load = json.load(f)
                 st.rerun()
-        _checkbox("Resume from checkpoint (--from_resume)", value=False, key="from_resume",
-                    help="Auto-detect and resume from checkpoints/{weight}_{dim}{_moe}_resume.pth")
+        if train_type == "full_sft":
+            _sft_start_modes = ["base", "continue", "resume"]
+            _sft_start_labels = {
+                "base": "Start from base weights",
+                "continue": "Continue a completed SFT on new data",
+                "resume": "Resume an interrupted run",
+            }
+            if "sft_start_mode" not in st.session_state:
+                st.session_state.sft_start_mode = (
+                    "resume" if st.session_state.get("from_resume", False) else "base"
+                )
+            _sft_start_mode = _radio(
+                "SFT start mode",
+                _sft_start_modes,
+                key="sft_start_mode",
+                format_func=lambda mode: _sft_start_labels[mode],
+                help="Continue 会加载已完成的 full_sft 普通权重，但重新创建 optimizer、scheduler 和 step；"
+                     "Resume 会恢复同一轮训练的完整 checkpoint。",
+            )
+            st.session_state.from_resume = _sft_start_mode == "resume"
+            _continue_completed_sft = _sft_start_mode == "continue"
+        else:
+            _checkbox("Resume from checkpoint (--from_resume)", value=False, key="from_resume",
+                      help="Auto-detect and resume from checkpoints/{weight}_{dim}{_moe}_resume.pth")
+            _continue_completed_sft = False
         _weight_files = _available_weight_files()
         _auto_label = "auto (newest matching base)"
-        _base_options = ["none (from scratch)", _auto_label] + _weight_files
+        if _continue_completed_sft:
+            _completed_sft_weights = [path for path in _weight_files if _is_completed_sft_weight(path)]
+            _base_options = [_auto_label] + _completed_sft_weights
+            _continue_without_weight = not _completed_sft_weights
+            if _continue_without_weight:
+                st.error("No completed full_sft weight was found in out/ or checkpoints/.")
+        else:
+            _base_options = ["none (from scratch)", _auto_label] + _weight_files
+            _continue_without_weight = False
         if "base_weight" not in st.session_state:
             st.session_state.base_weight = "none" if train_type == "pretrain" else _auto_label
         elif st.session_state.base_weight not in _base_options:
@@ -2166,18 +2397,26 @@ with st.sidebar:
             "Base weights (--from_weight)",
             _base_options,
             key="base_weight",
-            help="SFT 基于 pretrain、LoRA/DPO/PPO/GRPO/Agent/蒸馏基于 full_sft 启动。"
+            disabled=st.session_state.get("from_resume", False),
+            help="SFT 基于 pretrain；Continue SFT 和 LoRA/DPO/PPO/GRPO/Agent/蒸馏基于 full_sft 启动。"
                  "可选 out/ 与 checkpoints/ 下的 .pth（自动排除 _resume 检查点），"
                  "或 'auto' 自动选择最新匹配权重；'none' 从随机初始化开始。"
                  "选中 Resume 且检查点含完整状态时，基础权重会自动跳过。",
         )
+        _bucket_auto_batch = (
+            train_type in ("pretrain", "full_sft", "lora", "distillation")
+            and st.session_state.get("sequence_packing", False)
+            and st.session_state.get("sequence_packing_mode", "fixed") == "bucket"
+        )
         _number_input(
-            "batch_size",
+            "batch_size (fixed/non-packing)",
             min_value=1, max_value=512,
             value=st.session_state.get("batch_size", 32),
             step=8, key="batch_size",
+            disabled=_bucket_auto_batch,
             help="批次大小。小模型 GPU 利用率低时，可提升到 64/128 放大单步 GEMM "
-                 "(注意：batch×seq 与激活显存成正比，过高会 OOM)",
+                 "(注意：batch×seq 与激活显存成正比，过高会 OOM)。Auto buckets 模式下"
+                 "此项停用，改为根据显存和桶长度自动计算。",
         )
         epochs_key = f"epochs_{train_type}"
         _number_input(
@@ -2233,7 +2472,36 @@ with st.sidebar:
                 help="按 token 长度排序后，用分组 DP + 斜率优化自动求各桶的 block 长度。"
                      "每个桶独立 packing；默认 2 桶。",
             )
-            st.caption("Packing 模式不使用手动 max_seq_len；仅按模型 32K 上下文自动截断异常长样本。")
+            _number_input(
+                "Maximum bucket context (tokens)",
+                min_value=512, max_value=32768,
+                value=int(st.session_state.get("bucket_max_seq_len", 16384)),
+                step=512, key="bucket_max_seq_len",
+                help="Auto buckets 的单样本硬上限。SFT 样本超过该长度会整条丢弃，"
+                     "不会截断成残缺的代码或回答。16GB 显卡建议 16384。",
+            )
+            st.caption("超过最大上下文的 SFT 样本会在 tokenization 阶段整条丢弃并记录数量。")
+            _number_input(
+                "Group large buckets above (tokens)",
+                min_value=512, max_value=32767,
+                value=int(st.session_state.get("bucket_large_threshold", 8192)),
+                step=512, key="bucket_large_threshold",
+                help="长度严格超过此值的桶会集中排在每个 epoch 开头。训练完大桶阶段后，"
+                     "销毁该阶段的 CUDA Graph 和静态 GPU 张量并释放显存。",
+            )
+            st.caption("默认 >8192 tokens 的桶先连续训练，结束后会记录实际释放的 GPU 显存。")
+            _number_input(
+                "GPU VRAM per card (GB)",
+                min_value=1.0, max_value=192.0,
+                value=float(st.session_state.get("bucket_gpu_memory_gb", 16.0)),
+                step=1.0, key="bucket_gpu_memory_gb",
+                help="填写每张训练 GPU 可用的显存。根据 16GB 下 2048 tokens 可运行 batch 12 的"
+                     "实测曲线，自动计算每个长度桶的 batch_size。",
+            )
+            st.caption(
+                "标定：16GB = 24576 tokens/step/GPU；按显存线性缩放预算，再除以桶 max_seq_len。"
+            )
+            st.caption("上方手动 batch_size 在 Auto buckets 模式中不会参与每桶批量计算。")
         else:
             _number_input(
                 "max_seq_len (训练截断长度)",
@@ -2249,6 +2517,37 @@ with st.sidebar:
             step=100, key="packing_batch_size",
             disabled=not _packing_enabled,
             help="首次构建 Arrow cache 时每批处理的原始样本数；越大通常填充率越高，但占用更多 CPU 内存。",
+        )
+        _packing_worker_limit = _packing_preprocess_workers(
+            32, platform_name=os.name, cpu_count=os.cpu_count(),
+        )
+        _packing_workers = _packing_preprocess_workers(
+            st.session_state.get("packing_num_proc"),
+        )
+        # A saved value from an older UI may exceed the new Windows-safe max.
+        if st.session_state.get("packing_num_proc") != _packing_workers:
+            st.session_state.packing_num_proc = _packing_workers
+        _number_input(
+            "Packing preprocessing workers",
+            min_value=1, max_value=_packing_worker_limit,
+            value=_packing_workers,
+            step=1, key="packing_num_proc",
+            disabled=not _bucket_packing,
+            help="Auto buckets 的 tokenizer/长度统计和桶内 packing 使用的并行进程数；"
+                 "Windows 最多 4，避免多个 PyTorch 子进程耗尽提交内存。"
+                 "分桶 DP 已是 O(bucket×样本数)，通常不是耗时瓶颈。",
+        )
+        _number_input(
+            "Bucket training DataLoader workers",
+            min_value=0, max_value=max(1, min(16, os.cpu_count() or 1)),
+            value=min(
+                int(st.session_state.get("bucket_loader_workers", 0)),
+                max(1, min(16, os.cpu_count() or 1)),
+            ),
+            step=1, key="bucket_loader_workers",
+            disabled=not _bucket_packing,
+            help="训练阶段读取 packed Arrow 数据的进程数。Windows 建议 0：每个 spawn worker "
+                 "都会重新导入 PyTorch，显著增加任务管理器的已提交内存。",
         )
         if _packing_enabled and st.session_state.get("from_resume", False):
             st.info(
@@ -2433,7 +2732,10 @@ with st.sidebar:
             )
         if st.button(
             "Start Training", width="stretch", key="btn_start_train",
-            disabled=_compile_invalid or _fp8_invalid or _low_precision_invalid,
+            disabled=(
+                _compile_invalid or _fp8_invalid or _low_precision_invalid
+                or _dataset_missing or _continue_without_weight
+            ),
         ):
             st.session_state.train_triggered = True
         if st.session_state.get("train_status") == "running":
@@ -2506,7 +2808,13 @@ if st.session_state.get("train_triggered", False):
                 config_path = os.path.join(trainer_dir, f"config_{train_type}.json")
                 with open(config_path, "w", encoding="utf-8") as f:
                     json.dump(cfg, f, ensure_ascii=False, indent=2)
-                from_resume = st.session_state.get("from_resume", False)
+                sft_start_mode = st.session_state.get("sft_start_mode", "base")
+                from_resume = (
+                    sft_start_mode == "resume"
+                    if train_type == "full_sft"
+                    else st.session_state.get("from_resume", False)
+                )
+                continue_completed_sft = train_type == "full_sft" and sft_start_mode == "continue"
                 stamp = time.strftime("%Y%m%d_%H%M%S")
                 save_prefix = _resolve_save_prefix(train_type, cfg["hidden_size"], cfg["use_moe"],
                                                    from_resume, stamp)
@@ -2535,7 +2843,7 @@ if st.session_state.get("train_triggered", False):
                 elif from_weight == "auto (newest matching base)":
                     from_weight = "auto"
                 if from_weight == "auto":
-                    base_type = _BASE_WEIGHT_TYPE.get(train_type, train_type)
+                    base_type = _base_weight_type(train_type, continue_completed_sft)
                     auto_path = _latest_weight_file(base_type, cfg["hidden_size"], cfg["use_moe"], _arch_tag())
                     from_weight = auto_path if auto_path else "none"
                 elif from_weight.startswith(("out/", "checkpoints/")):
@@ -2574,7 +2882,23 @@ if st.session_state.get("train_triggered", False):
                 cmd.extend(["--sequence_packing", "1" if packing_enabled else "0"])
                 cmd.extend(["--sequence_packing_mode", packing_mode])
                 cmd.extend(["--seq_bucket", str(st.session_state.get("seq_bucket", 2))])
+                cmd.extend(["--bucket_gpu_memory_gb", str(
+                    st.session_state.get("bucket_gpu_memory_gb", 16.0)
+                )])
+                cmd.extend(["--bucket_max_seq_len", str(
+                    st.session_state.get("bucket_max_seq_len", 16384)
+                )])
+                cmd.extend(["--bucket_large_threshold", str(
+                    st.session_state.get("bucket_large_threshold", 8192)
+                )])
                 cmd.extend(["--packing_batch_size", str(st.session_state.get("packing_batch_size", 1000))])
+                packing_workers = _packing_preprocess_workers(
+                    st.session_state.get("packing_num_proc"),
+                )
+                cmd.extend(["--packing_num_proc", str(packing_workers)])
+                cmd.extend(["--bucket_loader_workers", str(
+                    st.session_state.get("bucket_loader_workers", 0)
+                )])
                 cmd.extend(["--accumulation_steps", str(st.session_state.get("accumulation_steps", 1))])
                 cmd.extend(["--optimizer", st.session_state.get("optimizer", "adamw")])
                 cmd.extend(["--learning_rate", str(st.session_state.get(
@@ -2605,12 +2929,12 @@ if st.session_state.get("train_triggered", False):
                     cmd.extend(["--early_exit", "1"])
                 if from_resume:
                     cmd.extend(["--from_resume", "1"])
-                if train_type == "pretrain":
-                    suffix = "_mini" if st.session_state.get("dataset_size", "mini") == "mini" else ""
-                    cmd.extend(["--data_path", f"./dataset/pretrain_t2t{suffix}.jsonl"])
-                elif train_type in ("full_sft", "distillation"):
-                    suffix = "_mini" if st.session_state.get("dataset_size", "mini") == "mini" else ""
-                    cmd.extend(["--data_path", f"./dataset/sft_t2t{suffix}.jsonl"])
+                selected_data_path = st.session_state.get(f"data_path_{train_type}")
+                if selected_data_path:
+                    cmd.extend(["--data_path", selected_data_path])
+                else:
+                    _launch_ok = False
+                    st.session_state.train_status = "failed"
                 if _launch_ok:
                     logs_dir = os.path.join(trainer_dir, "logs")
                     os.makedirs(logs_dir, exist_ok=True)
@@ -2627,7 +2951,12 @@ if st.session_state.get("train_triggered", False):
                     log_file.write(
                         f"# Sequence packing: {'ON' if packing_enabled else 'OFF'} "
                         f"(mode={packing_mode}, buckets={st.session_state.get('seq_bucket', 2)}, "
-                        f"cache_batch={st.session_state.get('packing_batch_size', 1000)})\n"
+                        f"cache_batch={st.session_state.get('packing_batch_size', 1000)}, "
+                        f"gpu_memory={st.session_state.get('bucket_gpu_memory_gb', 16.0)}GB, "
+                        f"max_context={st.session_state.get('bucket_max_seq_len', 16384)}, "
+                        f"large_threshold={st.session_state.get('bucket_large_threshold', 8192)}, "
+                        f"preprocess_workers={packing_workers}, "
+                        f"loader_workers={st.session_state.get('bucket_loader_workers', 0)})\n"
                     )
                     log_file.write(
                         f"# TorchAO FP8 training: {st.session_state.get('fp8_training', 'off')} "
@@ -2654,14 +2983,24 @@ if st.session_state.get("train_triggered", False):
 
 if st.session_state.get("train_status") == "running":
     proc = st.session_state.get("train_proc")
-    if proc is not None and proc.poll() is not None:
+    if proc is not None:
         rc = proc.poll()
-        if rc == PAUSE_EXIT_CODE:
-            st.session_state.train_status = "paused"
-        elif rc == 0:
-            st.session_state.train_status = "success"
-        else:
-            st.session_state.train_status = "failed"
+        if rc is not None:
+            if rc == PAUSE_EXIT_CODE:
+                st.session_state.train_status = "paused"
+            elif rc == 0:
+                st.session_state.train_status = "success"
+            else:
+                st.session_state.train_status = "failed"
+    else:
+        # After a page reload the original Popen object is gone.  Re-scan on
+        # every auto-refresh so a recovered session can observe process exit.
+        recovered_pid, _ = _find_running_train_process()
+        st.session_state.train_status = _detached_training_status(
+            st.session_state.get("train_log_path"),
+            recovered_pid is not None,
+            _read_paused_state(),
+        )
 
 cfg = build_config_dict()
 breakdown = calc_params(cfg)
@@ -2890,7 +3229,7 @@ elif st.session_state.get("train_status") == "success":
         with st.expander("📄 Training Log", expanded=False):
             st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
 elif st.session_state.get("train_status") == "failed":
-    st.error("Training failed to start")
+    st.error("Training stopped or failed (see log below)")
     log_path = st.session_state.get("train_log_path")
     if log_path and os.path.exists(log_path):
         with open(log_path, "r", encoding="utf-8") as f:

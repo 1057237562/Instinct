@@ -252,6 +252,30 @@ python eval_llm.py --load_from ./instinct-3
 python eval_llm.py --load_from ./model --weight full_sft
 ```
 
+#### LiveCodeBench code-generation evaluation
+
+`eval_llm.py` can generate the JSON format accepted by LiveCodeBench's official
+`custom_evaluator`:
+
+```bash
+# Generation smoke test (a limited run cannot be scored by the official evaluator)
+python eval_llm.py --benchmark livecodebench --weight full_sft \
+  --lcb_release_version release_v6 --lcb_limit 10 \
+  --temperature 0.2 --max_new_tokens 2048
+
+# Full generation and optional official pass@k evaluation
+python eval_llm.py --benchmark livecodebench --weight full_sft \
+  --lcb_release_version release_v6 --lcb_num_samples 10 \
+  --temperature 0.2 --max_new_tokens 2048 \
+  --lcb_output out/livecodebench_release_v6.json \
+  --lcb_runner_path ../LiveCodeBench --lcb_evaluate
+```
+
+Generation is saved atomically after every problem and resumes by default. Use
+`--lcb_dataset_path` for a local JSON/JSONL dataset, or `--lcb_evaluate_only` to
+score an existing output without loading the model. The official evaluator executes
+generated Python programs, so run it in an isolated evaluation environment.
+
 ### 3' (Optional) WebUI
 
 ```bash

@@ -32,7 +32,7 @@ from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint, init_model,
     config_from_args, build_optimizer, pause_save_checkpoint,
     restore_config_from_checkpoint, apply_torchao_fp8_training,
-    prepare_lm_batch,
+    prepare_lm_batch, release_compiled_cuda_memory,
 )
 from trainer.training_profiler import TrainingProfiler
 
@@ -64,7 +64,9 @@ def distillation_loss(student_logits: torch.Tensor, teacher_logits: torch.Tensor
     return (temperature ** 2) * kl
 
 
-def train_epoch(epoch, loader, iters, teacher_model, lm_config_student, start_step=0, wandb=None, alpha=0.0, temperature=1.0):
+def train_epoch(epoch, loader, iters, teacher_model, lm_config_student,
+                start_step=0, wandb=None, alpha=0.0, temperature=1.0,
+                packing_plan=None):
     start_time = time.time()
     data_config['epoch_steps'] = int(iters)
     last_step = start_step
@@ -74,6 +76,9 @@ def train_epoch(epoch, loader, iters, teacher_model, lm_config_student, start_st
         teacher_model.requires_grad_(False)
 
     for step, batch in enumerate(loader, start=start_step + 1):
+        bucket_status = packing_plan.observe_batch(
+            batch, epoch=epoch, step=step,
+        ) if packing_plan is not None else ''
         input_ids, labels = batch[:2]
         last_step = step
         profiler.begin_step(tokens=input_ids.numel(), useful_tokens=(labels != -100).sum().item())
@@ -142,9 +147,11 @@ def train_epoch(epoch, loader, iters, teacher_model, lm_config_student, start_st
             current_ce_loss = ce_loss_raw.item()
             current_aux_loss = res.aux_loss.item() if lm_config_student.use_moe else 0.0
             current_lr = optimizer.param_groups[-1]['lr']
-            eta_min = spend_time / max(step - start_step, 1) * (iters - step) // 60
+            eta_min = spend_time / max(step - start_step, 1) * (iters - step) / 60
+            elapsed_min = spend_time / 60
 
-            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, ce: {current_ce_loss:.4f}, aux_loss: {current_aux_loss:.4f}, distill: {distill_loss.item():.4f}, learning_rate: {current_lr:.8f}, epoch_time: {eta_min:.3f}min')
+            bucket_text = f', {bucket_status}' if bucket_status else ''
+            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, ce: {current_ce_loss:.4f}, aux_loss: {current_aux_loss:.4f}, distill: {distill_loss.item():.4f}, learning_rate: {current_lr:.8f}{bucket_text}, epoch_time: {eta_min:.3f}min, elapsed_time: {elapsed_min:.3f}min')
 
             if wandb:
                 wandb.log({
@@ -153,7 +160,8 @@ def train_epoch(epoch, loader, iters, teacher_model, lm_config_student, start_st
                     "aux_loss": current_aux_loss,
                     "distill_loss": distill_loss.item() if teacher_model is not None else 0.0,
                     "learning_rate": current_lr,
-                    "epoch_time": eta_min
+                    "epoch_time": eta_min,
+                    "elapsed_time": elapsed_min,
                 })
 
         if (step % args.save_interval == 0 or step == iters) and is_main_process():
@@ -169,6 +177,15 @@ def train_epoch(epoch, loader, iters, teacher_model, lm_config_student, start_st
             del state_dict
 
         del input_ids, labels, sequence_ids, loss_mask, res, student_logits, ce_loss, distill_loss, loss
+
+        if (
+            args.use_compile == 1
+            and packing_plan is not None
+            and packing_plan.should_release_large_cuda_memory(epoch=epoch, step=step)
+        ):
+            release_compiled_cuda_memory(
+                f'epoch={epoch + 1}, completed buckets >{args.bucket_large_threshold} tokens'
+            )
 
         if pause_requested(args):
             clear_pause_request(args)
@@ -243,13 +260,16 @@ if __name__ == "__main__":
         args, ckp_data,
         lambda packing, sample_indices=None: SFTDataset(
             args.data_path, tokenizer,
-            max_length=(lm_config_student.max_position_embeddings
+            max_length=(min(lm_config_student.max_position_embeddings,
+                            args.bucket_max_seq_len)
                         if packing and args.sequence_packing_mode == 'bucket'
                         else args.max_seq_len),
             packing=packing,
             packing_batch_size=args.packing_batch_size,
             packing_mode=args.sequence_packing_mode,
             seq_bucket=args.seq_bucket,
+            packing_num_proc=args.packing_num_proc,
+            bucket_gpu_memory_gb=args.bucket_gpu_memory_gb,
             sample_indices=sample_indices,
         ),
     )
@@ -295,12 +315,23 @@ if __name__ == "__main__":
             )
         else:
             batch_sampler = transition_batches
-        loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
+        loader = DataLoader(
+            train_ds, batch_sampler=batch_sampler,
+            num_workers=packing_plan.loader_num_workers(), pin_memory=True,
+        )
         if skip > 0:
             Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
-            train_epoch(epoch, loader, len(loader) + skip, teacher_model, lm_config_student, start_step, wandb, args.alpha, args.temperature)
+            train_epoch(epoch, loader, len(loader) + skip, teacher_model, lm_config_student, start_step, wandb, args.alpha, args.temperature, packing_plan)
         else:
-            train_epoch(epoch, loader, len(loader), teacher_model, lm_config_student, 0, wandb, args.alpha, args.temperature)
+            train_epoch(epoch, loader, len(loader), teacher_model, lm_config_student, 0, wandb, args.alpha, args.temperature, packing_plan)
+        if (
+            args.use_compile == 1
+            and epoch + 1 < args.epochs
+            and packing_plan.has_large_phase(epoch)
+        ):
+            release_compiled_cuda_memory(
+                f'epoch={epoch + 1} complete, preparing next long-bucket phase'
+            )
 
     final_profile_metrics = profiler.finish()
     if final_profile_metrics and wandb:

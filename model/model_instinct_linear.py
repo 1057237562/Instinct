@@ -56,6 +56,8 @@ class InstinctConfig(PretrainedConfig):
     model_type = "instinct"
     def __init__(self, hidden_size: int = 768, num_hidden_layers: int = 8, use_moe: bool = False, **kwargs):
         """初始化配置:全部可选字段经 kwargs 传入,并据此生成 layer_types。"""
+        saved_rope_scaling = kwargs.pop("rope_scaling", None)
+        saved_rope_parameters = kwargs.pop("rope_parameters", None)
         super().__init__(**kwargs)
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
@@ -65,6 +67,7 @@ class InstinctConfig(PretrainedConfig):
         self.vocab_size = kwargs.get("vocab_size", 6400)
         self.bos_token_id = kwargs.get("bos_token_id", 1)
         self.eos_token_id = kwargs.get("eos_token_id", 2)
+        self.pad_token_id = kwargs.get("pad_token_id", 0)
         self.flash_attn = kwargs.get("flash_attn", True)
         self.param_dtype = kwargs.get("param_dtype", "fp32")
         self.kv_cache_dtype = kwargs.get("kv_cache_dtype", "fp32")
@@ -83,9 +86,10 @@ class InstinctConfig(PretrainedConfig):
         self.intermediate_size = kwargs.get("intermediate_size", math.ceil(hidden_size * math.pi / 64) * 64)
         self.max_position_embeddings = kwargs.get("max_position_embeddings", 32768)
         self.rms_norm_eps = kwargs.get("rms_norm_eps", 1e-6)
+        self.initializer_range = kwargs.get("initializer_range", 0.02)
         self.rope_theta = kwargs.get("rope_theta", 1e6)
         self.inference_rope_scaling = kwargs.get("inference_rope_scaling", False)
-        self.rope_scaling = {
+        default_rope_scaling = {
             "beta_fast": 32,
             "beta_slow": 1,
             "factor": 16,
@@ -93,6 +97,7 @@ class InstinctConfig(PretrainedConfig):
             "attention_factor": 1.0,
             "type": "yarn"
         } if self.inference_rope_scaling else None
+        self.rope_scaling = saved_rope_scaling or saved_rope_parameters or default_rope_scaling
         # Early Exit configs (LayerSkip-style: shared LM head, no auxiliary classifiers)
         self.early_exit_layers = kwargs.get("early_exit_layers", [4, 5, 6, 7])
         self.early_exit_loss_weight = kwargs.get("early_exit_loss_weight", 0.3)
@@ -789,6 +794,22 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
     推理时置信度阈值动态退出）与 generate 采样解码;统一返回 MoeCausalLMOutputWithPast。
     """
     config_class = InstinctConfig
+    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
+
+    def _init_weights(self, module):
+        """Keep Instinct's initialization stable if post_init is enabled later."""
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if module.padding_idx is not None:
+                nn.init.zeros_(module.weight[module.padding_idx])
+        elif "RMSNorm" in module.__class__.__name__:
+            if getattr(module, "weight", None) is not None:
+                nn.init.ones_(module.weight)
+
     def __init__(self, config: InstinctConfig = None):
         """初始化主干模型与 lm_head,并绑定 embedding 权重（tied weights）。"""
         self.config = config or InstinctConfig()

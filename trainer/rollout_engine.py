@@ -180,7 +180,7 @@ class SGLangRolloutEngine(RolloutEngine):
                 unwrapped = getattr(unwrapped, '_orig_mod', unwrapped)
                 abs_path = os.path.abspath(self.shared_ckpt_path)
                 state_dict = {k: v.detach().half().cpu() for k, v in unwrapped.state_dict().items()}
-                unwrapped.save_pretrained(abs_path, state_dict=state_dict, safe_serialization=False)
+                unwrapped.save_pretrained(abs_path, state_dict=state_dict)
                 self.tokenizer.save_pretrained(abs_path)
                 resp = self.http.post(f"{self.base_url}/update_weights_from_disk", json={"model_path": abs_path}, timeout=self.timeout)
                 if resp.status_code != 200: print(f"[SGLANG WARNING] update_weights 失败: {resp.status_code}, {resp.text}")
