@@ -1,0 +1,3 @@
+Instinct pretrain smoke (T12): --use_grad_checkpoint 1, tiny config, synthetic data
+trainer=train_pretrain status=PASS detail=exit=0, loss=8.712200 (finite)
+cmd=python trainer/train_pretrain.py --hidden_size 64 --num_hidden_layers 2 --max_seq_len 32 --batch_size 1 --epochs 1 --use_grad_checkpoint 1 --num_workers 0 --log_interval 1 --accumulation_steps 1 --save_dir C:\Users\L1bra\AppData\Local\Temp\instinct_smoke_6qrnd76i\out --data_path C:\Users\L1bra\AppData\Local\Temp\instinct_smoke_6qrnd76i\data\pretrain.jsonl --from_weight none --save_weight smoke_pretrain

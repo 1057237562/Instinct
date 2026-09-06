@@ -1,0 +1,13 @@
+=== T10 evidence: step equality (task-10-step) ===
+Suite: tests/test_cross_model_consistency.py::test_step_equality (plan T10, GREEN)
+seed 42, dense Mode 0 vs Mode 1, 3 AdamW steps (loss.backward -> optimizer.step -> zero_grad)
+Asserted: 3-step loss sequence torch.equal (bitwise), weights torch.equal, final grads torch.equal
+
+.                                                                        [100%]
+============================== warnings summary ===============================
+E:\miniconda3\Lib\site-packages\torch\jit\_script.py:365: 14 warnings
+  E:\miniconda3\Lib\site-packages\torch\jit\_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 14 warnings in 7.36s

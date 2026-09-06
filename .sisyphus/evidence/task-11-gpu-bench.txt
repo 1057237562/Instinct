@@ -1,0 +1,70 @@
+
+[bench] mode 0 (bs=4 seq=2048) ...
+[mode 0] peak=11444.8 MB  steps/s=0.897  params=63.9M
+
+[bench] mode 1 (bs=4 seq=2048) ...
+[mode 1] peak=4887.6 MB  steps/s=2.541  params=63.9M
+
+[bench] mode 2 (bs=4 seq=2048) ...
+[mode 2] peak=3429.6 MB  steps/s=2.490  params=63.9M
+
+=== Gradient-checkpointing bench ===
+config: bs=4 seq=2048 layers=8 hidden=768 moe=0 flash=0 steps=3 device=NVIDIA GeForce RTX 5070 Ti
+mode    peak MB   save%   steps/s  overhead%
+   0    11444.8             0.897           
+   1     4887.6   57.3%     2.541    -183.3%
+   2     3429.6   70.0%     2.490    -177.7%
+
+=== Assertions (S=2048 eager) ===
+[PASS] Mode 1 peak saving >= 45%  (measured=57.3%, threshold=45.0%)
+[FAIL] Mode 2 peak saving >= 85%  (measured=70.0%, threshold=85.0%)
+[PASS] Mode 1 throughput overhead <= 15%  (measured=-183.3%, threshold=15.0%)
+[PASS] Mode 2 throughput overhead <= 50%  (measured=-177.7%, threshold=50.0%)
+
+ASSERTIONS FAILED: ['Mode 2 peak saving >= 85%']
+
+
+===== SUPPLEMENTARY: S=768 eager (--seq 768 --mode all) =====
+
+[bench] mode 0 (bs=4 seq=768) ...
+[mode 0] peak=3237.7 MB  steps/s=3.292  params=63.9M
+
+[bench] mode 1 (bs=4 seq=768) ...
+[mode 1] peak=1909.3 MB  steps/s=4.805  params=63.9M
+
+[bench] mode 2 (bs=4 seq=768) ...
+[mode 2] peak=1469.3 MB  steps/s=4.353  params=63.9M
+
+=== Gradient-checkpointing bench ===
+config: bs=4 seq=768 layers=8 hidden=768 moe=0 flash=0 steps=3 device=NVIDIA GeForce RTX 5070 Ti
+mode    peak MB   save%   steps/s  overhead%
+   0     3237.7             3.292           
+   1     1909.3   41.0%     4.805     -45.9%
+   2     1469.3   54.6%     4.353     -32.2%
+
+(no acceptance assertions defined for this config)
+
+===== ANALYSIS: Mode 2 saving shortfall (70.0% < 85% threshold) =====
+Mode 2 full-layer checkpointing IS effective: peak 3429.6 MB vs eager 11444.8 MB
+(70% reduction; without checkpointing the peak would equal Mode 0's ~11.4 GB).
+The shortfall is a measurement-floor artifact of the benchmark config, not a
+checkpointing defect:
+  * Mode 2 peak = irreducible floor + ONE layer's recompute in backward:
+      - params (fp32) 255.6 MB + AdamW states 511.2 MB                    ~767 MB
+      - logits [4,2048,6400] bf16 + CE fp32 intermediate                  ~400 MB
+      - checkpoint saved per-layer inputs 8 x [4,2048,768] fp32           ~200 MB
+      - one recomputed layer in fp32 (backward has NO autocast):
+        scores [4,8,2048,2048] fp32 537 MB + softmax 537 MB + proj/FFN    ~1.4 GB
+  * To reach save>=85%, Mode 0 would need >=22.8 GB peak (RTX 5070 Ti has 16 GB),
+    i.e. the threshold is not reachable at bs=4/seq=2048/bf16 on this card.
+  * Confirmation (saving% rises with activation-to-floor ratio):
+      bs=4 seq=2048: Mode0 11444.8 / Mode2 3429.6 -> 70.0%
+      bs=2 seq=2048: Mode0  6202.0 / Mode2 2242.7 -> 63.8%
+      bs=4 seq=768 : Mode0  3237.7 / Mode2 1469.3 -> 54.6%
+  * Mode 1 (selective) matches research expectation: 57.3% save at S=2048 (~55%).
+  * Throughput: checkpoint modes are FASTER than eager here (negative overhead)
+    because eager near-OOM memory pressure + huge saved-activation graph makes
+    autograd slower than recompute at this scale.
+Verdict: implementation correct; 85% threshold is calibrated for a larger
+activation/floor ratio than a 16 GB card allows at this model scale. Threshold
+kept as specified (per instruction, not adjusted to mask the miss).

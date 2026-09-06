@@ -1,0 +1,59 @@
+Task: architecture.html — gradient checkpointing Mode 1/2 section
+Date: 2026-08-24
+Branch: feature/gradient-checkpointing
+Status: DONE
+
+== Insertion ==
+- Banner comment at line 541
+- <section id="grad-checkpointing" class="section section-white"> spans lines 542-755
+- Inserted between Early Exit (section-amber, ends L539) and
+  "From Zero to RL in 3 Stages" (section-emerald, was L542, now L757+).
+- git diff --stat architecture.html: 1 file changed, 216 insertions(+), 0 deletions(-)
+
+== Section structure ==
+1. section-header: label-sm "Training Memory Optimization" (color:var(--primary))
+   + heading-lg "Gradient Checkpointing" + intro paragraph (flag threaded through
+   all model variants Dense/MoE/LoopUS/Linear, 8 trainers, WebUI).
+2. Mode overview card (card + 3-row table): Mode 0 / 1 / 2 flags, stored
+   activations, peak VRAM 11.4 GB / 4.9 GB / 3.4 GB (S=2048).
+3. grid-2:
+   - Mode 1 card (card-tint-blue): RecomputeAttention autograd.Function code-block
+     (recompute QK^T -> scale -> causal/mask -> softmax -> dropout -> @V; saves
+     pre-repeat_kv Q/K/V + RNG state for dropout replay), FFN/MoE via
+     torch.utils.checkpoint(use_reentrant=False) with aux_loss from return value,
+     no-parameter-trap note, eager-only + self.training guard. Tags: Recompute
+     QK^T @ V / Dropout RNG replay / Eager path only.
+   - Mode 2 card (card-tint-green): whole InstinctBlock wrapped in
+     torch.utils.checkpoint, only block input stored, covers all layer types
+     incl. GatedDeltaNet. Tags: All layer types / Max VRAM saving.
+4. grid-2 (margin-top:24px):
+   - Measured data card (card-tint-amber): table Peak VRAM 4.9/3.4 GB, saved
+     ~57%/~70%, wall-time ~+5%/~+35%, 69 pytest green (loss & grads bitwise
+     identical); Korthikanti et al. note (+1.6-2.7% selective, +30-40% full).
+   - torch.compile card (card-tint-blue): checkpoint regions are Dynamo graph
+     breaks (eager, no Triton fusion), real cost small (~+5% Mode 1), tag
+     "Recommended for compile: Mode 2" with ~82% peak-VRAM saving.
+5. Usage code-block: --use_grad_checkpoint 1 / 2, --use_compile 1 + Mode 2.
+
+== Style compliance ==
+- Reuses section-white / container / section-header / label-sm / heading-lg /
+  heading-md / grid-2 / card / card-tint-* / card-hover / icon-circle-* / tag /
+  tag-blue / tag-green / code-block / geo-circle / geo-square only. No new classes.
+- Code-block span palette follows Early Exit habit: #6B7280 comments,
+  var(--accent) keywords, #93C5FD functions, #F87171 special values; dark
+  background (#111827) inlined on the light section for contrast.
+- Lucide icons: target / layers / gauge / zap (all render to svg.lucide).
+
+== Verification ==
+- html.parser full-document: final stack empty; error set IDENTICAL to the
+  committed original (pre-existing Early Exit extra </div> at L522-523,
+  tolerated by browsers) -> zero new issues.
+- Targeted parse of new section (L542-755): 0 unclosed, 0 mismatched tags.
+- Playwright render (http://localhost:8734/architecture.html):
+  - Only console error: favicon.ico 404 (pre-existing, unrelated).
+  - Section between section-amber and section-emerald; class="section section-white".
+  - 5 cards, 4 code-blocks, 6 tags, 2 tables, 4 svg.lucide icons, 2 geo shapes.
+  - card-tint-blue computed rgb(239,246,255) = #EFF6FF; section bg #FFFFFF.
+
+== Commit ==
+git add architecture.html (only file staged)

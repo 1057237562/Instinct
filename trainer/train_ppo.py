@@ -1,56 +1,91 @@
+"""
+PPO（Proximal Policy Optimization）训练脚本：Actor-Critic 架构 + GAE（Generalized Advantage Estimation）。
+
+- Actor：策略模型，通过 clipped surrogate objective 更新，并加 KL 惩罚约束在 reference 模型附近；
+- Critic：复用 InstinctForCausalLM 主干、把输出头替换为单值线性层，提供价值估计供 GAE 使用；
+- Rollout：由 rollout_engine 抽象（torch 原生 / sglang 两种后端）生成回复并返回 per-token logprob。
+"""
 import os
 import sys
 
 __package__ = "trainer"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import trainer.compile_cache  # noqa: F401  # configure Inductor before torch import
 os.environ.setdefault("HF_HOME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".cache", "huggingface"))
 import datasets  # noqa: F401  # Windows pyarrow/torch DLL conflict workaround (issue #771)
-import argparse
 import math
 import re
 import warnings
+from typing import List
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from transformers import AutoTokenizer
-from contextlib import nullcontext
-from torch import optim, nn
+from torch import nn
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from model.model_instinct import InstinctForCausalLM
 from dataset.lm_dataset import RLAIFDataset
-from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, LMForRewardModel, config_from_args, build_optimizer
+from trainer.trainer_utils import (Logger, is_main_process, lm_checkpoint,
+                                   pause_save_checkpoint, setup_seed, SkipBatchSampler, init_model,
+                                   LMForRewardModel, config_from_args, build_optimizer,
+                                   restore_config_from_checkpoint, apply_torchao_fp8_training)
+from trainer.trainer_cli import (
+    build_trainer_parser, setup_dist_and_seed, build_autocast_ctx, init_wandb_logger,
+    PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
+)
 from trainer.rollout_engine import create_rollout_engine
+from trainer.training_profiler import TrainingProfiler
 
 warnings.filterwarnings('ignore')
 
 
-def rep_penalty(text, n=3, cap=0.5):
+def rep_penalty(text: str, n: int = 3, cap: float = 0.5) -> float:
+    """计算文本的重复惩罚分数。
+
+    将文本切分为 n-gram，重复 n-gram 占比越高惩罚越大，结果被 cap 截断；
+    无有效 n-gram 时返回 0.0。用于抑制模型回复中的机械重复。
+    """
     toks = re.findall(r"\w+|[^\w\s]", text.lower())
     grams = [tuple(toks[i:i + n]) for i in range(len(toks) - n + 1)]
     return min(cap, (len(grams) - len(set(grams))) * cap * 2 / len(grams)) if grams else 0.0
 
 
-# 自定义的Critic模型，继承自InstinctLM
 class CriticModel(InstinctForCausalLM):
+    """PPO 的 Critic 模型：复用 InstinctForCausalLM 主干，输出每个位置的状态价值估计。
+
+    与 Actor 共享相同的 Transformer 主干，仅把输出头替换为单维 value_head，
+    供 GAE 计算 advantage 与 value loss 使用。
+    """
+
     def __init__(self, params):
         super().__init__(params)
         # 替换lm_head为输出单一价值的线性层
         self.value_head = nn.Linear(params.hidden_size, 1)
 
     def forward(self, input_ids=None, attention_mask=None, **kwargs):
-        # 使用基础模型获取隐藏状态
+        """前向计算价值序列：取主干最后层隐藏状态经 RMSNorm 后映射为标量价值。
+
+        返回形状 [B, T] 的 value 张量（已 squeeze 掉最后一维）。
+        """
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
         hidden_states = self.model.norm(outputs[0])
-        # 使用value_head获取价值估计
         values = self.value_head(hidden_states).squeeze(-1)
         return values
 
 
-def calculate_rewards(prompts, responses, reward_model):
+def calculate_rewards(prompts: List[str], responses: List[str], reward_model: LMForRewardModel) -> torch.Tensor:
+    """计算整批响应的奖励（heuristic 分 + reward model 打分）。
+
+    从 prompt 中解析出对话 messages，对每个 response 施加：
+    - 长度分：20~800 字符得 +0.5，否则 -0.5；
+    - thinking 分：思考段 20~300 字符 +1.0、恰好一个 </think> 闭合 +0.25；
+    - 重复惩罚 rep_penalty；
+    - 外部 reward model 对 (messages, answer) 的打分。
+    返回形状 [B] 的奖励张量（device 与 args.device 一致）。
+    """
     rewards = torch.zeros(len(responses), device=args.device)
 
     with torch.no_grad():
@@ -77,28 +112,42 @@ def calculate_rewards(prompts, responses, reward_model):
     return rewards
 
 
-def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_scheduler, critic_scheduler, reward_model, start_step=0, wandb=None, use_sglang=False):
+def ppo_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model, actor_scheduler, critic_scheduler, reward_model, start_step: int = 0, wandb=None, use_sglang: bool = False):
+    """PPO 单 epoch 训练循环（Actor-Critic + GAE）。
+
+    流程：
+    1. rollout 引擎生成响应并收集 old logprob / old value（no_grad）；
+    2. 用 GAE 递推计算 advantage（gamma / lam），并按响应 mask 做均值方差归一化；
+    3. 对同一批 rollout 重复 ppo_update_iters 轮 minibatch 更新：
+       - Actor：clipped surrogate policy loss + 相对 ref_model 的 KL 惩罚；
+       - Critic：cliprange 内的 value loss；
+       - approx_kl 超过 early_stop_kl 时早停（只截断 loss，保持 DDP 通信闭环）；
+    4. 梯度累积更新优化器，按 save_interval 保存权重并同步 rollout 引擎策略。
+    """
     actor_model.train()
     critic_model.train()
     grad_accum_step = 0
 
     for step, batch in enumerate(loader, start=start_step + 1):
+        profiler.begin_step(tokens=0, useful_tokens=0)
         prompts = batch["prompt"]  # list[str], length B
         enc = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True, max_length=args.max_seq_len,
                         padding_side="left").to(args.device)  # input_ids: [B, P], attention_mask: [B, P]
 
-        rollout_result = rollout_engine.rollout(
-            prompt_ids=enc.input_ids,
-            attention_mask=enc.attention_mask,
-            num_generations=1,
-            max_new_tokens=args.max_gen_len,
-            temperature=0.8,
-        )
+        with profiler.phase("rollout"):
+            rollout_result = rollout_engine.rollout(
+                prompt_ids=enc.input_ids,
+                attention_mask=enc.attention_mask,
+                num_generations=1,
+                max_new_tokens=args.max_gen_len,
+                temperature=0.8,
+            )
         gen_out = rollout_result.output_ids
         completion_ids = rollout_result.completion_ids
         prompt_lens = rollout_result.prompt_lens.to(args.device)
         responses_text = rollout_result.completions
         old_resp_logp = rollout_result.per_token_logps.to(args.device)
+        profiler.set_tokens(gen_out.numel(), gen_out.numel())
         rewards = calculate_rewards(prompts, responses_text, reward_model)  # [B]
 
         if args.debug_mode and is_main_process() and step % args.debug_interval == 0:
@@ -132,7 +181,7 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
             critic_for_rollout = critic_model.module if isinstance(critic_model, DistributedDataParallel) else critic_model
             values_seq = critic_for_rollout(input_ids=gen_out, attention_mask=full_mask)
             old_resp_values = values_seq.gather(1, logp_pos) * resp_value_mask
-            
+
             ref_resp_logp = F.log_softmax(ref_model(input_ids=gen_out, attention_mask=full_mask).logits[:, :-1], dim=-1).gather(2, labels.unsqueeze(-1)).squeeze(-1).gather(1, logp_pos)
             token_rewards = torch.zeros_like(old_resp_logp)
             last_idx = resp_lengths - 1  # [B]
@@ -168,7 +217,7 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
             b_inds = torch.randperm(B, device=args.device)
             for i in range(0, B, mb_size):
                 inds = b_inds[i:i + mb_size]
-                
+
                 mb_values_seq = critic_unwrapped(input_ids=gen_out[inds], attention_mask=full_mask[inds])
                 mb_resp_values = mb_values_seq.gather(1, logp_pos[inds])
 
@@ -177,18 +226,18 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
                     aux_loss = res.aux_loss if lm_config.use_moe else torch.tensor(0.0, device=args.device)
 
                 mb_resp_logp = F.log_softmax(res.logits[:, :-1], dim=-1).gather(2, labels[inds].unsqueeze(-1)).squeeze(-1).gather(1, logp_pos[inds])
-                
+
                 log_ratio = mb_resp_logp - old_resp_logp[inds]
                 approx_kl = (0.5 * (log_ratio ** 2) * resp_policy_mask[inds]).sum() / resp_policy_mask[inds].sum().clamp(min=1)
-                
+
                 # 同步各卡的 approx_kl，防止某卡 break 而其它卡继续导致 DDP 死锁
                 approx_kl_val = approx_kl.detach().clone()
                 if dist.is_initialized():
                     dist.all_reduce(approx_kl_val, op=dist.ReduceOp.AVG)
-                    
+
                 if approx_kl_val > args.early_stop_kl:
                     stop_ppo = True
-                
+
                 ratio = torch.exp(log_ratio)
                 clipfrac = ((((ratio - 1.0).abs() > args.clip_epsilon).float() * resp_policy_mask[inds]).sum()
                             / resp_policy_mask[inds].sum().clamp(min=1))
@@ -211,7 +260,7 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
                     loss = (policy_loss + args.vf_coef * value_loss + aux_loss) * 0.0
                 else:
                     loss = (policy_loss + args.vf_coef * value_loss + aux_loss) / args.accumulation_steps
-                
+
                 loss.backward()
 
                 policy_loss_sum += policy_loss.item()
@@ -243,8 +292,12 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
             critic_scheduler.step()
             actor_optimizer.zero_grad()
             critic_optimizer.zero_grad()
-        
+
         if step % args.save_interval == 0 or step == iters: rollout_engine.update_policy(actor_model)
+
+        profile_metrics = profiler.end_step()
+        if profile_metrics and wandb:
+            wandb.log(profile_metrics)
 
         if is_main_process():
             critic_loss_val = value_loss_sum / max(log_count, 1)
@@ -280,11 +333,11 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
             raw_actor = getattr(raw_actor, '_orig_mod', raw_actor)
             actor_state = raw_actor.state_dict()
             torch.save({k: v.half().cpu() for k, v in actor_state.items()}, ckp)
-            
+
             # 使用 lm_checkpoint 保存完整状态（包括 critic）
-            lm_checkpoint(lm_config, weight=args.save_weight, model=actor_model, optimizer=actor_optimizer, 
+            lm_checkpoint(lm_config, weight=args.save_weight, model=actor_model, optimizer=actor_optimizer,
                          epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints',
-                         scheduler=actor_scheduler, critic_model=critic_model, 
+                         scheduler=actor_scheduler, critic_model=critic_model,
                          critic_optimizer=critic_optimizer, critic_scheduler=critic_scheduler, ref_model=ref_model)
             actor_model.train()
             del actor_state
@@ -293,29 +346,32 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
         del labels, resp_labels, resp_idx, resp_pad_mask, valid_resp, eos_mask, has_eos, eos_pos, resp_lengths, resp_policy_mask, resp_value_mask, old_resp_logp, ref_resp_logp
         del kl, kl_ref, policy_loss, value_loss, loss, token_rewards, returns, old_resp_values, prompt_lens, logp_pos
 
+        if pause_requested(args):
+            clear_pause_request(args)
+            profiler.finish()
+            if is_main_process():
+                pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=actor_model, optimizer=actor_optimizer, epoch=epoch, step=step, wandb=wandb, scheduler=actor_scheduler, critic_model=critic_model, critic_optimizer=critic_optimizer, critic_scheduler=critic_scheduler, ref_model=ref_model)
+            Logger('[PAUSED] Training paused — resume checkpoint saved.')
+            sys.exit(PAUSE_EXIT_CODE)
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Instinct PPO (Proximal Policy Optimization)")
-    parser.add_argument("--save_dir", type=str, default="./out", help="模型保存目录")
-    parser.add_argument('--save_weight', default='ppo_actor', type=str, help="保存权重的前缀名")
-    parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
-    parser.add_argument("--batch_size", type=int, default=2, help="batch size")
-    parser.add_argument("--learning_rate", type=float, default=3e-7, help="Actor学习率")
-    parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "adafactor", "muon"], help="优化器类型（adamw / adafactor / muon，Actor与Critic共用）")
+    parser = build_trainer_parser(
+        description="Instinct PPO (Proximal Policy Optimization)",
+        defaults={
+            'save_weight': 'ppo_actor',
+            'epochs': 1,
+            'batch_size': 2,
+            'learning_rate': 3e-7,
+            'accumulation_steps': 1,
+            'log_interval': 1,
+            'save_interval': 10,
+            'max_seq_len': 768,
+            'from_weight': 'full_sft',
+            'wandb_project': 'Instinct-PPO',
+        },
+    )
     parser.add_argument("--critic_learning_rate", type=float, default=5e-7, help="Critic学习率")
-    parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
-    parser.add_argument("--dtype", type=str, default="bfloat16", help="激活层计算精度（bfloat16/float16/fp32）")
-    parser.add_argument("--param_dtype", type=str, default="fp32", choices=["fp32", "bf16", "fp16"], help="模型参数精度（fp32=主权重，bf16/fp16=训练时权重直接 cast）")
-    parser.add_argument("--kv_cache_dtype", type=str, default="fp32", choices=["fp32", "bf16", "fp16", "fp8_e4m3", "fp8_e5m2"], help="KV Cache 精度（fp8 时缓存量化，decode 带宽减半）")
-    parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程数")
-    parser.add_argument("--accumulation_steps", type=int, default=1, help="梯度累积步数")
-    parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
-    parser.add_argument("--log_interval", type=int, default=1, help="日志打印间隔")
-    parser.add_argument("--save_interval", type=int, default=10, help="模型保存间隔")
-    parser.add_argument('--hidden_size', default=768, type=int, help="隐藏层维度")
-    parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
-    parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
-    parser.add_argument('--max_seq_len', default=768, type=int, help="Prompt最大长度")
     parser.add_argument("--max_gen_len", type=int, default=1024, help="生成的最大长度")
     parser.add_argument("--data_path", type=str, default="./dataset/rlaif.jsonl", help="RLAIF数据路径")
     parser.add_argument("--clip_epsilon", type=float, default=0.2, help="PPO裁剪参数")
@@ -327,13 +383,7 @@ if __name__ == "__main__":
     parser.add_argument("--ppo_update_iters", type=int, default=2, help="同一批rollout重复更新次数")
     parser.add_argument("--early_stop_kl", type=float, default=0.25, help="PPO early stop 的 KL 阈值")
     parser.add_argument("--mini_batch_size", type=int, default=2, help="PPO每次更新的minibatch大小")
-    parser.add_argument('--from_weight', default='full_sft', type=str, help="基于哪个权重训练")
     parser.add_argument("--reward_model_path", type=str, default="../internlm2-1_8b-reward", help="Reward模型路径")
-    parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
-    parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
-    parser.add_argument("--wandb_project", type=str, default="Instinct-PPO", help="wandb项目名")
-    parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
-    parser.add_argument("--compile_mode", type=str, default="default", choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"], help="torch.compile 模式（default=Triton 编译；reduce-overhead=叠加 CUDA graph，小模型首选；max-autotune=极限调优，编译极慢）")
     parser.add_argument("--debug_mode", action="store_true", help="是否打印训练调试采样")
     parser.add_argument("--debug_interval", type=int, default=20, help="debug模式下每隔多少step打印一次采样")
     parser.add_argument("--thinking_ratio", type=float, default=0.9, help="按概率开启thinking（0.0~1.0）")
@@ -341,34 +391,24 @@ if __name__ == "__main__":
     parser.add_argument("--sglang_base_url", type=str, default="http://localhost:8998", help="SGLang服务器URL")
     parser.add_argument("--sglang_model_path", type=str, default="./model", help="SGLang tokenizer路径")
     parser.add_argument("--sglang_shared_path", type=str, default="./sglang_ckpt_ppo", help="SGLang共享存储路径")
-    parser.add_argument('--config_path', default='', type=str, help="JSON配置文件路径")
     args = parser.parse_args()
 
-    # ========== 1. 初始化环境和随机种子 ==========
-    local_rank = init_distributed_mode()
-    if dist.is_initialized(): args.device = f"cuda:{local_rank}"
-    setup_seed(42 + (dist.get_rank() if dist.is_initialized() else 0))
-    
-    # ========== 2. 配置目录、模型参数、检查ckp ==========
+    # 1. 初始化环境和随机种子
+    local_rank = setup_dist_and_seed(args)
+
+    # 2. 配置目录、模型参数、检查ckp
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = config_from_args(args)
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='./checkpoints') if args.from_resume==1 else None
-    
-    # ========== 3. 设置混合精度 ==========
-    device_type = "cuda" if "cuda" in args.device else "cpu"
-    dtype = {'bfloat16': torch.bfloat16, 'float16': torch.float16, 'fp32': torch.float32}[args.dtype]
-    autocast_ctx = nullcontext() if device_type == "cpu" or args.dtype == "fp32" else torch.cuda.amp.autocast(dtype=dtype)
-    
-    # ========== 4. 配wandb ==========
-    wandb = None
-    if args.use_wandb and is_main_process():
-        import swanlab as wandb
-        wandb_id = ckp_data.get('wandb_id') if ckp_data else None
-        resume = 'must' if wandb_id else None
-        wandb_run_name = f"Instinct-PPO-Epoch-{args.epochs}-BS-{args.batch_size}-LR-{args.learning_rate}"
-        wandb.init(project=args.wandb_project, name=wandb_run_name, id=wandb_id, resume=resume)
-    
-    # ========== 5. 初始化模型和数据 ==========
+    lm_config = restore_config_from_checkpoint(lm_config, ckp_data)
+
+    # 3. 设置混合精度
+    autocast_ctx = build_autocast_ctx(args)
+
+    # 4. 配wandb
+    wandb = init_wandb_logger(args, ckp_data, run_name=f"Instinct-PPO-Epoch-{args.epochs}-BS-{args.batch_size}-LR-{args.learning_rate}")
+
+    # 5. 初始化模型和数据
     if ckp_data and 'ref_model' in ckp_data:
         base_weight = 'none'
         ref_from_ckp = True
@@ -400,8 +440,8 @@ if __name__ == "__main__":
     )
     train_ds = RLAIFDataset(args.data_path, tokenizer, max_length=(args.max_seq_len + args.max_gen_len), thinking_ratio=args.thinking_ratio)
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
-    actor_optimizer = build_optimizer(actor_model.parameters(), lr=args.learning_rate, optimizer=args.optimizer)
-    critic_optimizer = build_optimizer(critic_model.parameters(), lr=args.critic_learning_rate, optimizer=args.optimizer)
+    actor_optimizer = build_optimizer(actor_model.named_parameters(), lr=args.learning_rate, optimizer=args.optimizer)
+    critic_optimizer = build_optimizer(critic_model.named_parameters(), lr=args.critic_learning_rate, optimizer=args.optimizer)
     loader_for_count = DataLoader(train_ds, batch_size=args.batch_size, sampler=train_sampler)
     iters = len(loader_for_count)
     mb_factor = max(1, math.ceil(args.batch_size / args.mini_batch_size))
@@ -421,31 +461,48 @@ if __name__ == "__main__":
         critic_scheduler.load_state_dict(ckp_data['critic_scheduler'])
         start_epoch = ckp_data['epoch']
         start_step = ckp_data.get('step', 0)
-    
-    # ========== 7. 编译和分布式包装 ==========
+
+    actor_model = apply_torchao_fp8_training(actor_model, args, label="actor")
+    critic_model = apply_torchao_fp8_training(critic_model, args, label="critic")
+
+    # 7. 编译和分布式包装
     if args.use_compile == 1:
-        actor_model = torch.compile(actor_model, mode=args.compile_mode)
-        Logger('torch.compile enabled')
+        actor_model = torch.compile(
+            actor_model, mode=args.compile_mode,
+            dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
+        )
+        if getattr(args, 'fp8_training', 'off') != 'off':
+            critic_model = torch.compile(
+                critic_model, mode=args.compile_mode,
+                dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
+            )
+        Logger(f"torch.compile enabled; cache={os.environ['TORCHINDUCTOR_CACHE_DIR']}")
         rollout_engine.update_policy(actor_model)
     if dist.is_initialized():
         actor_model = DistributedDataParallel(actor_model, device_ids=[local_rank])
         critic_model = DistributedDataParallel(critic_model, device_ids=[local_rank])
     rollout_engine.update_policy(actor_model)
-    
-    # ========== 8. 开始训练 ==========
+
+    profiler = TrainingProfiler(args, name="ppo")
+
+    # 8. 开始训练
     for epoch in range(start_epoch, args.epochs):
         train_sampler and train_sampler.set_epoch(epoch)
         setup_seed(42 + epoch); indices = torch.randperm(len(train_ds)).tolist()
         skip = start_step if (epoch == start_epoch and start_step > 0) else 0
         batch_sampler = SkipBatchSampler(train_sampler or indices, args.batch_size, skip)
         loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
-        if skip > 0: 
+        if skip > 0:
             Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
             ppo_train_epoch(epoch, loader, len(loader) + skip, rollout_engine, ref_model, actor_scheduler, critic_scheduler, reward_model, start_step, wandb, use_sglang = (args.rollout_engine == "sglang"))
         else:
             ppo_train_epoch(epoch, loader, len(loader), rollout_engine, ref_model, actor_scheduler, critic_scheduler, reward_model, 0, wandb, use_sglang = (args.rollout_engine == "sglang"))
-    
-    # ========== 9. 清理分布进程 ==========
+
+    final_profile_metrics = profiler.finish()
+    if final_profile_metrics and wandb:
+        wandb.log(final_profile_metrics)
+
+    # 9. 清理分布进程
     if dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()

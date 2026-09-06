@@ -1,0 +1,23 @@
+tests/test_flag_threading.py::test_default_zero[dense]
+tests/test_flag_threading.py::test_default_zero[loop]
+tests/test_flag_threading.py::test_default_zero[linear]
+tests/test_flag_threading.py::test_kwargs_override[1-dense]
+tests/test_flag_threading.py::test_kwargs_override[1-loop]
+tests/test_flag_threading.py::test_kwargs_override[1-linear]
+tests/test_flag_threading.py::test_kwargs_override[2-dense]
+tests/test_flag_threading.py::test_kwargs_override[2-loop]
+tests/test_flag_threading.py::test_kwargs_override[2-linear]
+tests/test_flag_threading.py::test_config_from_args_passes_flag[0]
+tests/test_flag_threading.py::test_config_from_args_passes_flag[1]
+tests/test_flag_threading.py::test_config_from_args_passes_flag[2]
+tests/test_flag_threading.py::test_config_from_args_missing_attr_defaults_zero
+tests/test_flag_threading.py::test_config_from_args_explicit_override_wins
+tests/test_flag_threading.py::test_config_from_args_looped_variant
+
+============================== warnings summary ===============================
+E:\miniconda3\Lib\site-packages\torch\jit\_script.py:365: 14 warnings
+  E:\miniconda3\Lib\site-packages\torch\jit\_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+15 tests collected in 6.85s

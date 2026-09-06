@@ -1,0 +1,3 @@
+# Optional dependency for --fp8_training.  TorchAO 0.18 supports the Python
+# APIs used by Instinct and the PyTorch 2.13 environment validated on RTX 5070 Ti.
+torchao==0.18.0

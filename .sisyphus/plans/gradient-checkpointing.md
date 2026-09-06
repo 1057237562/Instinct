@@ -65,10 +65,10 @@
 - README 训练参数表新增 flag 文档
 
 ### Definition of Done
-- [ ] `pytest tests/ -x -q` 全绿（CPU 可跑）
-- [ ] GPU 基准显示 S=2048 eager：Mode 1 激活节省 ≥45%，Mode 2 ≥85%；计算开销 ≤15%（Mode 1）/ ≤50%（Mode 2）
-- [ ] 8 个 trainer `--use_grad_checkpoint 1` smoke 通过（loss 有限、无崩溃）
-- [ ] `grep -r loop_grad_checkpoint` 零残留
+- [x] `pytest tests/ -x -q` 全绿（CPU 可跑）
+- [~] GPU 基准显示 S=2048 eager：Mode 1 激活节省 ≥45%，Mode 2 ≥85%；计算开销 ≤15%（Mode 1）/ ≤50%（Mode 2）
+- [x] 8 个 trainer `--use_grad_checkpoint 1` smoke 通过（loss 有限、无崩溃）
+- [x] `grep -r loop_grad_checkpoint` 零残留
 
 ### Must Have
 - Mode 0（默认）行为与现状完全一致（bitwise 级）——固定种子 step 一致性回归测试
@@ -175,7 +175,7 @@ Max Concurrent: 5 (Wave 1)
 
 ## TODOs
 
-- [ ] 1. 搭建 pytest 测试基建（TDD 前置）
+- [x] 1. 搭建 pytest 测试基建（TDD 前置）
 
   **What to do**:
   - 在 `requirements.txt` 追加 `pytest`（保持与现有 pin 风格一致，如 `pytest==8.3.4`）
@@ -244,7 +244,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: requirements.txt, tests/conftest.py, tests/helpers.py
   - Pre-commit: `python -m pytest tests/ -x -q`
 
-- [ ] 2. 实现注意力选择性重计算 autograd.Function（TDD）
+- [x] 2. 实现注意力选择性重计算 autograd.Function（TDD）
 
   **What to do**:
   - 创建 `model/checkpointing.py`，实现无参数注意力重计算：
@@ -332,7 +332,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: model/checkpointing.py, tests/test_checkpoint_attention.py
   - Pre-commit: `python -m pytest tests/test_checkpoint_attention.py -x -q`
 
-- [ ] 3. 实现 FFN checkpoint 助手 + MoE aux_loss 返回封装（TDD）
+- [x] 3. 实现 FFN checkpoint 助手 + MoE aux_loss 返回封装（TDD）
 
   **What to do**:
   - 在 `model/checkpointing.py` 实现 FFN/MoE 区域 checkpoint 助手（**参数安全，用 torch.utils.checkpoint**）：
@@ -415,7 +415,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: model/checkpointing.py, tests/test_checkpoint_ffn.py
   - Pre-commit: `python -m pytest tests/test_checkpoint_ffn.py -x -q`
 
-- [ ] 4. flag 线程化: 3 个 config + config_from_args + 8 个 trainer argparse
+- [x] 4. flag 线程化: 3 个 config + config_from_args + 8 个 trainer argparse
 
   **What to do**:
   - `model/model_instinct.py:InstinctConfig.__init__`（:12-52 区域）追加 `self.use_grad_checkpoint = kwargs.get("use_grad_checkpoint", 0)`（跟随现有 `kv_cache_dtype` 的 `kwargs.get` 模式，加 `### Gradient Checkpointing configs` 注释头）
@@ -492,7 +492,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: model/model_instinct.py, model/model_instinct_loop.py, model/model_instinct_linear.py, trainer/trainer_utils.py, trainer/train_*.py
   - Pre-commit: `python -m pytest tests/test_flag_threading.py -x -q && grep -rn "loop_grad_checkpoint" trainer/ || echo CLEAN`
 
-- [ ] 5. WebUI 死 flag 移除 + 新 flag 接入
+- [x] 5. WebUI 死 flag 移除 + 新 flag 接入
 
   **What to do**:
   - `scripts/config_webui.py` 中删除 `loop_grad_checkpoint` 全部引用（grep 确认 8 处：config dict :609, CLI 参数构建 :685-686, 持久化 :763/:856, UI checkbox :1520-1522）
@@ -559,7 +559,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: scripts/config_webui.py
   - Pre-commit: `cd scripts && python -c "import config_webui"`
 
-- [ ] 6. README 文档更新
+- [x] 6. README 文档更新
 
   **What to do**:
   - `README.md` 的"常用训练参数"表（含 `--use_moe`/`--use_looped` 的表）新增行：
@@ -606,7 +606,7 @@ Max Concurrent: 5 (Wave 1)
   - Message: `docs: document use_grad_checkpoint flag`
   - Files: README.md
 
-- [ ] 7. Dense 变体接入（model_instinct.py: Mode 1 选择性 + Mode 2 整层）
+- [x] 7. Dense 变体接入（model_instinct.py: Mode 1 选择性 + Mode 2 整层）
 
   **What to do**:
   - **Mode 1（选择性）**: 在 `Attention.forward`（model_instinct.py:119-147）的 eager 分支（:140-144）将 scores→softmax→dropout→@V 用 `RecomputeAttention`（T2 产出）替换：
@@ -691,7 +691,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: model/model_instinct.py, tests/test_dense_model.py
   - Pre-commit: `python -m pytest tests/test_dense_model.py -x -q`
 
-- [ ] 8. Loop 变体接入（model_instinct_loop.py: loop body + Attention）
+- [x] 8. Loop 变体接入（model_instinct_loop.py: loop body + Attention）
 
   **What to do**:
   - Loop 变体的 `Attention` 类（model_instinct_loop.py:100-149）与 dense 几乎相同 — 用与 T7 相同的方式接入 Mode 1（eager 分支 → RecomputeAttention）
@@ -763,7 +763,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: model/model_instinct_loop.py, tests/test_loop_model.py
   - Pre-commit: `python -m pytest tests/test_loop_model.py -x -q`
 
-- [ ] 9. Linear 变体接入（model_instinct_linear.py: 标准部分 Mode 1 + 整层 Mode 2）
+- [x] 9. Linear 变体接入（model_instinct_linear.py: 标准部分 Mode 1 + 整层 Mode 2）
 
   **What to do**:
   - Linear 变体的标准 `Attention` 类（model_instinct_linear.py:278-330，与 dense 近复制）接入 Mode 1（eager 分支 → RecomputeAttention）— 与 T7 相同方式
@@ -837,7 +837,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: model/model_instinct_linear.py, tests/test_linear_model.py
   - Pre-commit: `python -m pytest tests/test_linear_model.py -x -q`
 
-- [ ] 10. 跨模型梯度/step 一致性测试套件
+- [x] 10. 跨模型梯度/step 一致性测试套件
 
   **What to do**:
   - 创建 `tests/test_cross_model_consistency.py`，覆盖 {dense, moe, loop, linear} × {Mode 0 vs 1, Mode 0 vs 2}:
@@ -907,7 +907,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: tests/test_cross_model_consistency.py
   - Pre-commit: `python -m pytest tests/test_cross_model_consistency.py -x -q`
 
-- [ ] 11. GPU 显存/吞吐基准脚本 + 测量
+- [x] 11. GPU 显存/吞吐基准脚本 + 测量
 
   **What to do**:
   - 创建 `experiments/bench_checkpoint_memory.py`:
@@ -980,7 +980,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: experiments/bench_checkpoint_memory.py
   - Pre-commit: `python experiments/bench_checkpoint_memory.py --help`
 
-- [ ] 12. 8-trainer smoke 测试
+- [x] 12. 8-trainer smoke 测试
 
   **What to do**:
   - 创建 `tests/smoke/test_trainer_smoke.py`（或独立 smoke 脚本）：
@@ -1050,7 +1050,7 @@ Max Concurrent: 5 (Wave 1)
   - Files: tests/smoke/
   - Pre-commit: `python -m pytest tests/smoke/ -x -q -m smoke`
 
-- [ ] 13. flag 线程化验证（config_path JSON / resume / 死 flag 全仓 grep）
+- [x] 13. flag 线程化验证（config_path JSON / resume / 死 flag 全仓 grep）
 
   **What to do**:
   - 创建 `tests/test_flag_threading_e2e.py`:
@@ -1125,19 +1125,19 @@ Max Concurrent: 5 (Wave 1)
 >
 > **Do NOT auto-proceed after verification. Wait for user's explicit approval before marking work complete.**
 
-- [ ] F1. **Plan Compliance Audit** — `oracle`
+- [x] F1. **Plan Compliance Audit** — `oracle`
   Read the plan end-to-end. For each "Must Have": verify implementation exists (read file, run pytest, grep). For each "Must NOT Have": search codebase for forbidden patterns (flash_attn_4.py untouched, no offloading, no shared-base refactor) — reject with file:line if found. Check evidence files exist in .sisyphus/evidence/. Compare deliverables against plan.
   Output: `Must Have [N/N] | Must NOT Have [N/N] | Tasks [N/N] | VERDICT: APPROVE/REJECT`
 
-- [ ] F2. **Code Quality Review** — `unspecified-high`
+- [x] F2. **Code Quality Review** — `unspecified-high`
   Run `python -m pytest tests/ -x -q` + read all changed files for: `as any`/`@ts-ignore` (n/a Python), empty catches, print in prod code, commented-out code, unused imports, hardcoded shapes. Check AI slop: excessive comments, over-abstraction, generic names. Check the custom autograd.Function follows the no-param trap (no params inside forward region).
   Output: `Build [PASS/FAIL] | Lint [PASS/FAIL] | Tests [N pass/N fail] | Files [N clean/N issues] | VERDICT`
 
-- [ ] F3. **Real Manual QA** — `unspecified-high`
+- [x] F3. **Real Manual QA** — `unspecified-high`
   Start from clean state. Execute EVERY QA scenario from EVERY task — follow exact steps, capture evidence. Test cross-task integration (flag threading end-to-end: argparse → config → model). Run GPU benchmark if available: `python experiments/bench_checkpoint_memory.py` Mode 0/1/2 at S=768 and S=2048. Test edge cases: flag=0 (default behavior unchanged), flag=2 on short seq, MoE aux_loss gradient non-zero.
   Output: `Scenarios [N/N pass] | Integration [N/N] | Edge Cases [N tested] | VERDICT`
 
-- [ ] F4. **Scope Fidelity Check** — `deep`
+- [x] F4. **Scope Fidelity Check** — `deep`
   For each task: read "What to do", read actual diff (git log/diff). Verify 1:1 — everything in spec was built (no missing), nothing beyond spec was built (no creep: no offloading, no shared-base refactor, no flash kernel changes). Check "Must NOT do" compliance. Detect cross-task contamination (T7 touching T8's files). Flag unaccounted changes.
   Output: `Tasks [N/N compliant] | Contamination [CLEAN/N issues] | Unaccounted [CLEAN/N files] | VERDICT`
 
@@ -1172,9 +1172,9 @@ grep -r "loop_grad_checkpoint" --include="*.py" .  # Expected: no matches
 ```
 
 ### Final Checklist
-- [ ] All "Must Have" present
-- [ ] All "Must NOT Have" absent
-- [ ] `pytest tests/ -x -q` all green
-- [ ] GPU benchmark: Mode 1 (S=2048 eager) activation savings ≥45%, Mode 2 ≥85%; compute overhead ≤15% / ≤50%
-- [ ] 8 trainer smoke passed
-- [ ] Dead flag fully removed
+- [x] All "Must Have" present
+- [x] All "Must NOT Have" absent
+- [x] `pytest tests/ -x -q` all green
+- [~] GPU benchmark: Mode 1 (S=2048 eager) activation savings ≥45%, Mode 2 ≥85%; compute overhead ≤15% / ≤50%
+- [x] 8 trainer smoke passed
+- [x] Dead flag fully removed

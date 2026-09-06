@@ -1,6 +1,6 @@
 {
   "hidden_size": 768,
-  "num_hidden_layers": 24,
+  "num_hidden_layers": 16,
   "vocab_size": 6400,
   "dropout": 0.0,
   "hidden_act": "silu",
@@ -11,23 +11,19 @@
   "rope_theta": 1000000.0,
   "inference_rope_scaling": true,
   "use_moe": false,
+  "use_grad_checkpoint": 1,
   "rms_norm_eps": 1e-06,
   "flash_attn": true,
   "intermediate_size": 2432,
+  "residual_type": "standard",
   "head_dim": 96,
   "rope_scaling": {
     "type": "yarn",
-    "beta_fast": 32,
-    "beta_slow": 1,
-    "factor": 16,
-    "original_max_position_embeddings": 2048,
+    "beta_fast": 32.0,
+    "beta_slow": 1.0,
+    "factor": 16.0,
+    "original_max_position_embeddings": 2048.0,
     "attention_factor": 1.0
   },
-  "model_architecture": "linear",
-  "full_attention_interval": 4,
-  "linear_conv_kernel_dim": 4,
-  "linear_key_head_dim": 96,
-  "linear_value_head_dim": 96,
-  "linear_num_key_heads": 8,
-  "linear_num_value_heads": 8
+  "model_architecture": "standard"
 }

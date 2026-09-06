@@ -8,17 +8,52 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import json
 import random
 import math
+import gc
 import inspect
+import importlib.metadata
 import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import Sampler
-from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
+from transformers import AutoTokenizer, AutoModel
 from model.model_instinct import InstinctForCausalLM, InstinctConfig
-from model.model_instinct_loop import InstinctConfig as LoopedInstinctConfig, InstinctForCausalLM as LoopedInstinctForCausalLM
 
-def get_model_params(model, config):
+
+def _architecture_classes(architecture):
+    """Import optional backbones only when selected (important for Windows workers)."""
+    if architecture == 'linear':
+        from model.model_instinct_linear import InstinctConfig as Config, InstinctForCausalLM as Model
+        return Config, Model
+    if architecture == 'looped':
+        from model.model_instinct_loop import InstinctConfig as Config, InstinctForCausalLM as Model
+        return Config, Model
+    return InstinctConfig, InstinctForCausalLM
+
+
+def prepare_lm_batch(batch, device):
+    """Move an LM batch to device and surface packing metadata when needed.
+
+    Plain datasets keep their historical ``(input_ids, labels)`` API. Packed
+    datasets add ``sequence_ids``; blocks containing only one real example can
+    still use the ordinary fused causal-attention path.
+    """
+    if len(batch) == 2:
+        input_ids, labels = batch
+        sequence_ids = None
+    elif len(batch) == 3:
+        input_ids, labels, sequence_ids = batch
+        if not torch.any(sequence_ids > 0).item():
+            sequence_ids = None
+    else:
+        raise ValueError(f"expected an LM batch with 2 or 3 tensors, got {len(batch)}")
+    input_ids = input_ids.to(device)
+    labels = labels.to(device)
+    if sequence_ids is not None:
+        sequence_ids = sequence_ids.to(device)
+    return input_ids, labels, sequence_ids
+
+def get_model_params(model: torch.nn.Module, config) -> None:
     total = sum(p.numel() for p in model.parameters()) / 1e6
     n_routed = getattr(config, 'n_routed_experts', getattr(config, 'num_experts', 0))
     n_active = getattr(config, 'num_experts_per_tok', 0)
@@ -31,17 +66,182 @@ def get_model_params(model, config):
     else: Logger(f'Model Params: {total:.2f}M')
 
 
-def is_main_process():
+_TORCHAO_FP8_RECIPES = {"tensorwise", "rowwise", "rowwise_with_gw_hp"}
+_TORCHAO_FP8_PROBE_CACHE = {}
+
+
+def _fp8_linear_is_eligible(module: torch.nn.Module, fqn: str) -> bool:
+    """Return whether a Linear has hardware-compatible FP8 GEMM dimensions.
+
+    The language-model output projection stays in high precision for numerical
+    stability (and because it shares its weight with the token embedding).
+    LoRA adapters also stay high precision; only their base Linear is eligible.
+    """
+    if not isinstance(module, torch.nn.Linear):
+        return False
+    if fqn == "lm_head" or fqn.endswith(".lm_head") or ".lora." in fqn:
+        return False
+    return module.in_features % 16 == 0 and module.out_features % 16 == 0
+
+
+def _probe_torchao_fp8_recipe(recipe: str, device: torch.device, config_cls, convert_fn):
+    """Exercise one real FP8 forward/backward before converting the full model."""
+    cache_key = (recipe, device.type, device.index)
+    cached = _TORCHAO_FP8_PROBE_CACHE.get(cache_key)
+    if cached is not None:
+        if isinstance(cached, Exception):
+            raise cached
+        return
+
+    try:
+        with torch.cuda.device(device):
+            probe = torch.nn.Sequential(
+                torch.nn.Linear(64, 64, bias=False, device=device, dtype=torch.bfloat16)
+            )
+            convert_fn(probe, config=config_cls.from_recipe_name(recipe))
+            x = torch.randn(32, 64, device=device, dtype=torch.bfloat16, requires_grad=True)
+            probe(x).float().square().mean().backward()
+            torch.cuda.synchronize(device)
+            del probe, x
+        _TORCHAO_FP8_PROBE_CACHE[cache_key] = True
+    except Exception as exc:
+        _TORCHAO_FP8_PROBE_CACHE[cache_key] = exc
+        raise
+
+
+def apply_torchao_fp8_training(model: torch.nn.Module, args, *, label: str = "model") -> torch.nn.Module:
+    """Convert eligible Linear layers to TorchAO Float8Linear for training.
+
+    Conversion is state-dict compatible: Float8Linear reuses the original
+    Parameters and only changes the forward/backward GEMMs.  Call this after
+    loading model/optimizer resume state and before DDP/torch.compile wrapping.
+    """
+    requested_recipe = getattr(args, "fp8_training", "off")
+    if requested_recipe == "off":
+        return model
+    if requested_recipe not in _TORCHAO_FP8_RECIPES:
+        raise ValueError(f"Unknown --fp8_training recipe: {requested_recipe}")
+    if getattr(args, "dtype", "bfloat16") != "bfloat16":
+        raise ValueError("TorchAO FP8 training requires --dtype bfloat16")
+    if not torch.cuda.is_available() or not str(getattr(args, "device", "cuda")).startswith("cuda"):
+        raise RuntimeError("TorchAO FP8 training requires a CUDA GPU")
+
+    device = next(model.parameters()).device
+    if device.type != "cuda":
+        raise RuntimeError(f"TorchAO FP8 training requires a CUDA model, got {device}")
+    major, minor = torch.cuda.get_device_capability(device)
+    if (major, minor) < (8, 9):
+        raise RuntimeError(
+            f"TorchAO FP8 training requires NVIDIA compute capability >= 8.9, got {major}.{minor}"
+        )
+
+    try:
+        import torchao
+        from torchao.float8 import Float8LinearConfig, convert_to_float8_training
+    except ImportError as exc:
+        raise ImportError(
+            "--fp8_training requires TorchAO. Install the project FP8 dependencies "
+            "with: python -m pip install -r requirements-fp8.txt"
+        ) from exc
+
+    active_recipe = requested_recipe
+    try:
+        _probe_torchao_fp8_recipe(
+            active_recipe, device, Float8LinearConfig, convert_to_float8_training
+        )
+    except Exception as exc:
+        if active_recipe.startswith("rowwise"):
+            Logger(
+                f"[TorchAO FP8] {active_recipe} is unavailable on "
+                f"{torch.cuda.get_device_name(device)} ({exc}); falling back to tensorwise"
+            )
+            active_recipe = "tensorwise"
+            _probe_torchao_fp8_recipe(
+                active_recipe, device, Float8LinearConfig, convert_to_float8_training
+            )
+        else:
+            raise RuntimeError(f"TorchAO FP8 tensorwise preflight failed: {exc}") from exc
+
+    filter_mode = getattr(args, "fp8_filter", "auto")
+    auto_filter = None
+    if filter_mode == "auto":
+        try:
+            from torchao.float8 import _auto_filter_for_recipe
+            auto_filter = _auto_filter_for_recipe(active_recipe, filter_fqns=["lm_head"])
+        except (ImportError, AttributeError):
+            Logger("[TorchAO FP8] auto filter unavailable; using all eligible Linear layers")
+    elif filter_mode != "eligible":
+        raise ValueError(f"Unknown --fp8_filter mode: {filter_mode}")
+
+    def module_filter_fn(module: torch.nn.Module, fqn: str) -> bool:
+        if not _fp8_linear_is_eligible(module, fqn):
+            return False
+        return auto_filter(module, fqn) if auto_filter is not None else True
+
+    converted_names = [
+        name for name, module in model.named_modules() if module_filter_fn(module, name)
+    ]
+    if not converted_names and auto_filter is not None:
+        Logger(
+            f"[TorchAO FP8] auto filter selected no layers for {label}; "
+            "falling back to all eligible Linear layers"
+        )
+        auto_filter = None
+        converted_names = [
+            name for name, module in model.named_modules() if module_filter_fn(module, name)
+        ]
+    if not converted_names:
+        raise RuntimeError(
+            f"TorchAO FP8 filter {filter_mode!r} selected no Linear layers for {label}; "
+            "use --fp8_filter eligible or disable FP8"
+        )
+
+    config = Float8LinearConfig.from_recipe_name(active_recipe)
+    convert_to_float8_training(model, module_filter_fn=module_filter_fn, config=config)
+    version = getattr(torchao, "__version__", importlib.metadata.version("torchao"))
+    if getattr(args, "use_compile", 0) != 1:
+        Logger("[TorchAO FP8] warning: torch.compile is disabled; FP8 may be slower than BF16")
+    Logger(
+        f"[TorchAO FP8] enabled for {label}: requested={requested_recipe}, "
+        f"active={active_recipe}, filter={filter_mode}, linear_layers={len(converted_names)}, "
+        f"torchao={version}"
+    )
+    setattr(args, "fp8_training_active", active_recipe)
+    return model
+
+
+def is_main_process() -> bool:
     return not dist.is_initialized() or dist.get_rank() == 0
 
 
 def config_from_args(args, **overrides):
+    """从命令行参数（可选叠加 JSON 配置）构建模型配置。
+
+    参数:
+        args: argparse 解析出的命令行参数对象
+        **overrides: 显式覆盖项（hidden_size / num_hidden_layers / use_moe / use_looped 等）
+
+    说明:
+        - 指定 config_path 时，以 JSON 为基底再叠加命令行覆盖；
+        - 按 model_architecture（兼容 use_looped）选择 Dense / Linear / Looped 配置类。
+    """
     overrides.setdefault('param_dtype', getattr(args, 'param_dtype', 'fp32'))
     overrides.setdefault('kv_cache_dtype', getattr(args, 'kv_cache_dtype', 'fp32'))
+    overrides.setdefault("use_grad_checkpoint", int(getattr(args, "use_grad_checkpoint", 0)))
+    for field in (
+        "residual_type", "hc_mult", "hc_sinkhorn_iters", "hc_eps",
+        "attnres_variant", "attnres_block_size",
+    ):
+        value = getattr(args, field, None)
+        if value is not None:
+            overrides.setdefault(field, value)
     hidden_size = overrides.pop('hidden_size', getattr(args, 'hidden_size', 768))
     num_hidden_layers = overrides.pop('num_hidden_layers', getattr(args, 'num_hidden_layers', 8))
     use_moe = overrides.pop('use_moe', bool(getattr(args, 'use_moe', 0)))
     use_looped = overrides.pop('use_looped', bool(getattr(args, 'use_looped', 0)))
+    architecture = getattr(args, 'model_architecture', None)
+    if use_looped:
+        architecture = 'looped'
     config_path = getattr(args, 'config_path', None)
     if config_path and os.path.exists(config_path):
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -50,28 +250,165 @@ def config_from_args(args, **overrides):
         cfg_dict['num_hidden_layers'] = num_hidden_layers
         cfg_dict['use_moe'] = use_moe
         cfg_dict.update(overrides)
-        use_looped = use_looped or cfg_dict.get('model_architecture') == 'looped'
-        cfg_cls = LoopedInstinctConfig if use_looped else InstinctConfig
+        architecture = architecture or cfg_dict.get('model_architecture', 'standard')
+        cfg_dict['model_architecture'] = architecture
+        cfg_cls, _ = _architecture_classes(architecture)
         return cfg_cls(**cfg_dict)
-    cfg_cls = LoopedInstinctConfig if use_looped else InstinctConfig
+    architecture = architecture or 'standard'
+    cfg_cls, _ = _architecture_classes(architecture)
     return cfg_cls(
         hidden_size=hidden_size,
         num_hidden_layers=num_hidden_layers,
         use_moe=use_moe,
+        model_architecture=architecture,
         **overrides,
     )
 
 
-def Logger(content):
+_TOPOLOGY_CONFIG_FIELDS = (
+    "model_architecture", "residual_type",
+    "hc_mult", "hc_sinkhorn_iters", "hc_eps", "mhc_init_std",
+    "attnres_variant", "attnres_block_size",
+    "full_attention_interval", "linear_conv_kernel_dim",
+    "linear_key_head_dim", "linear_value_head_dim",
+    "linear_num_key_heads", "linear_num_value_heads",
+    "loop_iters", "prelude_layers", "coda_layers", "use_input_injection",
+)
+
+
+def restore_config_from_checkpoint(current_config, checkpoint_data, *,
+                                   config_key="config", fallback_topology_key=None):
+    """Rebuild the model config before loading a resume checkpoint.
+
+    Resume state is authoritative for architecture and residual topology. This
+    prevents a refreshed WebUI/CLI config from constructing a Standard model
+    and then trying to load mHC/AttnRes parameters into it.
+
+    ``fallback_topology_key`` supports legacy distillation checkpoints that
+    stored the student config but not a separate teacher config: teacher shape
+    fields stay current while topology fields follow the saved student.
+    """
+    if not checkpoint_data:
+        return current_config
+    saved_config = checkpoint_data.get(config_key)
+    if saved_config is None and fallback_topology_key:
+        topology = checkpoint_data.get(fallback_topology_key)
+        if topology is not None:
+            saved_config = current_config.to_dict()
+            for field in _TOPOLOGY_CONFIG_FIELDS:
+                if field in topology:
+                    saved_config[field] = topology[field]
+    if saved_config is None:
+        Logger(f"[Resume] checkpoint has no {config_key!r}; using current model config")
+        return current_config
+
+    saved_config = dict(saved_config)
+    # Architecture comes from the checkpoint, while runtime precision choices
+    # come from the current launch. This allows a low-precision run to resume
+    # safely with FP32 master parameters without changing model topology.
+    for field in ("param_dtype", "kv_cache_dtype", "use_grad_checkpoint"):
+        if hasattr(current_config, field):
+            saved_config[field] = getattr(current_config, field)
+    architecture = saved_config.get(
+        "model_architecture", getattr(current_config, "model_architecture", "standard")
+    )
+    saved_config["model_architecture"] = architecture
+    config_cls, _ = _architecture_classes(architecture)
+    restored = config_cls(**saved_config)
+    Logger(
+        f"[Resume] restored checkpoint config: architecture={architecture}, "
+        f"residual={getattr(restored, 'residual_type', 'standard')}"
+    )
+    return restored
+
+
+def restore_config_from_weight(current_config, from_weight: str, save_dir: str = './out'):
+    """Restore model topology from the JSON belonging to a raw ``.pth`` base weight.
+
+    A base checkpoint is just as topology-sensitive as a resume checkpoint.  The
+    WebUI's current architecture controls must therefore not silently change GQA,
+    layer count, or other tensor shapes while loading an existing weight file.
+    Runtime precision choices remain current through
+    :func:`restore_config_from_checkpoint`.
+    """
+    if not from_weight or from_weight == 'none':
+        return current_config
+
+    if from_weight.endswith('.pth'):
+        weight_path = os.path.abspath(from_weight)
+    else:
+        moe_suffix = '_moe' if current_config.use_moe else ''
+        weight_path = os.path.abspath(
+            os.path.join(save_dir, f'{from_weight}_{current_config.hidden_size}{moe_suffix}.pth')
+        )
+
+    stem = os.path.splitext(os.path.basename(weight_path))[0]
+    weight_dir = os.path.dirname(weight_path)
+    parent_dir = os.path.dirname(weight_dir)
+    candidates = [
+        os.path.join(weight_dir, f'{stem}.json'),
+        os.path.join(parent_dir, 'checkpoints', f'{stem}.json'),
+        os.path.abspath(os.path.join('./checkpoints', f'{stem}.json')),
+    ]
+    config_path = next((path for path in candidates if os.path.isfile(path)), None)
+    if config_path is None:
+        Logger(
+            f"[Base weight] no saved config JSON found for {weight_path}; "
+            "using current model topology"
+        )
+        return current_config
+
+    with open(config_path, 'r', encoding='utf-8') as config_file:
+        saved_config = json.load(config_file)
+    restored = restore_config_from_checkpoint(current_config, {'config': saved_config})
+    Logger(f"[Base weight] restored model topology from {config_path}")
+    return restored
+
+
+def Logger(content: str) -> None:
     if is_main_process():
         print(content)
 
 
-def get_lr(current_step, total_steps, lr):
+def release_compiled_cuda_memory(reason: str) -> None:
+    """Destroy compiled graph objects and return their unused VRAM to CUDA.
+
+    The live model parameters and optimizer state are intentionally retained:
+    subsequent buckets continue training the exact same updated model.  Resetting
+    the compiler drops shape-specialized CUDA Graph pools/static tensors; the
+    next shape recompiles lazily and can reuse the persistent on-disk kernel
+    cache.
+    """
+    if not torch.cuda.is_available():
+        return
+    torch.cuda.synchronize()
+    before_allocated = torch.cuda.memory_allocated()
+    before_reserved = torch.cuda.memory_reserved()
+    before_free, total = torch.cuda.mem_get_info()
+
+    torch.compiler.reset()
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+
+    after_allocated = torch.cuda.memory_allocated()
+    after_reserved = torch.cuda.memory_reserved()
+    after_free, _ = torch.cuda.mem_get_info()
+    gib = 1024 ** 3
+    Logger(
+        '[GPU Memory Release] '
+        f'{reason}; allocated={before_allocated / gib:.2f}->{after_allocated / gib:.2f}GB, '
+        f'reserved={before_reserved / gib:.2f}->{after_reserved / gib:.2f}GB, '
+        f'device_free={before_free / gib:.2f}->{after_free / gib:.2f}GB/'
+        f'{total / gib:.2f}GB'
+    )
+
+
+def get_lr(current_step: int, total_steps: int, lr: float) -> float:
     return lr*(0.1 + 0.45*(1 + math.cos(math.pi * current_step / total_steps)))
 
 
-def init_distributed_mode():
+def init_distributed_mode() -> int:
     if int(os.environ.get("RANK", -1)) == -1:
         return 0  # 非DDP模式
 
@@ -81,7 +418,7 @@ def init_distributed_mode():
     return local_rank
 
 
-def setup_seed(seed: int):
+def setup_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -96,55 +433,51 @@ def setup_seed(seed: int):
 # ═══════════════════════════════════════════════════════════════
 
 def _zeropower_via_newtonschulz5(G, steps=5, eps=1e-7):
-    """Newton-Schulz 迭代求矩阵的 0 次幂（正交化），使用全局收敛的 5 阶迭代系数。
-
-    与 torch 官方 `torch.optim.Muon` 内部的 `_orthogonalize` 语义保持一致：
-    对矩阵（ndim>=2）的梯度做正交化，只保留方向信息、去掉幅度。
-    """
+    """Match ``torch.optim.Muon``'s quintic Newton-Schulz update."""
     a, b, c = (3.4445, -4.7750, 2.0315)
-    X = G.float()
+    X = G.bfloat16()
     if G.size(0) > G.size(1):
         X = X.T
-    X = X / (X.norm() + eps)
+    X = X / X.norm().clamp(min=eps)
     for _ in range(steps):
         A = X @ X.T
-        B = b * A + c * A @ A
-        X = a * X + B @ X
+        B = torch.addmm(A, A, A, beta=b, alpha=c)
+        X = torch.addmm(X, B, X, beta=a)
     if G.size(0) > G.size(1):
         X = X.T
     return X.to(G.dtype)
 
 
 class MuonOptimizer(torch.optim.Optimizer):
-    """Muon (MomentUm Orthogonalized by Newton-schulz) 的纯 PyTorch 原生实现。
+    """Fallback matching the public ``torch.optim.Muon`` algorithm.
 
     用于 torch < 2.10（此时 `torch.optim.Muon` 尚不存在）时的回退方案。
-    默认超参与 `torch.optim.Muon` 完全对齐，API 兼容，升级 torch 后可直接切换内置版本：
-
-    - lr=0.02, momentum=0.95, nesterov=True, ns_steps=5
-    - orthogonalize_scale='weight_decay', weight_decay=0.01
-
-    更新规则：
-    - ndim >= 2 的权重（矩阵）使用「动量 + Newton-Schulz 正交化」的更新；
-    - 其余 1D 参数退化为带 Nesterov 动量的 SGD；
-    - 采用解耦权重衰减（decoupled weight decay）。
+    和官方实现一样只接受隐藏层二维矩阵；embedding、输出头、Norm 等参数
+    由 ``build_optimizer`` 分配给 AdamW。
     """
 
-    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5,
-                 orthogonalize_scale='weight_decay', weight_decay=0.01):
+    def __init__(self, params, lr=1e-3, weight_decay=0.1, momentum=0.95,
+                 nesterov=True, ns_steps=5, eps=1e-7, adjust_lr_fn=None):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
         if momentum < 0.0:
             raise ValueError(f"Invalid momentum value: {momentum}")
         if ns_steps < 0:
             raise ValueError(f"Invalid ns_steps value: {ns_steps}")
-        if orthogonalize_scale not in ('lr', 'weight_decay'):
-            raise ValueError(f"Invalid orthogonalize_scale value: {orthogonalize_scale}")
+        if adjust_lr_fn not in (None, 'original', 'match_rms_adamw'):
+            raise ValueError(f"Invalid adjust_lr_fn value: {adjust_lr_fn}")
         if weight_decay < 0.0:
             raise ValueError(f"Invalid weight_decay value: {weight_decay}")
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps,
-                        orthogonalize_scale=orthogonalize_scale, weight_decay=weight_decay)
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum,
+                        nesterov=nesterov, ns_steps=ns_steps, eps=eps,
+                        adjust_lr_fn=adjust_lr_fn)
         super().__init__(params, defaults)
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.ndim != 2:
+                    raise ValueError(
+                        f"Muon only supports 2D parameters, found shape {tuple(p.shape)}"
+                    )
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -157,7 +490,8 @@ class MuonOptimizer(torch.optim.Optimizer):
             momentum = group['momentum']
             nesterov = group['nesterov']
             ns_steps = group['ns_steps']
-            orthogonalize_scale = group['orthogonalize_scale']
+            eps = group['eps']
+            adjust_lr_fn = group['adjust_lr_fn']
             weight_decay = group['weight_decay']
             for p in group['params']:
                 if p.grad is None:
@@ -170,16 +504,16 @@ class MuonOptimizer(torch.optim.Optimizer):
                     if 'momentum_buffer' not in state:
                         state['momentum_buffer'] = torch.zeros_like(g)
                     buf = state['momentum_buffer']
-                    buf.mul_(momentum).add_(g)
-                    g = g.add(buf, alpha=momentum) if nesterov else buf
-                if p.ndim >= 2:
-                    g = _zeropower_via_newtonschulz5(g, ns_steps)
-                    scale = lr if orthogonalize_scale == 'lr' else lr * weight_decay
-                    p.add_(g, alpha=-scale)
-                else:
-                    p.add_(g, alpha=-lr)
+                    buf.lerp_(g, 1 - momentum)
+                    g = g.lerp(buf, momentum) if nesterov else buf
+                g = _zeropower_via_newtonschulz5(g, ns_steps, eps)
+                if adjust_lr_fn == 'match_rms_adamw':
+                    scale = lr * 0.2 * math.sqrt(max(p.shape[:2]))
+                else:  # None / "original"
+                    scale = lr * math.sqrt(max(1.0, p.shape[0] / p.shape[1]))
                 if weight_decay != 0:
                     p.mul_(1 - lr * weight_decay)
+                p.add_(g, alpha=-scale)
         return loss
 
 
@@ -227,7 +561,29 @@ class CombinedOptimizer(torch.optim.Optimizer):
                 "MuonOptimizer 或其它优化器保存）。跨格式恢复 Muon 训练状态不受支持，"
                 "请改用 --from_weight 从模型权重继续，而非 --from_resume。"
             )
-        for opt, sd in zip(self.optimizers, state_dict["optimizers"]):
+        saved_optimizers = state_dict["optimizers"]
+        if len(saved_optimizers) != len(self.optimizers):
+            Logger(
+                "[Resume] optimizer layout changed; keeping fresh optimizer state "
+                "while restoring model/progress"
+            )
+            return
+        current_group_sizes = [
+            [len(group["params"]) for group in opt.param_groups]
+            for opt in self.optimizers
+        ]
+        saved_group_sizes = [
+            [len(group["params"]) for group in sd.get("param_groups", [])]
+            for sd in saved_optimizers
+        ]
+        if current_group_sizes != saved_group_sizes:
+            Logger(
+                "[Resume] optimizer parameter groups changed (for example, embeddings "
+                "moved from Muon to AdamW); keeping fresh optimizer state while "
+                "restoring model/progress"
+            )
+            return
+        for opt, sd in zip(self.optimizers, saved_optimizers):
             opt.load_state_dict(sd)
         self.param_groups = [g for opt in self.optimizers for g in opt.param_groups]
 
@@ -240,7 +596,47 @@ _OPTIMIZER_ALIASES = {
 }
 
 
-def build_optimizer(params, lr, optimizer='adamw', **kwargs):
+_LOW_PRECISION_LR_FLOORS = {
+    torch.bfloat16: 1e-4,
+    torch.float16: 1e-5,
+}
+
+
+def _materialize_named_params(params):
+    """Return ``[(name, parameter)]`` for parameter or named-parameter inputs."""
+    items = list(params)
+    if items and isinstance(items[0], tuple):
+        return [(str(name), param) for name, param in items if param.requires_grad]
+    return [("", param) for param in items if param.requires_grad]
+
+
+def _validate_optimizer_param_precision(named_params, lr: float) -> None:
+    """Reject learning rates that deterministically vanish in direct low-precision weights."""
+    dtypes = {param.dtype for _, param in named_params}
+    unsafe = [
+        (dtype, floor) for dtype, floor in _LOW_PRECISION_LR_FLOORS.items()
+        if dtype in dtypes and lr <= floor
+    ]
+    if not unsafe:
+        return
+    dtype, floor = unsafe[0]
+    raise ValueError(
+        f"learning_rate={lr:g} is too small for directly updated {dtype} parameters "
+        f"(safety floor: > {floor:g}); updates may round to zero. Use "
+        "--param_dtype fp32 (recommended; compatible with BF16 autocast and TorchAO FP8), "
+        "or deliberately choose a larger learning rate."
+    )
+
+
+def _is_muon_hidden_matrix(name: str, param: torch.nn.Parameter) -> bool:
+    """Keep embeddings/output heads out of Muon, as required by the algorithm."""
+    if param.ndim != 2:
+        return False
+    lowered = name.lower()
+    return not any(part in lowered for part in ("embed", "embedding", "lm_head", "output_head"))
+
+
+def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> torch.optim.Optimizer:
     """按名称统一构建优化器：AdamW / Adafactor / Muon。
 
     参数:
@@ -256,9 +652,12 @@ def build_optimizer(params, lr, optimizer='adamw', **kwargs):
                       否则回退到原生 MuonOptimizer）；1D 参数（RMSNorm 权重/bias 等）
                       交给 AdamW。两类都存在时组合为 CombinedOptimizer 返回。
     """
+    named_params = _materialize_named_params(params)
+    _validate_optimizer_param_precision(named_params, lr)
+    trainable_params = [param for _, param in named_params]
     name = _OPTIMIZER_ALIASES.get(str(optimizer).strip().lower(), str(optimizer).strip().lower())
     if name == 'adamw':
-        return torch.optim.AdamW(params, lr=lr, **kwargs)
+        return torch.optim.AdamW(trainable_params, lr=lr, **kwargs)
     if name == 'adafactor':
         if 'relative_step' in inspect.signature(torch.optim.Adafactor.__init__).parameters:
             # 旧版 API（torch < 2.8）：关闭 relative_step / scale_parameter，使 lr 显式生效
@@ -268,24 +667,46 @@ def build_optimizer(params, lr, optimizer='adamw', **kwargs):
             # 新版 API（torch >= 2.8）：lr 直接生效，无需额外开关
             defaults = dict(lr=lr)
             defaults.update(kwargs)
-        return torch.optim.Adafactor(params, **defaults)
+        return torch.optim.Adafactor(trainable_params, **defaults)
     if name == 'muon':
-        params = list(params)
-        matrix_params = [p for p in params if p.ndim == 2]
-        other_params = [p for p in params if p.ndim != 2]
+        matrix_params = [
+            param for param_name, param in named_params
+            if _is_muon_hidden_matrix(param_name, param)
+        ]
+        matrix_ids = {id(param) for param in matrix_params}
+        other_params = [param for param in trainable_params if id(param) not in matrix_ids]
         if not matrix_params:
             return torch.optim.AdamW(other_params, lr=lr)
         if hasattr(torch.optim, 'Muon'):
-            muon_opt = torch.optim.Muon(matrix_params, lr=lr, **kwargs)
+            muon_kwargs = dict(kwargs)
+            if 'adjust_lr_fn' in inspect.signature(torch.optim.Muon.__init__).parameters:
+                muon_kwargs.setdefault('adjust_lr_fn', 'match_rms_adamw')
+            muon_opt = torch.optim.Muon(matrix_params, lr=lr, **muon_kwargs)
         else:
-            muon_opt = MuonOptimizer(matrix_params, lr=lr, **kwargs)
+            muon_kwargs = dict(kwargs)
+            muon_kwargs.setdefault('adjust_lr_fn', 'match_rms_adamw')
+            muon_opt = MuonOptimizer(matrix_params, lr=lr, **muon_kwargs)
         if not other_params:
             return muon_opt
         return CombinedOptimizer([muon_opt, torch.optim.AdamW(other_params, lr=lr)])
     raise ValueError(f"未知优化器: {optimizer}，可选: adamw / adafactor / muon")
 
 
-def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='./checkpoints', **kwargs):
+def lm_checkpoint(lm_config, weight: str = 'full_sft', model=None, optimizer=None, epoch: int = 0, step: int = 0, wandb=None, save_dir: str = './checkpoints', **kwargs):
+    """保存或加载训练检查点。
+
+    参数:
+        lm_config: 模型配置（决定文件名中的 hidden_size / _moe 后缀）
+        weight: 权重前缀名
+        model: 传入时执行「保存」，为 None 时执行「加载」
+        optimizer / epoch / step / wandb: 随 resume 检查点一并保存的训练状态
+        save_dir: 检查点保存目录（默认 ./checkpoints）
+        **kwargs: 额外随检查点保存的状态（如 scaler / ref_model / teacher_model）
+
+    说明:
+        - 保存：原子写入权重 .pth、resume 检查点与 config JSON；
+        - 加载：读取 *_resume.pth，GPU 数量变化时自动按比例换算 step。
+    """
     os.makedirs(save_dir, exist_ok=True)
     moe_path = '_moe' if lm_config.use_moe else ''
     ckp_path = f'{save_dir}/{weight}_{lm_config.hidden_size}{moe_path}.pth'
@@ -294,8 +715,12 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
     if model is not None:
         raw_model = model.module if isinstance(model, DistributedDataParallel) else model
         raw_model = getattr(raw_model, '_orig_mod', raw_model)
-        state_dict = raw_model.state_dict()
-        state_dict = {k: v.half().cpu() for k, v in state_dict.items()}
+        raw_state_dict = raw_model.state_dict()
+        state_dict = {
+            k: (v.detach().half().cpu() if v.is_floating_point() else v.detach().cpu())
+            for k, v in raw_state_dict.items()
+        }
+        resume_state_dict = {k: v.detach().cpu() for k, v in raw_state_dict.items()}
         ckp_tmp = ckp_path + '.tmp'
         torch.save(state_dict, ckp_tmp)
         os.replace(ckp_tmp, ckp_path)
@@ -308,7 +733,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
                 wandb_id = getattr(wandb, 'id', None)
 
         resume_data = {
-            'model': state_dict,
+            'model': resume_state_dict,
             'optimizer': optimizer.state_dict(),
             'epoch': epoch,
             'step': step,
@@ -335,7 +760,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
             json.dump(lm_config.to_dict(), f, ensure_ascii=False, indent=2)
         os.replace(config_json_tmp, config_json_path)
 
-        del state_dict, resume_data
+        del raw_state_dict, state_dict, resume_state_dict, resume_data
         torch.cuda.empty_cache()
     else:  # 加载模式
         if os.path.exists(resume_path):
@@ -344,17 +769,66 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
             current_ws = dist.get_world_size() if dist.is_initialized() else 1
             if saved_ws != current_ws:
                 ckp_data['step'] = ckp_data['step'] * saved_ws // current_ws
+                data_config = ckp_data.get('data_config')
+                if data_config and data_config.get('epoch_steps'):
+                    data_config['epoch_steps'] = data_config['epoch_steps'] * saved_ws // current_ws
                 Logger(f'GPU数量变化({saved_ws}→{current_ws})，step已自动转换为{ckp_data["step"]}')
             return ckp_data
         return None
 
 
-def init_model(lm_config, from_weight='pretrain', tokenizer_path='./model', save_dir='./out', device='cuda'):
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    if isinstance(lm_config, LoopedInstinctConfig):
-        model = LoopedInstinctForCausalLM(lm_config)
+def pause_save_checkpoint(args, lm_config, *, weight, model, optimizer, epoch, step, scaler=None, wandb=None, lora_save=False, **lm_ckpt_kwargs) -> None:
+    """暂停时保存检查点（与各训练脚本的周期保存语义完全一致）。
+
+    参数:
+        args: 训练参数（需含 save_dir，决定权重 .pth 的输出目录）
+        lm_config: 模型配置（决定文件名中的 hidden_size / _moe 后缀）
+        weight: 权重前缀名
+        model: 当前模型（传入 lm_checkpoint 保存 resume 检查点）
+        optimizer: 优化器
+        epoch / step: 当前训练位置
+        scaler: GradScaler（可为 None，PPO / GRPO / Agent 训练不传）
+        wandb: 日志对象（可为 None）
+        lora_save: 为 True 时仅保存 LoRA 分支权重（save_lora），不保存完整 state_dict
+        **lm_ckpt_kwargs: 额外随 resume 检查点保存的状态（如 ref_model / teacher_model / scheduler / critic_model 等）
+
+    说明:
+        - 先写 out/ 下的权重 .pth（fp16，或 LoRA 专用权重），再经 lm_checkpoint 原子写入 resume 检查点；
+        - 与周期保存语义一致：不冲刷梯度，由调用方以 is_main_process() 守护后再调用。
+    """
+    model.eval()
+    if lora_save:
+        from model.model_lora import save_lora
+        moe_suffix = '_moe' if lm_config.use_moe else ''
+        save_lora(model, f'{args.save_dir}/{weight}_{lm_config.hidden_size}{moe_suffix}.pth')
     else:
-        model = InstinctForCausalLM(lm_config)
+        moe_suffix = '_moe' if lm_config.use_moe else ''
+        ckp = f'{args.save_dir}/{weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+        raw_model = model.module if isinstance(model, DistributedDataParallel) else model
+        raw_model = getattr(raw_model, '_orig_mod', raw_model)
+        state_dict = raw_model.state_dict()
+        torch.save({k: v.half().cpu() for k, v in state_dict.items()}, ckp)
+        del state_dict
+    lm_checkpoint(lm_config, weight=weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints', **lm_ckpt_kwargs)
+    model.train()
+
+
+def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = './model', save_dir: str = './out', device: str = 'cuda') -> tuple:
+    restored_config = restore_config_from_weight(lm_config, from_weight, save_dir=save_dir)
+    if restored_config is not lm_config:
+        if type(restored_config) is not type(lm_config):
+            raise ValueError(
+                "Base weight architecture differs from the selected model architecture; "
+                "select the matching architecture before loading this checkpoint."
+            )
+        # Keep the object identity because training callers retain ``lm_config``
+        # for checkpoint naming/saving after ``init_model`` returns.
+        lm_config.__dict__.clear()
+        lm_config.__dict__.update(restored_config.__dict__)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    architecture = getattr(lm_config, 'model_architecture', 'standard')
+    _, model_cls = _architecture_classes(architecture)
+    model = model_cls(lm_config)
 
     if from_weight != 'none':
         if from_weight.endswith('.pth'):
@@ -363,7 +837,7 @@ def init_model(lm_config, from_weight='pretrain', tokenizer_path='./model', save
             moe_suffix = '_moe' if lm_config.use_moe else ''
             weight_path = f'{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
         weights = torch.load(weight_path, map_location=device)
-        if isinstance(model, LoopedInstinctForCausalLM):
+        if architecture == 'looped':
             model.load_pretrained_weights(weights)
         else:
             model.load_state_dict(weights, strict=False)
@@ -377,6 +851,14 @@ def init_model(lm_config, from_weight='pretrain', tokenizer_path='./model', save
 
 
 class SkipBatchSampler(Sampler):
+    """断点续训采样器：跳过前 skip_batches 个 batch，从上次中断处继续产出。
+
+    参数:
+        sampler: 底层采样器（DistributedSampler 或索引列表）
+        batch_size: 每个 batch 的样本数
+        skip_batches: 需要跳过的 batch 数（由上次中断的 step 换算而来）
+    """
+
     def __init__(self, sampler, batch_size, skip_batches=0):
         self.sampler = sampler
         self.batch_size = batch_size
@@ -403,9 +885,21 @@ class SkipBatchSampler(Sampler):
 
 
 class LMForRewardModel:
+    """通用对话模型奖励打分器（用于 PPO / GRPO 等 RL 阶段）。
+
+    参数:
+        model_path: HuggingFace 模型路径
+        device: 运行设备
+        dtype: 推理精度
+
+    说明:
+        get_score 拼接对话历史与回复后调用模型的 get_score 打分，
+        并将结果裁剪到 [-3, 3] 区间。
+    """
+
     def __init__(self, model_path, device="cuda", dtype=torch.float16):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        self.model = AutoModel.from_pretrained(model_path, torch_dtype=dtype, trust_remote_code=True)
+        self.model = AutoModel.from_pretrained(model_path, dtype=dtype, trust_remote_code=True)
         self.model = self.model.to(device).eval()
         self.device = device
 

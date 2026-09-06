@@ -1,0 +1,14 @@
+=== T10 evidence: cross-model gradient matrix (task-10-grad-matrix) ===
+Suite: tests/test_cross_model_consistency.py (plan T10, all GREEN, not TDD-RED)
+Variants x modes: {dense, moe, loop, linear} x {Mode 0 vs 1, Mode 0 vs 2} = 8 cases
+Assertions per case: loss torch.equal, aux_loss torch.equal, all param grads torch.equal (CPU fp32)
+loop: loop_iters=2; linear: full_attention_interval=1; backward: (loss + aux_loss) [trainer semantics]
+
+........                                                                 [100%]
+============================== warnings summary ===============================
+E:\miniconda3\Lib\site-packages\torch\jit\_script.py:365: 14 warnings
+  E:\miniconda3\Lib\site-packages\torch\jit\_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+8 passed, 11 deselected, 14 warnings in 7.43s

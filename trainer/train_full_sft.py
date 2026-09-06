@@ -1,52 +1,88 @@
+"""
+全量指令微调（Full SFT）脚本（Pipeline 第 2 阶段，必须）：在对话语料上微调预训练权重。
+
+使用 sft_t2t(_mini).jsonl（OpenAI 对话格式，含工具调用样本）对
+--from_weight pretrain 的基座做全参数微调，让模型学会遵循指令与工具调用，
+输出 {save_weight}_{hidden_size}.pth，作为 LoRA / DPO / 蒸馏等阶段的基座。
+"""
 import os
 import sys
 
 __package__ = "trainer"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import trainer.compile_cache  # noqa: F401  # configure Inductor before torch import
 os.environ.setdefault("HF_HOME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".cache", "huggingface"))
 import datasets  # noqa: F401  # Windows pyarrow/torch DLL conflict workaround (issue #771)
-import argparse
 import time
 import warnings
 import torch
 import torch.distributed as dist
-from contextlib import nullcontext
-from torch import optim, nn
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 from dataset.lm_dataset import SFTDataset
-from trainer.trainer_utils import get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler, config_from_args, build_optimizer
+from trainer.trainer_utils import (
+    Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
+    init_model, config_from_args, build_optimizer,
+    restore_config_from_checkpoint, apply_torchao_fp8_training,
+    prepare_lm_batch, release_compiled_cuda_memory,
+)
+from trainer.trainer_cli import (
+    build_trainer_parser, setup_dist_and_seed, build_autocast_ctx,
+    init_wandb_logger, set_cosine_lr, step_with_scaler, flush_remaining_grad,
+    PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
+)
+from trainer.packing_transition import packing_data_config, SequencePackingPlan
+from trainer.training_profiler import TrainingProfiler
 
 warnings.filterwarnings('ignore')
 
 
-def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
+def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
+                wandb=None, packing_plan=None) -> None:
+    """执行一个 epoch 的全量微调循环。
+
+    参数:
+        epoch: 当前轮数（从 0 起）
+        loader: 数据加载器
+        iters: 本 epoch 总步数（含断点续训跳过的步数）
+        start_step: 断点续训的起始步数（跳过前 start_step 步）
+        wandb: 日志对象（swanlab / wandb，可选）
+
+    说明:
+        每个 step 依次完成：余弦 LR 调度 → 前向（autocast）→ 反向（GradScaler）
+        → 按 accumulation_steps 累积后裁剪梯度并更新参数 → 周期性打日志 / 存检查点。
+    """
     start_time = time.time()
+    data_config['epoch_steps'] = int(iters)
     last_step = start_step
-    for step, (input_ids, labels) in enumerate(loader, start=start_step + 1):
-        input_ids = input_ids.to(args.device)
-        labels = labels.to(args.device)
+    for step, batch in enumerate(loader, start=start_step + 1):
+        bucket_status = packing_plan.observe_batch(
+            batch, epoch=epoch, step=step,
+        ) if packing_plan is not None else ''
+        input_ids, labels = batch[:2]
+        profiler.begin_step(tokens=input_ids.numel(), useful_tokens=(labels != -100).sum().item())
+        with profiler.phase("data_transfer"):
+            input_ids, labels, sequence_ids = prepare_lm_batch(batch, args.device)
         last_step = step
-        lr = get_lr(epoch * iters + step, args.epochs * iters, args.learning_rate)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
+        set_cosine_lr(optimizer, epoch, step, iters, args)
 
-        with autocast_ctx:
-            res = model(input_ids, labels=labels)
-            loss = res.loss + res.aux_loss
-            loss = loss / args.accumulation_steps
+        with profiler.phase("forward"):
+            with autocast_ctx:
+                res = model(input_ids, labels=labels, sequence_ids=sequence_ids)
+                loss = res.loss + res.aux_loss
+                loss = loss / args.accumulation_steps
 
-        scaler.scale(loss).backward()
+        with profiler.phase("backward"):
+            scaler.scale(loss).backward()
 
         if step % args.accumulation_steps == 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            with profiler.phase("optimizer"):
+                step_with_scaler(scaler, optimizer, model.parameters(), args.grad_clip)
 
-            scaler.step(optimizer)
-            scaler.update()
-
-            optimizer.zero_grad(set_to_none=True)
+        profile_metrics = profiler.end_step()
+        if profile_metrics and wandb:
+            wandb.log(profile_metrics)
 
         if step % args.log_interval == 0 or step == iters:
             spend_time = time.time() - start_time
@@ -54,9 +90,11 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             current_aux_loss = res.aux_loss.item() if res.aux_loss is not None else 0.0
             current_logits_loss = current_loss - current_aux_loss
             current_lr = optimizer.param_groups[-1]['lr']
-            eta_min = spend_time / max(step - start_step, 1) * (iters - step) // 60
-            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min')
-            if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
+            eta_min = spend_time / max(step - start_step, 1) * (iters - step) / 60
+            elapsed_min = spend_time / 60
+            bucket_text = f', {bucket_status}' if bucket_status else ''
+            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}{bucket_text}, epoch_time: {eta_min:.1f}min, elapsed_time: {elapsed_min:.1f}min')
+            if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min, "elapsed_time": elapsed_min})
 
         if (step % args.save_interval == 0 or step == iters) and is_main_process():
             model.eval()
@@ -66,85 +104,88 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             raw_model = getattr(raw_model, '_orig_mod', raw_model)
             state_dict = raw_model.state_dict()
             torch.save({k: v.half().cpu() for k, v in state_dict.items()}, ckp)
-            lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, 
-                         epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints', scaler=scaler)
+            lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer,
+                         epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints', scaler=scaler,
+                         data_config=data_config)
             model.train()
             del state_dict
 
-        del input_ids, labels, res, loss
+        del input_ids, labels, sequence_ids, res, loss
 
-    if last_step > start_step and last_step % args.accumulation_steps != 0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad(set_to_none=True)
+        if (
+            args.use_compile == 1
+            and packing_plan is not None
+            and packing_plan.should_release_large_cuda_memory(epoch=epoch, step=step)
+        ):
+            release_compiled_cuda_memory(
+                f'epoch={epoch + 1}, completed buckets >{args.bucket_large_threshold} tokens'
+            )
+
+        if pause_requested(args):
+            clear_pause_request(args)
+            profiler.finish()
+            if is_main_process():
+                pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, data_config=data_config)
+            Logger('[PAUSED] Training paused — resume checkpoint saved.')
+            sys.exit(PAUSE_EXIT_CODE)
+
+    flush_remaining_grad(scaler, optimizer, model.parameters(), args.grad_clip, last_step, start_step, args.accumulation_steps)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Instinct Full SFT")
-    parser.add_argument("--save_dir", type=str, default="./out", help="模型保存目录")
-    parser.add_argument('--save_weight', default='full_sft', type=str, help="保存权重的前缀名")
-    parser.add_argument("--epochs", type=int, default=2, help="训练轮数")
-    parser.add_argument("--batch_size", type=int, default=16, help="batch size")
-    parser.add_argument("--learning_rate", type=float, default=1e-5, help="初始学习率")
-    parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "adafactor", "muon"], help="优化器类型（adamw / adafactor / muon）")
-    parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
-    parser.add_argument("--dtype", type=str, default="bfloat16", help="激活层计算精度（bfloat16/float16/fp32）")
-    parser.add_argument("--param_dtype", type=str, default="fp32", choices=["fp32", "bf16", "fp16"], help="模型参数精度（fp32=主权重，bf16/fp16=训练时权重直接 cast）")
-    parser.add_argument("--kv_cache_dtype", type=str, default="fp32", choices=["fp32", "bf16", "fp16", "fp8_e4m3", "fp8_e5m2"], help="KV Cache 精度（fp8 时缓存量化，decode 带宽减半）")
-    parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程数")
-    parser.add_argument("--accumulation_steps", type=int, default=1, help="梯度累积步数")
-    parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
-    parser.add_argument("--log_interval", type=int, default=100, help="日志打印间隔")
-    parser.add_argument("--save_interval", type=int, default=1000, help="模型保存间隔")
-    parser.add_argument('--hidden_size', default=768, type=int, help="隐藏层维度")
-    parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
-    parser.add_argument('--max_seq_len', default=768, type=int, help="训练的最大截断长度（中文1token≈1.5~1.7字符）")
-    parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
+    parser = build_trainer_parser(
+        description="Instinct Full SFT",
+        defaults={
+            'save_weight': 'full_sft',
+            'batch_size': 16,
+            'learning_rate': 1e-5,
+            'accumulation_steps': 1,
+            'max_seq_len': 768,
+            'from_weight': 'pretrain',
+            'wandb_project': 'Instinct-Full-SFT',
+        },
+    )
     parser.add_argument("--data_path", type=str, default="./dataset/sft_t2t_mini.jsonl", help="训练数据路径")
-    parser.add_argument('--from_weight', default='pretrain', type=str, help="基于哪个权重训练，为none则不基于任何权重训练")
-    parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
-    parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
-    parser.add_argument("--wandb_project", type=str, default="Instinct-Full-SFT", help="wandb项目名")
-    parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
-    parser.add_argument("--compile_mode", type=str, default="default", choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"], help="torch.compile 模式（default=Triton 编译；reduce-overhead=叠加 CUDA graph，小模型首选；max-autotune=极限调优，编译极慢）")
-    parser.add_argument('--config_path', default='', type=str, help="JSON配置文件路径")
     args = parser.parse_args()
 
-    # ========== 1. 初始化环境和随机种子 ==========
-    local_rank = init_distributed_mode()
-    if dist.is_initialized(): args.device = f"cuda:{local_rank}"
-    setup_seed(42 + (dist.get_rank() if dist.is_initialized() else 0))
-    
-    # ========== 2. 配置目录、模型参数、检查ckp ==========
+    # 1. 初始化环境和随机种子
+    local_rank = setup_dist_and_seed(args)
+    # 2. 配置目录、模型参数、检查ckp
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = config_from_args(args)
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='./checkpoints') if args.from_resume==1 else None
-    
-    # ========== 3. 设置混合精度 ==========
-    device_type = "cuda" if "cuda" in args.device else "cpu"
-    dtype = {'bfloat16': torch.bfloat16, 'float16': torch.float16, 'fp32': torch.float32}[args.dtype]
-    autocast_ctx = nullcontext() if device_type == "cpu" or args.dtype == "fp32" else torch.cuda.amp.autocast(dtype=dtype)
-    
-    # ========== 4. 配wandb ==========
-    wandb = None
-    if args.use_wandb and is_main_process():
-        import swanlab as wandb
-        wandb_id = ckp_data.get('wandb_id') if ckp_data else None
-        resume = 'must' if wandb_id else None
-        wandb_run_name = f"Instinct-Full-SFT-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
-        wandb.init(project=args.wandb_project, name=wandb_run_name, id=wandb_id, resume=resume)
-    
-    # ========== 5. 定义模型、数据、优化器 ==========
+    data_config = packing_data_config(args)
+    lm_config = restore_config_from_checkpoint(lm_config, ckp_data)
+
+    # 3. 设置混合精度
+    autocast_ctx = build_autocast_ctx(args)
+    # 4. 配wandb
+    wandb = init_wandb_logger(args, ckp_data, run_name=f"Instinct-Full-SFT-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}")
+
+    # 5. 定义模型、数据、优化器
     # Resume 检查点已包含完整模型状态，无需再加载 --from_weight 基础权重
     model, tokenizer = init_model(lm_config, 'none' if ckp_data else args.from_weight, device=args.device)
-    train_ds = SFTDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
-    train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
+    packing_plan = SequencePackingPlan(
+        args, ckp_data,
+        lambda packing, sample_indices=None: SFTDataset(
+            args.data_path, tokenizer,
+            max_length=(min(lm_config.max_position_embeddings,
+                            args.bucket_max_seq_len)
+                        if packing and args.sequence_packing_mode == 'bucket'
+                        else args.max_seq_len),
+            packing=packing,
+            packing_batch_size=args.packing_batch_size,
+            packing_mode=args.sequence_packing_mode,
+            seq_bucket=args.seq_bucket,
+            packing_num_proc=args.packing_num_proc,
+            bucket_gpu_memory_gb=args.bucket_gpu_memory_gb,
+            sample_indices=sample_indices,
+        ),
+    )
     scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))
-    optimizer = build_optimizer(model.parameters(), lr=args.learning_rate, optimizer=args.optimizer)
-    
-    # ========== 6. 从ckp恢复状态 ==========
+    optimizer = build_optimizer(model.named_parameters(), lr=args.learning_rate, optimizer=args.optimizer)
+
+    # 6. 从ckp恢复状态
     start_epoch, start_step = 0, 0
     if ckp_data:
         model.load_state_dict(ckp_data['model'])
@@ -152,28 +193,58 @@ if __name__ == "__main__":
         scaler.load_state_dict(ckp_data['scaler'])
         start_epoch = ckp_data['epoch']
         start_step = ckp_data.get('step', 0)
-    
-    # ========== 7. 编译和分布式包装 ==========
+
+    model = apply_torchao_fp8_training(model, args)
+
+    # 7. 编译和分布式包装
     if args.use_compile == 1:
-        model = torch.compile(model, mode=args.compile_mode)
-        Logger('torch.compile enabled')
+        model = torch.compile(
+            model, mode=args.compile_mode,
+            dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
+        )
+        Logger(f"torch.compile enabled; cache={os.environ['TORCHINDUCTOR_CACHE_DIR']}")
     if dist.is_initialized():
         model = DistributedDataParallel(model, device_ids=[local_rank])
-    
-    # ========== 8. 开始训练 ==========
+
+    profiler = TrainingProfiler(args, name="full_sft")
+
+    # 8. 开始训练
     for epoch in range(start_epoch, args.epochs):
-        train_sampler and train_sampler.set_epoch(epoch)
-        setup_seed(42 + epoch); indices = torch.randperm(len(train_ds)).tolist()
         skip = start_step if (epoch == start_epoch and start_step > 0) else 0
-        batch_sampler = SkipBatchSampler(train_sampler or indices, args.batch_size, skip)
-        loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
-        if skip > 0: 
-            Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
-            train_epoch(epoch, loader, len(loader) + skip, start_step, wandb)
+        train_ds, transition_batches, active_packing = packing_plan.epoch_data(
+            epoch, skip, args.batch_size,
+        )
+        packing_plan.update_checkpoint_config(data_config, epoch=epoch, active=active_packing)
+        if transition_batches is None:
+            batch_sampler = packing_plan.batch_sampler(
+                train_ds, active_packing=active_packing, epoch=epoch,
+                batch_size=args.batch_size, skip_batches=skip,
+            )
         else:
-            train_epoch(epoch, loader, len(loader), 0, wandb)
-    
-    # ========== 9. 清理分布进程 ==========
+            batch_sampler = transition_batches
+        loader = DataLoader(
+            train_ds, batch_sampler=batch_sampler,
+            num_workers=packing_plan.loader_num_workers(), pin_memory=True,
+        )
+        if skip > 0:
+            Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
+            train_epoch(epoch, loader, len(loader) + skip, start_step, wandb, packing_plan)
+        else:
+            train_epoch(epoch, loader, len(loader), 0, wandb, packing_plan)
+        if (
+            args.use_compile == 1
+            and epoch + 1 < args.epochs
+            and packing_plan.has_large_phase(epoch)
+        ):
+            release_compiled_cuda_memory(
+                f'epoch={epoch + 1} complete, preparing next long-bucket phase'
+            )
+
+    final_profile_metrics = profiler.finish()
+    if final_profile_metrics and wandb:
+        wandb.log(final_profile_metrics)
+
+    # 9. 清理分布进程
     if dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()
