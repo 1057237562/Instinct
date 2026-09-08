@@ -1,0 +1,146 @@
+{
+  "output": "D:\\AI\\Instinct\\dataset\\sft_competitive_t2t_ultrachat_16k_cot50plus.jsonl",
+  "bytes": 1800006667,
+  "gb": 1.800006667,
+  "gib": 1.6763868434354663,
+  "min_bytes": 1600000000,
+  "max_bytes": 5000000000,
+  "total_rows": 370109,
+  "sha256": "55f7e181a4836dc0fee614df0cb5913d2deb24174d4c711afd719a88df49e3ea",
+  "seed": 20260905,
+  "max_tokens": 16384,
+  "counts": {
+    "ultrachat_new": 118496,
+    "t2t_cot": 218004,
+    "competitive_cot": 33609
+  },
+  "nonempty_reasoning_rows": {
+    "ultrachat_new": 0,
+    "t2t_cot": 218004,
+    "competitive_cot": 33609
+  },
+  "reasoning_fraction": 0.6798348594603212,
+  "total_tokens": 564521395,
+  "token_stats": {
+    "ultrachat_new": {
+      "total": 222181062,
+      "fraction": 0.3935742098844633,
+      "mean": 1875.0089623278423,
+      "p50": 1728,
+      "p95": 3551,
+      "max": 11193
+    },
+    "t2t_cot": {
+      "total": 123090036,
+      "fraction": 0.2180431726595588,
+      "mean": 564.622832608576,
+      "p50": 578,
+      "p95": 829,
+      "max": 2723
+    },
+    "competitive_cot": {
+      "total": 219250297,
+      "fraction": 0.3883826174559779,
+      "mean": 6523.5590764378585,
+      "p50": 5342,
+      "p95": 15024,
+      "max": 16384
+    }
+  },
+  "selection_stats": {
+    "competitive_cot": {
+      "selected": 33609,
+      "bytes": 600019101,
+      "tokens": 219250297,
+      "reasoning_selected": 33609,
+      "over_limit": 8080
+    },
+    "t2t_cot": {
+      "selected": 218004,
+      "bytes": 494150608,
+      "tokens": 123090036,
+      "reasoning_selected": 218004
+    },
+    "ultrachat_new": {
+      "selected": 118496,
+      "bytes": 705836958,
+      "tokens": 222181062,
+      "reasoning_selected": 0
+    }
+  },
+  "competitive_languages": {
+    "python": 16715,
+    "cpp": 16894
+  },
+  "max_answers_per_question_language": 3,
+  "peak_process_memory_bytes": 302149632,
+  "policy": {
+    "ratio_basis": "adaptive byte quotas: about 600 MB competitive reasoning, 80% hash sample of unique T2T reasoning, then unseen UltraChat to about 1.8 GB",
+    "reasoning": "complete nonempty reasoning in all competitive and T2T samples; empty think tags do not count; UltraChat kept as originally provided",
+    "sampling": "fixed-seed random priority without exact duplicates; at most 3 answers per competitive question/language",
+    "length": "full local chat template <= 16384 tokens; no truncation; original competitive candidate character prefilter <= 65536",
+    "previous_data": "T2T is intentional replay; competitive and UltraChat exclude conversation and first-user-prompt overlap with both previously trained files",
+    "splits": "UltraChat train_sft only; competitive question IDs with any non-train label in all four local shards excluded",
+    "validation_limits": "code not executed; source split filtering is not comprehensive benchmark decontamination"
+  },
+  "inputs": [
+    {
+      "path": "D:\\AI\\Instinct\\dataset\\sft_magicoder110k_mathinstruct_ultrachat20.jsonl",
+      "bytes": 701918995,
+      "mtime_ns": 1788532917898741200
+    },
+    {
+      "path": "D:\\AI\\Instinct\\dataset\\sft_t2t_mini.jsonl",
+      "bytes": 1739133909,
+      "mtime_ns": 1788367164093541500
+    },
+    {
+      "path": "D:\\AI\\Instinct\\dataset\\competitive-coding\\data\\competitive_programming_cpp_00.jsonl",
+      "bytes": 23691055037,
+      "mtime_ns": 1788576665529291100
+    },
+    {
+      "path": "D:\\AI\\Instinct\\dataset\\competitive-coding\\data\\competitive_programming_cpp_01.jsonl",
+      "bytes": 23690693444,
+      "mtime_ns": 1788576657360490500
+    },
+    {
+      "path": "D:\\AI\\Instinct\\dataset\\competitive-coding\\data\\competitive_programming_python_00.jsonl",
+      "bytes": 24034430476,
+      "mtime_ns": 1788576669831159000
+    },
+    {
+      "path": "D:\\AI\\Instinct\\dataset\\competitive-coding\\data\\competitive_programming_python_01.jsonl",
+      "bytes": 24034361165,
+      "mtime_ns": 1788576668820684200
+    },
+    {
+      "path": "D:\\AI\\Instinct\\dataset\\ultrachat-200k\\data\\train_sft-00000-of-00003-a3ecf92756993583.parquet",
+      "bytes": 243999189,
+      "mtime_ns": 1788530360279651100
+    },
+    {
+      "path": "D:\\AI\\Instinct\\dataset\\ultrachat-200k\\data\\train_sft-00001-of-00003-0a1804bcb6ae68c6.parquet",
+      "bytes": 243897199,
+      "mtime_ns": 1788530375711039000
+    },
+    {
+      "path": "D:\\AI\\Instinct\\dataset\\ultrachat-200k\\data\\train_sft-00002-of-00003-ee46ed25cfae92c6.parquet",
+      "bytes": 244131731,
+      "mtime_ns": 1788530363157085300
+    },
+    {
+      "path": "D:\\AI\\Instinct\\model\\tokenizer.json",
+      "bytes": 451182,
+      "mtime_ns": 1787241605302525400
+    },
+    {
+      "path": "D:\\AI\\Instinct\\model\\tokenizer_config.json",
+      "bytes": 13308,
+      "mtime_ns": 1787241605302525400
+    }
+  ],
+  "candidate_cache": "D:\\AI\\Instinct\\.cache\\continued_sft_large\\candidates.sqlite",
+  "tokenizer_sha256": "71f32c68cf63a15355a8fc171b7594b3d41870fe0ddb54fc6aefa55f73a4a668",
+  "template_sha256": "d7cd6a60c9f191c4f9ffec69b2eb289ad2f960366724f328b681ae1e46e4c110"
+}

@@ -1,0 +1,44 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.python-version
+
+# ===== 训练产物：模型权重 / 检查点 =====
+out/
+checkpoints/
+*.pth
+*.safetensors
+*.gguf
+*.onnx
+*.bin
+
+# ===== 数据集（大文件，从 ModelScope / HuggingFace 单独下载） =====
+dataset/*.jsonl
+dataset/*.csv
+dataset/*.zip
+
+# ===== 工具 / IDE / 缓存目录 =====
+.omo/
+.codegraph/
+.cache/
+.playwright-mcp/
+.idea/
+.vscode/
+.sisyphus/
+nul
+
+# ===== 实验输出（重新生成即可） =====
+experiments/data/
+experiments/results/
+trainer/logs/
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
+
+# ===== WebUI 本地面板状态（用户参数持久化，不入库） =====
+trainer/webui_state.json
