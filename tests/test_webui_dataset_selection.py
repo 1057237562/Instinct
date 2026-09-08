@@ -75,6 +75,16 @@ def test_default_mini_dataset_is_first(tmp_path):
     assert Path(discovered[0]).name == "sft_t2t_mini.jsonl"
 
 
+def test_mofe_dataset_kind_is_pretraining_text(tmp_path):
+    helpers = _load_helpers()
+    path = tmp_path / "pretrain_domains.jsonl"
+    path.write_text('{"text":"example"}\n', encoding="utf-8")
+
+    discovered = helpers["_available_training_datasets"]("mofe_post_pretrain", tmp_path)
+
+    assert discovered == [str(path)]
+
+
 def test_continue_sft_uses_completed_sft_weights_not_pretrain():
     helpers = _load_helpers()
 

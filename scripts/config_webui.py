@@ -20,6 +20,8 @@ import sys
 import subprocess
 import time
 
+from mofe_ui import validate_expert_bank, write_run_manifest
+
 # ═══════════════════════════════════════════════════════════════
 # Page config
 # ═══════════════════════════════════════════════════════════════
@@ -58,6 +60,10 @@ def _radio(*args, **kwargs):
 
 def _text_input(*args, **kwargs):
     return _state_aware_widget(st.text_input, "value", *args, **kwargs)
+
+
+def _text_area(*args, **kwargs):
+    return _state_aware_widget(st.text_area, "value", *args, **kwargs)
 
 
 def _packing_preprocess_workers(value=None, *, platform_name=None, cpu_count=None):
@@ -714,16 +720,40 @@ def build_config_dict() -> dict:
             "attnres_block_size", max(1, math.ceil(2 * d["num_hidden_layers"] / 8))
         )
 
-    # MoE
+    # MoE. The dedicated MoFE trainer is always sparse even if the generic
+    # architecture checkbox was previously off in session state.
+    mofe_training = st.session_state.get("train_type") == "mofe_post_pretrain"
+    if mofe_training:
+        d["use_moe"] = True
+        d["model_architecture"] = "standard"
     if d["use_moe"]:
-        d["num_experts"] = st.session_state.get("num_experts", 4)
-        d["num_experts_per_tok"] = st.session_state.get("num_experts_per_tok", 1)
-        d["moe_intermediate_size"] = st.session_state.get(
-            "moe_intermediate_size",
-            compute_intermediate_size(h),
+        d["num_experts"] = st.session_state.get(
+            "mofe_num_experts" if mofe_training else "num_experts", 16 if mofe_training else 4
+        )
+        d["num_experts_per_tok"] = st.session_state.get(
+            "mofe_top_k" if mofe_training else "num_experts_per_tok", 2 if mofe_training else 1
+        )
+        d["moe_intermediate_size"] = (
+            d["intermediate_size"] if mofe_training else st.session_state.get(
+                "moe_intermediate_size", compute_intermediate_size(h)
+            )
         )
         d["norm_topk_prob"] = st.session_state.get("norm_topk_prob", True)
-        d["router_aux_loss_coef"] = st.session_state.get("router_aux_loss_coef", 5e-4)
+        d["router_aux_loss_coef"] = st.session_state.get(
+            "mofe_balance_loss_coef" if mofe_training else "router_aux_loss_coef", 5e-4
+        )
+        d["router_type"] = st.session_state.get(
+            "mofe_router_type" if mofe_training else "router_type", "attention" if mofe_training else "linear"
+        )
+        d["router_temperature"] = st.session_state.get(
+            "mofe_router_temperature" if mofe_training else "router_temperature", 1.0
+        )
+        d["router_z_loss_coef"] = st.session_state.get(
+            "mofe_z_loss_coef" if mofe_training else "router_z_loss_coef", 1e-3 if mofe_training else 0.0
+        )
+        d["moe_expert_mode"] = "frozen" if mofe_training else st.session_state.get(
+            "moe_expert_mode", "trainable"
+        )
 
     return d
 
@@ -761,6 +791,10 @@ def gen_python_code(cfg: dict) -> str:
         params.append(("num_experts_per_tok", cfg["num_experts_per_tok"]))
         params.append(("norm_topk_prob", str(cfg["norm_topk_prob"])))
         params.append(("router_aux_loss_coef", f'{cfg["router_aux_loss_coef"]}'))
+        params.append(("router_type", f'"{cfg.get("router_type", "linear")}"'))
+        params.append(("router_temperature", cfg.get("router_temperature", 1.0)))
+        params.append(("router_z_loss_coef", cfg.get("router_z_loss_coef", 0.0)))
+        params.append(("moe_expert_mode", f'"{cfg.get("moe_expert_mode", "trainable")}"'))
     else:
         params.append(("use_moe", "False"))
 
@@ -863,7 +897,8 @@ def gen_config_json(cfg: dict) -> str:
 
     if cfg.get("use_moe"):
         for k in ["num_experts", "num_experts_per_tok", "moe_intermediate_size",
-                   "norm_topk_prob", "router_aux_loss_coef"]:
+                  "norm_topk_prob", "router_aux_loss_coef", "router_type",
+                  "router_temperature", "router_z_loss_coef", "moe_expert_mode"]:
             out[k] = cfg.get(k)
 
     if cfg.get("model_architecture") == "linear":
@@ -957,6 +992,10 @@ def load_config_to_session(config_dict: dict):
         )
         st.session_state.norm_topk_prob = config_dict.get("norm_topk_prob", True)
         st.session_state.router_aux_loss_coef = config_dict.get("router_aux_loss_coef", 5e-4)
+        st.session_state.router_type = config_dict.get("router_type", "linear")
+        st.session_state.router_temperature = config_dict.get("router_temperature", 1.0)
+        st.session_state.router_z_loss_coef = config_dict.get("router_z_loss_coef", 0.0)
+        st.session_state.moe_expert_mode = config_dict.get("moe_expert_mode", "trainable")
 
     # Linear arch
     if arch == "linear":
@@ -1308,6 +1347,7 @@ _DEFAULT_WEIGHT_PREFIX = {
     "grpo": "grpo",
     "agent": "agent",
     "distillation": "full_dist",
+    "mofe_post_pretrain": "mofe_post_pretrain",
 }
 
 _DEFAULT_EPOCHS = {
@@ -1319,6 +1359,7 @@ _DEFAULT_EPOCHS = {
     "grpo": 1,
     "agent": 1,
     "distillation": 6,
+    "mofe_post_pretrain": 1,
 }
 
 _DEFAULT_LEARNING_RATES = {
@@ -1330,6 +1371,7 @@ _DEFAULT_LEARNING_RATES = {
     "grpo": 3e-7,
     "agent": 3e-7,
     "distillation": 5e-6,
+    "mofe_post_pretrain": 1e-4,
 }
 
 _DATASET_KINDS_BY_TRAIN_TYPE = {
@@ -1341,6 +1383,7 @@ _DATASET_KINDS_BY_TRAIN_TYPE = {
     "grpo": {"rlaif"},
     "agent": {"agent"},
     "distillation": {"sft"},
+    "mofe_post_pretrain": {"pretrain"},
 }
 
 _DEFAULT_DATASET_NAMES = {
@@ -1352,6 +1395,7 @@ _DEFAULT_DATASET_NAMES = {
     "grpo": "rlaif.jsonl",
     "agent": "agent_rl.jsonl",
     "distillation": "sft_t2t_mini.jsonl",
+    "mofe_post_pretrain": "pretrain_t2t_mini.jsonl",
 }
 
 # 暂停退出码：训练进程识别到 .pause_request 标记后保存检查点并以 42 退出，
@@ -1419,6 +1463,8 @@ def _dataset_option_label(path):
 
 
 def _arch_tag():
+    if st.session_state.get("train_type") == "mofe_post_pretrain":
+        return f"_mofe_{st.session_state.get('mofe_router_type', 'attention')}"
     architecture = st.session_state.get("model_architecture", "standard")
     tag = {"standard": "", "linear": "_linear", "looped": "_looped"}.get(
         architecture, f"_{architecture}"
@@ -2325,25 +2371,40 @@ with st.sidebar:
     with st.expander("🚀 Training", expanded=(st.session_state.get("train_status") == "running")):
         train_type = _selectbox(
             "Training type",
-            ["pretrain", "full_sft", "lora", "dpo", "ppo", "grpo", "agent", "distillation"],
+            ["pretrain", "mofe_post_pretrain", "full_sft", "lora", "dpo", "ppo", "grpo", "agent", "distillation"],
             key="train_type",
         )
-        _dataset_options = _available_training_datasets(train_type)
+        _mofe_training = train_type == "mofe_post_pretrain"
         _dataset_key = f"data_path_{train_type}"
-        if _dataset_options:
-            if st.session_state.get(_dataset_key) not in _dataset_options:
-                st.session_state[_dataset_key] = _dataset_options[0]
-            _selectbox(
-                "Training dataset",
-                _dataset_options,
+        if _mofe_training:
+            _text_input(
+                "Post-pretraining dataset (.jsonl)",
+                value=st.session_state.get(
+                    _dataset_key,
+                    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dataset", "pretrain_t2t_mini.jsonl")),
+                ),
                 key=_dataset_key,
-                format_func=_dataset_option_label,
-                help="自动扫描 dataset/ 顶层 JSONL；文件名以 sft 开头的文件会被判定为 SFT 数据集。",
+                help="可填写 worktree 外部的绝对路径；每行格式为 {\"text\": \"...\"}。",
             )
-            _dataset_missing = False
+            _dataset_missing = not os.path.isfile(st.session_state.get(_dataset_key, ""))
+            if _dataset_missing:
+                st.error("MoFE post-pretraining JSONL does not exist.")
         else:
-            st.error(f"No compatible JSONL dataset found for {train_type} in dataset/.")
-            _dataset_missing = True
+            _dataset_options = _available_training_datasets(train_type)
+            if _dataset_options:
+                if st.session_state.get(_dataset_key) not in _dataset_options:
+                    st.session_state[_dataset_key] = _dataset_options[0]
+                _selectbox(
+                    "Training dataset",
+                    _dataset_options,
+                    key=_dataset_key,
+                    format_func=_dataset_option_label,
+                    help="自动扫描 dataset/ 顶层 JSONL；文件名以 sft 开头的文件会被判定为 SFT 数据集。",
+                )
+                _dataset_missing = False
+            else:
+                st.error(f"No compatible JSONL dataset found for {train_type} in dataset/.")
+                _dataset_missing = True
         config_file = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", "trainer", f"config_{train_type}.json"
         )
@@ -2380,7 +2441,10 @@ with st.sidebar:
             _continue_completed_sft = False
         _weight_files = _available_weight_files()
         _auto_label = "auto (newest matching base)"
-        if _continue_completed_sft:
+        if _mofe_training:
+            _base_options = ["managed by MoFE expert bank"]
+            _continue_without_weight = False
+        elif _continue_completed_sft:
             _completed_sft_weights = [path for path in _weight_files if _is_completed_sft_weight(path)]
             _base_options = [_auto_label] + _completed_sft_weights
             _continue_without_weight = not _completed_sft_weights
@@ -2389,22 +2453,127 @@ with st.sidebar:
         else:
             _base_options = ["none (from scratch)", _auto_label] + _weight_files
             _continue_without_weight = False
-        if "base_weight" not in st.session_state:
+        if _mofe_training:
+            st.session_state.base_weight = _base_options[0]
+        elif "base_weight" not in st.session_state:
             st.session_state.base_weight = "none" if train_type == "pretrain" else _auto_label
         elif st.session_state.base_weight not in _base_options:
             st.session_state.base_weight = _auto_label
         _selectbox(
-            "Base weights (--from_weight)",
+            "Base weights (--from_weight)" if not _mofe_training else "Base weight source",
             _base_options,
             key="base_weight",
-            disabled=st.session_state.get("from_resume", False),
+            disabled=st.session_state.get("from_resume", False) or _mofe_training,
             help="SFT 基于 pretrain；Continue SFT 和 LoRA/DPO/PPO/GRPO/Agent/蒸馏基于 full_sft 启动。"
                  "可选 out/ 与 checkpoints/ 下的 .pth（自动排除 _resume 检查点），"
                  "或 'auto' 自动选择最新匹配权重；'none' 从随机初始化开始。"
                  "选中 Resume 且检查点含完整状态时，基础权重会自动跳过。",
         )
+        _mofe_input_errors = []
+        if _mofe_training:
+            st.warning(
+                "MoFE 原论文报告：冻结 FFN 的 post-pretraining 可能造成层间失配并降低下游表现。"
+                "请保留无 post-pretraining 对照；首次实验建议 router_only。"
+            )
+            _text_input(
+                "Shared/base checkpoint",
+                value=st.session_state.get("mofe_base_model", "D:/weights/base.pth"),
+                key="mofe_base_model",
+                help="提供 embeddings、attention、norm 与 LM head 的已训练 dense Instinct 权重。",
+            )
+            _number_input(
+                "Frozen expert count (n)",
+                min_value=2, max_value=64,
+                value=int(st.session_state.get("mofe_num_experts", 16)),
+                step=1, key="mofe_num_experts",
+            )
+            _default_experts = "\n".join(
+                f"expert_{index:02d} | domain_{index:02d} | D:/weights/expert_{index:02d}.pth"
+                for index in range(16)
+            )
+            _text_area(
+                "Frozen expert bank — one `name | domain | path` per line",
+                value=st.session_state.get("mofe_expert_rows", _default_experts),
+                height=300,
+                key="mofe_expert_rows",
+                help="也允许每行只填写 checkpoint 路径。专家名称必须唯一。",
+            )
+            _mofe_cols = st.columns(2)
+            with _mofe_cols[0]:
+                _selectbox(
+                    "Router",
+                    ["attention", "linear"],
+                    index=["attention", "linear"].index(
+                        st.session_state.get("mofe_router_type", "attention")
+                    ),
+                    key="mofe_router_type",
+                )
+                _mofe_count = int(st.session_state.get("mofe_num_experts", 16))
+                if int(st.session_state.get("mofe_top_k", 2)) > _mofe_count:
+                    st.session_state.mofe_top_k = _mofe_count
+                _number_input(
+                    "Active experts per token (top-k)",
+                    min_value=1, max_value=_mofe_count,
+                    value=int(st.session_state.get("mofe_top_k", 2)),
+                    step=1, key="mofe_top_k",
+                )
+                _number_input(
+                    "Router temperature",
+                    min_value=0.05, max_value=10.0,
+                    value=float(st.session_state.get("mofe_router_temperature", 1.0)),
+                    step=0.05, key="mofe_router_temperature",
+                )
+            with _mofe_cols[1]:
+                _selectbox(
+                    "Train scope",
+                    ["router_only", "router_shared"],
+                    index=["router_only", "router_shared"].index(
+                        st.session_state.get("mofe_train_scope", "router_only")
+                    ),
+                    key="mofe_train_scope",
+                    help="router_only 最稳健；router_shared 同时更新共享注意力、嵌入、norm 和 LM head。",
+                )
+                _number_input(
+                    "Load-balance loss coefficient",
+                    min_value=0.0, max_value=0.1,
+                    value=float(st.session_state.get("mofe_balance_loss_coef", 5e-4)),
+                    format="%.1e", key="mofe_balance_loss_coef",
+                )
+                _number_input(
+                    "Router z-loss coefficient",
+                    min_value=0.0, max_value=0.1,
+                    value=float(st.session_state.get("mofe_z_loss_coef", 1e-3)),
+                    format="%.1e", key="mofe_z_loss_coef",
+                )
+            try:
+                _mofe_payload, _mofe_input_errors = validate_expert_bank(
+                    st.session_state.get("mofe_base_model", ""),
+                    st.session_state.get("mofe_expert_rows", ""),
+                    int(st.session_state.get("mofe_num_experts", 16)),
+                )
+            except ValueError as _mofe_error:
+                _mofe_payload, _mofe_input_errors = {}, [str(_mofe_error)]
+            if _mofe_input_errors:
+                st.error("Expert bank is not launchable:\n\n- " + "\n- ".join(_mofe_input_errors[:8]))
+                if len(_mofe_input_errors) > 8:
+                    st.caption(f"... and {len(_mofe_input_errors) - 8} more errors")
+            else:
+                st.success(f"Found shared base + {len(_mofe_payload['experts'])} frozen expert files.")
+                if st.button("Run topology preflight", key="btn_mofe_preflight"):
+                    _trainer_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "trainer"))
+                    _manifest = write_run_manifest(_trainer_dir, "preflight", _mofe_payload)
+                    _repo_root = os.path.dirname(_trainer_dir)
+                    _result = subprocess.run(
+                        [sys.executable, "-m", "model.mofe_checkpoint", "--manifest", _manifest,
+                         "--expected_layers", str(st.session_state.get("num_hidden_layers", 8))],
+                        cwd=_repo_root, capture_output=True, text=True,
+                    )
+                    st.session_state.mofe_preflight_result = (_result.returncode, _result.stdout.strip() or _result.stderr.strip())
+                if st.session_state.get("mofe_preflight_result"):
+                    _preflight_code, _preflight_text = st.session_state.mofe_preflight_result
+                    (st.success if _preflight_code == 0 else st.error)(_preflight_text)
         _bucket_auto_batch = (
-            train_type in ("pretrain", "full_sft", "lora", "distillation")
+            train_type in ("pretrain", "mofe_post_pretrain", "full_sft", "lora", "distillation")
             and st.session_state.get("sequence_packing", False)
             and st.session_state.get("sequence_packing_mode", "fixed") == "bucket"
         )
@@ -2426,7 +2595,7 @@ with st.sidebar:
             step=1, key=epochs_key,
             help="完整遍历训练数据的次数。续训时表示目标总 Epoch 数，而不是额外增加的轮数。",
         )
-        _packing_supported = train_type in ("pretrain", "full_sft", "lora", "distillation")
+        _packing_supported = train_type in ("pretrain", "mofe_post_pretrain", "full_sft", "lora", "distillation")
         _checkbox(
             "Sequence packing",
             value=st.session_state.get("sequence_packing", False),
@@ -2734,7 +2903,7 @@ with st.sidebar:
             "Start Training", width="stretch", key="btn_start_train",
             disabled=(
                 _compile_invalid or _fp8_invalid or _low_precision_invalid
-                or _dataset_missing or _continue_without_weight
+                or _dataset_missing or _continue_without_weight or bool(_mofe_input_errors)
             ),
         ):
             st.session_state.train_triggered = True
@@ -2864,6 +3033,27 @@ if st.session_state.get("train_triggered", False):
                     if from_weight != "none":
                         cmd.extend(["--from_student_weight", from_weight])
                         cmd.extend(["--from_teacher_weight", from_weight])
+                elif train_type == "mofe_post_pretrain":
+                    try:
+                        mofe_payload, mofe_errors = validate_expert_bank(
+                            st.session_state.get("mofe_base_model", ""),
+                            st.session_state.get("mofe_expert_rows", ""),
+                            int(st.session_state.get("mofe_num_experts", 16)),
+                        )
+                    except ValueError as mofe_error:
+                        mofe_payload, mofe_errors = {}, [str(mofe_error)]
+                    if mofe_errors:
+                        raise ValueError("Invalid MoFE expert bank: " + "; ".join(mofe_errors))
+                    expert_manifest = write_run_manifest(trainer_dir, save_prefix, mofe_payload)
+                    cmd.extend([
+                        "--expert_manifest", expert_manifest,
+                        "--train_scope", st.session_state.get("mofe_train_scope", "router_only"),
+                        "--num_experts_per_tok", str(st.session_state.get("mofe_top_k", 2)),
+                        "--router_type", st.session_state.get("mofe_router_type", "attention"),
+                        "--router_temperature", str(st.session_state.get("mofe_router_temperature", 1.0)),
+                        "--router_aux_loss_coef", str(st.session_state.get("mofe_balance_loss_coef", 5e-4)),
+                        "--router_z_loss_coef", str(st.session_state.get("mofe_z_loss_coef", 1e-3)),
+                    ])
                 else:
                     cmd.extend(["--from_weight", from_weight])
                 cmd.extend(["--batch_size", str(st.session_state.get("batch_size", 32))])
@@ -2872,7 +3062,7 @@ if st.session_state.get("train_triggered", False):
                 ))
                 cmd.extend(["--epochs", str(epochs)])
                 packing_enabled = bool(
-                    train_type in ("pretrain", "full_sft", "lora", "distillation")
+                    train_type in ("pretrain", "mofe_post_pretrain", "full_sft", "lora", "distillation")
                     and st.session_state.get("sequence_packing", False)
                 )
                 packing_mode = st.session_state.get("sequence_packing_mode", "fixed")
@@ -2968,6 +3158,14 @@ if st.session_state.get("train_triggered", False):
                         f"interval={st.session_state.get('profile_interval', 100)}, "
                         f"trace_steps={st.session_state.get('profile_active_steps', 5)})\n"
                     )
+                    if train_type == "mofe_post_pretrain":
+                        log_file.write(
+                            f"# MoFE: experts={st.session_state.get('mofe_num_experts', 16)}, "
+                            f"top_k={st.session_state.get('mofe_top_k', 2)}, "
+                            f"router={st.session_state.get('mofe_router_type', 'attention')}, "
+                            f"scope={st.session_state.get('mofe_train_scope', 'router_only')}, "
+                            f"manifest={expert_manifest}\n"
+                        )
                     log_file.flush()
                     st.session_state.train_log_path = log_path
                     st.session_state.train_proc = subprocess.Popen(

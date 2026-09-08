@@ -86,6 +86,20 @@ class InstinctConfig(PretrainedConfig):
         self.moe_intermediate_size = kwargs.get("moe_intermediate_size", self.intermediate_size)
         self.norm_topk_prob = kwargs.get("norm_topk_prob", True)
         self.router_aux_loss_coef = kwargs.get("router_aux_loss_coef", 5e-4)
+        self.moe_expert_mode = kwargs.get("moe_expert_mode", "trainable")
+        self.router_type = kwargs.get("router_type", "linear")
+        self.router_temperature = float(kwargs.get("router_temperature", 1.0))
+        self.router_z_loss_coef = float(kwargs.get("router_z_loss_coef", 0.0))
+        if self.num_experts < 1:
+            raise ValueError("num_experts must be >= 1")
+        if not 1 <= self.num_experts_per_tok <= self.num_experts:
+            raise ValueError("num_experts_per_tok must be in [1, num_experts]")
+        if self.moe_expert_mode not in {"trainable", "frozen"}:
+            raise ValueError("moe_expert_mode must be one of: trainable, frozen")
+        if self.router_type not in {"linear", "attention"}:
+            raise ValueError("router_type must be one of: linear, attention")
+        if self.router_temperature <= 0:
+            raise ValueError("router_temperature must be > 0")
         # Residual topology. ``standard`` keeps old configs/checkpoints exact.
         self.residual_type = kwargs.get("residual_type", "standard")
         if self.residual_type not in {"standard", "mhc", "attnres"}:
@@ -316,20 +330,63 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
+
+class AttentionExpertRouter(nn.Module):
+    """Token-wise expert self-attention router from Yuan 2.0-M32.
+
+    Each token is projected to expert-space Q/K/V vectors.  The Q-K outer
+    product lets every candidate expert condition its score on all other
+    experts before top-k selection.  The E x E matrix is deliberately kept
+    explicit: for the intended 16 experts it is small and faithfully matches
+    the published attention-router formulation.
+    """
+
+    def __init__(self, hidden_size: int, num_experts: int, temperature: float = 1.0):
+        super().__init__()
+        self.num_experts = num_experts
+        self.temperature = temperature
+        self.q_proj = nn.Linear(hidden_size, num_experts, bias=False)
+        self.k_proj = nn.Linear(hidden_size, num_experts, bias=False)
+        self.v_proj = nn.Linear(hidden_size, num_experts, bias=False)
+
+    def forward(self, hidden_states):
+        router_input = hidden_states.float()
+        # Router math stays in fp32 even when the main model is stored in
+        # bf16/fp16. Casting the parameters remains differentiable and avoids
+        # dtype mismatches outside autocast (notably CPU tests and preflight).
+        query = F.linear(router_input, self.q_proj.weight.float())
+        key = F.linear(router_input, self.k_proj.weight.float())
+        value = F.linear(router_input, self.v_proj.weight.float())
+        scale = math.sqrt(self.num_experts) * self.temperature
+        affinity = torch.softmax(query.unsqueeze(-1) * key.unsqueeze(-2) / scale, dim=-1)
+        return torch.matmul(affinity, value.unsqueeze(-1)).squeeze(-1)
+
 class MOEFeedForward(nn.Module):
     def __init__(self, config: InstinctConfig):
         super().__init__()
         self.config = config
-        self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
+        if config.router_type == "attention":
+            self.gate = AttentionExpertRouter(
+                config.hidden_size, config.num_experts, config.router_temperature
+            )
+        else:
+            self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
         self.experts = nn.ModuleList([FeedForward(config, intermediate_size=config.moe_intermediate_size) for _ in range(config.num_experts)])
         self.act_fn = ACT2FN[config.hidden_act]
+        if config.moe_expert_mode == "frozen":
+            for expert in self.experts:
+                expert.requires_grad_(False)
 
     def forward(self, x):
         batch_size, seq_len, hidden_dim = x.shape
         x_flat = x.view(-1, hidden_dim)
-        scores = F.softmax(self.gate(x_flat), dim=-1)
+        router_logits = self.gate(x_flat)
+        scores = F.softmax(router_logits, dim=-1)
         topk_weight, topk_idx = torch.topk(scores, k=self.config.num_experts_per_tok, dim=-1, sorted=False)
-        if self.config.norm_topk_prob: topk_weight = topk_weight / (topk_weight.sum(dim=-1, keepdim=True) + 1e-20)
+        # Renormalising a top-1 probability to exactly one destroys the task
+        # gradient to the router. Keep the selected probability in that case.
+        if self.config.norm_topk_prob and self.config.num_experts_per_tok > 1:
+            topk_weight = topk_weight / (topk_weight.sum(dim=-1, keepdim=True) + 1e-20)
         y = torch.zeros_like(x_flat)
         for i, expert in enumerate(self.experts):
             mask = (topk_idx == i)
@@ -337,13 +394,22 @@ class MOEFeedForward(nn.Module):
                 token_idx = mask.any(dim=-1).nonzero().flatten()
                 weight = topk_weight[mask].view(-1, 1)
                 y.index_add_(0, token_idx, (expert(x_flat[token_idx]) * weight).to(y.dtype))
-            elif self.training:
+            elif self.training and any(p.requires_grad for p in expert.parameters()):
                 y[0, 0] += 0 * sum(p.sum() for p in expert.parameters())
-        if self.training and self.config.router_aux_loss_coef > 0:
-            load = F.one_hot(topk_idx, self.config.num_experts).float().mean(0)
-            self.aux_loss = (load * scores.mean(0)).sum() * self.config.num_experts * self.config.router_aux_loss_coef
-        else:
-            self.aux_loss = scores.new_zeros(1).squeeze()
+        self.aux_loss = scores.new_zeros(())
+        if self.training:
+            if self.config.router_aux_loss_coef > 0:
+                importance = scores.mean(dim=0)
+                load = F.one_hot(topk_idx, self.config.num_experts).float().mean(dim=(0, 1))
+                balance = self.config.num_experts * torch.sum(importance * load)
+                self.aux_loss = self.aux_loss + balance * self.config.router_aux_loss_coef
+            if self.config.router_z_loss_coef > 0:
+                z_loss = torch.logsumexp(router_logits.float(), dim=-1).square().mean()
+                self.aux_loss = self.aux_loss + z_loss * self.config.router_z_loss_coef
+        self.routing_stats = {
+            "importance": scores.detach().mean(dim=0),
+            "load": F.one_hot(topk_idx, self.config.num_experts).float().detach().mean(dim=(0, 1)),
+        }
         return y.view(batch_size, seq_len, hidden_dim)
 
 class InstinctBlock(nn.Module):
