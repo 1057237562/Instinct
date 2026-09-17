@@ -23,6 +23,8 @@ def snapshot(state, model, trainer):
     args.update(dtype=state.get('activation_dtype', 'bfloat16'),
                 epochs=state.get(f'epochs_{trainer}', 2),
                 learning_rate=state.get(f'learning_rate_{trainer}', 5e-4 if trainer == 'pretrain' else 1e-5),
+                warmup_ratio=state.get(f'warmup_ratio_{trainer}', 0.0),
+                warmup_steps=0, min_lr_ratio=0.1,
                 data_path=state.get(f'data_path_{trainer}', ''),
                 hidden_size=model['hidden_size'], num_hidden_layers=model['num_hidden_layers'],
                 use_moe=model['use_moe'],
@@ -57,6 +59,10 @@ def render(st, model, training_active):
         st.json(plan, expanded=False)
         st.download_button('导出流水线配置', json.dumps(plan, ensure_ascii=False, indent=2),
                            file_name='training_pipeline.json', mime='application/json')
+        # Recover sessions already poisoned by an older persistence restore.
+        # Keep actual UploadedFile objects so reruns preserve selected files.
+        if st.session_state.get('pipeline_upload') is None:
+            st.session_state.pop('pipeline_upload', None)
         uploaded = st.file_uploader('导入已保存的流水线配置', type=['json'], key='pipeline_upload')
         if st.button('应用导入配置', disabled=uploaded is None):
             try:

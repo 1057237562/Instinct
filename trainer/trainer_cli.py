@@ -44,6 +44,18 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     parser.add_argument("--epochs", type=int, default=2, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=32, help="batch size")
     parser.add_argument("--learning_rate", type=float, default=5e-4, help="初始学习率")
+    parser.add_argument(
+        "--warmup_ratio", type=float, default=0.0,
+        help="线性 LR warmup 占总 micro-steps 的比例；0 保持旧版无 warmup 行为",
+    )
+    parser.add_argument(
+        "--warmup_steps", type=int, default=0,
+        help="显式 warmup micro-steps；大于 0 时优先于 --warmup_ratio",
+    )
+    parser.add_argument(
+        "--min_lr_ratio", type=float, default=0.1,
+        help="余弦衰减末端 LR / peak LR（默认 0.1）",
+    )
     parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "adafactor", "muon"], help="优化器类型（adamw / adafactor / muon）")
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
     parser.add_argument("--dtype", type=str, default="bfloat16", help="激活层计算精度（bfloat16/float16/fp32）")
@@ -104,21 +116,32 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
         help='Bucket token 统计和桶内 packing 的并行进程数（0=自动；Windows 为避免提交内存耗尽，最多使用 4）',
     )
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
-    parser.add_argument('--use_looped', default=0, type=int, choices=[0, 1], help="是否使用LoopUS循环架构（0=否，1=是）")
-    parser.add_argument('--model_architecture', default=None, choices=['standard', 'linear', 'looped'], help="模型主干（默认读取config；--use_looped 1仍可兼容切换LoopUS）")
+    parser.add_argument('--use_looped', default=0, type=int, choices=[0, 1], help="是否使用Instinct V2 latent recurrent-depth架构（0=否，1=是）")
+    parser.add_argument('--model_architecture', default=None, choices=['standard', 'linear', 'looped'], help="模型主干（默认读取config；--use_looped 1切换V2循环深度主干）")
+    parser.add_argument('--loop_iters', default=None, type=int, help="推理默认/训练目标平均递归次数 r-bar")
+    parser.add_argument('--recurrent_layers', default=None, type=int, help="共享 recurrent core 内的 Transformer 层数")
+    parser.add_argument('--prelude_layers', default=None, type=int, help="Prelude 独立层数")
+    parser.add_argument('--coda_layers', default=None, type=int, help="Coda 独立层数")
+    parser.add_argument('--mean_backprop_depth', default=None, type=int, help="仅对最后 k 次递归反向传播")
+    parser.add_argument('--recurrence_sampling', default=None, choices=['lognormal_poisson', 'fixed'], help="训练递归深度采样分布")
+    parser.add_argument('--recurrence_log_normal_sigma', default=None, type=float, help="log-normal Poisson 的 sigma")
+    parser.add_argument('--max_recurrence', default=None, type=int, help="随机递归深度安全上限")
+    parser.add_argument('--state_init_std', default=None, type=float, help="截断高斯 latent 初态标准差")
+    parser.add_argument('--embedding_scale', default=None, type=float, help="token embedding 输出缩放；默认 sqrt(hidden_size)")
+    parser.add_argument('--use_input_injection', default=None, type=int, choices=[0, 1], help="每轮通过拼接适配器重新注入 Prelude 表示")
     parser.add_argument('--residual_type', default=None, choices=['standard', 'mhc', 'attnres'], help="残差拓扑（默认读取config或standard）")
     parser.add_argument('--hc_mult', default=None, type=int, help="mHC并行残差流数量")
     parser.add_argument('--hc_sinkhorn_iters', default=None, type=int, help="mHC Sinkhorn-Knopp迭代次数")
     parser.add_argument('--hc_eps', default=None, type=float, help="mHC数值稳定项")
     parser.add_argument('--attnres_variant', default=None, choices=['full', 'block'], help="Attention Residuals变体")
     parser.add_argument('--attnres_block_size', default=None, type=int, help="Block AttnRes块大小（按Attention/MLP子层计）")
-    parser.add_argument('--depth_reward', default=-1.0, type=float, help="深度reward权重λ（>0时覆盖config，-1用config默认；可随训练退火）")
-    parser.add_argument('--distill_weight', default=-1.0, type=float, help="自蒸馏权重（>0时启用：浅层循环深度向最终深度输出分布学习；建议配合exit_in_training=0跑满循环）")
+    parser.add_argument('--depth_reward', default=-1.0, type=float, help="已弃用的LoopUS参数；Instinct V2忽略")
+    parser.add_argument('--distill_weight', default=-1.0, type=float, help="已弃用的LoopUS参数；Instinct V2忽略")
     parser.add_argument('--distill_temperature', default=2.0, type=float, help="自蒸馏温度T（软化教师/学生分布）")
     parser.add_argument('--teacher_stop_grad', default=1, type=int, choices=[0, 1], help="教师logits是否stop-grad（1=是，0=否）")
-    parser.add_argument('--depth_gain_reward', default=0.0, type=float, help="深度增益奖励权重（>0时启用：仅当更深步相对第1步基线降低LM损失时给予正奖励）")
-    parser.add_argument('--exit_in_training', default=-1, type=int, choices=[-1, 0, 1], help="训练中是否允许早退（-1用config默认；自蒸馏建议0=跑满循环）")
-    parser.add_argument('--n_supervision', default=-1, type=int, help="随机深度监督步数（-1用config默认；自蒸馏可提高以覆盖更多深度）")
+    parser.add_argument('--depth_gain_reward', default=0.0, type=float, help="已弃用的LoopUS参数；Instinct V2忽略")
+    parser.add_argument('--exit_in_training', default=-1, type=int, choices=[-1, 0, 1], help="已弃用的LoopUS参数；Instinct V2忽略")
+    parser.add_argument('--n_supervision', default=-1, type=int, help="已弃用的LoopUS参数；请使用--mean_backprop_depth")
     parser.add_argument('--early_exit', default=0, type=int, choices=[0, 1], help="启用Early Exit训练（0=否，1=是）")
     parser.add_argument('--from_weight', default='none', type=str, help="基于哪个权重训练，为none则从头开始")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
@@ -224,6 +247,20 @@ def init_wandb_logger(args, ckp_data=None, *, project=None, run_name=None):
     return wandb
 
 
+def resolve_warmup_steps(total_steps: int, args) -> int:
+    """Resolve explicit steps or a ratio into a valid global warmup length."""
+    explicit = int(getattr(args, "warmup_steps", 0))
+    ratio = float(getattr(args, "warmup_ratio", 0.0))
+    if explicit < 0:
+        raise ValueError("warmup_steps must be non-negative")
+    if not 0.0 <= ratio < 1.0:
+        raise ValueError("warmup_ratio must be in [0, 1)")
+    warmup = explicit if explicit > 0 else round(total_steps * ratio)
+    if warmup >= total_steps:
+        raise ValueError("warmup must be shorter than the complete training schedule")
+    return warmup
+
+
 def set_cosine_lr(optimizer, epoch, step, iters, args) -> None:
     """余弦退火学习率调度：按全局步数更新优化器各参数组的 lr。
 
@@ -234,7 +271,15 @@ def set_cosine_lr(optimizer, epoch, step, iters, args) -> None:
         iters: 本 epoch 总步数（含断点续训跳过的步数）
         args: argparse 解析出的命令行参数对象（需含 epochs / learning_rate）
     """
-    lr = get_lr(epoch * iters + step, args.epochs * iters, args.learning_rate)
+    total_steps = args.epochs * iters
+    warmup_steps = resolve_warmup_steps(total_steps, args)
+    lr = get_lr(
+        epoch * iters + step,
+        total_steps,
+        args.learning_rate,
+        warmup_steps=warmup_steps,
+        min_lr_ratio=float(getattr(args, "min_lr_ratio", 0.1)),
+    )
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 

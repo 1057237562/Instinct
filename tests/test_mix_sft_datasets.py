@@ -3,7 +3,7 @@
 import json
 import random
 
-from scripts.mix_sft_datasets import (
+from dataset.scripts.mix_sft_datasets import (
     iter_json_array,
     mix_datasets,
     replay_rows_for_fraction,

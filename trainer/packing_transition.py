@@ -42,7 +42,30 @@ def packing_data_config(args) -> dict:
         'batch_size': int(getattr(args, 'batch_size', 1)),
         'max_seq_len': int(getattr(args, 'max_seq_len', 0)),
         'data_path': os.path.normcase(os.path.abspath(getattr(args, 'data_path', ''))),
+        'lr_schedule': {
+            'epochs': int(getattr(args, 'epochs', 2)),
+            'learning_rate': float(getattr(args, 'learning_rate', 5e-4)),
+            'warmup_ratio': float(getattr(args, 'warmup_ratio', 0.0)),
+            'warmup_steps': int(getattr(args, 'warmup_steps', 0)),
+            'min_lr_ratio': float(getattr(args, 'min_lr_ratio', 0.1)),
+        },
     }
+
+
+def validate_lr_schedule_resume(args, ckp_data) -> None:
+    """Keep the global re-warm/re-decay curve unchanged across resume."""
+    if not ckp_data:
+        return
+    saved = (ckp_data.get('data_config') or {}).get('lr_schedule')
+    if saved is None:  # legacy checkpoints predate explicit schedule metadata
+        return
+    current = packing_data_config(args)['lr_schedule']
+    if saved != current:
+        raise ValueError(
+            'Cannot resume with a changed LR schedule: '
+            f'checkpoint={saved!r}, requested={current!r}. '
+            'Start a new training stage to change LR/warmup/epochs.'
+        )
 
 
 def validate_packing_resume(args, ckp_data) -> bool:
@@ -138,6 +161,7 @@ class SequencePackingPlan:
         self.packing_mode = str(getattr(args, 'sequence_packing_mode', 'fixed'))
         saved = (ckp_data or {}).get('data_config') or {}
         self.source = bool(saved.get('active_sequence_packing', saved.get('sequence_packing', False)))
+        validate_lr_schedule_resume(args, ckp_data)
         self.transition = validate_packing_resume(args, ckp_data)
         self.start_epoch = int((ckp_data or {}).get('epoch', 0))
         self.intra_epoch = self.transition and not self.source and self.target

@@ -2,7 +2,7 @@
 
 import orjson
 
-from scripts.collect_arxiv_pretrain import (
+from dataset.scripts.collect_arxiv_pretrain import (
     classify_license,
     make_output_record,
     quota_end,

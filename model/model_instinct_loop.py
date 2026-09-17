@@ -1,20 +1,25 @@
-"""
-循环深度（Looped Depth / LoopUS）变体:共享块的循环 Transformer。
+"""Instinct V2 latent recurrent-depth Transformer.
 
-与主线 model/model_instinct.py（Dense 逐层堆叠,每层独立权重）不同,本文件实现
-「Prelude → 共享 Loop Block ×N → Coda」架构:主体层权重被同一个 InstinctBlock
-循环复用 loop_iters 次,在固定参数量下增加有效深度（total_effective_layers =
-prelude_layers + loop_iters + coda_layers）。每次循环注入可学习的 loop-position
-embedding,并按 use_input_injection 叠加冻结的 prelude 输出（Yang et al. 2024 的
-input injection 技巧）,保证循环稳定性;配合 Early Exit 可在推理时按 token 动态
-决定实际计算深度,控制推理成本。
+This backbone follows Geiping et al., *Scaling up Test-Time Compute with Latent
+Reasoning* (arXiv:2502.05171):
 
-本文件自包含:定义了独立的 InstinctConfig / InstinctLoopModel / InstinctForCausalLM,
-对外接口与 Dense 主线完全一致（训练脚本通过 --use_looped 1 直接切换）。
+    tokens -> Prelude -> [state || embedded input] adapter
+           -> shared multi-layer recurrent core x r -> Coda -> LM head
+
+The recurrent state starts from truncated Gaussian noise.  During training one
+depth is sampled for the complete micro-batch from a log-normal Poisson
+distribution and only the final ``mean_backprop_depth`` recurrences retain an
+autograd graph.  At inference ``num_steps`` directly scales latent compute.
+
+The public Instinct config/model/generation interfaces stay compatible with the
+other backbones so all trainers can select this implementation with
+``--use_looped 1`` or ``model_architecture=looped``.
 """
 import math
+import warnings
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch import nn
 from transformers.activations import ACT2FN
 from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
@@ -30,12 +35,7 @@ from model.model_instinct import AttentionResidual, ManifoldHyperConnection, Man
 # Instinct Loop Config
 # ═══════════════════════════════════════════════════════════════
 class InstinctConfig(PretrainedConfig):
-    """循环深度（LoopUS）变体配置类:在 Dense 配置基础上新增循环深度专属字段:
-    - loop_iters:共享块循环次数（即循环段的有效深度）
-    - prelude_layers / coda_layers:循环前后各独享的块数量
-    - use_input_injection:是否每轮循环注入冻结的 prelude 输出
-    - tie_word_embeddings:是否绑定 embedding 与 lm_head 权重
-    """
+    """Configuration for the Instinct V2 recurrent-depth backbone."""
     model_type = "instinct"
     def __init__(self, hidden_size: int = 768, num_hidden_layers: int = 8, use_moe: bool = False, **kwargs):
         """初始化配置:全部可选字段经 kwargs 传入。"""
@@ -46,6 +46,7 @@ class InstinctConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.use_moe = use_moe
         self.model_architecture = kwargs.get("model_architecture", "looped")
+        self.recurrent_architecture_version = 2
         self.dropout = kwargs.get("dropout", 0.0)
         self.vocab_size = kwargs.get("vocab_size", 6400)
         self.bos_token_id = kwargs.get("bos_token_id", 1)
@@ -69,7 +70,9 @@ class InstinctConfig(PretrainedConfig):
         self.intermediate_size = kwargs.get("intermediate_size", math.ceil(hidden_size * math.pi / 64) * 64)
         self.max_position_embeddings = kwargs.get("max_position_embeddings", 32768)
         self.rms_norm_eps = kwargs.get("rms_norm_eps", 1e-6)
-        self.initializer_range = kwargs.get("initializer_range", 0.02)
+        self.initializer_range = kwargs.get(
+            "initializer_range", math.sqrt(2.0 / (5.0 * hidden_size))
+        )
         self.rope_theta = kwargs.get("rope_theta", 1e6)
         self.tie_word_embeddings = kwargs.get("tie_word_embeddings", True)
         self.inference_rope_scaling = kwargs.get("inference_rope_scaling", False)
@@ -100,13 +103,60 @@ class InstinctConfig(PretrainedConfig):
         self.attnres_variant = kwargs.get("attnres_variant", "block")
         if self.attnres_variant not in {"full", "block"}:
             raise ValueError("attnres_variant must be one of: full, block")
-        # Loop Transformer configs
-        self.loop_iters = kwargs.get("loop_iters", 8)
-        self.prelude_layers = kwargs.get("prelude_layers", 1)
-        self.coda_layers = kwargs.get("coda_layers", 1)
-        self.use_input_injection = kwargs.get("use_input_injection", True)
+        # Latent recurrent-depth settings.  ``loop_iters`` remains the public
+        # compatibility alias for the paper's mean recurrence r-bar.
+        default_side = 2 if num_hidden_layers >= 8 else 1
+        self.prelude_layers = int(kwargs.get("prelude_layers", default_side))
+        self.coda_layers = int(kwargs.get("coda_layers", default_side))
+        default_recurrent = max(
+            1, num_hidden_layers - self.prelude_layers - self.coda_layers
+        )
+        self.recurrent_layers = int(kwargs.get(
+            "recurrent_layers",
+            kwargs.get("recurrent_block_layers", default_recurrent),
+        ))
+        self.loop_iters = int(kwargs.get(
+            "loop_iters", kwargs.get("mean_recurrence", 8)
+        ))
+        self.mean_recurrence = self.loop_iters
+        self.mean_backprop_depth = int(kwargs.get(
+            "mean_backprop_depth", min(4, self.loop_iters)
+        ))
+        self.recurrence_sampling = kwargs.get(
+            "recurrence_sampling", "lognormal_poisson"
+        )
+        self.recurrence_log_normal_sigma = float(kwargs.get(
+            "recurrence_log_normal_sigma", 1.0
+        ))
+        self.max_recurrence = int(kwargs.get(
+            "max_recurrence", max(self.loop_iters, 4 * self.loop_iters)
+        ))
+        self.state_init_std = float(kwargs.get(
+            "state_init_std", math.sqrt(2.0 / 5.0)
+        ))
+        self.embedding_scale = float(kwargs.get(
+            "embedding_scale", math.sqrt(hidden_size)
+        ))
+        self.use_input_injection = bool(kwargs.get("use_input_injection", True))
+        # Huginn uses learnable Q/K biases and no per-head QK normalization.
+        self.qk_bias = bool(kwargs.get("qk_bias", True))
+        self.qk_norm = bool(kwargs.get("qk_norm", False))
+        if min(self.prelude_layers, self.coda_layers) < 0:
+            raise ValueError("prelude_layers and coda_layers must be >= 0")
+        if self.recurrent_layers < 1 or self.loop_iters < 1:
+            raise ValueError("recurrent_layers and loop_iters must be >= 1")
+        if not 1 <= self.mean_backprop_depth <= self.max_recurrence:
+            raise ValueError("mean_backprop_depth must be in [1, max_recurrence]")
+        if self.max_recurrence < self.loop_iters:
+            raise ValueError("max_recurrence must be >= loop_iters")
+        if self.recurrence_sampling not in {"lognormal_poisson", "fixed"}:
+            raise ValueError("recurrence_sampling must be lognormal_poisson or fixed")
+        if self.recurrence_log_normal_sigma < 0 or self.state_init_std < 0:
+            raise ValueError("recurrence sigma and state_init_std must be non-negative")
         default_block_size = max(1, math.ceil(2 * (
-            self.prelude_layers + self.loop_iters + self.coda_layers
+            self.prelude_layers
+            + self.loop_iters * self.recurrent_layers
+            + self.coda_layers
         ) / 8))
         self.attnres_block_size = int(kwargs.get("attnres_block_size", default_block_size))
         if self.attnres_block_size < 1:
@@ -132,6 +182,8 @@ class RMSNorm(torch.nn.Module):
 
     def forward(self, x):
         """前向:归一化后乘权重,并恢复输入 dtype。"""
+        if not self.training and getattr(self, '_inference_norm', None) is not None:
+            return self._inference_norm(x, self.weight, self.eps)
         return (self.weight * self.norm(x.float())).type_as(x)
 
 def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float = 1e6, rope_scaling: dict = None):
@@ -180,12 +232,20 @@ class Attention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = config.head_dim
         self.is_causal = True
-        self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=False)
-        self.k_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.q_proj = nn.Linear(
+            config.hidden_size,
+            config.num_attention_heads * self.head_dim,
+            bias=config.qk_bias,
+        )
+        self.k_proj = nn.Linear(
+            config.hidden_size,
+            self.num_key_value_heads * self.head_dim,
+            bias=config.qk_bias,
+        )
         self.v_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
-        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps) if config.qk_norm else nn.Identity()
+        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps) if config.qk_norm else nn.Identity()
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.dropout = config.dropout
@@ -209,7 +269,11 @@ class Attention(nn.Module):
             xk = torch.cat([k_past, xk], dim=1)
             xv = torch.cat([v_past, xv], dim=1)
         past_kv = make_cache(xk, xv, self.kv_cache_dtype) if use_cache else None
-        if (self.flash and (seq_len > 1)
+        if self.flash and not self.training and seq_len == 1:
+            output = flash_attention(xq, xk, xv, dropout_p=0.0,
+                                     is_causal=False, attention_mask=attention_mask)
+            output = output.reshape(bsz, seq_len, -1)
+        elif (self.flash and (seq_len > 1)
                 and (not self.is_causal or past_key_value is None)):
             # Keep packed attention fused; mode 1 checkpoints the FFN only.
             output = flash_attention(
@@ -242,7 +306,10 @@ class FeedForward(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        gate, up = self.gate_proj(x), self.up_proj(x)
+        if not self.training and getattr(self, '_inference_gate', None) is not None:
+            return self.down_proj(self._inference_gate(gate, up))
+        return self.down_proj(self.act_fn(gate) * up)
 
 class MOEFeedForward(nn.Module):
     def __init__(self, config: InstinctConfig):
@@ -275,12 +342,18 @@ class MOEFeedForward(nn.Module):
         return y.view(batch_size, seq_len, hidden_dim)
 
 class InstinctBlock(nn.Module):
-    """Standard transformer block (pre-norm with residual). Reused by loop model."""
+    """Transformer layer with the paper's four-norm sandwich layout."""
     def __init__(self, layer_id: int, config: InstinctConfig):
         super().__init__()
         self.self_attn = Attention(config)
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_residual_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.post_mlp_residual_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
         self.mlp = FeedForward(config) if not config.use_moe else MOEFeedForward(config)
         self.use_grad_checkpoint = getattr(config, "use_grad_checkpoint", 0)
         self.layer_id = layer_id
@@ -303,15 +376,21 @@ class InstinctBlock(nn.Module):
             self.input_layernorm(hidden_states), position_embeddings,
             past_key_value, use_cache, attention_mask
         )
-        hidden_states = hidden_states + residual
+        hidden_states = self.post_attention_residual_layernorm(
+            hidden_states + residual
+        )
         normed = self.post_attention_layernorm(hidden_states)
         if self.use_grad_checkpoint == 1 and self.training:
             ffn_out, aux = checkpoint_ffn(self.mlp, normed)
             if aux is not None:
                 self.mlp.aux_loss = aux
-            hidden_states = hidden_states + ffn_out
+            hidden_states = self.post_mlp_residual_layernorm(
+                hidden_states + ffn_out
+            )
         else:
-            hidden_states = hidden_states + self.mlp(normed)
+            hidden_states = self.post_mlp_residual_layernorm(
+                hidden_states + self.mlp(normed)
+            )
         return hidden_states, present_key_value
 
     def _run_mlp(self, hidden_states):
@@ -330,9 +409,11 @@ class InstinctBlock(nn.Module):
             past_key_value, use_cache, attention_mask
         )
         hidden_states = self.attn_hc.merge(hidden_states, attn_output, post, comb)
+        hidden_states = self.post_attention_residual_layernorm(hidden_states)
         post, comb, collapsed = self.ffn_hc(hidden_states)
         mlp_output = self._run_mlp(self.post_attention_layernorm(collapsed))
-        return self.ffn_hc.merge(hidden_states, mlp_output, post, comb), present_key_value
+        hidden_states = self.ffn_hc.merge(hidden_states, mlp_output, post, comb)
+        return self.post_mlp_residual_layernorm(hidden_states), present_key_value
 
     def forward_attnres_full(self, source_bank, position_embeddings, past_key_value=None,
                              use_cache=False, attention_mask=None, depth_index=None,
@@ -377,7 +458,7 @@ class InstinctBlock(nn.Module):
         mlp_output = self._run_mlp(self.post_attention_layernorm(hidden_states))
         return self._block_residual(source_bank, partial_count, mlp_output), present_key_value
 
-class InstinctLoopModel(nn.Module):
+class _LegacyInstinctLoopModel(nn.Module):
     """
     Loop Transformer model with prelude → shared loop block → coda architecture.
 
@@ -618,6 +699,390 @@ class InstinctLoopModel(nn.Module):
             return hidden_states, presents, aux_loss, intermediates
         return hidden_states, presents, aux_loss
 
+class InstinctLoopModel(nn.Module):
+    """Prelude -> recurrent latent core -> coda implementation for Instinct V2."""
+
+    def __init__(self, config: InstinctConfig):
+        super().__init__()
+        self.config = config
+        self.vocab_size = config.vocab_size
+        self.prelude_layers = config.prelude_layers
+        self.recurrent_layers = config.recurrent_layers
+        self.loop_iters = config.loop_iters
+        self.coda_layers = config.coda_layers
+        self.total_effective_layers = self.effective_layers(self.loop_iters)
+
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.dropout)
+        self.prelude = nn.ModuleList(
+            InstinctBlock(i, config) for i in range(self.prelude_layers)
+        )
+        self.input_adapter = (
+            nn.Linear(2 * config.hidden_size, config.hidden_size, bias=False)
+            if config.use_input_injection else nn.Identity()
+        )
+        self.recurrent_block = nn.ModuleList(
+            InstinctBlock(self.prelude_layers + i, config)
+            for i in range(self.recurrent_layers)
+        )
+        coda_offset = self.prelude_layers + self.recurrent_layers * self.loop_iters
+        self.coda = nn.ModuleList(
+            InstinctBlock(coda_offset + i, config)
+            for i in range(self.coda_layers)
+        )
+        self.recurrent_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.residual_type = config.residual_type
+        if self.residual_type == "mhc":
+            self.hc_head = ManifoldHyperHead(config)
+        elif self.residual_type == "attnres":
+            self.output_residual = AttentionResidual(config)
+
+        freqs_cos, freqs_sin = precompute_freqs_cis(
+            dim=config.head_dim,
+            end=config.max_position_embeddings,
+            rope_base=config.rope_theta,
+            rope_scaling=config.rope_scaling,
+        )
+        self.register_buffer("freqs_cos", freqs_cos, persistent=False)
+        self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+        self.last_num_steps = self.loop_iters
+        self.last_num_steps_no_grad = 0
+        self.last_num_steps_with_grad = self.loop_iters
+
+    def effective_layers(self, num_steps):
+        return (
+            self.prelude_layers
+            + int(num_steps) * self.recurrent_layers
+            + self.coda_layers
+        )
+
+    @property
+    def loop_block(self):
+        """Compatibility alias for code that inspected the former one-layer core."""
+        return self.recurrent_block[0]
+
+    @property
+    def layers(self):
+        """All materialized (unique-parameter) transformer layers."""
+        return list(self.prelude) + list(self.recurrent_block) + list(self.coda)
+
+    def _run_block(self, layer, hidden_states, position_embeddings, past_key_value,
+                   use_cache, attention_mask, depth_index):
+        if self.residual_type != "attnres":
+            return layer(
+                hidden_states,
+                position_embeddings,
+                past_key_value=past_key_value,
+                use_cache=use_cache,
+                attention_mask=attention_mask,
+            )
+        layer_forward = (
+            layer.forward_attnres_full
+            if self.config.attnres_variant == "full"
+            else layer.forward_attnres_block
+        )
+        return layer_forward(
+            hidden_states,
+            position_embeddings,
+            past_key_value=past_key_value,
+            use_cache=use_cache,
+            attention_mask=attention_mask,
+            depth_index=depth_index,
+        )
+
+    def _readout(self, hidden_states, completed_layers):
+        if self.residual_type == "mhc":
+            return self.hc_head(hidden_states)
+        if self.residual_type != "attnres":
+            return hidden_states
+        if self.config.attnres_variant == "block":
+            partial_count = (2 * completed_layers) % self.config.attnres_block_size
+            hidden_states = hidden_states[:-1] if partial_count == 0 else hidden_states
+        return self.output_residual(hidden_states)
+
+    def _sample_total_steps(self, device):
+        if self.config.recurrence_sampling == "fixed":
+            sampled = self.loop_iters
+        else:
+            sampled_tensor = torch.zeros(1, dtype=torch.long, device=device)
+            should_sample = not dist.is_initialized() or dist.get_rank() == 0
+            if should_sample:
+                sigma = self.config.recurrence_log_normal_sigma
+                mu = math.log(max(float(self.loop_iters), 1.0)) - 0.5 * sigma**2
+                rate = torch.empty(1, device=device).log_normal_(mean=mu, std=sigma)
+                sampled_tensor.copy_(torch.poisson(rate).to(torch.long) + 1)
+            if dist.is_initialized():
+                dist.broadcast(sampled_tensor, src=0)
+            sampled = int(sampled_tensor.item())
+        return max(1, min(sampled, self.config.max_recurrence))
+
+    def _resolve_steps(self, num_steps, device):
+        if num_steps is None:
+            total = self._sample_total_steps(device) if self.training else self.loop_iters
+            with_grad = (
+                min(self.config.mean_backprop_depth, total)
+                if self.training else total
+            )
+            return total - with_grad, with_grad
+        if isinstance(num_steps, torch.Tensor):
+            values = num_steps.flatten().tolist()
+        elif isinstance(num_steps, (tuple, list)):
+            values = list(num_steps)
+        else:
+            values = [num_steps]
+        if len(values) == 2:
+            no_grad, with_grad = int(values[0]), int(values[1])
+            if no_grad < 0 or with_grad < 0 or no_grad + with_grad < 1:
+                raise ValueError(
+                    "num_steps pair must contain non-negative values with positive sum"
+                )
+            return no_grad, with_grad
+        total = int(values[0])
+        if not 1 <= total <= self.config.max_recurrence:
+            raise ValueError(
+                f"num_steps must be in [1, {self.config.max_recurrence}], got {total}"
+            )
+        with_grad = (
+            min(self.config.mean_backprop_depth, total)
+            if self.training else total
+        )
+        return total - with_grad, with_grad
+
+    def _initialize_state(self, embedded_input):
+        if not self.config.use_input_injection:
+            return embedded_input.clone()
+        std = self.config.state_init_std
+        state = torch.empty_like(embedded_input)
+        if std == 0:
+            return state.zero_()
+        return nn.init.trunc_normal_(
+            state, mean=0.0, std=std, a=-3 * std, b=3 * std
+        )
+
+    def _inject_input(self, state, embedded_input, completed_layers):
+        if not self.config.use_input_injection:
+            return state
+        if self.residual_type != "attnres":
+            return self.input_adapter(torch.cat((state, embedded_input), dim=-1))
+        # Attention Residuals maintains a source bank.  Apply the paper adapter
+        # to its readout, then inject the delta into the bank.  The standard
+        # residual path above is the exact architecture from the paper.
+        readout = self._readout(state, completed_layers)
+        embedded_readout = self._readout(embedded_input, self.prelude_layers)
+        adapted = self.input_adapter(
+            torch.cat((readout, embedded_readout), dim=-1)
+        )
+        return state + (adapted - readout).unsqueeze(0)
+
+    def _core_iteration(self, state, embedded_input, position_embeddings,
+                        past_key_values, use_cache, attention_mask, kv_idx):
+        state = self._inject_input(state, embedded_input, kv_idx)
+        presents = []
+        aux_loss = state.new_zeros(1).squeeze()
+        for offset, layer in enumerate(self.recurrent_block):
+            state, present = self._run_block(
+                layer,
+                state,
+                position_embeddings,
+                past_key_values[offset],
+                use_cache,
+                attention_mask,
+                depth_index=kv_idx + offset,
+            )
+            presents.append(present)
+            if isinstance(layer.mlp, MOEFeedForward):
+                aux_loss = aux_loss + layer.mlp.aux_loss
+        return state, presents, aux_loss
+
+    def forward(self, input_ids, attention_mask=None, past_key_values=None,
+                use_cache=False, return_intermediate=False, layer_callback=None,
+                sequence_ids=None, position_ids=None, num_steps=None,
+                input_states=None, **kwargs):
+        _, seq_length = input_ids.shape
+        no_grad_steps, grad_steps = self._resolve_steps(num_steps, input_ids.device)
+        total_steps = no_grad_steps + grad_steps
+        self.last_num_steps = total_steps
+        self.last_num_steps_no_grad = no_grad_steps
+        self.last_num_steps_with_grad = grad_steps
+        expected_cache_slots = self.effective_layers(total_steps)
+
+        if hasattr(past_key_values, "layers"):
+            past_key_values = None
+        if past_key_values is None:
+            past_key_values = [None] * expected_cache_slots
+        elif len(past_key_values) != expected_cache_slots:
+            raise ValueError(
+                "KV cache depth does not match num_steps: "
+                f"expected {expected_cache_slots}, got {len(past_key_values)}"
+            )
+
+        start_pos = 0
+        for pkv in past_key_values:
+            if pkv is not None:
+                start_pos = pkv[0].shape[1]
+                break
+
+        hidden_states = (
+            self.dropout(self.embed_tokens(input_ids)) * self.config.embedding_scale
+        )
+        if self.residual_type == "mhc":
+            hidden_states = hidden_states.unsqueeze(2).expand(
+                -1, -1, self.config.hc_mult, -1
+            ).contiguous()
+        elif self.residual_type == "attnres":
+            if self.config.attnres_variant == "full":
+                hidden_states = hidden_states.unsqueeze(0)
+            else:
+                hidden_states = torch.stack(
+                    (hidden_states, torch.zeros_like(hidden_states)), dim=0
+                )
+
+        if self.freqs_cos[0, 0] == 0:
+            freqs_cos, freqs_sin = precompute_freqs_cis(
+                dim=self.config.head_dim,
+                end=self.config.max_position_embeddings,
+                rope_base=self.config.rope_theta,
+                rope_scaling=self.config.rope_scaling,
+            )
+            self.freqs_cos = freqs_cos.to(hidden_states.device)
+            self.freqs_sin = freqs_sin.to(hidden_states.device)
+
+        if sequence_ids is not None:
+            if any(pkv is not None for pkv in past_key_values):
+                raise ValueError("sequence_ids cannot be used together with a KV cache")
+            if position_ids is None:
+                position_ids = positions_from_sequence_ids(sequence_ids)
+            attention_mask = merge_packed_attention_mask(sequence_ids, attention_mask)
+        if position_ids is None:
+            position_embeddings = (
+                self.freqs_cos[start_pos:start_pos + seq_length],
+                self.freqs_sin[start_pos:start_pos + seq_length],
+            )
+        else:
+            position_embeddings = (
+                self.freqs_cos[position_ids], self.freqs_sin[position_ids]
+            )
+
+        presents, intermediates = [], []
+        aux_loss = hidden_states.new_zeros(1).squeeze()
+        kv_idx = 0
+
+        def record(state, completed_layers):
+            if layer_callback is None and not return_intermediate:
+                return
+            readout = self.norm(self._readout(state, completed_layers))
+            if layer_callback is not None:
+                layer_callback(completed_layers, readout)
+            if return_intermediate:
+                intermediates.append(readout)
+
+        for layer in self.prelude:
+            hidden_states, present = self._run_block(
+                layer,
+                hidden_states,
+                position_embeddings,
+                past_key_values[kv_idx],
+                use_cache,
+                attention_mask,
+                depth_index=kv_idx,
+            )
+            presents.append(present)
+            if isinstance(layer.mlp, MOEFeedForward):
+                aux_loss = aux_loss + layer.mlp.aux_loss
+            kv_idx += 1
+            record(hidden_states, kv_idx)
+
+        embedded_input = hidden_states
+        state = (
+            self._initialize_state(embedded_input)
+            if input_states is None else input_states.clone()
+        )
+
+        with torch.no_grad():
+            for _ in range(no_grad_steps):
+                state, iteration_presents, _ = self._core_iteration(
+                    state,
+                    embedded_input,
+                    position_embeddings,
+                    past_key_values[kv_idx:kv_idx + self.recurrent_layers],
+                    use_cache,
+                    attention_mask,
+                    kv_idx,
+                )
+                presents.extend(iteration_presents)
+                kv_idx += self.recurrent_layers
+                record(state, kv_idx)
+
+        for _ in range(grad_steps):
+            cache_slice = past_key_values[kv_idx:kv_idx + self.recurrent_layers]
+            can_checkpoint = (
+                self.config.use_grad_checkpoint == 2
+                and self.training
+                and not use_cache
+                and all(cache is None for cache in cache_slice)
+            )
+            if can_checkpoint:
+                depth_index = kv_idx
+
+                def checkpointed_iteration(current_state, recurrent_input):
+                    output, _, iteration_aux = self._core_iteration(
+                        current_state,
+                        recurrent_input,
+                        position_embeddings,
+                        [None] * self.recurrent_layers,
+                        False,
+                        attention_mask,
+                        depth_index,
+                    )
+                    return output, iteration_aux
+
+                state, iteration_aux = torch.utils.checkpoint.checkpoint(
+                    checkpointed_iteration,
+                    state,
+                    embedded_input,
+                    use_reentrant=False,
+                    preserve_rng_state=True,
+                )
+                iteration_presents = [None] * self.recurrent_layers
+            else:
+                state, iteration_presents, iteration_aux = self._core_iteration(
+                    state,
+                    embedded_input,
+                    position_embeddings,
+                    cache_slice,
+                    use_cache,
+                    attention_mask,
+                    kv_idx,
+                )
+            aux_loss = aux_loss + iteration_aux
+            presents.extend(iteration_presents)
+            kv_idx += self.recurrent_layers
+            record(state, kv_idx)
+
+        hidden_states = self.recurrent_norm(state)
+        for layer in self.coda:
+            hidden_states, present = self._run_block(
+                layer,
+                hidden_states,
+                position_embeddings,
+                past_key_values[kv_idx],
+                use_cache,
+                attention_mask,
+                depth_index=kv_idx,
+            )
+            presents.append(present)
+            if isinstance(layer.mlp, MOEFeedForward):
+                aux_loss = aux_loss + layer.mlp.aux_loss
+            kv_idx += 1
+            record(hidden_states, kv_idx)
+
+        hidden_states = self.norm(self._readout(hidden_states, kv_idx))
+        if return_intermediate:
+            return hidden_states, presents, aux_loss, intermediates
+        return hidden_states, presents, aux_loss
+
+
 def _compute_lm_loss(logits: torch.Tensor, labels):
     """Next-token cross-entropy over the last hidden state; None when labels are absent."""
     if labels is None:
@@ -630,13 +1095,19 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
     def _init_weights(self, module):
-        """Keep Instinct's initialization stable across Transformers releases."""
+        """Takase-style truncated initialization used by the recurrent model."""
         if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            std = self.config.initializer_range
+            nn.init.trunc_normal_(
+                module.weight, mean=0.0, std=std, a=-3 * std, b=3 * std
+            )
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            std = self.config.initializer_range
+            nn.init.trunc_normal_(
+                module.weight, mean=0.0, std=std, a=-3 * std, b=3 * std
+            )
             if module.padding_idx is not None:
                 nn.init.zeros_(module.weight[module.padding_idx])
         elif "RMSNorm" in module.__class__.__name__:
@@ -652,6 +1123,91 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         if self.config.tie_word_embeddings:
             self.model.embed_tokens.weight = self.lm_head.weight
         self.post_init()
+        effective_depth = (
+            self.config.prelude_layers
+            + self.config.loop_iters * self.config.recurrent_layers
+            + self.config.coda_layers
+        )
+        output_std = math.sqrt(
+            1.0 / (5.0 * self.config.hidden_size * effective_depth)
+        )
+        for name, module in self.named_modules():
+            if isinstance(module, nn.Linear) and name.endswith(
+                ("self_attn.o_proj", "mlp.down_proj")
+            ):
+                nn.init.trunc_normal_(
+                    module.weight,
+                    mean=0.0,
+                    std=output_std,
+                    a=-3 * output_std,
+                    b=3 * output_std,
+                )
+
+    def load_pretrained_weights(self, weights):
+        """Load V2 weights or migrate Dense/legacy-loop weights as initialization.
+
+        Dense layers are partitioned in order into Prelude, recurrent core and
+        Coda.  A former one-layer LoopUS core is copied into every layer of the
+        new recurrent block.  New adapter/sandwich-norm parameters retain their
+        paper initialization.
+        """
+        state = dict(weights)
+        mapped = {}
+        dense_prefix = "model.layers."
+        has_dense_layers = any(key.startswith(dense_prefix) for key in state)
+        has_legacy_loop = any(key.startswith("model.loop_block.") for key in state)
+        if has_dense_layers:
+            layer_targets = (
+                [f"model.prelude.{i}" for i in range(self.config.prelude_layers)]
+                + [f"model.recurrent_block.{i}" for i in range(self.config.recurrent_layers)]
+                + [f"model.coda.{i}" for i in range(self.config.coda_layers)]
+            )
+            for key, value in state.items():
+                if not key.startswith(dense_prefix):
+                    mapped[key] = value
+                    continue
+                suffix = key[len(dense_prefix):]
+                index_text, separator, parameter = suffix.partition(".")
+                if separator and index_text.isdigit():
+                    index = int(index_text)
+                    if index < len(layer_targets):
+                        mapped[f"{layer_targets[index]}.{parameter}"] = value
+        elif has_legacy_loop:
+            for key, value in state.items():
+                if key.startswith("model.loop_pos_embed."):
+                    continue
+                if key.startswith("model.loop_block."):
+                    suffix = key[len("model.loop_block."):]
+                    for index in range(self.config.recurrent_layers):
+                        mapped[f"model.recurrent_block.{index}.{suffix}"] = value
+                else:
+                    mapped[key] = value
+        else:
+            mapped = state
+
+        incompatible = self.load_state_dict(mapped, strict=False)
+        allowed_missing_fragments = (
+            "input_adapter", "recurrent_norm",
+            "post_attention_residual_layernorm", "post_mlp_residual_layernorm",
+            "self_attn.q_proj.bias", "self_attn.k_proj.bias",
+        )
+        significant_missing = [
+            key for key in incompatible.missing_keys
+            if not any(fragment in key for fragment in allowed_missing_fragments)
+        ]
+        significant_unexpected = [
+            key for key in incompatible.unexpected_keys
+            if "loop_pos_embed" not in key
+            and "self_attn.q_norm.weight" not in key
+            and "self_attn.k_norm.weight" not in key
+        ]
+        if significant_missing or significant_unexpected:
+            warnings.warn(
+                "Partial Instinct V2 weight migration; missing="
+                f"{significant_missing[:8]}, unexpected={significant_unexpected[:8]}",
+                RuntimeWarning,
+            )
+        return incompatible
 
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False,
                 logits_to_keep=0, labels=None, logit_lens=False, **kwargs):
@@ -673,6 +1229,7 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                 past_key_values=past_key_values, hidden_states=hidden_states
             )
             output.layer_logits = layer_logits  # list[Tensor]: one [bs, seq, vocab] per effective layer
+            output.recurrent_steps = self.model.last_num_steps
             return output
 
         hidden_states, past_key_values, aux_loss = self.model(
@@ -680,10 +1237,12 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         )
         logits = _compute_logits(hidden_states)
         loss = _compute_lm_loss(logits, labels)
-        return MoeCausalLMOutputWithPast(
+        output = MoeCausalLMOutputWithPast(
             loss=loss, aux_loss=aux_loss, logits=logits,
             past_key_values=past_key_values, hidden_states=hidden_states
         )
+        output.recurrent_steps = self.model.last_num_steps
+        return output
 
     @torch.inference_mode()
     def generate(self, inputs=None, attention_mask=None, max_new_tokens=8192, temperature=0.85,
@@ -691,35 +1250,47 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                  num_return_sequences=1, do_sample=True, repetition_penalty=1.0, **kwargs):
         input_ids = kwargs.pop("input_ids", inputs).repeat(num_return_sequences, 1)
         attention_mask = attention_mask.repeat(num_return_sequences, 1) if attention_mask is not None else None
+        initial_length = input_ids.shape[1]
+        input_storage = input_ids.new_empty((input_ids.shape[0], initial_length + max_new_tokens))
+        input_storage[:, :initial_length].copy_(input_ids)
+        input_ids = input_storage[:, :initial_length]
+        attention_storage = None
+        if attention_mask is not None:
+            attention_storage = attention_mask.new_ones((attention_mask.shape[0], initial_length + max_new_tokens))
+            attention_storage[:, :initial_length].copy_(attention_mask)
+            attention_mask = attention_storage[:, :initial_length]
         past_key_values = kwargs.pop("past_key_values", None)
+        from model.generation_stream import TokenChunkBuffer
+        chunk_size = int(kwargs.pop('stream_chunk_size', 16))
+        # Cache-returning callers need the cache aligned to the exact stop token.
+        if kwargs.get('return_kv'):
+            chunk_size = 1
+        chunks = TokenChunkBuffer(streamer, chunk_size, eos_token_id)
         finished = torch.zeros(input_ids.shape[0], dtype=torch.bool, device=input_ids.device)
         if streamer:
             streamer.put(input_ids.cpu())
-        for _ in range(max_new_tokens):
+        forward_kwargs = {'logits_to_keep': 1, **kwargs}
+        for step in range(max_new_tokens):
             past_len = past_key_values[0][0].shape[1] if past_key_values else 0
             outputs = self.forward(
                 input_ids[:, past_len:], attention_mask, past_key_values,
-                use_cache=use_cache, **kwargs
+                use_cache=use_cache, **forward_kwargs
             )
-            attention_mask = (
-                torch.cat([attention_mask, attention_mask.new_ones(attention_mask.shape[0], 1)], -1)
-                if attention_mask is not None else None
-            )
-            logits = outputs.logits[:, -1, :] / temperature
+            attention_mask = attention_storage[:, :initial_length + step + 1] if attention_storage is not None else None
+            logits = outputs.logits[:, -1, :]
+            if do_sample:
+                logits = logits / temperature
             if repetition_penalty != 1.0:
-                for i in range(input_ids.shape[0]):
-                    seen = torch.unique(input_ids[i])
-                    score = logits[i, seen]
-                    logits[i, seen] = torch.where(
-                        score > 0, score / repetition_penalty, score * repetition_penalty
-                    )
-            if top_k > 0:
-                logits[logits < torch.topk(logits, top_k)[0][..., -1, None]] = -float('inf')
-            if top_p < 1.0:
+                seen = torch.zeros_like(logits, dtype=torch.bool).scatter_(1, input_ids, True)
+                penalized = torch.where(logits > 0, logits / repetition_penalty, logits * repetition_penalty)
+                logits = torch.where(seen, penalized, logits)
+            if do_sample and top_k > 0:
+                logits.masked_fill_(logits < torch.topk(logits, top_k)[0][..., -1, None], -float('inf'))
+            if do_sample and top_p < 1.0:
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True)
                 mask = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1) > top_p
                 mask[..., 1:], mask[..., 0] = mask[..., :-1].clone(), 0
-                logits[mask.scatter(1, sorted_indices, mask)] = -float('inf')
+                logits.masked_fill_(mask.scatter(1, sorted_indices, mask), -float('inf'))
             next_token = (
                 torch.multinomial(torch.softmax(logits, dim=-1), num_samples=1)
                 if do_sample else torch.argmax(logits, dim=-1, keepdim=True)
@@ -730,14 +1301,15 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                     next_token.new_full((next_token.shape[0], 1), eos_token_id),
                     next_token
                 )
-            input_ids = torch.cat([input_ids, next_token], dim=-1)
+            input_storage[:, initial_length + step:initial_length + step + 1].copy_(next_token)
+            input_ids = input_storage[:, :initial_length + step + 1]
             past_key_values = outputs.past_key_values if use_cache else None
-            if streamer:
-                streamer.put(next_token.cpu())
             if eos_token_id is not None:
                 finished |= next_token.squeeze(-1).eq(eos_token_id)
-                if finished.all():
-                    break
+            if chunks.push(next_token, finished, final=step + 1 == max_new_tokens):
+                break
+        if chunks.overshoot:
+            input_ids = input_ids[:, :-chunks.overshoot]
         if streamer:
             streamer.end()
         if kwargs.get("return_kv"):

@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Instinct V1 152.4M sequential Dense Transformer architecture">
+  <title>Instinct V1 — Dense Transformer Architecture</title>
+  <style>
+    :root {
+      --bg: #07111f;
+      --panel: #0d1a2c;
+      --panel-2: #12243b;
+      --line: #294361;
+      --text: #edf6ff;
+      --muted: #92a6bf;
+      --blue: #3b82f6;
+      --cyan: #22d3ee;
+      --amber: #f59e0b;
+      --green: #34d399;
+      --max: 1160px;
+      color-scheme: dark;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 85% 0, rgba(37, 99, 235, .24), transparent 33rem),
+        radial-gradient(circle at 0 36%, rgba(8, 145, 178, .13), transparent 29rem),
+        var(--bg);
+      font: 15px/1.65 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: #8bd3ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+    .container { width: min(var(--max), calc(100% - 40px)); margin: 0 auto; }
+
+    nav {
+      position: sticky; top: 0; z-index: 20;
+      border-bottom: 1px solid rgba(60, 93, 130, .5);
+      background: rgba(7, 17, 31, .84); backdrop-filter: blur(16px);
+    }
+    .nav-inner { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; }
+    .brand-mark {
+      width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center;
+      background: linear-gradient(135deg, #0ea5e9, #2563eb); box-shadow: 0 0 22px rgba(59, 130, 246, .28);
+    }
+    .nav-links { display: flex; gap: 20px; color: var(--muted); font-size: 13px; }
+
+    .hero { padding: 90px 0 62px; text-align: center; }
+    .eyebrow {
+      display: inline-flex; gap: 8px; align-items: center; padding: 6px 11px;
+      border: 1px solid #355578; border-radius: 999px; background: rgba(13, 26, 44, .72);
+      color: #bed2e9; font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 12px var(--cyan); }
+    h1 { margin: 22px 0 18px; font-size: clamp(42px, 7vw, 76px); line-height: 1; letter-spacing: -.055em; }
+    .gradient {
+      color: transparent; background: linear-gradient(90deg, #f4fbff 10%, #63c5ff 52%, #5b8cff 90%);
+      background-clip: text; -webkit-background-clip: text;
+    }
+    .hero p { max-width: 760px; margin: 0 auto; color: var(--muted); font-size: clamp(16px, 2vw, 20px); }
+    .actions { margin-top: 28px; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }
+    .button {
+      display: inline-flex; align-items: center; min-height: 44px; padding: 0 17px;
+      border: 1px solid #385775; border-radius: 10px; color: var(--text); background: rgba(13, 26, 44, .76); font-weight: 750;
+    }
+    .button.primary { border-color: transparent; background: linear-gradient(135deg, #0284c7, #2563eb); }
+    .button:hover { text-decoration: none; transform: translateY(-1px); }
+
+    .stats { max-width: 900px; margin: 42px auto 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .stat { padding: 18px 12px; border: 1px solid var(--line); border-radius: 14px; background: rgba(13, 26, 44, .88); }
+    .stat strong { display: block; font: 800 clamp(20px, 3vw, 27px)/1.1 "Cascadia Code", monospace; }
+    .stat span { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+
+    section { padding: 66px 0; }
+    .section-head { margin-bottom: 30px; }
+    .section-head small { color: var(--cyan); font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+    .section-head h2 { margin: 8px 0; font-size: clamp(28px, 4vw, 44px); line-height: 1.12; letter-spacing: -.035em; }
+    .section-head p { margin: 0; max-width: 790px; color: var(--muted); }
+
+    .arch-card {
+      padding: 28px; border: 1px solid var(--line); border-radius: 22px;
+      background: linear-gradient(155deg, rgba(17, 34, 57, .94), rgba(8, 19, 35, .96));
+      box-shadow: 0 28px 80px rgba(0, 0, 0, .24);
+    }
+    .flow { max-width: 750px; margin: 0 auto; display: flex; flex-direction: column; align-items: center; }
+    .node {
+      width: min(100%, 530px); padding: 15px 18px; border: 1px solid #39638b; border-radius: 13px;
+      text-align: center; background: linear-gradient(135deg, #123e68, #176d9b);
+    }
+    .node strong { display: block; font: 760 15px "Cascadia Code", monospace; }
+    .node span { display: block; margin-top: 4px; color: #c4d7ea; font-size: 11px; }
+    .node.head { background: linear-gradient(135deg, #164e63, #0369a1); }
+    .arrow { height: 28px; display: grid; place-items: center; color: #6b86a8; font-size: 17px; }
+
+    .stack-shell {
+      width: min(100%, 680px); padding: 18px; border: 1px solid #4287c5; border-radius: 18px;
+      background: linear-gradient(145deg, rgba(12, 74, 110, .36), rgba(15, 30, 51, .88));
+      box-shadow: 0 0 34px rgba(56, 189, 248, .08);
+    }
+    .stack-title { text-align: center; color: #d9efff; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .layer-rail { margin: 14px 0; display: grid; grid-template-columns: repeat(20, 1fr); gap: 4px; align-items: end; }
+    .mini-layer {
+      height: 52px; border: 1px solid rgba(125, 211, 252, .42); border-radius: 5px 5px 2px 2px;
+      background: linear-gradient(180deg, #38bdf8, #2563eb); opacity: .78;
+      transition: transform .15s, opacity .15s;
+    }
+    .mini-layer:nth-child(5n) { height: 66px; opacity: 1; }
+    .mini-layer:hover { transform: translateY(-5px); opacity: 1; }
+    .layer-axis { display: flex; justify-content: space-between; color: var(--muted); font: 10px "Cascadia Code", monospace; }
+    .block-detail { margin-top: 16px; display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: stretch; }
+    .sublayer { padding: 13px; border: 1px solid #355574; border-radius: 11px; background: #0b192b; text-align: center; }
+    .sublayer strong { font: 750 13px "Cascadia Code", monospace; }
+    .sublayer span { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
+    .plus { display: grid; place-items: center; color: var(--amber); font-size: 19px; font-weight: 800; }
+
+    .legend { margin-top: 23px; display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; }
+    .chip { padding: 6px 10px; border: 1px solid #314b69; border-radius: 999px; color: #bacce0; background: #0a1728; font-size: 11px; }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+    .panel { padding: 22px; border: 1px solid var(--line); border-radius: 17px; background: rgba(13, 26, 44, .82); }
+    .panel h3 { margin: 0 0 8px; font-size: 18px; }
+    .panel p { margin: 0; color: var(--muted); }
+    .spec-list { margin: 15px 0 0; padding: 0; list-style: none; }
+    .spec-list li { display: flex; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid rgba(54, 80, 110, .55); }
+    .spec-list li:last-child { border-bottom: 0; }
+    .spec-list span:first-child { color: var(--muted); }
+    .spec-list span:last-child { text-align: right; font-family: "Cascadia Code", monospace; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 11px 10px; border-bottom: 1px solid #293f59; text-align: left; }
+    th { color: var(--muted); font-size: 10px; letter-spacing: .07em; text-transform: uppercase; }
+    td:last-child, th:last-child { text-align: right; font-family: "Cascadia Code", monospace; }
+
+    .compare { overflow-x: auto; }
+    .compare table { min-width: 680px; }
+    .v1 { color: #7dd3fc; font-weight: 800; }
+    .v2 { color: #d8b4fe; font-weight: 800; }
+    .notice { margin-top: 15px; padding: 12px 14px; border-left: 3px solid var(--amber); background: rgba(245, 158, 11, .07); color: #cedbea; font-size: 12px; }
+
+    pre {
+      margin: 0; padding: 20px; overflow: auto; border: 1px solid var(--line); border-radius: 15px;
+      background: #050d18; color: #c9ddf3; font: 12px/1.7 "Cascadia Code", monospace;
+    }
+    .key { color: #7dd3fc; }
+    .num { color: #93c5fd; }
+    .bool { color: #6ee7b7; }
+    footer { padding: 38px 0 54px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    .footer-inner { display: flex; justify-content: space-between; gap: 18px; flex-wrap: wrap; }
+
+    @media (max-width: 780px) {
+      .nav-links { display: none; }
+      .hero { padding-top: 68px; }
+      .stats { grid-template-columns: repeat(2, 1fr); }
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .arch-card { padding: 18px 12px; }
+      .block-detail { grid-template-columns: 1fr; }
+      .plus { min-height: 18px; }
+      .layer-rail { gap: 2px; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="container nav-inner">
+      <div class="brand"><span class="brand-mark">I¹</span><span>Instinct V1</span></div>
+      <div class="nav-links">
+        <a href="architecture.html">V2 架构</a>
+        <a href="architecture-v1-moe.html">V1 MoE</a>
+        <a href="#architecture">架构</a>
+        <a href="#specs">参数</a>
+        <a href="#compare">V1 / V2</a>
+        <a href="#config">配置</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="container">
+      <span class="eyebrow"><span class="dot"></span> Sequential dense Transformer</span>
+      <h1><span class="gradient">Instinct V1 · 152.4M</span></h1>
+      <p>传统 Decoder-Only Transformer：20 个独立参数层顺序执行，使用 8Q / 4KV Grouped-Query Attention、SwiGLU 和 RMSNorm。</p>
+      <div class="actions">
+        <a class="button primary" href="#architecture">查看顺序架构</a>
+        <a class="button" href="architecture-v1-moe.html">查看 V1 MoE</a>
+        <a class="button" href="architecture.html">切换到 Instinct V2</a>
+        <a class="button" href="https://github.com/1057237562/Instinct">GitHub ↗</a>
+      </div>
+      <div class="stats">
+        <div class="stat"><strong>152,406,528</strong><span>Parameters</span></div>
+        <div class="stat"><strong>20</strong><span>Independent layers</span></div>
+        <div class="stat"><strong>768</strong><span>Hidden size</span></div>
+        <div class="stat"><strong>8Q / 4KV</strong><span>GQA heads</span></div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="architecture">
+      <div class="container">
+        <div class="section-head">
+          <small>Architecture graph</small>
+          <h2>20 层独立权重顺序堆叠</h2>
+          <p>与 V2 不同，V1 没有 recurrent state、输入重注入或共享 Core。每个 Decoder Block 都有自己独立的 Attention、FFN 与 Norm 参数。</p>
+        </div>
+        <div class="arch-card">
+          <div class="flow">
+            <div class="node"><strong>Input Tokens</strong><span>token ids · vocab 6,400</span></div>
+            <div class="arrow">▼</div>
+            <div class="node"><strong>Tied Token Embedding</strong><span>6,400 × 768</span></div>
+            <div class="arrow">▼</div>
+            <div class="stack-shell">
+              <div class="stack-title">20 × independent decoder blocks</div>
+              <div class="layer-rail" aria-label="20 independent Transformer layers">
+                <i class="mini-layer" title="Layer 1"></i><i class="mini-layer" title="Layer 2"></i><i class="mini-layer" title="Layer 3"></i><i class="mini-layer" title="Layer 4"></i><i class="mini-layer" title="Layer 5"></i>
+                <i class="mini-layer" title="Layer 6"></i><i class="mini-layer" title="Layer 7"></i><i class="mini-layer" title="Layer 8"></i><i class="mini-layer" title="Layer 9"></i><i class="mini-layer" title="Layer 10"></i>
+                <i class="mini-layer" title="Layer 11"></i><i class="mini-layer" title="Layer 12"></i><i class="mini-layer" title="Layer 13"></i><i class="mini-layer" title="Layer 14"></i><i class="mini-layer" title="Layer 15"></i>
+                <i class="mini-layer" title="Layer 16"></i><i class="mini-layer" title="Layer 17"></i><i class="mini-layer" title="Layer 18"></i><i class="mini-layer" title="Layer 19"></i><i class="mini-layer" title="Layer 20"></i>
+              </div>
+              <div class="layer-axis"><span>Layer 1</span><span>Layer 20</span></div>
+              <div class="block-detail">
+                <div class="sublayer"><strong>RMSNorm → GQA → Residual</strong><span>8 query heads · 4 KV heads · head dim 96 · Q/K RMSNorm</span></div>
+                <div class="plus">＋</div>
+                <div class="sublayer"><strong>RMSNorm → SwiGLU → Residual</strong><span>768 → 2432 gate/up · 2432 → 768 down</span></div>
+              </div>
+            </div>
+            <div class="arrow">▼</div>
+            <div class="node head"><strong>Final RMSNorm</strong><span>RMSNorm(768)</span></div>
+            <div class="arrow">▼</div>
+            <div class="node head"><strong>Tied LM Head</strong><span>768 → vocab 6,400 · next-token logits</span></div>
+          </div>
+          <div class="legend">
+            <span class="chip">RoPE θ = 1,000,000</span>
+            <span class="chip">YaRN factor = 4</span>
+            <span class="chip">Original context = 4,096</span>
+            <span class="chip">Max position = 32,768</span>
+            <span class="chip">RMSNorm ε = 1e-6</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="specs">
+      <div class="container">
+        <div class="section-head">
+          <small>Layer configuration</small>
+          <h2>Instinct V1 层参数</h2>
+          <p>每个物理层均独立保存参数，因此参数量随层数线性增长；推理计算深度固定为 20。</p>
+        </div>
+        <div class="grid-3">
+          <article class="panel">
+            <h3>Grouped-Query Attention</h3>
+            <p>查询头多于 KV 头，降低 KV cache 占用。</p>
+            <ul class="spec-list">
+              <li><span>Q / KV heads</span><span>8 / 4</span></li>
+              <li><span>Head dimension</span><span>96</span></li>
+              <li><span>Q/K RMSNorm</span><span>2 × 96</span></li>
+              <li><span>Attention params/layer</span><span>1,769,664</span></li>
+            </ul>
+          </article>
+          <article class="panel">
+            <h3>SwiGLU FFN</h3>
+            <p>无 bias 的 gate、up 与 down 三个矩阵。</p>
+            <ul class="spec-list">
+              <li><span>Hidden size</span><span>768</span></li>
+              <li><span>Intermediate</span><span>2,432</span></li>
+              <li><span>Expansion ratio</span><span>3.167×</span></li>
+              <li><span>FFN params/layer</span><span>5,603,328</span></li>
+            </ul>
+          </article>
+          <article class="panel">
+            <h3>Sequential Depth</h3>
+            <p>所有 token 固定通过完整的 20 层网络。</p>
+            <ul class="spec-list">
+              <li><span>Physical layers</span><span>20</span></li>
+              <li><span>Effective depth</span><span>20</span></li>
+              <li><span>Weight sharing</span><span>none</span></li>
+              <li><span>Norm params/layer</span><span>1,536</span></li>
+            </ul>
+          </article>
+        </div>
+
+        <div class="grid-2" style="margin-top:18px;">
+          <article class="panel">
+            <h3>Parameter Breakdown</h3>
+            <table>
+              <thead><tr><th>Component</th><th>Parameters</th></tr></thead>
+              <tbody>
+                <tr><td>Tied token embedding</td><td>4,915,200</td></tr>
+                <tr><td>Per Transformer layer</td><td>7,374,528</td></tr>
+                <tr><td>20 Transformer layers</td><td>147,490,560</td></tr>
+                <tr><td>Final RMSNorm</td><td>768</td></tr>
+                <tr><td>Tied LM head</td><td>0 additional</td></tr>
+                <tr><td><strong>Total</strong></td><td><strong>152,406,528</strong></td></tr>
+              </tbody>
+            </table>
+          </article>
+          <article class="panel">
+            <h3>Per-Layer Matrix Shapes</h3>
+            <table>
+              <thead><tr><th>Projection</th><th>Shape</th></tr></thead>
+              <tbody>
+                <tr><td>Q projection</td><td>768 × 768</td></tr>
+                <tr><td>K / V projection</td><td>2 × (768 × 384)</td></tr>
+                <tr><td>Output projection</td><td>768 × 768</td></tr>
+                <tr><td>Gate / Up</td><td>2 × (768 × 2432)</td></tr>
+                <tr><td>Down projection</td><td>2432 × 768</td></tr>
+              </tbody>
+            </table>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="compare">
+      <div class="container">
+        <div class="section-head">
+          <small>Architecture comparison</small>
+          <h2>Instinct V1 与 V2</h2>
+          <p>V1 是固定深度、独立权重的标准 Transformer；V2 用共享 Core 把参数量与测试时计算深度解耦。</p>
+        </div>
+        <div class="panel compare">
+          <table>
+            <thead><tr><th>Property</th><th>Instinct V1</th><th>Instinct V2</th></tr></thead>
+            <tbody>
+              <tr><td>Architecture</td><td class="v1">Sequential Dense</td><td class="v2">Latent Recurrent Depth</td></tr>
+              <tr><td>Parameters</td><td>152,406,528</td><td>187,521,984</td></tr>
+              <tr><td>Hidden / FFN</td><td>768 / 2432</td><td>1248 / 4224</td></tr>
+              <tr><td>Attention</td><td>8Q / 4KV GQA</td><td>13Q / 13KV MHA</td></tr>
+              <tr><td>Physical layers</td><td>20 independent</td><td>2 + 4 shared + 2</td></tr>
+              <tr><td>Default effective depth</td><td>20</td><td>132</td></tr>
+              <tr><td>Test-time depth scaling</td><td>Fixed</td><td>Adjustable num_steps</td></tr>
+            </tbody>
+          </table>
+          <div class="notice">两套架构使用不同的 tensor shapes 与拓扑，权重文件不能直接互换。V1 权重迁移到 V2 只能作为分层初始化，而不是无损转换。</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="config">
+      <div class="container">
+        <div class="section-head">
+          <small>Exact config</small>
+          <h2>Instinct V1 配置摘要</h2>
+          <p>对应 WebUI 的 Instinct V1 preset。</p>
+        </div>
+        <pre><span class="key">"hidden_size"</span>: <span class="num">768</span>,
+<span class="key">"intermediate_size"</span>: <span class="num">2432</span>,
+<span class="key">"num_hidden_layers"</span>: <span class="num">20</span>,
+<span class="key">"num_attention_heads"</span>: <span class="num">8</span>,
+<span class="key">"num_key_value_heads"</span>: <span class="num">4</span>,
+<span class="key">"head_dim"</span>: <span class="num">96</span>,
+<span class="key">"model_architecture"</span>: "standard",
+<span class="key">"tie_word_embeddings"</span>: <span class="bool">true</span>,
+<span class="key">"rope_theta"</span>: <span class="num">1000000.0</span>,
+<span class="key">"inference_rope_scaling"</span>: <span class="bool">true</span>,
+<span class="key">"rope_scaling.factor"</span>: <span class="num">4.0</span>,
+<span class="key">"rope_scaling.original_max_position_embeddings"</span>: <span class="num">4096</span>,
+<span class="key">"rms_norm_eps"</span>: <span class="num">1e-6</span></pre>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container footer-inner">
+      <span>Instinct V1 · Sequential Dense Transformer</span>
+      <span>152,406,528 parameters · 20 layers · hidden 768</span>
+    </div>
+  </footer>
+</body>
+</html>

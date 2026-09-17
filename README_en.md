@@ -267,7 +267,7 @@ python eval_llm.py --benchmark livecodebench --weight full_sft \
 python eval_llm.py --benchmark livecodebench --weight full_sft \
   --lcb_release_version release_v6 --lcb_num_samples 10 \
   --temperature 0.2 --max_new_tokens 2048 \
-  --lcb_output out/livecodebench_release_v6.json \
+  --lcb_output eval/livecodebench_release_v6.json \
   --lcb_runner_path ../LiveCodeBench --lcb_evaluate
 ```
 

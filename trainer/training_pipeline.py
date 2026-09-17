@@ -56,6 +56,7 @@ def cache_environment(cache):
         target.mkdir(parents=True, exist_ok=True)
         env[key] = str(target)
     env['PYTHONUTF8'] = '1'
+    env['INSTINCT_MANAGED_DATA_CACHE'] = '1'
     return env
 
 

@@ -1,0 +1,1064 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Instinct — Code Tour</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #FFFFFF;
+    --fg: #111827;
+    --primary: #3B82F6;
+    --secondary: #10B981;
+    --accent: #F59E0B;
+    --muted: #F3F4F6;
+    --border: #E5E7EB;
+    --font: 'Outfit', sans-serif;
+  }
+
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: var(--font);
+    color: var(--fg);
+    background: var(--bg);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Container ── */
+  .container { max-width: 1280px; margin: 0 auto; padding: 0 24px; }
+
+  /* ── Typography ── */
+  h1, h2, h3, h4 { letter-spacing: -0.02em; }
+  .heading-xl { font-size: clamp(2.5rem, 6vw, 4.5rem); font-weight: 800; line-height: 1.05; }
+  .heading-lg { font-size: clamp(2rem, 4vw, 3.25rem); font-weight: 700; line-height: 1.1; }
+  .heading-md { font-size: clamp(1.25rem, 2.5vw, 1.75rem); font-weight: 700; }
+  .label-sm { font-size: 0.8125rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+
+  /* ── Buttons ── */
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; padding: 0 32px;
+    height: 56px; border-radius: 8px; font-weight: 600; font-size: 0.9375rem;
+    font-family: var(--font); text-decoration: none; cursor: pointer;
+    transition: all 0.2s ease; border: none; letter-spacing: -0.01em;
+  }
+  .btn-primary   { background: var(--primary); color: #fff; }
+  .btn-primary:hover { background: #2563EB; transform: scale(1.05); }
+  .btn-secondary { background: var(--muted); color: var(--fg); }
+  .btn-secondary:hover { background: #E5E7EB; transform: scale(1.05); }
+  .btn-outline {
+    background: transparent; color: var(--fg);
+    border: 4px solid var(--fg);
+  }
+  .btn-outline:hover { background: var(--fg); color: #fff; transform: scale(1.05); }
+  .btn-outline-light {
+    background: transparent; color: #fff;
+    border: 4px solid rgba(255,255,255,0.4);
+  }
+  .btn-outline-light:hover { border-color: #fff; transform: scale(1.05); }
+
+  /* ── Section block ── */
+  .section { padding: 100px 0; position: relative; overflow: hidden; }
+  .section-blue  { background: var(--primary); color: #fff; }
+  .section-white { background: var(--bg); }
+  .section-muted { background: var(--muted); }
+  .section-emerald { background: var(--secondary); color: #fff; }
+  .section-amber { background: var(--accent); color: #111827; }
+  .section-dark  { background: #111827; color: #fff; }
+
+  /* ── Decorative shapes ── */
+  .geo-circle {
+    position: absolute; border-radius: 50%; pointer-events: none;
+  }
+  .geo-square {
+    position: absolute; pointer-events: none;
+  }
+
+  /* ── Cards (Color Block) ── */
+  .card {
+    border-radius: 12px; padding: 32px; background: #fff;
+    transition: all 0.2s ease;
+  }
+  .card-tint-blue   { background: #EFF6FF; }
+  .card-tint-green  { background: #ECFDF5; }
+  .card-tint-amber  { background: #FFFBEB; }
+  .card-hover:hover { transform: scale(1.02); }
+  .card-dark { background: rgba(255,255,255,0.06); color: #fff; }
+
+  /* ── Icon circle ── */
+  .icon-circle {
+    display: flex; align-items: center; justify-content: center;
+    width: 56px; height: 56px; border-radius: 50%; flex-shrink: 0;
+    transition: transform 0.2s ease;
+  }
+  .icon-circle-blue  { background: #fff; color: var(--primary); }
+  .icon-circle-green { background: #fff; color: var(--secondary); }
+  .icon-circle-amber { background: #fff; color: var(--accent); }
+  .icon-circle-dark  { background: rgba(255,255,255,0.12); color: #fff; }
+
+  /* ── Pipeline step ── */
+  .pipeline-step {
+    display: flex; align-items: flex-start; gap: 24px; padding: 28px 32px;
+    border-radius: 12px; background: rgba(255,255,255,0.08);
+    transition: transform 0.2s ease;
+  }
+  .pipeline-step:hover { transform: scale(1.02); }
+  .step-number {
+    width: 52px; height: 52px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.5rem; font-weight: 800; flex-shrink: 0;
+  }
+
+  /* ── Stat number ── */
+  .stat-value {
+    font-size: clamp(2.5rem, 5vw, 4rem); font-weight: 800;
+    line-height: 1; letter-spacing: -0.03em;
+  }
+
+  /* ── Code block ── */
+  .code-block {
+    background: rgba(255,255,255,0.08); border-radius: 10px;
+    padding: 20px 24px; font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.875rem; line-height: 1.7; overflow-x: auto;
+  }
+
+  /* ── Grid ── */
+  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; }
+
+  /* ── Section header ── */
+  .section-header { text-align: center; margin-bottom: 64px; }
+  .section-header .label-sm { display: inline-block; margin-bottom: 12px; opacity: 0.7; }
+
+  /* ── Focus ── */
+  a:focus-visible, button:focus-visible, .btn:focus-visible {
+    outline: none; ring: 2px solid var(--primary); ring-offset: 2px;
+  }
+  .section-blue a:focus-visible, .section-dark a:focus-visible {
+    ring-color: #fff;
+  }
+
+  /* ── Tag ── */
+  .tag {
+    display: inline-block; padding: 4px 14px; border-radius: 6px;
+    font-size: 0.8125rem; font-weight: 600; letter-spacing: 0.04em;
+  }
+  .tag-blue  { background: var(--primary); color: #fff; }
+  .tag-green { background: var(--secondary); color: #fff; }
+
+  /* ── Responsive ── */
+  @media (max-width: 768px) {
+    .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+    .section { padding: 64px 0; }
+    .pipeline-step { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════ HERO ══════════════════════════════════════════ -->
+<section class="section section-blue" style="padding: 140px 0 120px;">
+  <!-- Decorative geometry -->
+  <div class="geo-circle" style="width:500px;height:500px;background:rgba(255,255,255,0.04);top:-120px;right:-80px;"></div>
+  <div class="geo-circle" style="width:340px;height:340px;background:rgba(255,255,255,0.05);bottom:-60px;left:-40px;"></div>
+  <div class="geo-square" style="width:180px;height:180px;background:rgba(255,255,255,0.04);border-radius:24px;top:80px;left:10%;transform:rotate(15deg);"></div>
+  <div class="geo-square" style="width:120px;height:120px;background:rgba(255,255,255,0.05);border-radius:20px;bottom:100px;right:12%;transform:rotate(-12deg);"></div>
+
+  <div class="container" style="position:relative;z-index:1;">
+    <span class="tag" style="background:rgba(255,255,255,0.15);color:#fff;margin-bottom:20px;display:inline-block;">CODE OVERVIEW</span>
+    <h1 class="heading-xl" style="margin-bottom:24px;">
+      Instinct<br>
+      <span style="opacity:0.7;font-weight:600;">Code Tour — ~64M LLM from Scratch</span>
+    </h1>
+    <p style="font-size:1.25rem;opacity:0.85;max-width:640px;margin-bottom:40px;line-height:1.65;">
+      Every algorithm in pure PyTorch — no <code>trl</code>, no <code>peft</code>, no high-level abstractions.
+      36 Python files across <code>model/</code>, <code>trainer/</code>, <code>dataset/</code> and <code>scripts/</code>,
+      each one readable, editable, reproducible.
+    </p>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;">
+      <a href="#structure" class="btn btn-outline-light">Explore Structure</a>
+      <a href="architecture.html" class="btn btn-outline-light">See Architecture</a>
+      <a href="https://github.com/1057237562/Instinct" class="btn" style="background:#fff;color:var(--primary);">View on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ PROJECT STRUCTURE ══════════════════════════════════════════ -->
+<section id="structure" class="section section-white">
+  <div class="geo-square" style="width:260px;height:260px;background:var(--muted);border-radius:32px;top:40px;right:-60px;transform:rotate(20deg);"></div>
+  <div class="geo-circle" style="width:180px;height:180px;background:rgba(59,130,246,0.05);bottom:20px;left:-40px;"></div>
+
+  <div class="container" style="position:relative;z-index:1;">
+    <div class="section-header">
+      <span class="label-sm" style="color:var(--primary);">Code Structure</span>
+      <h2 class="heading-lg">Where the Code Lives</h2>
+      <p style="color:#6B7280;font-size:1.0625rem;max-width:600px;margin:16px auto 0;">
+        Six entry points, one repo. Everything runs from the root — trainers, datasets and scripts included.
+      </p>
+    </div>
+
+    <!-- Directory tree -->
+    <div style="max-width:760px;margin:0 auto 48px;">
+      <div class="card card-hover">
+        <div class="code-block" style="background:#111827;color:#E5E7EB;">
+<span style="color:var(--secondary);">model/</span>       Config, Model, LoRA, Tokenizer <span style="color:#6B7280;">— 10 files</span>
+<span style="color:var(--secondary);">trainer/</span>     Pretrain, SFT, LoRA, DPO, PPO, GRPO, Agent RL, KD <span style="color:#6B7280;">— 8 trainers + 3 shared modules</span>
+<span style="color:var(--secondary);">dataset/</span>     lm_dataset.py <span style="color:#6B7280;">— 5 dataset classes + JSONL data files</span>
+<span style="color:var(--secondary);">scripts/</span>     API server, WebUI, model conversion, tool-call eval <span style="color:#6B7280;">— 6 files</span>
+<span style="color:var(--secondary);">eval_llm.py</span>  CLI interactive inference <span style="color:#6B7280;">(repo root)</span>
+<span style="color:var(--secondary);">run_linear.py / run_loop.py</span>   Model-variant launchers <span style="color:#6B7280;">(repo root)</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid-4">
+      <!-- model/ -->
+      <div class="card card-tint-blue card-hover">
+        <div class="icon-circle icon-circle-blue" style="margin-bottom:12px;">
+          <i data-lucide="box" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">model/</h3>
+        <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
+          <code>model_instinct.py</code> — InstinctConfig / InstinctForCausalLM / RMSNorm / RoPE / Attention / FFN / MoE.<br>
+          <code>model_instinct_loop.py</code> — LoopUS looped depth.<br>
+          <code>model_instinct_linear.py</code> — GatedDeltaNet.<br>
+          <code>model_lora.py</code> — LoRA.<br>
+          <code>flash_attn_4.py</code> · <code>kv_cache_quant.py</code> · <code>checkpointing.py</code>.<br>
+          <code>tokenizer.json</code> — BPE vocab 6,400.
+        </p>
+      </div>
+
+      <!-- trainer/ -->
+      <div class="card card-tint-green card-hover">
+        <div class="icon-circle icon-circle-green" style="margin-bottom:12px;">
+          <i data-lucide="play" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">trainer/</h3>
+        <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
+          <code>train_pretrain.py</code> · <code>train_full_sft.py</code> · <code>train_lora.py</code> · <code>train_dpo.py</code><br>
+          <code>train_ppo.py</code> · <code>train_grpo.py</code> · <code>train_agent.py</code> · <code>train_distillation.py</code> · <code>train_tokenizer.py</code><br>
+          Shared: <code>trainer_cli.py</code> · <code>trainer_utils.py</code> · <code>rollout_engine.py</code><br>
+          ⚠ Must run from repo root. Uses <code>__package__</code> import hack.
+        </p>
+      </div>
+
+      <!-- dataset/ -->
+      <div class="card card-tint-amber card-hover">
+        <div class="icon-circle icon-circle-amber" style="margin-bottom:12px;">
+          <i data-lucide="database" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">dataset/</h3>
+        <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
+          <code>lm_dataset.py</code> — PretrainDataset · SFTDataset · DPODataset · RLAIFDataset · AgentRLDataset.<br>
+          JSONL with OpenAI chat-format <code>{"conversations": [...]}</code> for SFT / RL / LoRA.
+        </p>
+      </div>
+
+      <!-- scripts/ -->
+      <div class="card card-tint-blue card-hover">
+        <div class="icon-circle icon-circle-blue" style="margin-bottom:12px;">
+          <i data-lucide="terminal" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">scripts/</h3>
+        <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
+          <code>serve_openai_api.py</code> — OpenAI-compatible API server (port 8998).<br>
+          <code>web_demo.py</code> — Streamlit chat UI.<br>
+          <code>convert_model.py</code> — torch ↔ transformers conversion.<br>
+          <code>eval_toolcall.py</code> — tool-call evaluation.<br>
+          <code>config_webui.py</code> — parameter explorer.<br>
+          <code>chat_api.py</code> — programmatic chat client.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ MODEL CODE ══════════════════════════════════════════ -->
+<section class="section section-muted">
+  <div class="geo-circle" style="width:280px;height:280px;background:rgba(16,185,129,0.06);top:60px;left:-80px;"></div>
+  <div class="geo-square" style="width:160px;height:160px;background:rgba(245,158,11,0.08);border-radius:24px;bottom:40px;right:-40px;transform:rotate(25deg);"></div>
+
+  <div class="container" style="position:relative;z-index:1;">
+    <div class="section-header">
+      <span class="label-sm" style="color:var(--secondary);">Model Internals</span>
+      <h2 class="heading-lg">The Model, Line by Line</h2>
+      <p style="color:#6B7280;font-size:1.0625rem;max-width:600px;margin:16px auto 0;">
+        Real excerpts from <code>model_instinct.py</code> — config, forward pass, routing and early exit.
+      </p>
+    </div>
+
+    <!-- C1: Config + Forward -->
+    <div class="grid-2">
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-blue" style="margin-bottom:12px;">
+          <i data-lucide="settings" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:8px;">Config in one class</h3>
+        <p style="color:#6B7280;line-height:1.65;margin-bottom:16px;">
+          All defaults live in a single <code>__init__</code> — no YAML, no config registry. Swap width, depth or MoE with one flag.
+        </p>
+        <div class="code-block" style="background:#111827;color:#E5E7EB;">
+<span style="color:var(--accent);">def</span> <span style="color:#93C5FD;">__init__</span>(self, hidden_size=<span style="color:#8B5CF6;">768</span>, num_hidden_layers=<span style="color:#8B5CF6;">8</span>, use_moe=<span style="color:#F87171;">False</span>, **kwargs):
+    <span style="color:var(--accent);">super</span>().__init__(**kwargs)
+    self.hidden_size = hidden_size
+    self.num_hidden_layers = num_hidden_layers
+    self.use_moe = use_moe
+    self.vocab_size = kwargs.get(<span style="color:var(--accent);">"vocab_size"</span>, <span style="color:#8B5CF6;">6400</span>)
+    self.max_position_embeddings = <span style="color:#8B5CF6;">32768</span>
+    self.rope_theta = <span style="color:#8B5CF6;">1e6</span>   <span style="color:#6B7280;"># RoPE base</span>
+    self.tie_word_embeddings = <span style="color:#F87171;">True</span>  <span style="color:#6B7280;"># shared LM head</span>
+        </div>
+      </div>
+
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-green" style="margin-bottom:12px;">
+          <i data-lucide="git-branch" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:8px;">Forward, layer by layer</h3>
+        <p style="color:#6B7280;line-height:1.65;margin-bottom:16px;">
+          The real loop — it also branches to <code>torch.utils.checkpoint</code> when
+          <code>use_grad_checkpoint==2</code>, accumulates MoE <code>aux_loss</code>, and fires
+          <code>exit_check_fn</code> for early exit.
+        </p>
+        <div class="code-block" style="background:#111827;color:#E5E7EB;">
+<span style="color:var(--accent);">for</span> layer, past_key_value <span style="color:var(--accent);">in</span> zip(self.layers, past_key_values):
+    <span style="color:var(--accent);">if</span> self.config.use_grad_checkpoint == <span style="color:#8B5CF6;">2</span> <span style="color:var(--accent);">and</span> self.training:
+        hidden_states, present = torch.utils.checkpoint.<span style="color:#93C5FD;">checkpoint</span>(
+            layer, hidden_states, position_embeddings, past_key_value,
+            use_cache, attention_mask, use_reentrant=<span style="color:#F87171;">False</span>)
+    <span style="color:var(--accent);">else</span>:
+        hidden_states, present = layer(hidden_states,
+            position_embeddings, past_key_value=past_key_value,
+            use_cache=use_cache, attention_mask=attention_mask)
+    presents.<span style="color:#93C5FD;">append</span>(present)
+        </div>
+      </div>
+    </div>
+
+    <!-- C2: InstinctConfig defaults -->
+    <h3 class="heading-md" style="text-align:center;margin:56px 0 24px;">InstinctConfig Defaults</h3>
+
+    <div class="grid-4">
+      <div style="text-align:center;">
+        <div class="stat-value" style="color:var(--primary);">8</div>
+        <div style="font-weight:600;margin-top:4px;">Layers</div>
+        <div style="font-size:0.8125rem;color:#6B7280;">num_hidden_layers</div>
+      </div>
+      <div style="text-align:center;">
+        <div class="stat-value" style="color:var(--secondary);">768</div>
+        <div style="font-weight:600;margin-top:4px;">Hidden Dim</div>
+        <div style="font-size:0.8125rem;color:#6B7280;">hidden_size</div>
+      </div>
+      <div style="text-align:center;">
+        <div class="stat-value" style="color:var(--accent);">6.4K</div>
+        <div style="font-weight:600;margin-top:4px;">Vocab</div>
+        <div style="font-size:0.8125rem;color:#6B7280;">vocab_size</div>
+      </div>
+      <div style="text-align:center;">
+        <div class="stat-value" style="color:#8B5CF6;">32K</div>
+        <div style="font-weight:600;margin-top:4px;">Max Pos</div>
+        <div style="font-size:0.8125rem;color:#6B7280;">max_position_embeddings</div>
+      </div>
+    </div>
+
+    <div class="grid-4" style="margin-top:40px;">
+      <div style="text-align:center;">
+        <div class="stat-value" style="color:var(--secondary);">8</div>
+        <div style="font-weight:600;margin-top:4px;">Q-Heads</div>
+        <div style="font-size:0.8125rem;color:#6B7280;">num_attention_heads</div>
+      </div>
+      <div style="text-align:center;">
+        <div class="stat-value" style="color:var(--accent);">4</div>
+        <div style="font-weight:600;margin-top:4px;">KV-Heads</div>
+        <div style="font-size:0.8125rem;color:#6B7280;">num_key_value_heads</div>
+      </div>
+      <div style="text-align:center;">
+        <div class="stat-value" style="color:#8B5CF6;">1e6</div>
+        <div style="font-weight:600;margin-top:4px;">RoPE θ</div>
+        <div style="font-size:0.8125rem;color:#6B7280;">rope_theta</div>
+      </div>
+      <div style="text-align:center;">
+        <div class="stat-value" style="color:var(--primary);">2,432</div>
+        <div style="font-weight:600;margin-top:4px;">FFN Intermediate</div>
+        <div style="font-size:0.8125rem;color:#6B7280;">ceil(dim·π/64)·64</div>
+      </div>
+    </div>
+
+    <div style="max-width:700px;margin:48px auto 0;">
+      <div class="card card-hover">
+        <pre style="font-family:'SF Mono','Fira Code',monospace;font-size:0.8125rem;line-height:1.8;color:var(--fg);overflow-x:auto;">
+
+<span style="color:var(--primary);">class</span> <span style="color:var(--secondary);">InstinctConfig</span>(PretrainedConfig):
+    model_type = <span style="color:var(--accent);">"instinct"</span>
+    hidden_size            = <span style="color:#8B5CF6;">768</span>
+    num_hidden_layers      = <span style="color:#8B5CF6;">8</span>
+    vocab_size             = <span style="color:#8B5CF6;">6400</span>
+    num_attention_heads    = <span style="color:#8B5CF6;">8</span>
+    num_key_value_heads    = <span style="color:#8B5CF6;">4</span>      <span style="color:#6B7280;"># Grouped Query Attention</span>
+    max_position_embeddings= <span style="color:#8B5CF6;">32768</span>
+    rope_theta             = <span style="color:#8B5CF6;">1e6</span>
+    hidden_act             = <span style="color:var(--accent);">"silu"</span>    <span style="color:#6B7280;"># SwiGLU</span>
+    rms_norm_eps           = <span style="color:#8B5CF6;">1e-6</span>
+    tie_word_embeddings    = <span style="color:#8B5CF6;">True</span>
+    flash_attn             = <span style="color:#8B5CF6;">True</span>
+     <span style="color:#6B7280;"># MoE (when use_moe=True)</span>
+     num_experts            = <span style="color:#8B5CF6;">4</span>
+      num_experts_per_tok    = <span style="color:#8B5CF6;">1</span>       <span style="color:#6B7280;"># Top-1 routing</span>
+      router_aux_loss_coef   = <span style="color:#8B5CF6;">5e-4</span>
+      <span style="color:#6B7280;"># Early Exit (LayerSkip-style)</span>
+     early_exit_layers      = <span style="color:#8B5CF6;">[4, 5, 6, 7]</span>
+      early_exit_loss_weight  = <span style="color:#8B5CF6;">0.3</span>
+      <span style="color:#6B7280;"># Linear Attention (GatedDeltaNet)</span>
+     full_attention_interval = <span style="color:#8B5CF6;">4</span>      <span style="color:#6B7280;"># every Nth layer = full attn</span>
+     linear_conv_kernel_dim  = <span style="color:#8B5CF6;">4</span>      <span style="color:#6B7280;"># short conv kernel size</span>
+        </pre>
+      </div>
+    </div>
+
+    <!-- C3: Architecture variants -->
+    <div class="grid-3" style="margin-top:56px;">
+      <!-- Dense -->
+      <div class="card card-tint-blue card-hover" style="position:relative;overflow:hidden;">
+        <div class="geo-square" style="width:100px;height:100px;background:rgba(59,130,246,0.06);border-radius:16px;top:-10px;right:-10px;"></div>
+        <div style="position:relative;z-index:1;">
+          <div class="icon-circle icon-circle-blue" style="margin-bottom:20px;">
+            <i data-lucide="layers" style="width:24px;height:24px;"></i>
+          </div>
+          <span class="tag tag-blue" style="margin-bottom:16px;">Dense</span>
+          <h3 class="heading-md" style="margin:12px 0 8px;">Instinct Dense</h3>
+          <p style="color:#4B5563;margin-bottom:24px;line-height:1.65;">
+            64M params, 8 layers, SwiGLU + RMSNorm + RoPE.
+          </p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Parameters</div><div style="font-weight:700;font-size:1.125rem;">64 M</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Layers</div><div style="font-weight:700;font-size:1.125rem;">8</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Hidden Dim</div><div style="font-weight:700;font-size:1.125rem;">768</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Vocab Size</div><div style="font-weight:700;font-size:1.125rem;">6,400</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MoE -->
+      <div class="card card-tint-green card-hover" style="position:relative;overflow:hidden;">
+        <div class="geo-square" style="width:100px;height:100px;background:rgba(16,185,129,0.06);border-radius:16px;top:-10px;right:-10px;"></div>
+        <div style="position:relative;z-index:1;">
+          <div class="icon-circle icon-circle-green" style="margin-bottom:20px;">
+            <i data-lucide="network" style="width:24px;height:24px;"></i>
+          </div>
+          <span class="tag tag-green" style="margin-bottom:16px;">MoE</span>
+          <h3 class="heading-md" style="margin:12px 0 8px;">Instinct MoE</h3>
+          <p style="color:#4B5563;margin-bottom:24px;line-height:1.65;">
+            198M total / 64M active, 4 experts, top-1 routing, aux loss 5e-4, no shared expert.
+          </p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Total Params</div><div style="font-weight:700;font-size:1.125rem;">198 M</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Active Params</div><div style="font-weight:700;font-size:1.125rem;">64 M</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Experts</div><div style="font-weight:700;font-size:1.125rem;">4</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Routing</div><div style="font-weight:700;font-size:1.125rem;">Top-1</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- LoopUS -->
+      <div class="card card-tint-amber card-hover" style="position:relative;overflow:hidden;">
+        <div class="geo-square" style="width:100px;height:100px;background:rgba(245,158,11,0.06);border-radius:16px;top:-10px;right:-10px;"></div>
+        <div style="position:relative;z-index:1;">
+          <div class="icon-circle icon-circle-amber" style="margin-bottom:20px;">
+            <i data-lucide="repeat" style="width:24px;height:24px;"></i>
+          </div>
+          <span class="tag tag-green" style="margin-bottom:16px;">Experimental</span>
+          <h3 class="heading-md" style="margin:12px 0 8px;">LoopUS</h3>
+          <p style="color:#4B5563;margin-bottom:24px;line-height:1.65;">
+            Looped depth — 1 shared block re-run 8× (1 prelude + 1 coda), effective depth 10, fixed params,
+            zero-init loop-position embedding + input injection.
+          </p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Shared Block</div><div style="font-weight:700;font-size:1.125rem;">1</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Re-runs</div><div style="font-weight:700;font-size:1.125rem;">8×</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Effective Depth</div><div style="font-weight:700;font-size:1.125rem;">10</div></div>
+            <div><div style="font-size:0.8125rem;color:#6B7280;margin-bottom:2px;">Params</div><div style="font-weight:700;font-size:1.125rem;">Fixed</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Linear detail card -->
+    <div class="card card-tint-blue card-hover" style="margin-top:24px;position:relative;overflow:hidden;">
+      <div class="geo-square" style="width:140px;height:140px;background:rgba(59,130,246,0.06);border-radius:20px;bottom:-20px;right:-20px;"></div>
+      <div style="position:relative;z-index:1;">
+        <h3 class="heading-md" style="margin-bottom:12px;">
+          <span style="display:inline-flex;align-items:center;gap:10px;">
+            <span class="icon-circle icon-circle-blue" style="width:40px;height:40px;"><i data-lucide="activity" style="width:18px;height:18px;"></i></span>
+            GatedDeltaNet — linear attention
+          </span>
+        </h3>
+        <p style="color:#4B5563;line-height:1.65;margin-bottom:16px;">
+          Replaces softmax attention with a fixed-size state matrix S — S ← g·S + β·k·vᵀ, read via o = qᵀ·S.
+          Every 4th layer is full attention, conv kernel 4, L2-norm Q/K. Chunked training (chunk 128) with
+          recurrent inference, no KV cache. 71M params.
+        </p>
+        <div class="code-block">
+<span style="color:#6B7280;"># GatedDeltaNet — O(T) linear attention</span>
+<span style="color:var(--secondary);">S</span> = <span style="color:var(--accent);">g</span> * <span style="color:var(--secondary);">S</span> + <span style="color:var(--accent);">β</span> * <span style="color:var(--secondary);">k</span> @ <span style="color:var(--secondary);">v</span>.T    <span style="color:#6B7280;"># state update</span>
+<span style="color:var(--secondary);">o</span> = <span style="color:var(--secondary);">q</span> @ <span style="color:var(--secondary);">S</span>                          <span style="color:#6B7280;"># read output</span>
+<span style="color:var(--secondary);">out</span> = RMSNormGated(<span style="color:var(--secondary);">o</span>, <span style="color:var(--secondary);">z</span>)           <span style="color:#6B7280;"># gated output norm</span>
+        </div>
+        <div style="display:flex;gap:16px;margin-top:16px;flex-wrap:wrap;">
+          <span class="tag" style="background:var(--muted);color:var(--fg);">71M Params</span>
+          <span class="tag" style="background:var(--muted);color:var(--fg);">Full Attn Every 4th</span>
+          <span class="tag" style="background:var(--muted);color:var(--fg);">Conv Kernel 4</span>
+          <span class="tag" style="background:var(--muted);color:var(--fg);">Chunk 128</span>
+          <span class="tag" style="background:var(--muted);color:var(--fg);">No KV Cache</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- C4: MoE gate + Early exit -->
+    <div class="grid-2" style="margin-top:24px;">
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-amber" style="margin-bottom:12px;">
+          <i data-lucide="cpu" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:8px;">MoE top-1 gate</h3>
+        <p style="color:#6B7280;line-height:1.65;margin-bottom:16px;">
+          Softmax scores over 4 experts, top-1 selection, optional renormalization
+          (<code>norm_topk_prob</code>), zeroed output buffer.
+        </p>
+        <div class="code-block" style="background:#111827;color:#E5E7EB;">
+<span style="color:var(--secondary);">x_flat</span> = <span style="color:var(--secondary);">x</span>.<span style="color:#93C5FD;">view</span>(-<span style="color:#F87171;">1</span>, hidden_dim)
+<span style="color:var(--secondary);">scores</span> = F.<span style="color:#93C5FD;">softmax</span>(self.gate(x_flat), dim=-<span style="color:#F87171;">1</span>)
+<span style="color:var(--secondary);">topk_weight</span>, <span style="color:var(--secondary);">topk_idx</span> = torch.<span style="color:#93C5FD;">topk</span>(scores, k=self.config.num_experts_per_tok, dim=-<span style="color:#F87171;">1</span>, sorted=<span style="color:#F87171;">False</span>)
+<span style="color:var(--accent);">if</span> self.config.norm_topk_prob: <span style="color:var(--secondary);">topk_weight</span> = <span style="color:var(--secondary);">topk_weight</span> / (<span style="color:var(--secondary);">topk_weight</span>.<span style="color:#93C5FD;">sum</span>(dim=-<span style="color:#F87171;">1</span>, keepdim=<span style="color:#F87171;">True</span>) + <span style="color:#F87171;">1e-20</span>)
+<span style="color:var(--secondary);">y</span> = torch.<span style="color:#93C5FD;">zeros_like</span>(x_flat)
+        </div>
+      </div>
+
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-blue" style="margin-bottom:12px;">
+          <i data-lucide="zap" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:8px;">LayerSkip-style early exit</h3>
+        <p style="color:#6B7280;line-height:1.65;margin-bottom:16px;">
+          Shared LM head across exit layers <code>[4, 5, 6, 7]</code>; training CE weight <code>0.3</code>.
+          At inference the model exits when <code>max(softmax(lm_head(h))) &ge; threshold</code>
+          (default <code>0.9</code>) — skipped layers&rsquo; KV slots are padded with <code>None</code>.
+        </p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <span class="tag tag-blue">LayerSkip</span>
+          <span class="tag tag-blue">Shared LM head</span>
+          <span class="tag tag-blue">CE weight 0.3</span>
+          <span class="tag tag-blue">Threshold 0.9</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ TRAINING CODE ══════════════════════════════════════════ -->
+<section class="section section-emerald">
+  <div class="geo-circle" style="width:360px;height:360px;background:rgba(255,255,255,0.05);top:-80px;right:-60px;"></div>
+  <div class="geo-square" style="width:200px;height:200px;background:rgba(255,255,255,0.04);border-radius:28px;bottom:40px;left:-40px;transform:rotate(-15deg);"></div>
+
+  <div class="container" style="position:relative;z-index:1;">
+    <div class="section-header">
+      <span class="label-sm" style="opacity:0.8;">Training Pipeline</span>
+      <h2 class="heading-lg">From Zero to RL in Code</h2>
+      <p style="opacity:0.85;font-size:1.0625rem;max-width:600px;margin:16px auto 0;">
+        Every stage uses pure PyTorch. Checkpoint-resume at any point.
+      </p>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:20px;max-width:780px;margin:0 auto;">
+      <!-- Step 1 -->
+      <div class="pipeline-step">
+        <div class="step-number" style="background:rgba(255,255,255,0.15);color:#fff;">1</div>
+        <div style="flex:1;">
+          <h3 class="heading-md" style="margin-bottom:4px;">Pretrain</h3>
+          <p style="opacity:0.8;font-size:0.9375rem;margin-bottom:10px;">
+            Next-token prediction on <code>pretrain_t2t_mini.jsonl</code>. Builds world knowledge and language patterns from scratch.
+          </p>
+          <div class="code-block">
+python trainer/train_pretrain.py --from_weight none   <span style="color:rgba(255,255,255,0.4);"># or: torchrun --nproc_per_node N</span>
+          </div>
+          <div style="display:flex;gap:12px;margin-top:10px;">
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">out/pretrain_768.pth</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 2 -->
+      <div class="pipeline-step">
+        <div class="step-number" style="background:rgba(255,255,255,0.2);color:#fff;">2</div>
+        <div style="flex:1;">
+          <h3 class="heading-md" style="margin-bottom:4px;">Supervised Fine-Tuning</h3>
+          <p style="opacity:0.8;font-size:0.9375rem;margin-bottom:10px;">
+            Instruction-tuning on <code>sft_t2t_mini.jsonl</code>. Teaches chat formatting, tool calling, and assistant behavior.
+          </p>
+          <div class="code-block">
+python trainer/train_full_sft.py --from_weight pretrain   <span style="color:rgba(255,255,255,0.4);"># MUST load pretrained</span>
+          </div>
+          <div style="display:flex;gap:12px;margin-top:10px;">
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">out/full_sft_768.pth</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 3 -->
+      <div class="pipeline-step">
+        <div class="step-number" style="background:rgba(255,255,255,0.3);color:#fff;">3</div>
+        <div style="flex:1;">
+          <h3 class="heading-md" style="margin-bottom:4px;">Post-Training (Optional)</h3>
+          <p style="opacity:0.8;font-size:0.9375rem;margin-bottom:10px;">
+            LoRA · DPO · PPO · GRPO / CISPO · Agentic RL · Knowledge Distillation
+          </p>
+          <div class="code-block">
+python trainer/train_grpo.py --loss_type cispo   <span style="color:rgba(255,255,255,0.4);"># grpo | cispo</span>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">lora_medical_768</span>
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">dpo_768</span>
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">ppo_actor_768</span>
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">grpo_768</span>
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">agent_768</span>
+            <span class="tag" style="background:rgba(255,255,255,0.12);color:#fff;">full_dist_768</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- One shared CLI -->
+    <div style="max-width:960px;margin:40px auto 0;">
+      <div class="card card-hover">
+        <h3 class="heading-md" style="margin-bottom:16px;">One shared CLI, 37 flags</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:0.8125rem;color:#374151;">
+          <tr style="border-bottom:2px solid var(--border);">
+            <th style="text-align:left;padding:10px 14px;color:var(--primary);">Script</th>
+            <th style="text-align:left;padding:10px 14px;color:var(--primary);">Algorithm</th>
+            <th style="text-align:left;padding:10px 14px;color:var(--primary);">Key flags</th>
+            <th style="text-align:left;padding:10px 14px;color:var(--primary);">Output</th>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 14px;font-family:monospace;">train_pretrain.py</td>
+            <td style="padding:10px 14px;">Autoregressive next-token</td>
+            <td style="padding:10px 14px;font-family:monospace;font-size:0.75rem;">--data_path pretrain_t2t_mini.jsonl, epochs 2, lr 5e-4, accum 8</td>
+            <td style="padding:10px 14px;font-family:monospace;">out/pretrain_768.pth</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 14px;font-family:monospace;">train_full_sft.py</td>
+            <td style="padding:10px 14px;">Full SFT on chat corpus</td>
+            <td style="padding:10px 14px;font-family:monospace;font-size:0.75rem;">--from_weight pretrain, lr 1e-5, max_seq_len 768</td>
+            <td style="padding:10px 14px;font-family:monospace;">out/full_sft_768.pth</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 14px;font-family:monospace;">train_lora.py</td>
+            <td style="padding:10px 14px;">Low-rank adapters (backbone frozen)</td>
+            <td style="padding:10px 14px;font-family:monospace;font-size:0.75rem;">--lora_name lora_medical, epochs 10</td>
+            <td style="padding:10px 14px;font-family:monospace;">out/lora_medical_768.pth</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 14px;font-family:monospace;">train_dpo.py</td>
+            <td style="padding:10px 14px;">Offline preference, loss = −log σ(β·Δlogit)</td>
+            <td style="padding:10px 14px;font-family:monospace;font-size:0.75rem;">--beta 0.15, lr 4e-8</td>
+            <td style="padding:10px 14px;font-family:monospace;">out/dpo_768.pth</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 14px;font-family:monospace;">train_ppo.py</td>
+            <td style="padding:10px 14px;">Actor-Critic + GAE</td>
+            <td style="padding:10px 14px;font-family:monospace;font-size:0.75rem;">--critic_learning_rate 5e-7, --clip_epsilon 0.2, --kl_coef 0.02</td>
+            <td style="padding:10px 14px;font-family:monospace;">out/ppo_actor_768.pth</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 14px;font-family:monospace;">train_grpo.py</td>
+            <td style="padding:10px 14px;">GRPO / CISPO, no critic</td>
+            <td style="padding:10px 14px;font-family:monospace;font-size:0.75rem;">--loss_type cispo, --num_generations 6, --epsilon_high 5.0</td>
+            <td style="padding:10px 14px;font-family:monospace;">out/grpo_768.pth</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 14px;font-family:monospace;">train_agent.py</td>
+            <td style="padding:10px 14px;">Multi-turn tool-use RL (6 mock tools, 3 turns)</td>
+            <td style="padding:10px 14px;font-family:monospace;font-size:0.75rem;">--max_total_len 2500, --rollout_engine torch|sglang</td>
+            <td style="padding:10px 14px;font-family:monospace;">out/agent_768.pth</td>
+          </tr>
+          <tr>
+            <td style="padding:10px 14px;font-family:monospace;">train_distillation.py</td>
+            <td style="padding:10px 14px;">White-box KD: α·CE + (1−α)·KL(T)</td>
+            <td style="padding:10px 14px;font-family:monospace;font-size:0.75rem;">--alpha 0.5, --temperature 1.5</td>
+            <td style="padding:10px 14px;font-family:monospace;">out/full_dist_768.pth</td>
+          </tr>
+        </table>
+        <p style="color:#6B7280;font-size:0.8125rem;line-height:1.6;margin-top:12px;">
+          Uniform naming: <code>out/{save_weight}_{hidden_size}{_moe}.pth</code> — LoRA uses <code>{lora_name}</code>.
+          Resume checkpoints at <code>checkpoints/{weight}_{hidden_size}_resume.pth</code>.
+          Precision flags <code>--dtype</code> / <code>--param_dtype</code> / <code>--kv_cache_dtype</code> thread through all trainers.
+        </p>
+      </div>
+    </div>
+
+    <div class="grid-2" style="margin-top:24px;">
+      <div class="card card-dark card-hover">
+        <h3 class="heading-md" style="margin-bottom:8px;color:var(--accent);">train_pretrain.py — the training loop</h3>
+        <p style="opacity:0.8;line-height:1.65;margin-bottom:16px;">
+          Mixed precision via autocast + GradScaler, loss / accumulation, gradient clipping every step.
+        </p>
+        <div class="code-block" style="background:#111827;color:#E5E7EB;">
+<span style="color:var(--accent);">with</span> autocast_ctx:
+    <span style="color:var(--secondary);">res</span> = model(input_ids, labels=labels, early_exit=<span style="color:#93C5FD;">bool</span>(args.early_exit))
+    <span style="color:var(--secondary);">loss</span> = <span style="color:var(--secondary);">res</span>.loss + <span style="color:var(--secondary);">res</span>.aux_loss
+    <span style="color:var(--secondary);">loss</span> = <span style="color:var(--secondary);">loss</span> / args.accumulation_steps
+scaler.<span style="color:#93C5FD;">scale</span>(<span style="color:var(--secondary);">loss</span>).<span style="color:#93C5FD;">backward</span>()
+<span style="color:var(--accent);">if</span> step % args.accumulation_steps == <span style="color:#F87171;">0</span>:
+    <span style="color:#93C5FD;">step_with_scaler</span>(scaler, optimizer, model.parameters(), args.grad_clip)
+        </div>
+      </div>
+
+      <div class="card card-dark card-hover">
+        <h3 class="heading-md" style="margin-bottom:8px;color:var(--accent);">train_grpo.py — advantage, no critic</h3>
+        <p style="opacity:0.8;line-height:1.65;margin-bottom:16px;">
+          Group-relative normalization across <code>num_generations</code> rollouts — zero value-network parameters.
+        </p>
+        <div class="code-block" style="background:#111827;color:#E5E7EB;">
+<span style="color:var(--secondary);">grouped_rewards</span> = <span style="color:var(--secondary);">rewards</span>.<span style="color:#93C5FD;">view</span>(-<span style="color:#F87171;">1</span>, args.num_generations)
+<span style="color:var(--secondary);">mean_r</span> = <span style="color:var(--secondary);">grouped_rewards</span>.<span style="color:#93C5FD;">mean</span>(dim=<span style="color:#F87171;">1</span>).<span style="color:#93C5FD;">repeat_interleave</span>(args.num_generations)
+<span style="color:var(--secondary);">std_r</span> = <span style="color:var(--secondary);">grouped_rewards</span>.<span style="color:#93C5FD;">std</span>(dim=<span style="color:#F87171;">1</span>, unbiased=<span style="color:#F87171;">False</span>).<span style="color:#93C5FD;">repeat_interleave</span>(args.num_generations)
+<span style="color:var(--secondary);">advantages</span> = (<span style="color:var(--secondary);">rewards</span> - <span style="color:var(--secondary);">mean_r</span>) / (<span style="color:var(--secondary);">std_r</span> + <span style="color:#F87171;">1e-4</span>)
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ DATA CODE ══════════════════════════════════════════ -->
+<section class="section section-white">
+  <div class="geo-circle" style="width:280px;height:280px;background:rgba(59,130,246,0.05);top:-80px;left:-80px;"></div>
+  <div class="geo-square" style="width:180px;height:180px;background:rgba(16,185,129,0.05);border-radius:26px;bottom:40px;right:-50px;transform:rotate(18deg);"></div>
+
+  <div class="container" style="position:relative;z-index:1;">
+    <div class="section-header">
+      <span class="label-sm" style="color:var(--primary);">Dataset Layer</span>
+      <h2 class="heading-lg">From JSONL to Tokens</h2>
+      <p style="color:#6B7280;font-size:1.0625rem;max-width:600px;margin:16px auto 0;">
+        Five dataset classes in one file, each translating raw JSONL into padded token batches.
+      </p>
+    </div>
+
+    <div class="grid-2">
+      <div class="card card-tint-blue card-hover">
+        <div class="icon-circle icon-circle-blue" style="margin-bottom:12px;">
+          <i data-lucide="file-text" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">PretrainDataset</h3>
+        <p style="color:#6B7280;line-height:1.65;">
+          Input <code>{"text": "..."}</code> → bos-token wrap + pad-mask; <code>-100</code> on padding so only real tokens count toward loss.
+        </p>
+      </div>
+
+      <div class="card card-tint-green card-hover">
+        <div class="icon-circle icon-circle-green" style="margin-bottom:12px;">
+          <i data-lucide="message-square" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">SFTDataset</h3>
+        <p style="color:#6B7280;line-height:1.65;">
+          Input <code>{"conversations": [...]}</code> → <code>apply_chat_template</code>; assistant-only labels (<code>-100</code> on prompt).
+        </p>
+      </div>
+
+      <div class="card card-tint-amber card-hover">
+        <div class="icon-circle icon-circle-amber" style="margin-bottom:12px;">
+          <i data-lucide="scale" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">DPODataset</h3>
+        <p style="color:#6B7280;line-height:1.65;">
+          Input <code>{chosen, rejected}</code> → chat-template both halves; batch interleaves chosen / rejected pairs.
+        </p>
+      </div>
+
+      <div class="card card-tint-blue card-hover">
+        <div class="icon-circle icon-circle-blue" style="margin-bottom:12px;">
+          <i data-lucide="zap" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">RLAIFDataset</h3>
+        <p style="color:#6B7280;line-height:1.65;">
+          Input <code>{"conversations"}</code> → prompt = <code>template[:-1]</code> + generation prompt; answers come from rollout.
+        </p>
+      </div>
+    </div>
+
+    <!-- AgentRLDataset wide card -->
+    <div class="card card-tint-green card-hover" style="margin-top:24px;">
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;">
+        <div class="icon-circle icon-circle-green">
+          <i data-lucide="bot" style="width:22px;height:22px;"></i>
+        </div>
+        <div style="flex:1;min-width:260px;">
+          <h3 class="heading-md" style="margin-bottom:4px;">AgentRLDataset</h3>
+          <p style="color:#6B7280;line-height:1.65;">
+            Input <code>{"conversations", "gt"}</code> → tools parsed from the system message;
+            multi-turn tool-call loops over 3 turns with assistant, <code>tool_calls</code> and <code>tool</code> roles.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid-2" style="margin-top:24px;">
+      <div class="card card-hover">
+        <h3 class="heading-md" style="margin-bottom:8px;">PretrainDataset.__getitem__</h3>
+        <p style="color:#6B7280;line-height:1.65;margin-bottom:16px;">
+          Tokenize, wrap in bos/eos, right-pad, then blank out pad positions in the labels.
+        </p>
+        <div class="code-block" style="background:#111827;color:#E5E7EB;">
+<span style="color:var(--secondary);">tokens</span> = self.tokenizer(<span style="color:#93C5FD;">str</span>(sample[<span style="color:var(--accent);">'text'</span>]), add_special_tokens=<span style="color:#F87171;">False</span>, max_length=self.max_length - <span style="color:#F87171;">2</span>, truncation=<span style="color:#F87171;">True</span>).input_ids
+<span style="color:var(--secondary);">tokens</span> = [self.tokenizer.bos_token_id] + <span style="color:var(--secondary);">tokens</span> + [self.tokenizer.eos_token_id]
+<span style="color:var(--secondary);">input_ids</span> = <span style="color:var(--secondary);">tokens</span> + [self.tokenizer.pad_token_id] * (self.max_length - <span style="color:#93C5FD;">len</span>(<span style="color:var(--secondary);">tokens</span>))
+<span style="color:var(--secondary);">labels</span> = <span style="color:var(--secondary);">input_ids</span>.<span style="color:#93C5FD;">clone</span>()
+<span style="color:var(--secondary);">labels</span>[<span style="color:var(--secondary);">input_ids</span> == self.tokenizer.pad_token_id] = -<span style="color:#F87171;">100</span>
+<span style="color:var(--accent);">return</span> <span style="color:var(--secondary);">input_ids</span>, <span style="color:var(--secondary);">labels</span>
+        </div>
+      </div>
+
+      <div class="card card-hover">
+        <h3 class="heading-md" style="margin-bottom:8px;">SFTDataset.__getitem__</h3>
+        <p style="color:#6B7280;line-height:1.65;margin-bottom:16px;">
+          Pre-process chat, render the template, truncate, then build assistant-only labels.
+        </p>
+        <div class="code-block" style="background:#111827;color:#E5E7EB;">
+<span style="color:var(--secondary);">conversations</span> = <span style="color:#93C5FD;">pre_processing_chat</span>(sample[<span style="color:var(--accent);">'conversations'</span>])
+<span style="color:var(--secondary);">prompt</span> = self.<span style="color:#93C5FD;">create_chat_prompt</span>(<span style="color:var(--secondary);">conversations</span>)
+<span style="color:var(--secondary);">prompt</span> = <span style="color:#93C5FD;">post_processing_chat</span>(<span style="color:var(--secondary);">prompt</span>)
+<span style="color:var(--secondary);">input_ids</span> = self.tokenizer(<span style="color:var(--secondary);">prompt</span>).input_ids[:self.max_length]
+<span style="color:var(--secondary);">input_ids</span> += [self.tokenizer.pad_token_id] * (self.max_length - <span style="color:#93C5FD;">len</span>(<span style="color:var(--secondary);">input_ids</span>))
+<span style="color:var(--secondary);">labels</span> = self.<span style="color:#93C5FD;">generate_labels</span>(<span style="color:var(--secondary);">input_ids</span>)
+<span style="color:var(--accent);">return</span> torch.<span style="color:#93C5FD;">tensor</span>(<span style="color:var(--secondary);">input_ids</span>, dtype=torch.long), torch.<span style="color:#93C5FD;">tensor</span>(<span style="color:var(--secondary);">labels</span>, dtype=torch.long)
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ INFERENCE & DEPLOYMENT ══════════════════════════════════════════ -->
+<section class="section section-amber">
+  <div class="geo-circle" style="width:260px;height:260px;background:rgba(255,255,255,0.05);top:-40px;right:-60px;"></div>
+  <div class="geo-square" style="width:160px;height:160px;background:rgba(255,255,255,0.04);border-radius:24px;bottom:30px;left:-30px;transform:rotate(-18deg);"></div>
+
+  <div class="container" style="position:relative;z-index:1;">
+    <div class="section-header">
+      <span class="label-sm" style="opacity:0.8;">Inference &amp; Deployment</span>
+      <h2 class="heading-lg">Run It, Serve It, Convert It</h2>
+      <p style="opacity:0.85;font-size:1.0625rem;max-width:640px;margin:16px auto 0;">
+        A CLI for interactive chat, an OpenAI-compatible server, a Streamlit UI — all reading the same weights.
+      </p>
+    </div>
+
+    <div class="grid-3">
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-blue" style="margin-bottom:12px;">
+          <i data-lucide="server" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">OpenAI API — localhost:8998</h3>
+        <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
+          <code>POST /v1/chat/completions</code>, SSE streaming, and the
+          <code>reasoning_content</code> / <code>tool_calls</code> / <code>open_thinking</code> fields.
+          Run from <code>scripts/</code>.
+        </p>
+      </div>
+
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-green" style="margin-bottom:12px;">
+          <i data-lucide="layout-dashboard" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">WebUI — localhost:8501</h3>
+        <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
+          <code>streamlit run web_demo.py</code>. Auto-scans <code>../out</code> and <code>../checkpoints</code>
+          for <code>.pth</code> weights; multi-round tool-call loop up to 16 iterations.
+        </p>
+      </div>
+
+      <div class="card card-hover">
+        <div class="icon-circle icon-circle-amber" style="margin-bottom:12px;">
+          <i data-lucide="sliders" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">Config Studio — localhost:8501</h3>
+        <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
+          <code>streamlit run config_webui.py</code>. Parameter explorer that inspects and edits
+          configs with zero model imports.
+        </p>
+      </div>
+    </div>
+
+    <!-- eval_llm.py flags -->
+    <div style="max-width:880px;margin:32px auto 0;">
+      <div class="card card-hover">
+        <h3 class="heading-md" style="margin-bottom:16px;">eval_llm.py — CLI flags</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:0.8125rem;color:#374151;">
+          <tr style="border-bottom:2px solid var(--border);">
+            <th style="text-align:left;padding:10px 14px;color:var(--primary);">Flag</th>
+            <th style="text-align:left;padding:10px 14px;color:var(--primary);">Meaning</th>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 14px;font-family:monospace;">--load_from</td>
+            <td style="padding:10px 14px;"><code>model</code> → torch <code>.pth</code> weights; path → transformers-format model</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 14px;font-family:monospace;">--weight</td>
+            <td style="padding:10px 14px;"><code>full_sft</code> — pretrain / full_sft / rlhf / ppo_actor / grpo / spo</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 14px;font-family:monospace;">--lora_weight</td>
+            <td style="padding:10px 14px;"><code>None</code> — LoRA weights applied on top</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 14px;font-family:monospace;">--use_moe</td>
+            <td style="padding:10px 14px;"><code>0</code> | <code>1</code> — MoE architecture</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 14px;font-family:monospace;">--inference_rope_scaling</td>
+            <td style="padding:10px 14px;">4× YaRN context-length extrapolation</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 14px;font-family:monospace;">--open_thinking</td>
+            <td style="padding:10px 14px;"><code>0</code> | <code>1</code> — adaptive thinking mode</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:10px 14px;font-family:monospace;">--early_exit</td>
+            <td style="padding:10px 14px;"><code>0</code> | <code>1</code> + <code>--exit_threshold 0.9</code> — dynamic per-token exit</td>
+          </tr>
+          <tr>
+            <td style="padding:10px 14px;font-family:monospace;">--logit_lens</td>
+            <td style="padding:10px 14px;"><code>0</code> | <code>1</code> — inspect hidden states layer by layer</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- run_linear / run_loop shim -->
+    <div style="max-width:780px;margin:24px auto 0;">
+      <div class="card card-hover">
+        <h3 class="heading-md" style="margin-bottom:8px;">run_linear.py / run_loop.py — the shim</h3>
+        <p style="color:#6B7280;line-height:1.65;margin-bottom:16px;">
+          7-line launchers that swap <code>model.model_instinct</code> for the Linear / LoopUS variant,
+          then <code>exec</code> any target script. Example:
+          <code>python run_linear.py eval_llm.py --weight full_sft</code>
+        </p>
+        <div class="code-block">
+<span style="color:#6B7280;"># swap the module in sys.modules, then exec the target script</span>
+sys.modules[<span style="color:var(--accent);">"model.model_instinct"</span>] = importlib.<span style="color:#93C5FD;">import_module</span>(<span style="color:var(--accent);">"model.model_instinct_linear"</span>)
+<span style="color:var(--secondary);">target</span> = os.path.<span style="color:#93C5FD;">abspath</span>(sys.argv.<span style="color:#93C5FD;">pop</span>(<span style="color:#F87171;">1</span>))
+os.<span style="color:#93C5FD;">chdir</span>(os.path.<span style="color:#93C5FD;">dirname</span>(os.path.<span style="color:#93C5FD;">abspath</span>(__file__)))
+__file__ = <span style="color:var(--secondary);">target</span>
+<span style="color:#93C5FD;">exec</span>(<span style="color:#93C5FD;">open</span>(<span style="color:var(--secondary);">target</span>).<span style="color:#93C5FD;">read</span>())
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ SUPPORT LAYER ══════════════════════════════════════════ -->
+<section class="section section-muted">
+  <div class="geo-square" style="width:200px;height:200px;background:rgba(59,130,246,0.04);border-radius:28px;top:30px;right:-50px;transform:rotate(15deg);"></div>
+  <div class="geo-circle" style="width:240px;height:240px;background:rgba(245,158,11,0.06);bottom:40px;left:-60px;"></div>
+
+  <div class="container" style="position:relative;z-index:1;">
+    <div class="section-header">
+      <span class="label-sm" style="color:var(--accent);">Support Layer</span>
+      <h2 class="heading-lg">The Modules Underneath</h2>
+      <p style="color:#6B7280;font-size:1.0625rem;max-width:600px;margin:16px auto 0;">
+        The shared machinery every trainer, model and rollout path leans on.
+      </p>
+    </div>
+
+    <div class="grid-3">
+      <div class="card card-tint-blue card-hover">
+        <div class="icon-circle icon-circle-blue" style="margin-bottom:12px;">
+          <i data-lucide="zap" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">flash_attn_4.py</h3>
+        <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
+          Flash Attention 4 fused kernels with an SDPA fallback; native GQA support throughout.
+        </p>
+      </div>
+
+      <div class="card card-tint-green card-hover">
+        <div class="icon-circle icon-circle-green" style="margin-bottom:12px;">
+          <i data-lucide="database" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">kv_cache_quant.py</h3>
+        <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
+          fp32 / bf16 / fp16 / fp8_e4m3 / fp8_e5m2. Per-(batch, head) quantized cache halves decode bandwidth.
+        </p>
+      </div>
+
+      <div class="card card-tint-amber card-hover">
+        <div class="icon-circle icon-circle-amber" style="margin-bottom:12px;">
+          <i data-lucide="layers" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">checkpointing.py</h3>
+        <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
+          <code>RecomputeAttention</code> <code>autograd.Function</code> — backward re-runs attention,
+          saving only Q/K/V plus the dropout RNG state.
+        </p>
+      </div>
+
+      <div class="card card-tint-blue card-hover">
+        <div class="icon-circle icon-circle-blue" style="margin-bottom:12px;">
+          <i data-lucide="settings" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">trainer_cli.py</h3>
+        <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
+          Shared 37-flag parser: <code>--dtype</code>, <code>--param_dtype</code>, <code>--kv_cache_dtype</code>,
+          <code>--use_moe</code>, <code>--use_looped</code>, <code>--optimizer</code> adamw|adafactor|muon,
+          <code>--use_compile</code>, <code>--use_grad_checkpoint</code> 0|1|2.
+        </p>
+      </div>
+
+      <div class="card card-tint-green card-hover">
+        <div class="icon-circle icon-circle-green" style="margin-bottom:12px;">
+          <i data-lucide="wrench" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">trainer_utils.py</h3>
+        <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
+          <code>init_model</code>, <code>lm_checkpoint</code>, <code>build_optimizer</code>,
+          <code>LMForRewardModel</code> — the glue shared by all 8 trainers.
+        </p>
+      </div>
+
+      <div class="card card-tint-amber card-hover">
+        <div class="icon-circle icon-circle-amber" style="margin-bottom:12px;">
+          <i data-lucide="send" style="width:22px;height:22px;"></i>
+        </div>
+        <h3 class="heading-md" style="margin-bottom:4px;">rollout_engine.py</h3>
+        <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
+          <code>RolloutEngine</code> factory — <code>TorchRolloutEngine</code> via <code>model.generate</code>,
+          <code>SGLangRolloutEngine</code> via HTTP <code>/generate</code>.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ FOOTER ══════════════════════════════════════════ -->
+<footer class="section section-dark">
+  <div class="container">
+    <div style="text-align:center;">
+      <h2 class="heading-lg" style="margin-bottom:16px;">Instinct</h2>
+      <p style="opacity:0.5;font-size:0.9375rem;max-width:480px;margin:0 auto 24px;">
+        Pure PyTorch · ~64M–71M params · Dense / MoE / LoopUS / Linear · 100% open source under Apache 2.0
+      </p>
+      <a href="https://github.com/1057237562/Instinct" class="btn btn-outline-light">
+        <i data-lucide="star" style="width:18px;height:18px;"></i>
+        Star on GitHub
+      </a>
+    </div>
+  </div>
+</footer>
+
+<script>
+lucide.createIcons();
+</script>
+</body>
+</html>

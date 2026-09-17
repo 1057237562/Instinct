@@ -8,9 +8,15 @@ Instinct — train a ~64M LLM from scratch in ~2h on a single 3090. All core alg
 ```
 model/          # Model definition (InstinctConfig, InstinctForCausalLM, LoRA), tokenizer files
 trainer/        # All training scripts (pretrain, SFT, LoRA, DPO, PPO, GRPO, Agent RL, KD, tokenizer)
-dataset/        # Dataset loading classes (PretrainDataset, SFTDataset, RLAIFDataset)
-scripts/        # Inference, API server, WebUI, model conversion
+                # + shared infra: trainer_cli.py, trainer_utils.py, training_pipeline.py,
+                #   training_profiler.py, rollout_engine.py, compile_cache.py
+dataset/        # Dataset loaders, corpora, reports, and dataset/scripts preparation utilities
+scripts/        # Inference, API server, WebUI, model conversion, training launchers
 eval_llm.py     # CLI inference script
+eval_*.py       # Benchmark harnesses (gsm8k, humaneval, pass_k, batch, report); artifacts land in eval/
+tests/          # Pytest suite; `gpu` marker = needs CUDA
+experiments/    # Perf/research experiment scripts (lambda sweeps, synthetic data, plots)
+docs/           # Design docs: training_pipeline.md, compact_dataset_cache.md, gsm8k.md, humaneval.md, eval_webui.md
 ```
 
 ## Essential commands
@@ -30,6 +36,15 @@ torchrun --nproc_per_node N trainer/train_full_sft.py
 - `--dtype bfloat16|float16|fp32` — activation compute precision (autocast; fp32 = no autocast)
 - `--param_dtype fp32|bf16|fp16` — parameter precision (fp32 = master weights; bf16/fp16 = weights cast directly)
 - `--kv_cache_dtype fp32|bf16|fp16|fp8_e4m3|fp8_e5m2` — KV cache precision (fp8 = per-(batch,head) quantized cache, half decode bandwidth; affects generation/RL rollouts)
+- `--fp8_training` — FP8 training via torchao; optional dep: `pip install -r requirements-fp8.txt` (torchao==0.18.0)
+
+### Testing
+```bash
+python -m pytest tests/             # from repo root
+python -m pytest tests/ --skip-gpu  # force-skip CUDA-required tests
+```
+- Tests marked `@pytest.mark.gpu` auto-skip when CUDA is unavailable.
+- `tests/conftest.py` enforces the `datasets`-before-`torch` import order (same Windows workaround as trainers) — do not reorder there either.
 
 ### Resume from checkpoint
 ```bash
@@ -78,13 +93,15 @@ cd scripts && streamlit run web_demo.py
 - **Dense**: 8 layers, dim=768, 8 q-heads, 4 kv-heads, vocab 6400, max_pos 32768, SwiGLU, RMSNorm, RoPE θ=1e6
 - **MoE**: Same base + 4 experts, top-1 routing (198M total, 64M active)
 - Config in `model/model_instinct.py` → `InstinctConfig`. Defaults: `hidden_size=768`, `num_hidden_layers=8`, `use_moe=False`
+- **Alternate topologies**: `model/model_instinct_loop.py` (looped) and `model/model_instinct_linear.py` (linear attention). Run trainers through the wrappers `python run_loop.py trainer/train_x.py` / `python run_linear.py trainer/train_x.py`, which swap `sys.modules["model.model_instinct"]` — don't edit `model_instinct.py` to switch topology
 - Aligned to Qwen3 ecosystem — compatible with `transformers`, `llama.cpp`, `vllm`, `ollama`
 
 ## Training pipeline (must respect order)
 
 1. **Pretrain** (`train_pretrain.py`) — from scratch (`--from_weight none`), uses `pretrain_t2t(_mini).jsonl`
-2. **SFT** (`train_full_sft.py`) — **requires** `--from_weight pretrain`, uses `sft_t2t(_mini).jsonl`
-3. **Optional**: LoRA (`train_lora.py`), DPO (`train_dpo.py`), PPO (`train_ppo.py`), GRPO/CISPO (`train_grpo.py`), Agent RL (`train_agent.py`), KD (`train_distillation.py`)
+2. **Optional CPT** (`train_pretrain.py`) — continue from a completed `pretrain_*`/`cpt_*` weight on `pretrain*.jsonl`; use the Config WebUI `cpt` mode for separate defaults and `cpt_*` outputs
+3. **SFT** (`train_full_sft.py`) — requires a completed pretrain/CPT base, uses `sft_t2t(_mini).jsonl`
+4. **Optional**: LoRA (`train_lora.py`), DPO (`train_dpo.py`), PPO (`train_ppo.py`), GRPO/CISPO (`train_grpo.py`), Agent RL (`train_agent.py`), KD (`train_distillation.py`)
 
 ## Critical gotchas
 
@@ -96,7 +113,7 @@ Training scripts and `scripts/` files set `__package__` + `sys.path.append` to r
 - **API server / WebUI**: MUST run from `scripts/` directory
 
 ### Windows workaround
-`trainer/` scripts import `datasets` before `torch` to work around a known pyarrow/torch DLL conflict on Windows. Do NOT reorder or remove.
+`trainer/` scripts import `datasets` before `torch` to work around a known pyarrow/torch DLL conflict on Windows. They also import `trainer.compile_cache` before `torch` to configure Inductor (compile cache). Do NOT reorder or remove either.
 
 ### Windows + torch.compile (`--use_compile 1`)
 `torch.compile` on Windows **requires UTF-8 mode** — torch's own inductor template files (e.g. `torch/_inductor/kernel/mm_grouped.py`) crash with `UnicodeDecodeError: 'gbk' codec can't decode` otherwise. Set `PYTHONUTF8=1` in the environment of the training process (WebUI launches already inject it).
@@ -144,3 +161,8 @@ parent/
 
 ## Model conversion
 `scripts/convert_model.py` converts torch `.pth` → transformers format (and vice versa). Uses `Qwen3Config`/`Qwen3ForCausalLM` as the compatibility target. Supports LoRA merge.
+
+## Where to read more
+- `PLAN.md` — current performance-optimization plan for this branch (`codex/better_performance`): SDPA attention path, batch-level combined mask, selective gradient checkpointing, packing
+- `docs/training_pipeline.md` — end-to-end pipeline; `docs/compact_dataset_cache.md` — dataset cache design
+- `docs/gsm8k.md` / `docs/humaneval.md` / `docs/eval_webui.md` — benchmark harness and Eval WebUI details

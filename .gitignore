@@ -16,10 +16,24 @@ checkpoints/
 *.onnx
 *.bin
 
-# ===== 数据集（大文件，从 ModelScope / HuggingFace 单独下载） =====
-dataset/*.jsonl
-dataset/*.csv
-dataset/*.zip
+# ===== 数据集（大文件，从 ModelScope / HuggingFace 单独下载）=====
+# dataset/ 只入库 README / 准备脚本等小文件，数据本体全部忽略（黑名单改为白名单）
+dataset/**
+!dataset/**/
+!dataset/**/*.md
+!dataset/**/*.py
+!dataset/**/.gitattributes
+
+# ===== 评测输出（eval_*.py 重新生成即可） =====
+eval/
+
+# ===== 临时目录 / 日志 / 进程文件 =====
+tmp/
+*.log
+*.pid
+.pytest_cache/
+.ipynb_checkpoints/
+.env
 
 # ===== 工具 / IDE / 缓存目录 =====
 .omo/

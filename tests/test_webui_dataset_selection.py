@@ -11,6 +11,10 @@ def _load_helpers():
     assignments = {
         "_DATASET_KINDS_BY_TRAIN_TYPE",
         "_DEFAULT_DATASET_NAMES",
+        "_DEFAULT_WEIGHT_PREFIX",
+        "_DEFAULT_EPOCHS",
+        "_DEFAULT_LEARNING_RATES",
+        "_TRAINER_NAME",
         "_BASE_WEIGHT_TYPE",
     }
     functions = {
@@ -18,6 +22,11 @@ def _load_helpers():
         "_available_training_datasets",
         "_base_weight_type",
         "_is_completed_sft_weight",
+        "_is_cpt_base_weight",
+        "_default_weight_prefix",
+        "_default_epochs",
+        "_default_learning_rate",
+        "_trainer_name",
         "_packing_preprocess_workers",
     }
     selected = []
@@ -65,6 +74,19 @@ def test_full_sft_discovery_only_lists_sft_prefixed_jsonl(tmp_path):
     ]
 
 
+def test_cpt_discovers_pretrain_data_and_prefers_continue_corpus(tmp_path):
+    helpers = _load_helpers()
+    for name in ("pretrain_t2t.jsonl", "pretrain_continue.jsonl", "sft_continue.jsonl"):
+        (tmp_path / name).write_text("{}\n", encoding="utf-8")
+
+    discovered = helpers["_available_training_datasets"]("cpt", tmp_path)
+
+    assert [Path(path).name for path in discovered] == [
+        "pretrain_continue.jsonl",
+        "pretrain_t2t.jsonl",
+    ]
+
+
 def test_default_mini_dataset_is_first(tmp_path):
     helpers = _load_helpers()
     for name in ("sft_t2t.jsonl", "sft_t2t_mini.jsonl", "sft_code.jsonl"):
@@ -83,3 +105,17 @@ def test_continue_sft_uses_completed_sft_weights_not_pretrain():
     assert helpers["_is_completed_sft_weight"]("out/full_sft_run_768.pth")
     assert not helpers["_is_completed_sft_weight"]("checkpoints/full_sft_run_768_resume.pth")
     assert not helpers["_is_completed_sft_weight"]("out/pretrain_run_768.pth")
+
+
+def test_cpt_uses_pretrain_trainer_and_requires_pretrain_family_weights():
+    helpers = _load_helpers()
+
+    assert helpers["_trainer_name"]("cpt") == "pretrain"
+    assert helpers["_base_weight_type"]("cpt") == "pretrain"
+    assert helpers["_default_weight_prefix"]("cpt") == "cpt"
+    assert helpers["_default_epochs"]("cpt") == 1
+    assert helpers["_default_learning_rate"]("cpt") == 5e-5
+    assert helpers["_is_cpt_base_weight"]("out/pretrain_run_768.pth")
+    assert helpers["_is_cpt_base_weight"]("out/cpt_run_768.pth")
+    assert not helpers["_is_cpt_base_weight"]("out/full_sft_run_768.pth")
+    assert not helpers["_is_cpt_base_weight"]("checkpoints/cpt_run_768_resume.pth")

@@ -4,6 +4,13 @@ Import order matters: ``datasets`` MUST be imported before ``torch`` to work
 around the Windows pyarrow/torch DLL conflict (see AGENTS.md). Do NOT reorder.
 """
 
+from pathlib import Path
+import sys
+
+REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 import datasets  # noqa: F401  # must stay before torch (Windows pyarrow/torch DLL conflict)
 import torch  # noqa: F401
 import pytest

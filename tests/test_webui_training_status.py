@@ -23,6 +23,7 @@ def _load_status_helpers(checkpoints_dir):
         "_completed_checkpoint_exists",
         "_detached_training_status",
         "_training_script_from_argv",
+        "_training_mode_from_argv",
     }
     functions = [
         node for node in module.body
@@ -72,6 +73,20 @@ def test_training_process_detection_requires_a_script_argv(tmp_path):
         "-c",
         "print('train_full_sft.py')",
     ]) is None
+
+
+def test_cpt_process_is_distinguished_from_scratch_pretraining(tmp_path):
+    helper = _load_status_helpers(tmp_path / "checkpoints")[
+        "_training_mode_from_argv"
+    ]
+    argv = [
+        r"E:\miniconda3\python.exe", "-u",
+        r"D:\AI\Instinct\trainer\train_pretrain.py",
+        "--save_weight", "cpt_20260916_768",
+    ]
+
+    assert helper(argv) == "train_cpt"
+    assert helper(argv[:-1] + ["pretrain_20260916_768"]) == "train_pretrain"
 
 
 def test_detached_run_becomes_success_after_final_checkpoint(tmp_path):

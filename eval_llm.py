@@ -62,7 +62,7 @@ def init_model(args):
     from trainer.trainer_utils import get_model_params
 
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
-    if 'model' in args.load_from:
+    if getattr(args, 'checkpoint_path', None) or 'model' in args.load_from:
         if args.config_path:
             with open(args.config_path, 'r', encoding='utf-8') as config_file:
                 config_kwargs = json.load(config_file)
@@ -94,7 +94,7 @@ def init_model(args):
         else:
             model = InstinctForCausalLM(InstinctConfig(**config_kwargs))
         moe_suffix = '_moe' if model.config.use_moe else ''
-        ckp = f'./{args.save_dir}/{args.weight}_{model.config.hidden_size}{moe_suffix}.pth'
+        ckp = getattr(args, 'checkpoint_path', None) or f'./{args.save_dir}/{args.weight}_{model.config.hidden_size}{moe_suffix}.pth'
         model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
         if args.lora_weight != 'None':
             apply_lora(model)
@@ -102,7 +102,9 @@ def init_model(args):
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
     get_model_params(model, model.config)
-    return model.half().eval().to(args.device), tokenizer
+    from model.inference_runtime import optimize_inference
+    model = model.half().eval().to(args.device)
+    return optimize_inference(model, getattr(args, 'inference_compile', 'auto')), tokenizer
 
 
 def format_livecodebench_prompt(problem):
@@ -288,6 +290,8 @@ def _generation_kwargs(args, tokenizer, num_return_sequences=1):
     if args.early_exit:
         kwargs['early_exit'] = True
         kwargs['exit_threshold'] = args.exit_threshold
+    if getattr(args, 'num_steps', 0) > 0:
+        kwargs['num_steps'] = args.num_steps
     return kwargs
 
 
@@ -311,40 +315,39 @@ def run_livecodebench_generation(args, model, tokenizer):
         f'[LiveCodeBench] {len(problems)} problems, '
         f'{args.lcb_num_samples} sample(s) each, release={args.lcb_release_version}'
     )
+    from eval_batch import generate_batches
+    jobs = []
     for problem_index, problem in enumerate(problems):
         question_id = str(problem['question_id'])
         code_list = saved.get(question_id, [])
-        if len(code_list) < args.lcb_num_samples:
-            input_text = _livecodebench_input_text(args, tokenizer, problem)
-            inputs = tokenizer(input_text, return_tensors='pt', truncation=True).to(args.device)
-            input_length = inputs['input_ids'].shape[1]
-
-            for sample_index in range(len(code_list), args.lcb_num_samples):
-                setup_seed(args.lcb_seed + problem_index * args.lcb_num_samples + sample_index)
-                with torch.inference_mode():
-                    generated_ids = model.generate(
-                        inputs=inputs['input_ids'],
-                        attention_mask=inputs.get('attention_mask'),
-                        **_generation_kwargs(args, tokenizer),
-                    )
-                response_ids = generated_ids[0][input_length:]
-                total_generated_tokens += len(response_ids)
-                response = tokenizer.decode(response_ids, skip_special_tokens=True)
-                code = extract_livecodebench_code(response)
-                code_list.append(code)
-                if not code:
-                    print(f'[LiveCodeBench] warning: {question_id} sample {sample_index + 1} 未提取到代码块')
-
-        saved[question_id] = code_list
+        if len(code_list) >= args.lcb_num_samples:
+            continue
+        text = _livecodebench_input_text(args, tokenizer, problem)
+        for sample_index in range(len(code_list), args.lcb_num_samples):
+            jobs.append(dict(task_id=question_id, text=text,
+                             index=problem_index * args.lcb_num_samples + sample_index))
+    for job, response, token_count in generate_batches(
+            args, model, tokenizer, jobs, getattr(args, 'lcb_batch_size', 1), args.lcb_seed):
+        question_id = job['task_id']
+        code = extract_livecodebench_code(response)
+        saved.setdefault(question_id, []).append(code)
+        total_generated_tokens += token_count
+        if not code:
+            print(f'[LiveCodeBench] warning: {question_id} 未提取到代码块')
         rows = [
-            {'question_id': str(item['question_id']), 'code_list': saved.get(str(item['question_id']), [])}
-            for item in problems
-            if str(item['question_id']) in saved
+            {'question_id': str(item['question_id']), 'code_list': saved[str(item['question_id'])]}
+            for item in problems if str(item['question_id']) in saved
         ]
         _write_json_atomic(args.lcb_output, rows)
-        print(f'[LiveCodeBench] {problem_index + 1}/{len(problems)} {question_id}')
+        print(f'[LiveCodeBench] {question_id} {len(saved[question_id])}/{args.lcb_num_samples}', flush=True)
+    rows = [
+        {'question_id': str(item['question_id']), 'code_list': saved[str(item['question_id'])]}
+        for item in problems if str(item['question_id']) in saved
+    ]
 
     elapsed = max(time.time() - started_at, 1e-9)
+    from eval_report import compress_output
+    compress_output(args.lcb_output)
     print(f'[LiveCodeBench] generations saved to {Path(args.lcb_output).resolve()}')
     if args.show_speed:
         print(f'[LiveCodeBench] {total_generated_tokens / elapsed:.2f} generated tokens/s')
@@ -389,6 +392,23 @@ def run_livecodebench_evaluator(args):
         cwd=str(runner_path) if runner_path else None,
         check=True,
     )
+    from eval_pass_k import calculate
+    graded_path = output_path.with_name(output_path.stem + '_codegeneration_output_eval_all.json')
+    report = calculate(graded_path, getattr(args, 'lcb_k', [1, 5, 10]))
+    _write_json_atomic(str(output_path) + '_metrics.json', report)
+    from eval_report import write_analysis
+    graded_rows = json.loads(graded_path.read_text(encoding='utf-8'))
+    analysis_rows, analysis_problems = [], {}
+    for problem in graded_rows:
+        task = str(problem['question_id'])
+        analysis_problems[task] = problem
+        for index, passed in enumerate(problem['graded_list']):
+            analysis_rows.append({'task_id': task, 'passed': passed,
+                                  'result': 'passed' if passed else 'failed',
+                                  'completion': problem['code_list'][index],
+                                  'raw_response': problem.get('output_list', problem['code_list'])[index]})
+    write_analysis(str(output_path), analysis_rows, analysis_problems)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
 def build_parser():
@@ -396,6 +416,8 @@ def build_parser():
     parser.add_argument('--benchmark', default='none', choices=['none', 'livecodebench'], help="评测模式（默认进入交互推理）")
     parser.add_argument('--load_from', default='model', type=str, help="模型加载路径（model=原生torch权重，其他路径=transformers格式）")
     parser.add_argument('--save_dir', default='out', type=str, help="模型权重目录")
+    parser.add_argument('--checkpoint_path', default=None, help='直接指定原生 .pth 权重文件')
+    parser.add_argument('--inference_compile', choices=['auto', 'off'], default='auto', help='编译融合推理算子；不可用时回退')
     parser.add_argument('--weight', default='full_sft', type=str, help="权重名称前缀（pretrain, full_sft, rlhf, reason, ppo_actor, grpo, spo）")
     parser.add_argument('--lora_weight', default='None', type=str, help="LoRA权重名称（None表示不使用，可选：lora_identity, lora_medical）")
     parser.add_argument('--hidden_size', default=768, type=int, help="隐藏层维度")
@@ -417,6 +439,7 @@ def build_parser():
     parser.add_argument('--show_speed', default=1, type=int, help="显示decode速度（tokens/s）")
     parser.add_argument('--early_exit', default=0, type=int, choices=[0, 1], help="启用动态Early Exit推理（0=否，1=是）")
     parser.add_argument('--exit_threshold', default=0.9, type=float, help="退出置信度阈值（0-1，默认0.9，仅--early_exit 1时生效）")
+    parser.add_argument('--num_steps', default=0, type=int, help="Instinct V2 latent recurrent 推理次数；0 使用模型配置默认值")
     parser.add_argument('--logit_lens', default=0, type=int, choices=[0, 1], help="启用Logit Lens逐层解释，展示每个Transformer层对下一个token的预测（0=否，1=是）")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
 
@@ -426,10 +449,12 @@ def build_parser():
     lcb.add_argument('--lcb_start_date', default=None, type=str, help="仅评测该日期及之后的题目（YYYY-MM-DD）")
     lcb.add_argument('--lcb_end_date', default=None, type=str, help="仅评测该日期及之前的题目（YYYY-MM-DD）")
     lcb.add_argument('--lcb_limit', default=0, type=int, help="仅生成前 N 题（0=全部；smoke test 用，不能直接官方评分）")
+    lcb.add_argument('--lcb_batch_size', default=1, type=int, help='并行生成序列数（跨题目/样本）')
+    lcb.add_argument('--lcb_k', nargs='+', type=int, default=[1, 5, 10], help='计算的 pass@K，样本不足的 K 不计算')
     lcb.add_argument('--lcb_num_samples', default=1, type=int, help="每题生成样本数；计算 pass@5 时至少设为 5")
     lcb.add_argument('--lcb_seed', default=42, type=int, help="可复现生成的基础随机种子")
     lcb.add_argument('--lcb_prompt_style', default='auto', choices=['auto', 'chat', 'base'], help="chat 使用 tokenizer 对话模板，base 使用纯文本提示")
-    lcb.add_argument('--lcb_output', default='out/livecodebench_generations.json', type=str, help="官方 custom evaluator 格式的输出 JSON")
+    lcb.add_argument('--lcb_output', default='eval/livecodebench_generations.json', type=str, help="官方 custom evaluator 格式的输出 JSON")
     lcb.add_argument('--lcb_resume', default=1, type=int, choices=[0, 1], help="从已有输出续跑（每完成一题原子保存）")
     lcb.add_argument('--lcb_evaluate', action='store_true', help="生成后调用官方 evaluator（会执行模型生成的代码）")
     lcb.add_argument('--lcb_evaluate_only', action='store_true', help="跳过模型加载，仅对 --lcb_output 调用官方 evaluator")
@@ -442,6 +467,10 @@ def build_parser():
 def main():
     args = build_parser().parse_args()
 
+    if any(k < 1 for k in args.lcb_k):
+        raise ValueError('--lcb_k 必须是正整数')
+    if args.lcb_batch_size < 1:
+        raise ValueError('--lcb_batch_size 必须至少为 1')
     if args.lcb_num_samples < 1:
         raise ValueError('--lcb_num_samples 必须至少为 1')
     if args.lcb_limit < 0:

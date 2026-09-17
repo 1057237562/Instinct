@@ -4,7 +4,7 @@ import sqlite3
 import unittest
 from collections import Counter
 
-from scripts.mix_large_continued_sft import (
+from dataset.scripts.mix_large_continued_sft import (
     classify_replay, fingerprints, has_reasoning, select_balanced_replay, select_source,
 )
 

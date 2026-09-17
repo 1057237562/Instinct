@@ -16,6 +16,7 @@ import torch
 import numpy as np
 import streamlit as st
 from transformers import AutoTokenizer, TextIteratorStreamer
+from scripts.stream_metrics import TokenRateStreamer, speed_caption, render_updates
 from model.model_instinct import InstinctConfig, InstinctForCausalLM
 from scripts.web_demo_utils import (
     clear_conversation_state,
@@ -23,6 +24,8 @@ from scripts.web_demo_utils import (
     encode_clipboard_text,
     queue_last_response_regeneration,
     resolve_model_config_path,
+    render_markdown_stream,
+    generation_loading_html,
 )
 
 st.set_page_config(page_title="Instinct", initial_sidebar_state="collapsed")
@@ -200,55 +203,6 @@ def execute_tool(tool_name, args):
         return {"error": str(e)}
 
 
-def process_assistant_content(content, is_streaming=False):
-    # 处理tool_call标签，格式化显示
-    if '<tool_call>' in content:
-        def format_tool_call(match):
-            try:
-                tc = json.loads(match.group(1))
-                name = tc.get('name', 'unknown')
-                args = tc.get('arguments', {})
-                return f'<div style="background: rgba(80, 110, 150, 0.20); border: 1px solid rgba(140, 170, 210, 0.30); padding: 10px 12px; border-radius: 12px; margin: 6px 0;"><div style="font-size:12px;opacity:.75;display:block;margin:0 0 6px 0;line-height:1;">ToolCalling</div><div><b>{name}</b>: {json.dumps(args, ensure_ascii=False)}</div></div>'
-            except:
-                return match.group(0)
-        content = re.sub(r'<tool_call>(.*?)</tool_call>', format_tool_call, content, flags=re.DOTALL)
-    
-    # 流式生成且开启思考时，一开始就放到折叠里
-    if is_streaming and st.session_state.get('enable_thinking', False) and '</think>' not in content and '<think>' not in content:
-        m = re.search(r'(\n\n(?:我是|您好|你好)[^\n]*)', content)
-        if m and m.start(1) > 5:
-            i = m.start(1)
-            think_part = content[:i]
-            answer_part = content[i:]
-            return f'<details open style="border-left: 2px solid #666; padding-left: 12px; margin: 8px 0;"><summary style="cursor: pointer; color: #888;">已思考</summary><div style="color: #aaa; font-size: 0.95em; margin-top: 8px; max-height: 100px; overflow-y: auto;">{think_part.strip()}</div></details>{answer_part}'
-        elif len(content) > 5:
-            return f'<details open style="border-left: 2px solid #666; padding-left: 12px; margin: 8px 0;"><summary style="cursor: pointer; color: #888;">思考中...</summary><div style="color: #aaa; font-size: 0.95em; margin-top: 8px; max-height: 100px; overflow-y: auto; display: flex; flex-direction: column-reverse;"><div style="margin-bottom: auto;">{content.strip().replace(chr(10), "<br>")}</div></div></details>'
-
-    if '<think>' in content and '</think>' in content:
-        def format_think(match):
-            think_content = match.group(2)
-            if think_content.replace('\n', '').strip():  # 不是全换行
-                return f'<details open style="border-left: 2px solid #666; padding-left: 12px; margin: 8px 0;"><summary style="cursor: pointer; color: #888;">已思考</summary><div style="color: #aaa; font-size: 0.95em; margin-top: 8px; max-height: 100px; overflow-y: auto;">{think_content.strip()}</div></details>'
-            return ''
-        content = re.sub(r'(<think>)(.*?)(</think>)', format_think, content, flags=re.DOTALL)
-
-    if '<think>' in content and '</think>' not in content:
-        def format_think_in_progress(match):
-            tc = match.group(1)
-            return f'<details open style="border-left: 2px solid #666; padding-left: 12px; margin: 8px 0;"><summary style="cursor: pointer; color: #888;">思考中...</summary><div style="color: #aaa; font-size: 0.95em; margin-top: 8px; max-height: 100px; overflow-y: auto; display: flex; flex-direction: column-reverse;"><div style="margin-bottom: auto;">{tc.strip().replace(chr(10), "<br>")}</div></div></details>'
-        content = re.sub(r'<think>(.*?)$', format_think_in_progress, content, flags=re.DOTALL)
-
-    if '<think>' not in content and '</think>' in content:
-        def format_think_no_start(match):
-            think_content = match.group(1)
-            if think_content.replace('\n', '').strip():
-                return f'<details open style="border-left: 2px solid #666; padding-left: 12px; margin: 8px 0;"><summary style="cursor: pointer; color: #888;">已思考</summary><div style="color: #aaa; font-size: 0.95em; margin-top: 8px; max-height: 100px; overflow-y: auto;">{think_content.strip()}</div></details>'
-            return ''
-        content = re.sub(r'(.*?)</think>', format_think_no_start, content, flags=re.DOTALL)
-
-    return content
-
-
 def _escape_html(s):
     return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
 
@@ -257,12 +211,13 @@ class LogitLensStreamer(TextIteratorStreamer):
     """TextIteratorStreamer 的增强版：额外把实际生成的 token id 记录进共享列表。
 
     generate() 开头 put 的是完整 prompt（skip_prompt=True 时被丢弃，且不记录）；
-    之后每次 put 恰好是 1 个新生成的 token，逐 id 追加到 gen_ids，作为逐层解释的列头。
+    之后每次 put 是一块新生成的 token，逐 id 追加到 gen_ids，作为逐层解释的列头。
     """
 
-    def __init__(self, tokenizer, gen_ids, skip_prompt=True, skip_special_tokens=True):
+    def __init__(self, tokenizer, gen_ids, skip_prompt=True, skip_special_tokens=True, on_block=None):
         super().__init__(tokenizer, skip_prompt=skip_prompt, skip_special_tokens=skip_special_tokens)
         self.gen_ids = gen_ids
+        self.on_block = on_block
 
     def put(self, value):
         if len(value.shape) > 1:
@@ -270,8 +225,10 @@ class LogitLensStreamer(TextIteratorStreamer):
         if self.skip_prompt and self.next_tokens_are_prompt:
             self.next_tokens_are_prompt = False
             return
-        super().put(value)
+        if self.on_block:
+            self.on_block(value)
         self.gen_ids.extend(value.tolist())
+        super().put(value)
 
 
 def setup_logit_lens(model, tokenizer, temperature=None, top_p=None,
@@ -318,7 +275,9 @@ def setup_logit_lens(model, tokenizer, temperature=None, top_p=None,
         b = int(255 - (255 - 255) * p)
         return '#%02x%02x%02x' % (r, g, b)
 
-    def layer_cb(layer_idx, normed_h):
+    pending_logits = []
+
+    def record_layer(layer_idx, lg):
         if broken[0]:
             return
         try:
@@ -326,7 +285,6 @@ def setup_logit_lens(model, tokenizer, temperature=None, top_p=None,
             # 之后每步只输入 1 个新 token，对应预测下一个 token。
             if layer_idx == 1:
                 steps.append({'tops': [None] * n_layers})
-            lg = model.lm_head(normed_h[:, -1:, :]).float().cpu()[0, 0]
             # 采样对齐只作用于最终层（该层决定实际输出）；中间层保持原始 softmax 展示预测轨迹
             if n_layers > 0 and layer_idx == n_layers:
                 if temperature is not None and temperature > 0:
@@ -355,9 +313,36 @@ def setup_logit_lens(model, tokenizer, temperature=None, top_p=None,
             p, tid = probs.max(dim=-1)
             p, tid = p.item(), tid.item()
             steps[-1]['tops'][layer_idx - 1] = (decode_token(tid), p, tid)
-            del lg, normed_h  # 只保留标量 (text, prob, id)，避免显存累积
+            del lg
         except Exception:
             broken[0] = True
+
+    def layer_cb(layer_idx, normed_h):
+        if not broken[0]:
+            pending_logits.append((layer_idx, model.lm_head(normed_h[:, -1:, :])[0, 0].detach()))
+
+    def flush_layers(tokens):
+        if not pending_logits:
+            return
+        base = len(gen_ids)
+        try:
+            # One transfer for all layer diagnostics collected in this block.
+            logits = torch.stack([item[1] for item in pending_logits]).float().cpu()
+            token_values = tokens.tolist()
+            step_index = -1
+            for (layer_idx, _), lg in zip(pending_logits, logits):
+                if layer_idx == 1:
+                    if step_index >= 0 and step_index < len(token_values):
+                        gen_ids.append(token_values[step_index])
+                    step_index += 1
+                if step_index >= len(token_values):
+                    break
+                record_layer(layer_idx, lg)
+        except Exception:
+            broken[0] = True
+        finally:
+            del gen_ids[base:]
+            pending_logits.clear()
 
     def render(final=False):
         if broken[0]:
@@ -414,7 +399,7 @@ def setup_logit_lens(model, tokenizer, temperature=None, top_p=None,
                 '</div></details>') % (_escape_html(summary), thead, tbody)
         ph.markdown(html, unsafe_allow_html=True)
 
-    return SimpleNamespace(streamer=LogitLensStreamer(tokenizer, gen_ids), layer_cb=layer_cb, render=render)
+    return SimpleNamespace(streamer=LogitLensStreamer(tokenizer, gen_ids, on_block=flush_layers), layer_cb=layer_cb, render=render)
 
 
 def load_model_tokenizer(config_path, tokenizer_path, weight_path=None):
@@ -433,6 +418,8 @@ def load_model_tokenizer(config_path, tokenizer_path, weight_path=None):
         state_dict = torch.load(weight_path, map_location='cpu', weights_only=True)
         model.load_state_dict(state_dict, strict=False)
     model = model.half().eval().to(device)
+    from model.inference_runtime import optimize_inference
+    model = optimize_inference(model, os.environ.get('INSTINCT_INFERENCE_COMPILE', 'auto'))
     return model, tokenizer
 
 
@@ -467,7 +454,7 @@ def init_chat_messages():
     if "messages" in st.session_state:
         for i, message in enumerate(st.session_state.messages):
             if message["role"] == "assistant":
-                st.markdown(process_assistant_content(message["content"]), unsafe_allow_html=True)
+                render_markdown_stream(st.empty(), message['content'], streaming=False)
             else:
                 st.markdown(
                     f'<div style="display: flex; justify-content: flex-end;"><div style="display: inline-block; margin: 10px 0; padding: 8px 12px 8px 12px; background-color: #3d4450; border-radius: 22px; color: white;">{message["content"]}</div></div>',
@@ -748,7 +735,10 @@ def main():
 
     for i, message in enumerate(messages):
         if message["role"] == "assistant":
-            st.markdown(process_assistant_content(message["content"]), unsafe_allow_html=True)
+            render_markdown_stream(st.empty(), message['content'],
+                                   thinking=message.get('thinking_enabled', False), streaming=False)
+            if message.get('generation_stats'):
+                st.caption(speed_caption(message['generation_stats']))
             render_answer_actions(message["content"], i, i == len(messages) - 1)
         else:
             st.markdown(
@@ -770,6 +760,9 @@ def main():
         st.session_state.chat_messages.append({"role": "user", "content": prompt})
 
         placeholder = st.empty()
+        loading_slot = st.empty()
+        with loading_slot.container():
+            st.html(generation_loading_html())
 
         random_seed = random.randint(0, 2 ** 32 - 1)
         setup_seed(random_seed)
@@ -796,6 +789,9 @@ def main():
                                         prompt_token_ids=inputs.input_ids[0].tolist())
 
         streamer = lens.streamer if lens is not None else TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+        streamer = TokenRateStreamer(streamer)
+        speed_slot = st.empty()
+        generation_stats = []
         generation_kwargs = {
             "input_ids": inputs.input_ids,
             "max_new_tokens": st.session_state.max_new_tokens,
@@ -808,16 +804,20 @@ def main():
             "repetition_penalty": st.session_state.repetition_penalty,
             "top_p": 0.85,
             "streamer": streamer,
+            "stream_chunk_size": 16,
         }
         if lens is not None:
             generation_kwargs["layer_callback"] = lens.layer_cb
 
+        render_markdown_stream(placeholder, '', thinking=st.session_state.get('enable_thinking', False))
         Thread(target=model.generate, kwargs=generation_kwargs).start()
 
         answer = ""
-        for new_text in streamer:
-            answer += new_text
-            placeholder.markdown(process_assistant_content(answer, is_streaming=True), unsafe_allow_html=True)
+        for updated_answer, final_update in render_updates(streamer):
+            speed_slot.caption(speed_caption(streamer.snapshot()))
+            render_markdown_stream(placeholder, updated_answer, previous=answer,
+                                   thinking=st.session_state.get('enable_thinking', False), streaming=not final_update)
+            answer = updated_answer
             if lens is not None:
                 lens.render()
         if lens is not None:
@@ -826,6 +826,8 @@ def main():
             generation_kwargs.pop("layer_callback", None)
 
         full_answer = answer
+        generation_stats.append(streamer.snapshot())
+        speed_slot.caption(speed_caption(generation_stats[-1]))
         for _ in range(16):
             tool_calls = re.findall(r'<tool_call>(.*?)</tool_call>', answer, re.DOTALL)
             if not tool_calls:
@@ -837,27 +839,38 @@ def main():
                     tc = json.loads(tc_str.strip())
                     result = execute_tool(tc.get('name', ''), tc.get('arguments', {}))
                     st.session_state.chat_messages.append({"role": "tool", "content": json.dumps(result, ensure_ascii=False)})
-                    tool_results.append(f'<div style="background: rgba(90, 130, 110, 0.20); border: 1px solid rgba(150, 200, 170, 0.30); padding: 10px 12px; border-radius: 12px; margin: 6px 0;"><div style="font-size:12px;opacity:.75;display:block;margin:0 0 6px 0;line-height:1;">ToolCalled</div><div><b>{tc.get("name", "")}</b>: {json.dumps(result, ensure_ascii=False)}</div></div>')
+                    tool_results.append(f"**ToolCalled · {tc.get('name', '')}**\n\n```json\n{json.dumps(result, ensure_ascii=False, indent=2)}\n```")
                 except:
                     pass
             full_answer += "\n" + "\n".join(tool_results) + "\n"
-            placeholder.markdown(process_assistant_content(full_answer, is_streaming=True), unsafe_allow_html=True)
+            render_markdown_stream(placeholder, full_answer, streaming=False)
             new_prompt = tokenizer.apply_chat_template(st.session_state.chat_messages, **template_kwargs)
             inputs = tokenizer(new_prompt, return_tensors="pt", truncation=True).to(device)
             streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+            streamer = TokenRateStreamer(streamer)
             generation_kwargs["input_ids"] = inputs.input_ids
             generation_kwargs["attention_mask"] = inputs.attention_mask
             generation_kwargs["max_new_tokens"] = st.session_state.max_new_tokens
             generation_kwargs["streamer"] = streamer
             Thread(target=model.generate, kwargs=generation_kwargs).start()
             answer = ""
-            for new_text in streamer:
-                answer += new_text
-                placeholder.markdown(process_assistant_content(full_answer + answer, is_streaming=True), unsafe_allow_html=True)
+            for updated_answer, final_update in render_updates(streamer):
+                speed_slot.caption(speed_caption(streamer.snapshot()))
+                render_markdown_stream(placeholder, full_answer + updated_answer, previous=full_answer + answer,
+                                       thinking=st.session_state.get('enable_thinking', False), streaming=not final_update)
+                answer = updated_answer
             full_answer += answer
+            generation_stats.append(streamer.snapshot())
         answer = full_answer
+        loading_slot.empty()
+        total_tokens = sum(item['tokens'] for item in generation_stats)
+        total_seconds = sum(item['seconds'] for item in generation_stats)
+        stats = {'tokens': total_tokens, 'seconds': total_seconds,
+                 'tokens_per_second': total_tokens / total_seconds if total_seconds else 0}
+        speed_slot.caption(speed_caption(stats))
 
-        messages.append({"role": "assistant", "content": answer})
+        messages.append({"role": "assistant", "content": answer, "generation_stats": stats,
+                         "thinking_enabled": st.session_state.get('enable_thinking', False)})
         st.session_state.chat_messages.append({"role": "assistant", "content": answer})
         render_answer_actions(answer, len(messages) - 1, True)
 

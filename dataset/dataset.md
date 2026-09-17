@@ -23,10 +23,10 @@ CC BY、CC BY-SA、CC0 / Public Domain 论文。构建器按全部时间分片�
 ID、URL、作者和许可证元数据。
 
 ```bash
-python scripts/collect_arxiv_pretrain.py
+python dataset/scripts/collect_arxiv_pretrain.py
 
 # 例如扩充为约 2 GB
-python scripts/collect_arxiv_pretrain.py \
+python dataset/scripts/collect_arxiv_pretrain.py \
   --target-bytes 2000000000 \
   --output dataset/pretrain_arxiv_open_2gb.jsonl \
   --report dataset/pretrain_arxiv_open_2gb.report.json
@@ -39,22 +39,25 @@ python scripts/collect_arxiv_pretrain.py \
 
 ## 代码专家预训练混合
 
-`dataset/codespecialist.jsonl` 使用按正文 UTF-8 字节控制的代码专家配方：约 60%
-代码相关数据、20% 中英通用文本、10% 数学推理和 10% 学术技术全文。代码部分
+`dataset/codespecialist.jsonl` 使用按 Instinct tokenizer token 数控制的代码专家配方：约 60%
+代码相关数据、20% 中英通用文本、10% 数学推理和 10% 学术摘要。代码部分
 包含真实开放仓库代码与 Markdown 文档、竞赛题面/推理/答案、验证通过的 submission、
 代码指令、Text-to-SQL 和 Exercism 软件任务。所有来源保持整条记录，不在合成阶段
-切块或截断。
+切块或截断。含 BOS/EOS 超过 4096 tokens 的记录整条丢弃。语料约 16 亿 tokens，
+训练两遍约 32 亿 token 呈现量；重复训练不等价于相同数量的新语料。
+训练需设置 `max_seq_len=4096` 才能完整利用合格记录；更小长度仍会截断。
 
 真实仓库组件可复现为：
 
 ```bash
-python scripts/collect_stackv2_code.py
+python dataset/scripts/collect_stackv2_code_4096.py
+python dataset/scripts/collect_arxiv_abstracts_4096.py
 ```
 
-完整混合先构建为 `codespecialist.next.jsonl`，校验后再替换正式文件：
+完整混合先构建为 `codespecialist_4096.next.jsonl`，校验后再替换正式文件：
 
 ```bash
-python scripts/build_codespecialist_mix.py
+python dataset/scripts/build_codespecialist_4096.py
 ```
 
 实际组成、许可证来源、行数、正文比例和 SHA-256 见
@@ -67,16 +70,16 @@ python scripts/build_codespecialist_mix.py
 
 ```bash
 # 使用已下载到 dataset/codealpaca/ 的 CodeAlpaca 20K
-python scripts/prepare_sft_data.py codealpaca-local
+python dataset/scripts/prepare_sft_data.py codealpaca-local
 
 # 适合小于 1B 模型的通用指令数据（可先抽样 100K）
-python scripts/prepare_sft_data.py smol-smoltalk --max-samples 100000
+python dataset/scripts/prepare_sft_data.py smol-smoltalk --max-samples 100000
 
 # 执行过滤的 Coding 指令数据
-python scripts/prepare_sft_data.py bigcode-exec-50k
+python dataset/scripts/prepare_sft_data.py bigcode-exec-50k
 
 # 可选 Coding 补充
-python scripts/prepare_sft_data.py magicoder-75k
+python dataset/scripts/prepare_sft_data.py magicoder-75k
 ```
 
 转换结果统一为 Instinct 所需的 `conversations` 格式，并使用 `sft_` 文件名前缀。
@@ -84,7 +87,7 @@ python scripts/prepare_sft_data.py magicoder-75k
 ### 混合 Magicoder 110K、MathInstruct 与原始 T2T replay
 
 ```bash
-python scripts/mix_sft_datasets.py
+python dataset/scripts/mix_sft_datasets.py
 ```
 
 默认读取：

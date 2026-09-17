@@ -158,6 +158,8 @@ class RMSNorm(torch.nn.Module):
 
     def forward(self, x):
         """前向:归一化后乘权重,并恢复输入 dtype。"""
+        if not self.training and getattr(self, '_inference_norm', None) is not None:
+            return self._inference_norm(x, self.weight, self.eps)
         return (self.weight * self.norm(x.float())).type_as(x)
 
 class RMSNormGated(nn.Module):
@@ -410,7 +412,11 @@ class Attention(nn.Module):
             xk = torch.cat([k_past, xk], dim=1)
             xv = torch.cat([v_past, xv], dim=1)
         past_kv = make_cache(xk, xv, self.kv_cache_dtype) if use_cache else None
-        if self.flash and (seq_len > 1) and (past_key_value is None):
+        if self.flash and not self.training and seq_len == 1:
+            output = flash_attention(xq, xk, xv, dropout_p=0.0,
+                                     is_causal=False, attention_mask=attention_mask)
+            output = output.reshape(bsz, seq_len, -1)
+        elif self.flash and (seq_len > 1) and (past_key_value is None):
             # Keep packed attention fused; mode 1 checkpoints the FFN only.
             output = flash_attention(
                 xq, xk, xv, dropout_p=self.dropout if self.training else 0.0,
@@ -447,7 +453,10 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         """前向:SwiGLU 门控激活（act(gate(x)) * up(x)）→ down 投影。"""
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        gate, up = self.gate_proj(x), self.up_proj(x)
+        if not self.training and getattr(self, '_inference_gate', None) is not None:
+            return self.down_proj(self._inference_gate(gate, up))
+        return self.down_proj(self.act_fn(gate) * up)
 
 class MOEFeedForward(nn.Module):
     """Top-k 路由 MoE FFN:softmax 门控选 top-k 专家,按权重聚合专家输出。
@@ -892,36 +901,54 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         streamer、early exit 与 KV cache 复用;return_kv=True 时额外返回 past_kv。"""
         input_ids = kwargs.pop("input_ids", inputs).repeat(num_return_sequences, 1)
         attention_mask = attention_mask.repeat(num_return_sequences, 1) if attention_mask is not None else None
+        initial_length = input_ids.shape[1]
+        input_storage = input_ids.new_empty((input_ids.shape[0], initial_length + max_new_tokens))
+        input_storage[:, :initial_length].copy_(input_ids)
+        input_ids = input_storage[:, :initial_length]
+        attention_storage = None
+        if attention_mask is not None:
+            attention_storage = attention_mask.new_ones((attention_mask.shape[0], initial_length + max_new_tokens))
+            attention_storage[:, :initial_length].copy_(attention_mask)
+            attention_mask = attention_storage[:, :initial_length]
         past_key_values = kwargs.pop("past_key_values", None)
         early_exit = kwargs.pop("early_exit", False)
         exit_threshold = kwargs.pop("exit_threshold", 0.9)
+        from model.generation_stream import TokenChunkBuffer
+        chunk_size = int(kwargs.pop('stream_chunk_size', 16))
+        # Cache-returning callers need the cache aligned to the exact stop token.
+        if kwargs.get('return_kv'):
+            chunk_size = 1
+        chunks = TokenChunkBuffer(streamer, chunk_size, eos_token_id)
         finished = torch.zeros(input_ids.shape[0], dtype=torch.bool, device=input_ids.device)
         if streamer: streamer.put(input_ids.cpu())
-        for _ in range(max_new_tokens):
+        forward_kwargs = dict(kwargs)
+        forward_kwargs.setdefault('logits_to_keep', 1)
+        if early_exit:
+            forward_kwargs['early_exit'] = True
+            forward_kwargs['exit_threshold'] = exit_threshold
+        for step in range(max_new_tokens):
             past_len = 0
             if past_key_values:
                 for i, lt in enumerate(self.model.config.layer_types):
                     if lt == "full_attention" and past_key_values[i] is not None:
                         past_len = past_key_values[i][0].shape[1]
                         break
-            forward_kwargs = dict(kwargs)
-            if early_exit:
-                forward_kwargs['early_exit'] = True
-                forward_kwargs['exit_threshold'] = exit_threshold
             outputs = self.forward(input_ids[:, past_len:], attention_mask, past_key_values, use_cache=use_cache, **forward_kwargs)
-            attention_mask = torch.cat(
-                [attention_mask, attention_mask.new_ones(attention_mask.shape[0], 1)], -1
-            ) if attention_mask is not None else None
-            logits = outputs.logits[:, -1, :] / temperature
+            attention_mask = attention_storage[:, :initial_length + step + 1] if attention_storage is not None else None
+            logits = outputs.logits[:, -1, :]
+            if do_sample:
+                logits = logits / temperature
             if repetition_penalty != 1.0:
-                for i in range(input_ids.shape[0]): logits[i, torch.unique(input_ids[i])] /= repetition_penalty
-            if top_k > 0: 
-                logits[logits < torch.topk(logits, top_k)[0][..., -1, None]] = -float('inf')
-            if top_p < 1.0:
+                seen = torch.zeros_like(logits, dtype=torch.bool).scatter_(1, input_ids, True)
+                penalized = logits / repetition_penalty
+                logits = torch.where(seen, penalized, logits)
+            if do_sample and top_k > 0:
+                logits.masked_fill_(logits < torch.topk(logits, top_k)[0][..., -1, None], -float('inf'))
+            if do_sample and top_p < 1.0:
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True)
                 mask = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1) > top_p
                 mask[..., 1:], mask[..., 0] = mask[..., :-1].clone(), 0
-                logits[mask.scatter(1, sorted_indices, mask)] = -float('inf')
+                logits.masked_fill_(mask.scatter(1, sorted_indices, mask), -float('inf'))
             next_token = torch.multinomial(torch.softmax(logits, dim=-1), num_samples=1) if do_sample else torch.argmax(logits, dim=-1, keepdim=True)
             if eos_token_id is not None:
                 next_token = torch.where(
@@ -929,12 +956,15 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                     next_token.new_full((next_token.shape[0], 1), eos_token_id),
                     next_token,
                 )
-            input_ids = torch.cat([input_ids, next_token], dim=-1)
+            input_storage[:, initial_length + step:initial_length + step + 1].copy_(next_token)
+            input_ids = input_storage[:, :initial_length + step + 1]
             past_key_values = outputs.past_key_values if use_cache else None
-            if streamer: streamer.put(next_token.cpu())
             if eos_token_id is not None:
                 finished |= next_token.squeeze(-1).eq(eos_token_id)
-                if finished.all(): break
+            if chunks.push(next_token, finished, final=step + 1 == max_new_tokens):
+                break
+        if chunks.overshoot:
+            input_ids = input_ids[:, :-chunks.overshoot]
         if streamer: streamer.end()
         if kwargs.get("return_kv"): return {'generated_ids': input_ids, 'past_kv': past_key_values}
         return input_ids

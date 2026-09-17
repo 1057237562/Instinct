@@ -20,7 +20,8 @@ from model.sequence_packing import (
     block_diagonal_attention_mask, positions_from_sequence_ids,
 )
 from trainer.packing_transition import (
-    packing_data_config, SequencePackingPlan, validate_packing_resume,
+    packing_data_config, SequencePackingPlan, validate_lr_schedule_resume,
+    validate_packing_resume,
 )
 from trainer.trainer_utils import release_compiled_cuda_memory
 
@@ -521,7 +522,8 @@ def test_looped_packed_segment_matches_standalone_forward():
     config = LoopConfig(
         vocab_size=64, hidden_size=32, num_hidden_layers=4,
         num_attention_heads=4, num_key_value_heads=2,
-        prelude_layers=1, loop_iters=2, coda_layers=1,
+        prelude_layers=1, recurrent_layers=2, loop_iters=2, coda_layers=1,
+        state_init_std=0.0, recurrence_sampling="fixed",
         max_position_embeddings=32, dropout=0.0, flash_attn=False,
         tie_word_embeddings=False,
     )
@@ -585,6 +587,22 @@ class _SizedDataset(Dataset):
 
     def __getitem__(self, index):
         return index
+
+
+def test_resume_preserves_rewarm_schedule(tmp_path):
+    args = SimpleNamespace(
+        sequence_packing=1, packing_batch_size=10,
+        max_seq_len=1024, batch_size=4,
+        data_path=str(tmp_path / "data.jsonl"),
+        epochs=1, learning_rate=5e-5, warmup_ratio=0.01,
+        warmup_steps=0, min_lr_ratio=0.1,
+    )
+    checkpoint = {"data_config": packing_data_config(args)}
+    validate_lr_schedule_resume(args, checkpoint)
+    changed = SimpleNamespace(**vars(args))
+    changed.warmup_ratio = 0.02
+    with pytest.raises(ValueError, match="changed LR schedule"):
+        validate_lr_schedule_resume(changed, checkpoint)
 
 
 def test_resume_aligns_then_packs_inside_same_epoch(tmp_path):

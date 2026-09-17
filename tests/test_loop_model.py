@@ -38,10 +38,15 @@ LABELS = INPUT_IDS.clone()
 
 
 def _make_loop_causal_lm(use_moe, mode, seed=0, loop_iters=2):
-    """Fresh loop InstinctForCausalLM with a tiny config, fixed seed, small loop."""
+    """Fresh recurrent-depth InstinctForCausalLM with deterministic latent state."""
     torch.manual_seed(seed)
     config = make_tiny_config(use_moe=use_moe, variant="loop")
     config.loop_iters = loop_iters
+    config.mean_recurrence = loop_iters
+    config.mean_backprop_depth = loop_iters
+    config.recurrence_sampling = "fixed"
+    config.state_init_std = 0.0
+    config.recurrent_layers = 2
     config.use_grad_checkpoint = mode
     model = model_instinct_loop.InstinctForCausalLM(config)
     model.train()
@@ -149,3 +154,79 @@ def test_eval_no_checkpoint():
         losses.append(out.loss)
     assert torch.equal(losses[0], losses[1]), "eval: Mode 0 vs 1 loss differ"
     assert torch.equal(losses[0], losses[2]), "eval: Mode 0 vs 2 loss differ"
+
+
+def test_recurrent_depth_topology_matches_paper():
+    model = _make_loop_causal_lm(use_moe=False, mode=0, loop_iters=3)
+    assert len(model.model.prelude) == 1
+    assert len(model.model.recurrent_block) == 2
+    assert len(model.model.coda) == 1
+    assert model.model.input_adapter.in_features == 2 * model.config.hidden_size
+    assert model.model.input_adapter.out_features == model.config.hidden_size
+    layer = model.model.recurrent_block[0]
+    assert hasattr(layer, "input_layernorm")
+    assert hasattr(layer, "post_attention_residual_layernorm")
+    assert hasattr(layer, "post_attention_layernorm")
+    assert hasattr(layer, "post_mlp_residual_layernorm")
+    assert layer.self_attn.q_proj.bias is not None
+    assert layer.self_attn.k_proj.bias is not None
+    assert layer.self_attn.v_proj.bias is None
+    assert isinstance(layer.self_attn.q_norm, torch.nn.Identity)
+    assert isinstance(layer.self_attn.k_norm, torch.nn.Identity)
+    assert model.model.effective_layers(3) == 8
+
+
+def test_truncated_backprop_reports_sampled_partition_and_updates_prelude():
+    model = _make_loop_causal_lm(use_moe=False, mode=0, loop_iters=4)
+    model.config.mean_backprop_depth = 2
+    out = model(input_ids=INPUT_IDS, labels=LABELS, num_steps=4)
+    out.loss.backward()
+    assert model.model.last_num_steps_no_grad == 2
+    assert model.model.last_num_steps_with_grad == 2
+    assert model.model.input_adapter.weight.grad is not None
+    assert model.model.prelude[0].self_attn.q_proj.weight.grad is not None
+
+
+def test_inference_num_steps_scales_effective_depth_and_cache_slots():
+    model = _make_loop_causal_lm(use_moe=False, mode=0, loop_iters=2).eval()
+    with torch.no_grad():
+        shallow = model(INPUT_IDS, num_steps=1, use_cache=True)
+        deep = model(INPUT_IDS, num_steps=4, use_cache=True)
+    assert shallow.recurrent_steps == 1
+    assert deep.recurrent_steps == 4
+    assert len(shallow.past_key_values) == model.model.effective_layers(1)
+    assert len(deep.past_key_values) == model.model.effective_layers(4)
+
+
+def test_dense_weight_partition_migrates_into_v2_stages():
+    from model.model_instinct import (
+        InstinctConfig as DenseConfig,
+        InstinctForCausalLM as DenseForCausalLM,
+    )
+
+    torch.manual_seed(31)
+    recurrent = _make_loop_causal_lm(False, 0, loop_iters=2)
+    dense_config = DenseConfig(
+        hidden_size=64, num_hidden_layers=4, vocab_size=256,
+        num_attention_heads=4, num_key_value_heads=2,
+        intermediate_size=recurrent.config.intermediate_size,
+        max_position_embeddings=64, flash_attn=False,
+    )
+    dense = DenseForCausalLM(dense_config)
+    recurrent.load_pretrained_weights(dense.state_dict())
+    torch.testing.assert_close(
+        recurrent.model.prelude[0].self_attn.q_proj.weight,
+        dense.model.layers[0].self_attn.q_proj.weight,
+    )
+    torch.testing.assert_close(
+        recurrent.model.recurrent_block[0].self_attn.q_proj.weight,
+        dense.model.layers[1].self_attn.q_proj.weight,
+    )
+    torch.testing.assert_close(
+        recurrent.model.recurrent_block[1].self_attn.q_proj.weight,
+        dense.model.layers[2].self_attn.q_proj.weight,
+    )
+    torch.testing.assert_close(
+        recurrent.model.coda[0].self_attn.q_proj.weight,
+        dense.model.layers[3].self_attn.q_proj.weight,
+    )

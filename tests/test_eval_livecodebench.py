@@ -99,10 +99,11 @@ class _FakeTokenizer:
 
 class _FakeModel:
     def generate(self, inputs, **kwargs):
-        return torch.tensor([[10, 11, 12]])
+        return torch.tensor([[10, 11, 12]]).repeat(len(inputs), 1)
 
 
-def test_generation_writes_official_custom_evaluator_format(tmp_path):
+@pytest.mark.parametrize('batch_size', [1, 3])
+def test_generation_writes_official_custom_evaluator_format(tmp_path, batch_size):
     dataset_path = tmp_path / 'lcb.json'
     dataset_path.write_text(json.dumps([
         {'question_id': '2', 'question_content': 'B', 'starter_code': ''},
@@ -116,6 +117,7 @@ def test_generation_writes_official_custom_evaluator_format(tmp_path):
         lcb_end_date=None,
         lcb_limit=0,
         lcb_num_samples=2,
+        lcb_batch_size=batch_size,
         lcb_seed=7,
         lcb_resume=1,
         lcb_output=str(output_path),

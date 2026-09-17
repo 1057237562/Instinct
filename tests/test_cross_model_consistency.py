@@ -90,7 +90,12 @@ def _make_causal_lm(variant, use_moe, mode, seed=0, flash_attn=False):
     config.flash_attn = flash_attn
     config.use_grad_checkpoint = mode
     if variant == "loop":
-        config.loop_iters = 2  # total effective depth = prelude 1 + 2 + coda 1 = 4
+        config.loop_iters = 2
+        config.mean_recurrence = 2
+        config.mean_backprop_depth = 2
+        config.recurrence_sampling = "fixed"
+        config.state_init_std = 0.0
+        config.recurrent_layers = 1
     elif variant == "linear":
         # full_attention_interval=1 => every layer is a standard Attention block
         # (no GatedDeltaNet), so the same (k, v) cache format works for all layers.

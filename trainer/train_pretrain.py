@@ -98,7 +98,7 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
             current_lr = optimizer.param_groups[-1]['lr']
             eta_min = spend_time / max(step - start_step, 1) * (iters - step) / 60
             elapsed_min = spend_time / 60
-            loop_steps = getattr(model, 'last_avg_steps', None)
+            loop_steps = getattr(res, 'recurrent_steps', None)
             loop_str = f', loop_steps: {loop_steps:.2f}' if loop_steps else ''
             bucket_text = f', {bucket_status}' if bucket_status else ''
             Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}{loop_str}, lr: {current_lr:.8f}{bucket_text}, epoch_time: {eta_min:.1f}min, elapsed_time: {elapsed_min:.1f}min')
@@ -179,22 +179,21 @@ if __name__ == "__main__":
 
     # 5. 定义模型、数据、优化器
     model, tokenizer = init_model(lm_config, 'none' if ckp_data else args.from_weight, device=args.device)
-    if args.use_looped and args.depth_reward >= 0:
-        model.set_depth_reward(args.depth_reward)
-        Logger(f'[Looped] depth_reward λ = {args.depth_reward}')
-    if args.use_looped and args.distill_weight >= 0:
-        model.config.distill_weight = args.distill_weight
-        model.config.distill_temperature = args.distill_temperature
-        model.config.teacher_stop_grad = bool(args.teacher_stop_grad)
-        model.config.depth_gain_reward = args.depth_gain_reward
-        if args.exit_in_training >= 0:
-            model.config.exit_in_training = bool(args.exit_in_training)
-        if args.n_supervision > 0:
-            model.config.n_supervision = args.n_supervision
-        Logger(f'[Looped] self-distill w={args.distill_weight} T={args.distill_temperature} '
-               f'stop_grad={args.teacher_stop_grad} | depth-gain reward={args.depth_gain_reward} '
-               f'| exit_in_training={model.config.exit_in_training} '
-               f'| n_supervision={model.config.n_supervision}')
+    if getattr(lm_config, 'model_architecture', '') == 'looped':
+        Logger(
+            '[Instinct V2 recurrent-depth] '
+            f'P/R/C=({lm_config.prelude_layers}/{lm_config.recurrent_layers}/'
+            f'{lm_config.coda_layers}), mean recurrence={lm_config.loop_iters}, '
+            f'backprop depth={lm_config.mean_backprop_depth}, '
+            f'sampling={lm_config.recurrence_sampling}, cap={lm_config.max_recurrence}'
+        )
+        if any((args.depth_reward >= 0, args.distill_weight >= 0,
+                args.exit_in_training >= 0, args.n_supervision > 0)):
+            Logger(
+                '[Instinct V2] LoopUS depth-reward/self-distillation flags are '
+                'deprecated and ignored; recurrence is trained with randomized '
+                'unrolling and truncated backpropagation.'
+            )
     packing_plan = SequencePackingPlan(
         args, ckp_data,
         lambda packing, sample_indices=None: PretrainDataset(

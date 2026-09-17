@@ -231,9 +231,15 @@ def config_from_args(args, **overrides):
     for field in (
         "residual_type", "hc_mult", "hc_sinkhorn_iters", "hc_eps",
         "attnres_variant", "attnres_block_size",
+        "loop_iters", "recurrent_layers", "prelude_layers", "coda_layers",
+        "mean_backprop_depth", "recurrence_sampling",
+        "recurrence_log_normal_sigma", "max_recurrence", "state_init_std",
+        "embedding_scale", "use_input_injection",
     ):
         value = getattr(args, field, None)
         if value is not None:
+            if field == "use_input_injection":
+                value = bool(value)
             overrides.setdefault(field, value)
     hidden_size = overrides.pop('hidden_size', getattr(args, 'hidden_size', 768))
     num_hidden_layers = overrides.pop('num_hidden_layers', getattr(args, 'num_hidden_layers', 8))
@@ -272,7 +278,13 @@ _TOPOLOGY_CONFIG_FIELDS = (
     "full_attention_interval", "linear_conv_kernel_dim",
     "linear_key_head_dim", "linear_value_head_dim",
     "linear_num_key_heads", "linear_num_value_heads",
-    "loop_iters", "prelude_layers", "coda_layers", "use_input_injection",
+    "loop_iters", "mean_recurrence", "recurrent_layers",
+    "recurrent_block_layers", "prelude_layers", "coda_layers",
+    "recurrent_architecture_version",
+    "qk_bias", "qk_norm",
+    "mean_backprop_depth", "recurrence_sampling",
+    "recurrence_log_normal_sigma", "max_recurrence", "state_init_std",
+    "embedding_scale", "use_input_injection",
 )
 
 
@@ -404,8 +416,31 @@ def release_compiled_cuda_memory(reason: str) -> None:
     )
 
 
-def get_lr(current_step: int, total_steps: int, lr: float) -> float:
-    return lr*(0.1 + 0.45*(1 + math.cos(math.pi * current_step / total_steps)))
+def get_lr(current_step: int, total_steps: int, lr: float, *,
+           warmup_steps: int = 0, min_lr_ratio: float = 0.1) -> float:
+    """Linear re-warm followed by cosine re-decay.
+
+    ``warmup_steps=0`` preserves the historical cosine-only schedule. During
+    warmup, LR rises linearly from zero to ``lr``; the remaining steps decay
+    from ``lr`` to ``lr * min_lr_ratio``. Steps are micro-steps, matching the
+    token-proportional schedule used by the training loops.
+    """
+    total_steps = int(total_steps)
+    warmup_steps = int(warmup_steps)
+    if total_steps <= 0:
+        raise ValueError("total_steps must be positive")
+    if warmup_steps < 0 or warmup_steps >= total_steps:
+        raise ValueError("warmup_steps must be in [0, total_steps)")
+    if not 0.0 <= min_lr_ratio <= 1.0:
+        raise ValueError("min_lr_ratio must be in [0, 1]")
+    step = max(0, min(int(current_step), total_steps))
+    if warmup_steps and step <= warmup_steps:
+        return lr * step / warmup_steps
+    decay_steps = total_steps - warmup_steps
+    decay_step = step - warmup_steps
+    progress = decay_step / decay_steps
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return lr * (min_lr_ratio + (1.0 - min_lr_ratio) * cosine)
 
 
 def init_distributed_mode() -> int:

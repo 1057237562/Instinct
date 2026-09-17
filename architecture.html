@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Instinct V2 187.5M latent recurrent-depth Transformer architecture">
+  <title>Instinct V2 — Recurrent Architecture</title>
+  <style>
+    :root {
+      --bg: #07101f;
+      --panel: #0d192c;
+      --panel-2: #111f35;
+      --line: #243754;
+      --text: #edf4ff;
+      --muted: #91a2bb;
+      --blue: #38a5ff;
+      --cyan: #21d4c2;
+      --violet: #a855f7;
+      --violet-2: #6d28d9;
+      --green: #34d399;
+      --amber: #fbbf24;
+      --red: #fb7185;
+      --max: 1180px;
+      color-scheme: dark;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 80% -10%, rgba(88, 28, 135, .28), transparent 32rem),
+        radial-gradient(circle at 5% 18%, rgba(14, 116, 144, .18), transparent 28rem),
+        var(--bg);
+      font: 15px/1.65 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    a { color: #8bd0ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+    .container { width: min(var(--max), calc(100% - 40px)); margin: 0 auto; }
+
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid rgba(73, 99, 137, .45);
+      background: rgba(7, 16, 31, .82);
+      backdrop-filter: blur(16px);
+    }
+    .nav-inner {
+      min-height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: -.02em; }
+    .brand-mark {
+      width: 32px; height: 32px; border-radius: 10px;
+      display: grid; place-items: center;
+      background: linear-gradient(135deg, var(--blue), var(--violet));
+      box-shadow: 0 0 22px rgba(56, 165, 255, .28);
+    }
+    .nav-links { display: flex; gap: 20px; color: var(--muted); font-size: 13px; }
+
+    .hero { padding: 92px 0 62px; text-align: center; }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 11px; border: 1px solid #365071; border-radius: 999px;
+      background: rgba(13, 25, 44, .72); color: #b8cae2;
+      font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    }
+    .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px var(--green); }
+    h1 { margin: 22px 0 18px; font-size: clamp(42px, 7vw, 78px); line-height: 1; letter-spacing: -.055em; }
+    .gradient-text {
+      color: transparent;
+      background: linear-gradient(90deg, #e8f4ff 12%, #73c7ff 45%, #d09aff 82%);
+      background-clip: text; -webkit-background-clip: text;
+    }
+    .hero p { max-width: 770px; margin: 0 auto; color: var(--muted); font-size: clamp(16px, 2vw, 20px); }
+    .hero-actions { margin-top: 28px; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }
+    .button {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 44px; padding: 0 17px; border: 1px solid #395474; border-radius: 10px;
+      color: var(--text); background: rgba(13, 25, 44, .76); font-weight: 700;
+    }
+    .button.primary { border-color: transparent; background: linear-gradient(135deg, #157fe8, #7c3aed); }
+    .button:hover { text-decoration: none; transform: translateY(-1px); }
+
+    .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 42px auto 0; max-width: 900px; }
+    .stat {
+      padding: 18px 12px; border: 1px solid var(--line); border-radius: 14px;
+      background: linear-gradient(145deg, rgba(17, 31, 53, .92), rgba(10, 21, 38, .92));
+    }
+    .stat strong { display: block; font: 800 clamp(20px, 3vw, 28px)/1.1 "Cascadia Code", monospace; }
+    .stat span { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+
+    section { padding: 66px 0; }
+    .section-head { margin-bottom: 30px; }
+    .section-head small { color: var(--cyan); font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+    .section-head h2 { margin: 8px 0 8px; font-size: clamp(28px, 4vw, 44px); line-height: 1.12; letter-spacing: -.035em; }
+    .section-head p { margin: 0; color: var(--muted); max-width: 780px; }
+
+    .arch-card {
+      border: 1px solid var(--line); border-radius: 22px; padding: 28px;
+      background: linear-gradient(155deg, rgba(17, 31, 53, .94), rgba(8, 18, 34, .96));
+      box-shadow: 0 28px 80px rgba(0, 0, 0, .24);
+    }
+    .flow { max-width: 700px; margin: 0 auto; display: flex; flex-direction: column; align-items: center; }
+    .node {
+      width: min(100%, 520px); padding: 15px 18px; border: 1px solid #315275; border-radius: 13px;
+      text-align: center; background: linear-gradient(135deg, #113a61, #145f88);
+    }
+    .node strong { display: block; font: 750 15px "Cascadia Code", monospace; }
+    .node span { display: block; margin-top: 4px; color: #c3d5e8; font-size: 11px; }
+    .node.prelude { background: linear-gradient(135deg, #075985, #0e7490); }
+    .node.adapter { background: linear-gradient(135deg, #4c1d95, #7e22ce); border-color: #a855f7; }
+    .node.coda { background: linear-gradient(135deg, #14532d, #047857); border-color: #2b9566; }
+    .node.head { background: linear-gradient(135deg, #4a1942, #7e22ce); border-color: #9d55dc; }
+    .arrow { height: 28px; display: grid; place-items: center; color: #6882a4; font-size: 17px; }
+    .split { width: min(100%, 650px); display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .branch {
+      padding: 12px; text-align: center; border: 1px solid #344b69; border-radius: 12px; background: #101c30;
+    }
+    .branch strong { font: 700 13px "Cascadia Code", monospace; }
+    .branch span { display: block; color: var(--muted); font-size: 10px; margin-top: 3px; }
+    .loop {
+      width: min(100%, 600px); padding: 12px; border: 1px solid #a855f7; border-radius: 17px;
+      background: linear-gradient(145deg, rgba(88, 28, 135, .55), rgba(30, 20, 55, .78));
+      box-shadow: 0 0 34px rgba(168, 85, 247, .12);
+    }
+    .loop-title { margin-bottom: 9px; text-align: center; color: #e9d5ff; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .core { padding: 16px; border-radius: 12px; text-align: center; background: linear-gradient(135deg, #581c87, #9333ea); }
+    .core strong { font: 800 16px "Cascadia Code", monospace; }
+    .core span { display: block; margin-top: 5px; color: #eadcf8; font-size: 11px; }
+    .loop-back { margin-top: 9px; text-align: center; color: #e9c9ff; font: 700 12px "Cascadia Code", monospace; }
+    .legend { margin-top: 24px; display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; }
+    .chip { padding: 6px 10px; border: 1px solid #304766; border-radius: 999px; color: #b8c8dc; background: #0b1729; font-size: 11px; }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+    .panel { border: 1px solid var(--line); border-radius: 17px; padding: 22px; background: rgba(13, 25, 44, .82); }
+    .panel h3 { margin: 0 0 8px; font-size: 18px; }
+    .panel p { margin: 0; color: var(--muted); }
+    .spec-list { margin: 15px 0 0; padding: 0; list-style: none; }
+    .spec-list li { display: flex; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid rgba(52, 75, 105, .55); }
+    .spec-list li:last-child { border-bottom: 0; }
+    .spec-list span:first-child { color: var(--muted); }
+    .spec-list span:last-child { text-align: right; font-family: "Cascadia Code", monospace; }
+
+    .bar-row { margin: 15px 0; }
+    .bar-label { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 6px; font-size: 12px; }
+    .bar-label span:last-child { color: var(--muted); font-family: "Cascadia Code", monospace; }
+    .bar-track { height: 8px; border-radius: 999px; overflow: hidden; background: #16243a; }
+    .bar-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue), var(--violet)); min-width: 2px; }
+
+    .controls { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin: 18px 0; }
+    label { display: block; color: #c8d6e8; font-size: 12px; font-weight: 700; }
+    input, select {
+      width: 100%; margin-top: 7px; padding: 10px 11px; color: var(--text); background: #081526;
+      border: 1px solid #334c6b; border-radius: 9px; font: 600 13px "Cascadia Code", monospace;
+    }
+    input[type="range"] { padding: 0; accent-color: var(--violet); }
+    .result-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .result { padding: 13px; border: 1px solid #2e4562; border-radius: 11px; background: #091629; }
+    .result strong { display: block; font: 800 18px "Cascadia Code", monospace; }
+    .result span { display: block; color: var(--muted); font-size: 10px; margin-top: 3px; text-transform: uppercase; }
+    .notice { margin-top: 15px; padding: 12px 14px; border-left: 3px solid var(--amber); background: rgba(251, 191, 36, .07); color: #cfdaea; font-size: 12px; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 11px 10px; border-bottom: 1px solid #263a55; text-align: left; }
+    th { color: var(--muted); font-size: 10px; letter-spacing: .07em; text-transform: uppercase; }
+    td:last-child, th:last-child { text-align: right; font-family: "Cascadia Code", monospace; }
+    pre {
+      margin: 0; padding: 20px; overflow: auto; border: 1px solid var(--line); border-radius: 15px;
+      background: #050d19; color: #c9dcf3; font: 12px/1.7 "Cascadia Code", monospace;
+    }
+    .key { color: #7dd3fc; }
+    .num { color: #c4b5fd; }
+    .bool { color: #6ee7b7; }
+
+    footer { padding: 38px 0 54px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    .footer-inner { display: flex; justify-content: space-between; gap: 18px; flex-wrap: wrap; }
+
+    @media (max-width: 780px) {
+      .nav-links { display: none; }
+      .hero { padding-top: 68px; }
+      .stat-grid { grid-template-columns: repeat(2, 1fr); }
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .split { grid-template-columns: 1fr; }
+      .controls, .result-grid { grid-template-columns: 1fr; }
+      .arch-card { padding: 18px 12px; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="container nav-inner">
+      <div class="brand"><span class="brand-mark">I²</span><span>Instinct V2</span></div>
+      <div class="nav-links">
+        <a href="architecture-v1.html">V1 架构</a>
+        <a href="architecture-v1-moe.html">V1 MoE</a>
+        <a href="#architecture">架构</a>
+        <a href="#specs">参数</a>
+        <a href="#memory">显存估算</a>
+        <a href="#config">配置</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="container">
+      <span class="eyebrow"><span class="pulse"></span> Latent recurrent-depth Transformer</span>
+      <h1><span class="gradient-text">Instinct V2 · 187.5M</span></h1>
+      <p>基于论文的 Prelude → Shared Recurrent Core → Coda 结构。只有 8 个物理层，通过 32 次平均递归展开为 132 层平均有效深度。</p>
+      <div class="hero-actions">
+        <a class="button primary" href="#architecture">查看循环架构</a>
+        <a class="button" href="architecture-v1.html">查看 Instinct V1</a>
+        <a class="button" href="https://arxiv.org/abs/2502.05171">参考论文 ↗</a>
+        <a class="button" href="https://github.com/1057237562/Instinct">GitHub ↗</a>
+      </div>
+      <div class="stat-grid">
+        <div class="stat"><strong>187,521,984</strong><span>Parameters</span></div>
+        <div class="stat"><strong>8</strong><span>Physical layers</span></div>
+        <div class="stat"><strong id="hero-depth">132</strong><span>Mean effective depth</span></div>
+        <div class="stat"><strong>13 × 96</strong><span>MHA heads</span></div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="architecture">
+      <div class="container">
+        <div class="section-head">
+          <small>Architecture graph</small>
+          <h2>共享权重，扩展计算深度</h2>
+          <p>Core 的四个 Transformer 层在每次递归中复用。输入 latent <span class="mono">e</span> 每轮重新注入，状态 <span class="mono">sᵢ</span> 在隐空间内迭代。</p>
+        </div>
+        <div class="arch-card">
+          <div class="flow">
+            <div class="node"><strong>Input Tokens</strong><span>token ids · vocab 6,400</span></div>
+            <div class="arrow">▼</div>
+            <div class="node"><strong>Tied Embedding</strong><span>6,400 × 1,248 · output scale √1248</span></div>
+            <div class="arrow">▼</div>
+            <div class="node prelude"><strong>Prelude × 2</strong><span>MHA 13×96 · SwiGLU 1248→4224→1248 · Sandwich RMSNorm</span></div>
+            <div class="arrow">▼</div>
+            <div class="split">
+              <div class="branch"><strong>Input latent e</strong><span>每次递归重新注入 Prelude 输出</span></div>
+              <div class="branch"><strong>Initial state s₀</strong><span>Truncated Normal · std √(2/5)</span></div>
+            </div>
+            <div class="arrow">▼</div>
+            <div class="node adapter"><strong>Input Injection Adapter</strong><span>concat [sᵢ₋₁ ; e] → Linear(2496, 1248, bias=False)</span></div>
+            <div class="arrow">▼</div>
+            <div class="loop">
+              <div class="loop-title">Shared recurrent operator R · sampled depth</div>
+              <div class="core"><strong>Core Transformer × 4</strong><span>MHA · Q/K bias · no QK Norm · SwiGLU 4224 · 4× RMSNorm per layer</span></div>
+              <div class="loop-back">↻ Log-normal Poisson σ=1 · mean 32 · BPTT final 8 recurrences</div>
+            </div>
+            <div class="arrow">▼</div>
+            <div class="node adapter"><strong>Recurrent RMSNorm</strong><span>RMSNorm(1248)</span></div>
+            <div class="arrow">▼</div>
+            <div class="node coda"><strong>Coda × 2</strong><span>MHA 13×96 · SwiGLU 1248→4224→1248 · Sandwich RMSNorm</span></div>
+            <div class="arrow">▼</div>
+            <div class="node head"><strong>Final RMSNorm → Tied LM Head</strong><span>1,248 → vocab 6,400 · next-token logits</span></div>
+          </div>
+          <div class="legend">
+            <span class="chip">RoPE θ = 50,000</span>
+            <span class="chip">RMSNorm ε = 1e-6</span>
+            <span class="chip">BF16 autocast</span>
+            <span class="chip">Gradient checkpoint mode 2</span>
+            <span class="chip">Max recurrence safety cap = 256</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="specs">
+      <div class="container">
+        <div class="section-head">
+          <small>Layer configuration</small>
+          <h2>200M 预算内的论文比例缩放</h2>
+          <p>保持论文的 96 维 attention head 和 MLP 比例。13 个 head 得到 hidden 1248；FFN 理论缩放值约 4236，取硬件友好的 4224。</p>
+        </div>
+        <div class="grid-3">
+          <article class="panel">
+            <h3>Attention</h3>
+            <p>完整 Multi-Head Attention，不使用 GQA。</p>
+            <ul class="spec-list">
+              <li><span>Q / KV heads</span><span>13 / 13</span></li>
+              <li><span>Head dimension</span><span>96</span></li>
+              <li><span>Q/K bias</span><span>true</span></li>
+              <li><span>QK RMSNorm</span><span>false</span></li>
+              <li><span>Per-layer params</span><span>6,232,512</span></li>
+            </ul>
+          </article>
+          <article class="panel">
+            <h3>Feed Forward</h3>
+            <p>SwiGLU 三矩阵结构，所有 Linear 无 bias。</p>
+            <ul class="spec-list">
+              <li><span>Hidden size</span><span>1,248</span></li>
+              <li><span>Intermediate</span><span>4,224</span></li>
+              <li><span>Expansion ratio</span><span>3.385×</span></li>
+              <li><span>Activation</span><span>SiLU</span></li>
+              <li><span>Per-layer params</span><span>15,814,656</span></li>
+            </ul>
+          </article>
+          <article class="panel">
+            <h3>Depth & Training</h3>
+            <p>前向计算很深，但只有最后 k 次递归保留梯度图。</p>
+            <ul class="spec-list">
+              <li><span>Prelude / Core / Coda</span><span>2 / 4 / 2</span></li>
+              <li><span>Mean recurrence r</span><span>32</span></li>
+              <li><span>Mean effective depth</span><span>132</span></li>
+              <li><span>Backprop recurrence k</span><span>8</span></li>
+              <li><span>Grad-tracked depth</span><span>36</span></li>
+            </ul>
+          </article>
+        </div>
+
+        <div class="grid-2" style="margin-top:18px;">
+          <article class="panel">
+            <h3>Parameter Breakdown</h3>
+            <div class="bar-row"><div class="bar-label"><span>8 materialized Transformer layers</span><span>176,417,280 · 94.08%</span></div><div class="bar-track"><div class="bar-fill" style="width:94.08%"></div></div></div>
+            <div class="bar-row"><div class="bar-label"><span>Tied token embedding</span><span>7,987,200 · 4.26%</span></div><div class="bar-track"><div class="bar-fill" style="width:4.26%"></div></div></div>
+            <div class="bar-row"><div class="bar-label"><span>Input injection adapter</span><span>3,115,008 · 1.66%</span></div><div class="bar-track"><div class="bar-fill" style="width:1.66%"></div></div></div>
+            <div class="bar-row"><div class="bar-label"><span>Recurrent + final norm</span><span>2,496 · 0.001%</span></div><div class="bar-track"><div class="bar-fill" style="width:.0013%"></div></div></div>
+          </article>
+          <article class="panel">
+            <h3>Per Physical Layer</h3>
+            <table>
+              <thead><tr><th>Component</th><th>Parameters</th></tr></thead>
+              <tbody>
+                <tr><td>Attention projections + Q/K bias</td><td>6,232,512</td></tr>
+                <tr><td>SwiGLU FFN</td><td>15,814,656</td></tr>
+                <tr><td>4 × RMSNorm</td><td>4,992</td></tr>
+                <tr><td><strong>Total per layer</strong></td><td><strong>22,052,160</strong></td></tr>
+              </tbody>
+            </table>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="depth">
+      <div class="container">
+        <div class="section-head">
+          <small>Test-time compute</small>
+          <h2>递归深度计算器</h2>
+          <p>推理时可以改变 <span class="mono">num_steps</span>。权重参数量不变，但有效深度、KV cache 和计算量随递归次数增长。</p>
+        </div>
+        <div class="panel">
+          <div class="controls">
+            <label>Recurrences r: <span id="recurrence-value" class="mono">32</span>
+              <input id="recurrence" type="range" min="1" max="128" value="32" step="1">
+            </label>
+            <label>Backprop recurrences k: <span id="backprop-value" class="mono">8</span>
+              <input id="backprop" type="range" min="1" max="32" value="8" step="1">
+            </label>
+          </div>
+          <div class="result-grid">
+            <div class="result"><strong id="effective-depth">132</strong><span>Effective depth</span></div>
+            <div class="result"><strong id="tracked-depth">36</strong><span>Grad-tracked depth</span></div>
+            <div class="result"><strong id="compute-ratio">16.50×</strong><span>vs 8-layer forward</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="memory">
+      <div class="container">
+        <div class="section-head">
+          <small>VRAM planning</small>
+          <h2>训练显存工程估算</h2>
+          <p>估算包含权重、梯度、AdamW 状态、保留激活、CUDA workspace 与 allocator 余量。真实峰值会受 PyTorch、Flash Attention、编译缓存和 batch packing 影响。</p>
+        </div>
+        <div class="grid-2">
+          <article class="panel">
+            <div class="controls">
+              <label>Micro batch
+                <input id="mem-batch" type="number" min="1" max="64" value="1">
+              </label>
+              <label>Sequence length
+                <input id="mem-seq" type="number" min="64" max="32768" step="64" value="768">
+              </label>
+              <label>Parameter storage
+                <select id="mem-precision">
+                  <option value="fp32">FP32 params + BF16 autocast</option>
+                  <option value="bf16">Direct BF16 params</option>
+                </select>
+              </label>
+              <label>Backprop recurrences
+                <input id="mem-k" type="number" min="1" max="32" value="8">
+              </label>
+            </div>
+            <div class="result-grid">
+              <div class="result"><strong id="mem-persistent">2.79 GiB</strong><span>Persistent tensors</span></div>
+              <div class="result"><strong id="mem-activation">0.72 GiB</strong><span>Activation estimate</span></div>
+              <div class="result"><strong id="mem-peak">5.6–8.7 GiB</strong><span>Estimated peak</span></div>
+            </div>
+            <div class="notice">保守建议：先用 micro-batch 1、sequence 768、BF16 autocast、FP32 参数和 checkpoint mode 2 实测，再逐步增加 batch。梯度累积增加有效 batch，不会成比例增加单步激活显存。</div>
+          </article>
+          <article class="panel">
+            <h3>固定参数显存</h3>
+            <table>
+              <thead><tr><th>Tensor</th><th>FP32 params</th></tr></thead>
+              <tbody>
+                <tr><td>Weights</td><td>0.70 GiB</td></tr>
+                <tr><td>Gradients</td><td>0.70 GiB</td></tr>
+                <tr><td>AdamW first moment</td><td>0.70 GiB</td></tr>
+                <tr><td>AdamW second moment</td><td>0.70 GiB</td></tr>
+                <tr><td><strong>Persistent total</strong></td><td><strong>2.79 GiB</strong></td></tr>
+              </tbody>
+            </table>
+            <div class="notice">Direct BF16 参数会把上述理论固定占用降到约 1.40 GiB，但当前实现没有额外 FP32 master weights，数值稳定性通常弱于 FP32 参数。</div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="config">
+      <div class="container">
+        <div class="section-head">
+          <small>Exact config</small>
+          <h2>当前 Instinct V2 配置</h2>
+          <p>与 <span class="mono">trainer/config_pretrain.json</span>、<span class="mono">config_full_sft.json</span> 和 WebUI 预设一致。</p>
+        </div>
+        <pre><span class="key">"hidden_size"</span>: <span class="num">1248</span>,
+<span class="key">"intermediate_size"</span>: <span class="num">4224</span>,
+<span class="key">"num_hidden_layers"</span>: <span class="num">8</span>,
+<span class="key">"num_attention_heads"</span>: <span class="num">13</span>,
+<span class="key">"num_key_value_heads"</span>: <span class="num">13</span>,
+<span class="key">"head_dim"</span>: <span class="num">96</span>,
+<span class="key">"model_architecture"</span>: "looped",
+<span class="key">"prelude_layers"</span>: <span class="num">2</span>,
+<span class="key">"recurrent_layers"</span>: <span class="num">4</span>,
+<span class="key">"coda_layers"</span>: <span class="num">2</span>,
+<span class="key">"loop_iters"</span>: <span class="num">32</span>,
+<span class="key">"mean_backprop_depth"</span>: <span class="num">8</span>,
+<span class="key">"recurrence_log_normal_sigma"</span>: <span class="num">1.0</span>,
+<span class="key">"qk_bias"</span>: <span class="bool">true</span>,
+<span class="key">"qk_norm"</span>: <span class="bool">false</span>,
+<span class="key">"rope_theta"</span>: <span class="num">50000.0</span>,
+<span class="key">"rms_norm_eps"</span>: <span class="num">1e-6</span>,
+<span class="key">"use_grad_checkpoint"</span>: <span class="num">2</span></pre>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container footer-inner">
+      <span>Instinct V2 · Pure PyTorch latent recurrent-depth language model</span>
+      <span>187,521,984 parameters · vocab 6,400 · max position 32,768</span>
+    </div>
+  </footer>
+
+  <script>
+    const PARAMS = 187521984;
+    const HIDDEN = 1248;
+    const PRELUDE = 2;
+    const CORE = 4;
+    const CODA = 2;
+    const GIB = 1024 ** 3;
+
+    const fmt = (value, digits = 2) => Number(value).toFixed(digits);
+
+    function updateDepth() {
+      const r = Number(document.getElementById('recurrence').value);
+      const kSlider = document.getElementById('backprop');
+      kSlider.max = r;
+      if (Number(kSlider.value) > r) kSlider.value = r;
+      const k = Number(kSlider.value);
+      const effective = PRELUDE + CORE * r + CODA;
+      const tracked = PRELUDE + CORE * k + CODA;
+      document.getElementById('recurrence-value').textContent = r;
+      document.getElementById('backprop-value').textContent = k;
+      document.getElementById('effective-depth').textContent = effective;
+      document.getElementById('tracked-depth').textContent = tracked;
+      document.getElementById('compute-ratio').textContent = fmt(effective / 8) + '×';
+      document.getElementById('hero-depth').textContent = effective;
+    }
+
+    function updateMemory() {
+      const batch = Math.max(1, Number(document.getElementById('mem-batch').value) || 1);
+      const seq = Math.max(64, Number(document.getElementById('mem-seq').value) || 64);
+      const k = Math.max(1, Number(document.getElementById('mem-k').value) || 1);
+      const precision = document.getElementById('mem-precision').value;
+      // FP32 AdamW: weight + grad + two moments = 16 bytes/parameter.
+      // Direct BF16: BF16 weight/grad/moments = 8 bytes/parameter in this trainer.
+      const persistent = PARAMS * (precision === 'fp32' ? 16 : 8) / GIB;
+      const retainedDepth = PRELUDE + CORE * k + CODA;
+      // Engineering approximation for checkpointed BF16 transformer activations.
+      const activations = batch * seq * HIDDEN * retainedDepth * 12 * 2 / GIB;
+      const low = (persistent + activations + 1.5) * 1.12;
+      const high = (persistent + activations * 1.8 + 3.0) * 1.20;
+      document.getElementById('mem-persistent').textContent = fmt(persistent) + ' GiB';
+      document.getElementById('mem-activation').textContent = fmt(activations) + ' GiB';
+      document.getElementById('mem-peak').textContent = fmt(low, 1) + '–' + fmt(high, 1) + ' GiB';
+    }
+
+    ['recurrence', 'backprop'].forEach(id => document.getElementById(id).addEventListener('input', updateDepth));
+    ['mem-batch', 'mem-seq', 'mem-precision', 'mem-k'].forEach(id => document.getElementById(id).addEventListener('input', updateMemory));
+    updateDepth();
+    updateMemory();
+  </script>
+</body>
+</html>
