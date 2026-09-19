@@ -7,7 +7,54 @@ import torch
 import torch.nn.functional as F
 
 from model.model_instinct import MOEFeedForward
+from model.moe_dispatch import _sorted_expert_offsets
 from tests.helpers import make_tiny_config
+
+
+@pytest.mark.parametrize('counts', [
+    [0] * 8,                         # no routes
+    [19] + [0] * 7,                  # trailing empty experts
+    [0] * 7 + [19],                  # leading empty experts
+    [0, 3, 0, 1, 0, 0, 12, 0],      # internal gaps and skew
+    [4] * 8,
+    [1],
+])
+def test_sorted_expert_offsets_match_histogram(counts):
+    ids = torch.repeat_interleave(torch.arange(len(counts)), torch.tensor(counts))
+    expected = torch.bincount(ids, minlength=len(counts)).cumsum(0, dtype=torch.int32)
+    actual = _sorted_expert_offsets(ids, len(counts))
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    assert actual.dtype == torch.int32
+    assert actual.device == ids.device
+
+
+@pytest.mark.parametrize('top_k', [1, 2, 8])
+def test_sorted_expert_offsets_for_topk_routes(top_k):
+    generator = torch.Generator().manual_seed(23)
+    choices = torch.rand(37, 8, generator=generator).topk(top_k, dim=-1).indices
+    ids = choices.flatten().sort().values
+    actual = _sorted_expert_offsets(ids, 8)
+    expected = torch.bincount(ids, minlength=8).cumsum(0, dtype=torch.int32)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    assert actual[-1] == 37 * top_k
+
+
+@pytest.mark.gpu
+def test_cuda_expert_offsets_do_not_synchronize():
+    cpu_ids = torch.tensor([0, 0, 2, 2, 2, 7], dtype=torch.long)
+    expected = torch.bincount(cpu_ids, minlength=8).cumsum(0, dtype=torch.int32)
+    ids = cpu_ids.cuda()
+    _sorted_expert_offsets(ids, 8)  # warm up allocation/kernel initialization
+    torch.cuda.synchronize()
+    previous = torch.cuda.get_sync_debug_mode()
+    try:
+        torch.cuda.set_sync_debug_mode('error')
+        actual = _sorted_expert_offsets(ids, 8)
+        empty = _sorted_expert_offsets(ids[:0], 8)
+    finally:
+        torch.cuda.set_sync_debug_mode(previous)
+    torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
+    torch.testing.assert_close(empty.cpu(), torch.zeros(8, dtype=torch.int32))
 
 
 def _legacy_reference(module, x):
@@ -61,12 +108,20 @@ def test_empty_experts_receive_zero_grad_without_branch():
 
 
 @pytest.mark.gpu
-def test_grouped_cuda_matches_legacy_forward_and_backward():
+@pytest.mark.parametrize('top_k,empty_experts', [(1, False), (2, False), (1, True)])
+def test_grouped_cuda_matches_legacy_forward_and_backward(top_k, empty_experts):
     """Native BF16 grouped GEMM preserves routed output and parameter grads."""
     torch.manual_seed(7)
     grouped = MOEFeedForward(make_tiny_config(use_moe=True)).cuda().train()
+    grouped.config.num_experts_per_tok = top_k
+    if empty_experts:
+        with torch.no_grad():
+            grouped.gate.weight.fill_(-1)
+            grouped.gate.weight[0].fill_(1)
     reference = copy.deepcopy(grouped).cuda().train()
-    x_grouped = torch.randn(2, 64, 64, device="cuda", requires_grad=True)
+    x_grouped = (torch.ones if empty_experts else torch.randn)(
+        2, 64, 64, device="cuda", requires_grad=True
+    )
     x_reference = x_grouped.detach().clone().requires_grad_(True)
 
     with torch.autocast("cuda", dtype=torch.bfloat16):

@@ -1,4 +1,4 @@
-"""Shared synchronization-free routing for Instinct MoE feed-forward blocks."""
+"""Shared MoE routing; grouped-MM backend synchronization is platform dependent."""
 
 from __future__ import annotations
 
@@ -55,6 +55,23 @@ def _stack_linear_weights(
     ).transpose(1, 2).to(dtype=dtype)
 
 
+def _sorted_expert_offsets(
+    sorted_experts: torch.Tensor, num_experts: int
+) -> torch.Tensor:
+    """Return int32 exclusive ends for sorted expert IDs in [0, num_experts).
+
+    The right insertion point of expert e equals the number of routes with ID
+    <= e, including when that expert is empty. Unlike CUDA bincount (even with
+    minlength), this fixed-size search does not read min/max IDs back to CPU.
+    """
+    expert_ids = torch.arange(
+        num_experts, device=sorted_experts.device, dtype=sorted_experts.dtype
+    )
+    return torch.searchsorted(
+        sorted_experts, expert_ids, right=True, out_int32=True
+    )
+
+
 def _grouped_expert_forward(
     x_flat: torch.Tensor,
     topk_idx: torch.Tensor,
@@ -72,15 +89,13 @@ def _grouped_expert_forward(
         num_tokens, device=x_flat.device, dtype=torch.long
     ).view(-1, 1).expand(-1, top_k).reshape(-1)
 
-    # Group routes entirely on device. No Tensor becomes a Python bool/int,
-    # so this path has no implicit cudaStreamSynchronize.
+    # Sort routes and find group boundaries on device. The grouped-MM backend
+    # below may still synchronize on platforms that use its per-expert fallback.
     order = torch.argsort(route_expert, stable=True)
     route_expert = route_expert.index_select(0, order)
     route_token = route_token.index_select(0, order)
     route_weight = topk_weight.reshape(-1).index_select(0, order).unsqueeze(-1)
-    offsets = torch.bincount(route_expert, minlength=num_experts).cumsum(
-        0, dtype=torch.int32
-    )
+    offsets = _sorted_expert_offsets(route_expert, num_experts)
 
     compute_dtype = torch.bfloat16
     routed_x = x_flat.index_select(0, route_token).to(dtype=compute_dtype)
