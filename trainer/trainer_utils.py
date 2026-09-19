@@ -811,8 +811,8 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
     说明:
         - AdamW    -> torch.optim.AdamW（保持原有默认行为）
         - Adafactor-> torch.optim.Adafactor（显式 lr，关闭自动相对步长）
-        - Muon     -> 2D 参数交给 Muon（优先 torch.optim.Muon，torch>=2.10 内置；
-                      否则回退到原生 MuonOptimizer）；1D 参数（RMSNorm 权重/bias 等）
+        - Muon     -> 隐藏层 2D 参数交给按形状分批的 BatchedMuon；
+                      INSTINCT_MUON_BACKEND=native 可切回原实现。1D 参数等
                       交给 AdamW。两类都存在时组合为 CombinedOptimizer 返回。
     """
     named_params = _materialize_named_params(params)
@@ -840,7 +840,21 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
         other_params = [param for param in trainable_params if id(param) not in matrix_ids]
         if not matrix_params:
             return torch.optim.AdamW(other_params, lr=lr)
-        if hasattr(torch.optim, 'Muon'):
+        muon_backend = os.environ.get('INSTINCT_MUON_BACKEND', 'batched').strip().lower()
+        if muon_backend not in ('batched', 'native'):
+            raise ValueError('INSTINCT_MUON_BACKEND must be batched or native')
+        if muon_backend == 'batched':
+            from trainer.batched_muon import BatchedMuon
+            muon_kwargs = dict(kwargs)
+            muon_kwargs.setdefault('adjust_lr_fn', 'match_rms_adamw')
+            muon_kwargs.setdefault('batch_size', int(os.environ.get('INSTINCT_MUON_BATCH_SIZE', '16')))
+            muon_kwargs.setdefault('workspace_mb', float(os.environ.get('INSTINCT_MUON_WORKSPACE_MB', '64')))
+            muon_opt = BatchedMuon(matrix_params, lr=lr, **muon_kwargs)
+            Logger(
+                f'[Muon] shape-batched BF16 updates: batch_size<={muon_opt.batch_size}, '
+                f'temporary workspace target={muon_opt.workspace_bytes / 2**20:g}MiB'
+            )
+        elif hasattr(torch.optim, 'Muon'):
             muon_kwargs = dict(kwargs)
             if 'adjust_lr_fn' in inspect.signature(torch.optim.Muon.__init__).parameters:
                 muon_kwargs.setdefault('adjust_lr_fn', 'match_rms_adamw')
