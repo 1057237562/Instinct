@@ -133,29 +133,56 @@ def reservoir_sample_jsonl(path, sample_size, rng):
 class ExternalRandomShuffler:
     """Bounded-memory random shuffle backed by sorted temporary chunks."""
 
-    def __init__(self, output_path, seed, chunk_rows):
+    def __init__(self, output_path, seed, chunk_rows, *, deduplicate=True,
+                 chunk_bytes=None):
         self.output_path = Path(output_path)
         self.rng = random.Random(seed)
         self.chunk_rows = max(1, int(chunk_rows))
+        self.chunk_bytes = (
+            None if chunk_bytes is None else max(1, int(chunk_bytes))
+        )
         self.buffer = []
+        self.buffer_bytes = 0
         self.chunk_paths = []
-        self.fingerprints = set()
+        self.fingerprints = set() if deduplicate else None
         self.duplicate_rows = 0
+        self.rows_added = 0
+        self.serialized_bytes = 0
         self.temporary_dir = tempfile.TemporaryDirectory(
             prefix=".sft_mix_", dir=self.output_path.parent
         )
 
     def add(self, row):
-        serialized = json.dumps(row, ensure_ascii=False, separators=(",", ":"))
-        fingerprint = hashlib.blake2b(
-            serialized.encode("utf-8"), digest_size=16
-        ).digest()
-        if fingerprint in self.fingerprints:
-            self.duplicate_rows += 1
-            return False
-        self.fingerprints.add(fingerprint)
+        serialized = json.dumps(
+            row, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        return self.add_serialized(serialized)
+
+    def add_serialized(self, serialized):
+        """Add one already-serialized JSONL record without reformatting it.
+
+        This path is useful for reshuffling a large finished corpus: it avoids
+        parsing/re-encoding text and, with ``deduplicate=False``, avoids a
+        multi-gigabyte fingerprint set when uniqueness was already audited.
+        """
+        if isinstance(serialized, str):
+            serialized = serialized.encode("utf-8")
+        serialized = bytes(serialized).rstrip(b"\r\n")
+        if not serialized:
+            raise ValueError("Cannot shuffle an empty JSONL record")
+        if self.fingerprints is not None:
+            fingerprint = hashlib.blake2b(serialized, digest_size=16).digest()
+            if fingerprint in self.fingerprints:
+                self.duplicate_rows += 1
+                return False
+            self.fingerprints.add(fingerprint)
         self.buffer.append((self.rng.getrandbits(128), serialized))
-        if len(self.buffer) >= self.chunk_rows:
+        self.buffer_bytes += len(serialized) + 49
+        self.rows_added += 1
+        self.serialized_bytes += len(serialized) + 1
+        if len(self.buffer) >= self.chunk_rows or (
+            self.chunk_bytes is not None and self.buffer_bytes >= self.chunk_bytes
+        ):
             self._flush_chunk()
         return True
 
@@ -164,36 +191,58 @@ class ExternalRandomShuffler:
             return
         self.buffer.sort(key=lambda item: item[0])
         chunk_path = Path(self.temporary_dir.name) / f"chunk_{len(self.chunk_paths):06d}.jsonl"
-        with chunk_path.open("w", encoding="utf-8", newline="\n") as chunk_file:
+        with chunk_path.open("wb") as chunk_file:
             for key, serialized in self.buffer:
-                chunk_file.write(f"{key:032x}\t{serialized}\n")
+                chunk_file.write(f"{key:032x}\t".encode("ascii"))
+                chunk_file.write(serialized)
+                chunk_file.write(b"\n")
         self.chunk_paths.append(chunk_path)
         self.buffer.clear()
+        self.buffer_bytes = 0
 
     @staticmethod
     def _iter_chunk(path):
-        with path.open("r", encoding="utf-8") as chunk_file:
+        with path.open("rb") as chunk_file:
             for line in chunk_file:
-                key, serialized = line.rstrip("\n").split("\t", 1)
+                key, serialized = line.rstrip(b"\n").split(b"\t", 1)
                 yield key, serialized
 
-    def finish(self, overwrite=False):
+    def finish(self, overwrite=False, *, progress_label=None):
         self._flush_chunk()
         if self.output_path.exists() and not overwrite:
             raise FileExistsError(
                 f"Output already exists: {self.output_path}; pass --overwrite to replace it"
-            )
+        )
         temporary_output = self.output_path.with_suffix(self.output_path.suffix + ".tmp")
+        output_hash = hashlib.sha256()
+        rows_written = 0
+        bytes_written = 0
         try:
             iterators = [self._iter_chunk(path) for path in self.chunk_paths]
-            with temporary_output.open("w", encoding="utf-8", newline="\n") as output_file:
+            with temporary_output.open("wb") as output_file:
                 for _, serialized in heapq.merge(*iterators):
-                    output_file.write(serialized + "\n")
+                    line = serialized + b"\n"
+                    output_file.write(line)
+                    output_hash.update(line)
+                    rows_written += 1
+                    bytes_written += len(line)
+                    if progress_label and rows_written % 1_000_000 == 0:
+                        print(
+                            f"[{progress_label}] wrote {rows_written:,} rows, "
+                            f"{bytes_written / 1024 ** 3:.1f} GiB",
+                            flush=True,
+                        )
             os.replace(temporary_output, self.output_path)
         finally:
             if temporary_output.exists():
                 temporary_output.unlink()
             self.temporary_dir.cleanup()
+        return {
+            "rows": rows_written,
+            "bytes": bytes_written,
+            "sha256": output_hash.hexdigest(),
+            "temporary_chunks": len(self.chunk_paths),
+        }
 
 
 def replay_rows_for_fraction(new_rows, replay_fraction):

@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--learning_rate", type=float, default=5e-6)
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--accumulation_steps", type=int, default=4)
+    parser.add_argument("--accumulation_steps", type=int, default=1)
     args = parser.parse_args()
     config = ROOT / "checkpoints" / "full_sft_20260914_200306_768.json"
     weight = ROOT / "out" / "instinct-v1-0914.pth"

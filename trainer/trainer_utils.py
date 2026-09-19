@@ -11,6 +11,7 @@ import math
 import gc
 import inspect
 import importlib.metadata
+from dataclasses import replace
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -84,6 +85,18 @@ def _fp8_linear_is_eligible(module: torch.nn.Module, fqn: str) -> bool:
     return module.in_features % 16 == 0 and module.out_features % 16 == 0
 
 
+def _torchao_fp8_config(recipe: str, config_cls):
+    """Enable TorchAO's bounded padding for ragged-token FP8 GEMMs.
+
+    Model feature dimensions are filtered to multiples of 16, but the GEMM K
+    dimension in ``grad_weight`` is the number of input rows.  That row count
+    is inherently irregular for a routed MoE expert (and can also be irregular
+    in a final partial batch).  TorchAO pads only the affected matrix inner
+    dimension to the next supported boundary and crops the mathematical output.
+    """
+    return replace(config_cls.from_recipe_name(recipe), pad_inner_dim=True)
+
+
 def _probe_torchao_fp8_recipe(recipe: str, device: torch.device, config_cls, convert_fn):
     """Exercise one real FP8 forward/backward before converting the full model."""
     cache_key = (recipe, device.type, device.index)
@@ -98,8 +111,10 @@ def _probe_torchao_fp8_recipe(recipe: str, device: torch.device, config_cls, con
             probe = torch.nn.Sequential(
                 torch.nn.Linear(64, 64, bias=False, device=device, dtype=torch.bfloat16)
             )
-            convert_fn(probe, config=config_cls.from_recipe_name(recipe))
-            x = torch.randn(32, 64, device=device, dtype=torch.bfloat16, requires_grad=True)
+            convert_fn(probe, config=_torchao_fp8_config(recipe, config_cls))
+            # Deliberately ragged: routed MoE experts rarely receive a row
+            # count divisible by 16. This exercises grad_weight as well as fwd.
+            x = torch.randn(17, 64, device=device, dtype=torch.bfloat16, requires_grad=True)
             probe(x).float().square().mean().backward()
             torch.cuda.synchronize(device)
             del probe, x
@@ -196,7 +211,7 @@ def apply_torchao_fp8_training(model: torch.nn.Module, args, *, label: str = "mo
             "use --fp8_filter eligible or disable FP8"
         )
 
-    config = Float8LinearConfig.from_recipe_name(active_recipe)
+    config = _torchao_fp8_config(active_recipe, Float8LinearConfig)
     convert_to_float8_training(model, module_filter_fn=module_filter_fn, config=config)
     version = getattr(torchao, "__version__", importlib.metadata.version("torchao"))
     if getattr(args, "use_compile", 0) != 1:
@@ -204,7 +219,7 @@ def apply_torchao_fp8_training(model: torch.nn.Module, args, *, label: str = "mo
     Logger(
         f"[TorchAO FP8] enabled for {label}: requested={requested_recipe}, "
         f"active={active_recipe}, filter={filter_mode}, linear_layers={len(converted_names)}, "
-        f"torchao={version}"
+        f"ragged_inner_padding=on, torchao={version}"
     )
     setattr(args, "fp8_training_active", active_recipe)
     return model
@@ -669,6 +684,119 @@ def _is_muon_hidden_matrix(name: str, param: torch.nn.Parameter) -> bool:
         return False
     lowered = name.lower()
     return not any(part in lowered for part in ("embed", "embedding", "lm_head", "output_head"))
+
+
+def estimate_training_persistent_bytes(model: torch.nn.Module, args, *, extra_models=()) -> int:
+    """Estimate per-card tensors resident independently of batch/sequence size.
+
+    Unlike active-parameter FLOPs, memory must include every routed expert.
+    Optimizer state is estimated before its lazy first-step allocation so the
+    initial bucket cannot fit and then OOM when Muon/AdamW creates state.
+    """
+    parameter_bytes = sum(
+        param.numel() * param.element_size() for param in model.parameters()
+    )
+    parameter_bytes += sum(
+        param.numel() * param.element_size()
+        for extra in extra_models for param in extra.parameters()
+    )
+    named_trainable = [
+        (name, param) for name, param in model.named_parameters()
+        if param.requires_grad
+    ]
+    gradient_bytes = sum(
+        param.numel() * param.element_size() for _, param in named_trainable
+    )
+    optimizer = str(getattr(args, 'optimizer', 'adamw')).strip().lower()
+    if optimizer == 'muon':
+        optimizer_bytes = 0
+        for name, param in named_trainable:
+            one_state = param.numel() * param.element_size()
+            # Muon keeps one momentum matrix. Parameters excluded from Muon
+            # (embedding/head/norm/bias) use AdamW and keep two moments.
+            optimizer_bytes += one_state * (
+                1 if _is_muon_hidden_matrix(name, param) else 2
+            )
+    elif optimizer in {'adafactor', 'adafactory'}:
+        # Factorized states are smaller for matrices, but one full-parameter
+        # equivalent is a conservative model-independent upper bound.
+        optimizer_bytes = gradient_bytes
+    else:
+        optimizer_bytes = 2 * gradient_bytes
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        # Default DDP may transiently own gradient buckets in addition to .grad.
+        optimizer_bytes += gradient_bytes
+    return int(parameter_bytes + gradient_bytes + optimizer_bytes)
+
+
+def configure_bucket_memory_budget(
+    model: torch.nn.Module, args, *, extra_models=(), checkpoint_data=None,
+) -> int | None:
+    """Resolve and attach the bucket token budget used by this training run.
+
+    Packed checkpoints store a batch cursor.  Recomputing an automatic budget
+    with newer calibration code can change batch boundaries even when the user
+    changed no setting, making that cursor unsafe.  A packed resume therefore
+    inherits its resolved budget and persistent-memory value.  A positive
+    ``--bucket_token_budget`` remains an explicit override and is validated by
+    the normal resume compatibility checks.
+    """
+    if not (
+        bool(getattr(args, 'sequence_packing', 0))
+        and str(getattr(args, 'sequence_packing_mode', 'fixed')) == 'bucket'
+    ):
+        return None
+    from dataset.sequence_bucket import bucket_token_budget
+
+    explicit_budget = int(getattr(args, 'bucket_token_budget', 0) or 0)
+    persistent_bytes = estimate_training_persistent_bytes(
+        model, args, extra_models=extra_models,
+    )
+    gib = 1024 ** 3
+    persistent_gb = persistent_bytes / gib
+    compile_mode = (
+        str(getattr(args, 'compile_mode', 'default'))
+        if int(getattr(args, 'use_compile', 0)) else 'off'
+    )
+    bucket_count = int(getattr(args, 'seq_bucket', 1))
+    target_gb = float(getattr(args, 'bucket_gpu_memory_gb', 16.0))
+    automatic_budget = bucket_token_budget(
+        target_gb,
+        persistent_memory_gb=persistent_gb,
+        bucket_count=bucket_count,
+        compile_mode=compile_mode,
+    )
+    token_budget = explicit_budget if explicit_budget > 0 else automatic_budget
+    source = 'explicit' if explicit_budget > 0 else 'automatic'
+
+    saved = (checkpoint_data or {}).get('data_config') or {}
+    saved_active = bool(saved.get(
+        'active_sequence_packing', saved.get('sequence_packing', False),
+    ))
+    saved_mode = str(saved.get('sequence_packing_mode', 'fixed'))
+    saved_budget = int(saved.get('bucket_token_budget', 0) or 0)
+    if (
+        explicit_budget <= 0 and saved_active and saved_mode == 'bucket'
+        and saved_budget > 0
+    ):
+        token_budget = saved_budget
+        persistent_gb = float(saved.get(
+            'bucket_persistent_memory_gb', persistent_gb,
+        ))
+        source = 'checkpoint'
+    setattr(args, 'bucket_persistent_memory_gb', persistent_gb)
+    setattr(args, 'bucket_token_budget', token_budget)
+    Logger(
+        '[Packing VRAM Budget] '
+        f'target={target_gb:g}GiB, persistent={persistent_gb:.2f}GiB, '
+        f'buckets={bucket_count}, compile_mode={compile_mode}, '
+        f'token_budget={token_budget}, source={source}'
+        + (
+            f', current_auto_estimate={automatic_budget}'
+            if source == 'checkpoint' and automatic_budget != token_budget else ''
+        )
+    )
+    return token_budget
 
 
 def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> torch.optim.Optimizer:

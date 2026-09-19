@@ -25,6 +25,7 @@ from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
     init_model, config_from_args, build_optimizer,
     restore_config_from_checkpoint, apply_torchao_fp8_training,
+    configure_bucket_memory_budget,
     prepare_lm_batch, release_compiled_cuda_memory,
 )
 from trainer.trainer_cli import (
@@ -165,6 +166,8 @@ if __name__ == "__main__":
     # 5. 定义模型、数据、优化器
     # Resume 检查点已包含完整模型状态，无需再加载 --from_weight 基础权重
     model, tokenizer = init_model(lm_config, 'none' if ckp_data else args.from_weight, device=args.device)
+    configure_bucket_memory_budget(model, args, checkpoint_data=ckp_data)
+    data_config = packing_data_config(args)
     packing_plan = SequencePackingPlan(
         args, ckp_data,
         lambda packing, sample_indices=None: SFTDataset(
@@ -179,6 +182,7 @@ if __name__ == "__main__":
             seq_bucket=args.seq_bucket,
             packing_num_proc=args.packing_num_proc,
             bucket_gpu_memory_gb=args.bucket_gpu_memory_gb,
+            bucket_token_budget_override=getattr(args, 'bucket_token_budget', None),
             sample_indices=sample_indices,
         ),
     )

@@ -2,7 +2,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from trainer.trainer_cli import build_trainer_parser, resolve_warmup_steps, set_cosine_lr
+from trainer.trainer_cli import (
+    build_trainer_parser,
+    resolve_warmup_steps,
+    set_cosine_lr,
+    set_cosine_lr_progress,
+)
 from trainer.trainer_utils import get_lr
 
 
@@ -58,3 +63,17 @@ def test_common_cli_exposes_warmup_controls():
     assert args.warmup_ratio == pytest.approx(0.01)
     assert args.warmup_steps == 12
     assert args.min_lr_ratio == pytest.approx(0.05)
+
+
+def test_token_progress_schedule_does_not_restart_between_chunks():
+    optimizer = SimpleNamespace(param_groups=[{"lr": 0.0}])
+    args = SimpleNamespace(
+        learning_rate=1.0, warmup_steps=0,
+        warmup_ratio=0.1, min_lr_ratio=0.1,
+    )
+    set_cosine_lr_progress(optimizer, 10, 100, args)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(1.0)
+    set_cosine_lr_progress(optimizer, 55, 100, args)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.55)
+    set_cosine_lr_progress(optimizer, 100, 100, args)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.1)

@@ -25,6 +25,7 @@ from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
     init_model, config_from_args, build_optimizer,
     restore_config_from_checkpoint, apply_torchao_fp8_training,
+    configure_bucket_memory_budget,
     prepare_lm_batch,
 )
 from trainer.trainer_cli import (
@@ -175,6 +176,9 @@ if __name__ == "__main__":
         else:
             param.requires_grad = False
 
+    configure_bucket_memory_budget(model, args, checkpoint_data=ckp_data)
+    data_config = packing_data_config(args)
+
     # 6. 定义数据和优化器
     packing_plan = SequencePackingPlan(
         args, ckp_data,
@@ -190,6 +194,7 @@ if __name__ == "__main__":
             seq_bucket=args.seq_bucket,
             packing_num_proc=args.packing_num_proc,
             bucket_gpu_memory_gb=args.bucket_gpu_memory_gb,
+            bucket_token_budget_override=getattr(args, 'bucket_token_budget', None),
             sample_indices=sample_indices,
         ),
     )

@@ -6,7 +6,14 @@ import random
 import bisect
 import time
 os.environ.setdefault("HF_HOME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".cache", "huggingface"))
-from datasets import load_dataset, concatenate_datasets, Features, Value
+from datasets import concatenate_datasets, Features, Value
+from dataset.cache_budget import load_dataset_with_budget as load_dataset
+from dataset.cache_budget import (
+    cache_files as dataset_cache_files,
+    cache_paths_size,
+    register_cache_use,
+    reserve_cache_space,
+)
 from dataset.compact_cache import features as compact_features, encode as encode_cache, decode as decode_cache, restore_labels
 from dataset.sequence_bucket import (
     bucket_token_budget,
@@ -20,6 +27,22 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # batch_size * sequence_length, so aligning sequence_length itself keeps every
 # full or partial batch valid while adding at most 15 padding tokens per block.
 _SEQUENCE_BUCKET_ALIGNMENT = 16
+
+
+def _reserve_dataset_transform(samples, expected_bytes=None):
+    """Pre-evict for a map output expected to be no larger than its input cache."""
+    files = dataset_cache_files(samples)
+    if files:
+        size = cache_paths_size(files) if expected_bytes is None else int(expected_bytes)
+        reserve_cache_space(size, protected=files)
+    return files
+
+
+def _lease_dataset_cache(samples):
+    files = dataset_cache_files(samples)
+    if files:
+        register_cache_use(files)
+    return files
 
 
 def _packing_map_num_proc(requested, sample_count):
@@ -106,15 +129,22 @@ def _generate_sft_labels(input_ids, bos_id, eos_id, max_length):
 
 
 def _tokenize_pretrain_batch(batch, tokenizer, max_length):
-    input_sequences, lengths = [], []
-    for text in batch['text']:
-        tokens = tokenizer(
-            str(text), add_special_tokens=False,
-            max_length=max_length - 2, truncation=True,
-        ).input_ids
-        tokens = [tokenizer.bos_token_id] + tokens + [tokenizer.eos_token_id]
-        input_sequences.append(tokens)
-        lengths.append(len(tokens))
+    # One FastTokenizer batch call avoids hundreds/thousands of Python-Rust
+    # crossings per Arrow map batch. This matters in Windows inline streaming
+    # mode, where process spawning is deliberately disabled to bound memory.
+    encoded = tokenizer(
+        [str(text) for text in batch['text']],
+        add_special_tokens=False,
+        max_length=max_length - 2,
+        truncation=True,
+        return_attention_mask=False,
+        return_token_type_ids=False,
+    )
+    input_sequences = [
+        [tokenizer.bos_token_id, *tokens, tokenizer.eos_token_id]
+        for tokens in encoded.input_ids
+    ]
+    lengths = [len(tokens) for tokens in input_sequences]
     return {'input_ids': input_sequences, 'length': lengths}
 
 
@@ -251,7 +281,8 @@ def _print_packing_stats(name, raw_count, samples, bucket_ranges):
 
 def _pack_tokenized_buckets(samples, lengths, seq_bucket, packing_batch_size,
                             pad_token_id, features, name, packing_num_proc=1,
-                            bucket_gpu_memory_gb=16.0, packing_seed=42):
+                            bucket_gpu_memory_gb=16.0, packing_seed=42,
+                            bucket_token_budget_override=None):
     """Partition tokenized rows globally, then pack each length bucket."""
     dp_started = time.perf_counter()
     if os.environ.get('RANK', '0') in ('0', '-1'):
@@ -262,7 +293,11 @@ def _pack_tokenized_buckets(samples, lengths, seq_bucket, packing_batch_size,
         )
     sorted_indices, buckets = optimal_sequence_buckets(
         lengths, seq_bucket, alignment=_SEQUENCE_BUCKET_ALIGNMENT,
-        token_budget=bucket_token_budget(bucket_gpu_memory_gb),
+        token_budget=(
+            int(bucket_token_budget_override)
+            if bucket_token_budget_override is not None
+            else bucket_token_budget(bucket_gpu_memory_gb)
+        ),
     )
     if os.environ.get('RANK', '0') in ('0', '-1'):
         estimated_seconds = sum(bucket.estimated_cost for bucket in buckets)
@@ -282,6 +317,7 @@ def _pack_tokenized_buckets(samples, lengths, seq_bucket, packing_batch_size,
                 flush=True,
             )
     packed_parts, bucket_ranges = [], []
+    token_cache_bytes = cache_paths_size(dataset_cache_files(samples))
     offset = 0
     for bucket in buckets:
         source_indices = list(sorted_indices[bucket.start:bucket.end])
@@ -300,6 +336,8 @@ def _pack_tokenized_buckets(samples, lengths, seq_bucket, packing_batch_size,
             )
             return encode_cache(packed, packed=True, sft='loss_mask' in features)
 
+        expected_part_bytes = token_cache_bytes * len(source) / max(len(samples), 1)
+        _reserve_dataset_transform(source, expected_part_bytes)
         part = source.map(
             pack_batch,
             batched=True,
@@ -309,6 +347,7 @@ def _pack_tokenized_buckets(samples, lengths, seq_bucket, packing_batch_size,
             features=features,
             desc=f'Packing {name} bucket at {block_length} tokens',
         )
+        _lease_dataset_cache(part)
         packed_parts.append(part)
         bucket_ranges.append({
             'start': offset,
@@ -328,7 +367,8 @@ class PretrainDataset(Dataset):
     def __init__(self, data_path, tokenizer, max_length=512, packing=False,
                  packing_batch_size=1000, packing_mode='fixed', seq_bucket=2,
                  packing_num_proc=1, bucket_gpu_memory_gb=16.0,
-                 sample_indices=None):
+                 sample_indices=None, byte_range=None, source_fingerprint=None,
+                 bucket_token_budget_override=None):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -339,13 +379,24 @@ class PretrainDataset(Dataset):
                 packing=packing, packing_batch_size=packing_batch_size,
                 packing_mode=packing_mode, seq_bucket=seq_bucket,
                 packing_num_proc=packing_num_proc, bucket_gpu_memory_gb=bucket_gpu_memory_gb,
-                sample_indices=sample_indices))
+                sample_indices=sample_indices, byte_range=byte_range,
+                source_fingerprint=source_fingerprint,
+                bucket_token_budget_override=bucket_token_budget_override))
             if managed is not None:
                 self.samples, metadata = managed
                 self.__dict__.update(metadata)
                 _print_packing_stats('pretrain', self.raw_sample_count, self.samples, self.bucket_ranges)
                 return
-        self.samples = load_dataset('json', data_files=data_path, split='train')
+        if byte_range is not None:
+            raise RuntimeError(
+                'byte_range requires managed preprocessing; set '
+                'INSTINCT_MANAGED_DATA_CACHE=1'
+            )
+        load_num_proc = _packing_map_num_proc(packing_num_proc, None)
+        _print_packing_workers('pretrain load', load_num_proc)
+        self.samples = load_dataset(
+            'json', data_files=data_path, split='train', num_proc=load_num_proc,
+        )
         self.full_raw_sample_count = len(self.samples)
         if sample_indices is not None:
             self.samples = self.samples.select([int(index) for index in sample_indices])
@@ -365,6 +416,7 @@ class PretrainDataset(Dataset):
                     packing_num_proc, len(self.samples),
                 )
                 _print_packing_workers('pretrain', tokenization_num_proc)
+                _reserve_dataset_transform(self.samples)
                 self.samples = self.samples.map(
                     _tokenize_pretrain_batch,
                     batched=True,
@@ -378,15 +430,24 @@ class PretrainDataset(Dataset):
                     features=compact_features(tokenizer, packed=False, sft=False),
                     desc='Tokenizing pretrain for sequence buckets',
                 )
+                _lease_dataset_cache(self.samples)
                 release_intermediate(raw_cache_files)
                 token_cache_files = self.samples.cache_files
                 self.samples, self.bucket_ranges = _pack_tokenized_buckets(
                     self.samples, self.samples['length'], seq_bucket,
                     packing_batch_size, pad_token_id, compact_features(tokenizer, packed=True, sft=False), 'pretrain',
                     packing_num_proc, bucket_gpu_memory_gb,
+                    bucket_token_budget_override=bucket_token_budget_override,
                 )
                 release_intermediate(token_cache_files)
             else:
+                from dataset.managed_cache import release_intermediate
+                raw_cache_files = self.samples.cache_files
+                tokenization_num_proc = _packing_map_num_proc(
+                    packing_num_proc, len(self.samples),
+                )
+                _print_packing_workers('pretrain fixed', tokenization_num_proc)
+
                 def tokenize_and_pack(batch):
                     tokenized = _tokenize_pretrain_batch(
                         batch, tokenizer, max_length,
@@ -396,14 +457,18 @@ class PretrainDataset(Dataset):
                     )
                     return encode_cache(packed, packed=True, sft=False)
 
+                _reserve_dataset_transform(self.samples)
                 self.samples = self.samples.map(
                     tokenize_and_pack,
                     batched=True,
                     batch_size=max(1, int(packing_batch_size)),
+                    num_proc=tokenization_num_proc,
                     remove_columns=self.samples.column_names,
                     features=compact_features(tokenizer, packed=True, sft=False),
                     desc=f'Packing pretrain into {max_length}-token blocks',
                 )
+                _lease_dataset_cache(self.samples)
+                release_intermediate(raw_cache_files)
                 self.bucket_ranges = [{
                     'start': 0, 'end': len(self.samples), 'max_length': max_length,
                     'blocks': len(self.samples), 'raw_samples': raw_count,
@@ -440,7 +505,7 @@ class SFTDataset(Dataset):
     def __init__(self, jsonl_path, tokenizer, max_length=1024, packing=False,
                  packing_batch_size=1000, packing_seed=42, packing_mode='fixed',
                  seq_bucket=2, packing_num_proc=1, bucket_gpu_memory_gb=16.0,
-                 sample_indices=None):
+                 sample_indices=None, bucket_token_budget_override=None):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -453,7 +518,8 @@ class SFTDataset(Dataset):
                 packing=packing, packing_batch_size=packing_batch_size, packing_seed=packing_seed,
                 packing_mode=packing_mode, seq_bucket=seq_bucket,
                 packing_num_proc=packing_num_proc, bucket_gpu_memory_gb=bucket_gpu_memory_gb,
-                sample_indices=sample_indices))
+                sample_indices=sample_indices,
+                bucket_token_budget_override=bucket_token_budget_override))
             if managed is not None:
                 self.samples, metadata = managed
                 self.__dict__.update(metadata)
@@ -461,7 +527,12 @@ class SFTDataset(Dataset):
                                      self.samples, self.bucket_ranges)
                 return
         features = Features({'conversations': [{'role': Value('string'), 'content': Value('string'), 'reasoning_content': Value('string'), 'tools': Value('string'), 'tool_calls': Value('string')}]})
-        self.samples = load_dataset('json', data_files=jsonl_path, split='train', features=features)
+        load_num_proc = _packing_map_num_proc(packing_num_proc, None)
+        _print_packing_workers('SFT load', load_num_proc)
+        self.samples = load_dataset(
+            'json', data_files=jsonl_path, split='train', features=features,
+            num_proc=load_num_proc,
+        )
         self.full_raw_sample_count = len(self.samples)
         if sample_indices is not None:
             self.samples = self.samples.select([int(index) for index in sample_indices])
@@ -485,6 +556,7 @@ class SFTDataset(Dataset):
                     packing_num_proc, len(self.samples),
                 )
                 _print_packing_workers('SFT', tokenization_num_proc)
+                _reserve_dataset_transform(self.samples)
                 self.samples = self.samples.map(
                     _tokenize_sft_compact_batch,
                     batched=True,
@@ -503,6 +575,7 @@ class SFTDataset(Dataset):
                     features=compact_features(tokenizer, packed=False, sft=True),
                     desc='Tokenizing SFT for sequence buckets',
                 )
+                _lease_dataset_cache(self.samples)
                 release_intermediate(raw_cache_files)
                 self.discarded_long_sample_count = raw_count - len(self.samples)
                 packing_raw_count = len(self.samples)
@@ -522,9 +595,17 @@ class SFTDataset(Dataset):
                     self.samples, self.samples['length'], seq_bucket,
                     packing_batch_size, pad_token_id, compact_features(tokenizer, packed=True, sft=True), 'SFT',
                     packing_num_proc, bucket_gpu_memory_gb, packing_seed,
+                    bucket_token_budget_override=bucket_token_budget_override,
                 )
                 release_intermediate(token_cache_files)
             else:
+                from dataset.managed_cache import release_intermediate
+                raw_cache_files = self.samples.cache_files
+                tokenization_num_proc = _packing_map_num_proc(
+                    packing_num_proc, len(self.samples),
+                )
+                _print_packing_workers('SFT fixed', tokenization_num_proc)
+
                 def tokenize_and_pack(batch, indices):
                     tokenized = _tokenize_sft_batch(
                         batch, indices, tokenizer, max_length, packing_seed,
@@ -534,15 +615,19 @@ class SFTDataset(Dataset):
                         tokenized['input_ids'], tokenized['labels'], max_length, pad_token_id
                     ), packed=True, sft=True)
 
+                _reserve_dataset_transform(self.samples)
                 self.samples = self.samples.map(
                     tokenize_and_pack,
                     batched=True,
                     with_indices=True,
                     batch_size=max(1, int(packing_batch_size)),
+                    num_proc=tokenization_num_proc,
                     remove_columns=self.samples.column_names,
                     features=compact_features(tokenizer, packed=True, sft=True),
                     desc=f'Packing SFT into {max_length}-token blocks',
                 )
+                _lease_dataset_cache(self.samples)
+                release_intermediate(raw_cache_files)
                 self.bucket_ranges = [{
                     'start': 0, 'end': len(self.samples), 'max_length': max_length,
                     'blocks': len(self.samples), 'raw_samples': raw_count,

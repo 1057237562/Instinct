@@ -35,13 +35,20 @@ def packing_data_config(args) -> dict:
         'packing_num_proc': packing_num_proc,
         'sequence_packing_mode': packing_mode,
         'seq_bucket': int(getattr(args, 'seq_bucket', 2)),
-        'bucket_batch_strategy': 'vram_time_cost_v5_large_first' if packing_mode == 'bucket' else 'fixed',
+        'bucket_batch_strategy': 'vram_time_cost_v6_model_memory' if packing_mode == 'bucket' else 'fixed',
         'bucket_gpu_memory_gb': float(getattr(args, 'bucket_gpu_memory_gb', 16.0)),
+        'bucket_token_budget': int(getattr(args, 'bucket_token_budget', 0)),
+        'bucket_persistent_memory_gb': round(
+            float(getattr(args, 'bucket_persistent_memory_gb', 0.0)), 6
+        ),
         'bucket_max_seq_len': int(getattr(args, 'bucket_max_seq_len', 16384)),
         'bucket_large_threshold': int(getattr(args, 'bucket_large_threshold', 8192)),
         'batch_size': int(getattr(args, 'batch_size', 1)),
         'max_seq_len': int(getattr(args, 'max_seq_len', 0)),
         'data_path': os.path.normcase(os.path.abspath(getattr(args, 'data_path', ''))),
+        'dataset_streaming': str(getattr(args, 'dataset_streaming', 'auto')),
+        'streaming_chunk_mb': int(getattr(args, 'streaming_chunk_mb', 1024)),
+        'cache_build_mode': str(getattr(args, 'cache_build_mode', 'inline')),
         'lr_schedule': {
             'epochs': int(getattr(args, 'epochs', 2)),
             'learning_rate': float(getattr(args, 'learning_rate', 5e-4)),
@@ -88,7 +95,10 @@ def validate_packing_resume(args, ckp_data) -> bool:
         # and exactly the same packed side after another pause/resume.  A first
         # switch from raw -> packed may choose either packing strategy because
         # no packed rows from the checkpoint need reconstruction yet.
-        keys = ['batch_size', 'data_path']
+        keys = [
+            'batch_size', 'data_path', 'dataset_streaming',
+            'streaming_chunk_mb', 'cache_build_mode',
+        ]
         if not saved_active:
             keys.append('max_seq_len')
         if pending or saved_active:
@@ -99,6 +109,7 @@ def validate_packing_resume(args, ckp_data) -> bool:
                     'seq_bucket', 'bucket_batch_strategy',
                     'bucket_gpu_memory_gb', 'bucket_max_seq_len',
                     'bucket_large_threshold', 'packing_num_proc',
+                    'bucket_token_budget', 'bucket_persistent_memory_gb',
                 ])
             else:
                 keys.append('max_seq_len')
@@ -118,12 +129,16 @@ def validate_packing_resume(args, ckp_data) -> bool:
             'Cannot resume packed training with changed sequence_packing_mode: '
             f"checkpoint={saved_mode!r}, requested={current_mode!r}."
         )
-    keys = ['packing_batch_size', 'data_path']
+    keys = [
+        'packing_batch_size', 'data_path', 'dataset_streaming',
+        'streaming_chunk_mb', 'cache_build_mode',
+    ]
     if current_mode == 'bucket':
         keys.extend([
             'seq_bucket', 'bucket_batch_strategy',
             'bucket_gpu_memory_gb', 'bucket_max_seq_len',
             'bucket_large_threshold', 'packing_num_proc',
+            'bucket_token_budget', 'bucket_persistent_memory_gb',
         ])
     else:
         keys.append('max_seq_len')
@@ -285,7 +300,29 @@ class SequencePackingPlan:
         gpu_memory_gb = float(getattr(self.args, 'bucket_gpu_memory_gb', 16.0))
         if not math.isfinite(gpu_memory_gb) or gpu_memory_gb <= 0:
             raise ValueError('bucket_gpu_memory_gb must be a positive finite number')
-        token_budget = bucket_token_budget(gpu_memory_gb)
+        persistent_memory_gb = float(getattr(
+            self.args, 'bucket_persistent_memory_gb', 0.0,
+        ))
+        # ``configure_bucket_memory_budget`` resolves automatic, explicit, and
+        # checkpoint-inherited budgets before this plan is built.  Honor that
+        # exact value so a resume cursor reconstructs identical batch edges.
+        token_budget = int(getattr(self.args, 'bucket_token_budget', 0))
+        if token_budget <= 0 and persistent_memory_gb > 0:
+            compile_mode = (
+                str(getattr(self.args, 'compile_mode', 'default'))
+                if int(getattr(self.args, 'use_compile', 0)) else 'off'
+            )
+            # Use the actual DP result, not merely the requested maximum. Some
+            # corpora collapse to fewer distinct buckets and should recover the
+            # corresponding graph-reserve headroom.
+            token_budget = bucket_token_budget(
+                gpu_memory_gb,
+                persistent_memory_gb=persistent_memory_gb,
+                bucket_count=len(ranges),
+                compile_mode=compile_mode,
+            )
+        elif token_budget <= 0:
+            token_budget = bucket_token_budget(gpu_memory_gb)
         large_threshold = int(getattr(self.args, 'bucket_large_threshold', 8192))
         if large_threshold < 1:
             raise ValueError('bucket_large_threshold must be at least 1')
@@ -311,8 +348,9 @@ class SequencePackingPlan:
                 regular_batches.extend(bucket_batches)
 
         Logger(
-            f'[Packing Batch Plan] epoch={epoch + 1}, memory_model=B*L, '
-            f'gpu_memory={gpu_memory_gb:g}GB, token_budget={token_budget}, '
+            f'[Packing Batch Plan] epoch={epoch + 1}, memory_model=model+optimizer+B*L, '
+            f'gpu_memory={gpu_memory_gb:g}GB, persistent={persistent_memory_gb:.2f}GB, '
+            f'buckets={len(ranges)}, token_budget={token_budget}, '
             f'calibration={BUCKET_CALIBRATION_MEMORY_GB:g}GB:'
             f'{BUCKET_CALIBRATION_SEQ_LEN}x{BUCKET_CALIBRATION_BATCH_SIZE}'
         )

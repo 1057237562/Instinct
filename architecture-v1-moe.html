@@ -82,7 +82,7 @@
           <div class="stack-note">The complete Attention + Router + Experts block is repeated with independent weights for Layers 1–32.</div>
         </div>
         <div class="arrow">▼</div><div class="node head"><strong>Final RMSNorm → Tied LM Head</strong><span>512 → vocab 6,400 · next-token logits</span></div>
-      </div><div class="legend"><span class="chip">RoPE θ = 1,000,000</span><span class="chip">YaRN factor = 4</span><span class="chip">RMSNorm ε = 1e-6</span><span class="chip">Router aux coefficient = 5e-4</span><span class="chip">Gradient checkpoint mode 1</span></div></div>
+      </div><div class="legend"><span class="chip">RoPE θ = 1,000,000</span><span class="chip">LongRoPE 4K → 32K (8× PI seed)</span><span class="chip">RMSNorm ε = 1e-6</span><span class="chip">Router aux coefficient = 5e-4</span><span class="chip">Gradient checkpoint mode 1</span></div></div>
     </div></section>
 
     <section id="specs"><div class="container">

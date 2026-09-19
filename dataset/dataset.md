@@ -64,6 +64,41 @@ python dataset/scripts/build_codespecialist_4096.py
 `dataset/codespecialist.report.json`。通过完整性验证后，比例不足的草稿、替换前旧版
 和旧的 `pretrain_codespecialist` 派生混合均已清理；原始组件仍保留以支持重建。
 
+## 12B Instinct Coder 预训练语料
+
+面向 V1 MoE 编程模型的最终目标采用 DeepSeek-Coder-V2 的 token 配比：60% 源代码、
+10% 数学、30% 自然语言，总计 12B 唯一 tokens。现有 `codespecialist.jsonl` 和
+`pretrain_continue.jsonl` 中通过审计的新数据优先复用；不足部分由下列固定 revision
+的开放数据补齐：
+
+- 代码：`common-pile/stackv2_edu_filtered`（逐文件开放许可证）；
+- 数学：`HuggingFaceTB/finemath` 的 `finemath-4plus`（ODC-By）；
+- 英文：`HuggingFaceTB/smollm-corpus` 的 `fineweb-edu-dedup`（ODC-By）；
+- 中文：`opencsg/chinese-fineweb-edu`（Apache-2.0 声明，分发前仍需复核上游条款）。
+
+收集器按上游分片原子保存，可以安全中断后重跑：
+
+```bash
+python dataset/scripts/collect_coder_pretrain_12b.py --component all
+```
+
+四个补充组件收齐后生成最终全局打乱语料：
+
+```bash
+python dataset/scripts/build_coder_pretrain_12b.py
+```
+
+最终构建会按正文 SHA-256 全局精确去重，并用 13-word n-gram 筛除与 HumanEval、
+sanitized MBPP test 和 GSM8K test 重叠的记录。所有样本均由项目 tokenizer 验证为
+不超过 4096 tokens，不切分、不截断。完整来源、许可证计数、拒绝原因、token 配比
+和输出 SHA-256 写入 `dataset/pretrain_coder_12b.report.json`。
+
+当前成品 `dataset/pretrain_coder_12b.jsonl` 包含 13,267,273 条完整记录和
+11,999,990,666 tokens：代码 7,199,997,236、数学 1,199,996,324、自然语言
+3,599,997,106。文件 SHA-256 为
+`2b2c76ff86e65c9849ad743690e1807cfc8421796e3459839c780fafbb60bc5b`。
+各类别距名义配额的差值均小于单条 4096-token 上限，这是坚持不切断样本的结果。
+
 ## 推荐 SFT 数据准备
 
 在仓库根目录运行：

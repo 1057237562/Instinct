@@ -19,6 +19,15 @@ BUCKET_CALIBRATION_BATCH_SIZE = 12
 BUCKET_CALIBRATION_TOKEN_BUDGET = (
     BUCKET_CALIBRATION_SEQ_LEN * BUCKET_CALIBRATION_BATCH_SIZE
 )
+# The original 64M calibration already contained roughly this much persistent
+# FP32 parameter/gradient/optimizer memory.  Subtracting the same baseline
+# avoids charging small models twice while correctly accounting for large MoE
+# models whose inactive experts still keep weights, gradients and optimizer
+# state resident on every card.
+BUCKET_CALIBRATION_PERSISTENT_GB = 0.75
+BUCKET_MEMORY_SAFETY_GB = 0.50
+BUCKET_GRAPH_RESERVE_GB = 0.125
+BUCKET_CUDAGRAPH_RESERVE_GB = 0.50
 
 # Initial one-point wall-time calibration from the measured fixed-packing run.
 _TIME_REFERENCE_BATCH_SIZE = 28
@@ -66,14 +75,55 @@ def _align_up(value: int, alignment: int) -> int:
     return ((value + alignment - 1) // alignment) * alignment
 
 
-def bucket_token_budget(gpu_memory_gb: float) -> int:
-    """Scale the measured 16GB B*L budget to requested per-card VRAM."""
+def bucket_token_budget(
+    gpu_memory_gb: float,
+    *,
+    persistent_memory_gb: float | None = None,
+    bucket_count: int = 1,
+    compile_mode: str = "off",
+) -> int:
+    """Return a per-card token budget with optional model-memory accounting.
+
+    The legacy one-point scaling remains available when ``persistent_memory_gb``
+    is omitted.  Trainers provide the exact resident parameter/gradient/
+    optimizer estimate, then reserve additional space for every compiled bucket
+    shape.  This matters especially for MoE: all experts are resident even
+    though only top-k experts are active for each token.
+    """
     gpu_memory_gb = float(gpu_memory_gb)
     if not math.isfinite(gpu_memory_gb) or gpu_memory_gb <= 0:
         raise ValueError('bucket_gpu_memory_gb must be a positive finite number')
+    if persistent_memory_gb is None:
+        return max(1, math.floor(
+            BUCKET_CALIBRATION_TOKEN_BUDGET
+            * gpu_memory_gb / BUCKET_CALIBRATION_MEMORY_GB
+        ))
+    persistent_memory_gb = float(persistent_memory_gb)
+    if not math.isfinite(persistent_memory_gb) or persistent_memory_gb < 0:
+        raise ValueError('persistent_memory_gb must be a non-negative finite number')
+    bucket_count = max(1, int(bucket_count))
+    graph_per_extra = (
+        BUCKET_CUDAGRAPH_RESERVE_GB
+        if str(compile_mode) in {'reduce-overhead', 'max-autotune'}
+        else BUCKET_GRAPH_RESERVE_GB
+    )
+    graph_reserve = graph_per_extra * (bucket_count - 1)
+    available_gb = (
+        gpu_memory_gb - persistent_memory_gb
+        - BUCKET_MEMORY_SAFETY_GB - graph_reserve
+    )
+    if available_gb <= 0:
+        raise ValueError(
+            f'model/optimizer persistent memory ({persistent_memory_gb:.2f} GiB) '
+            f'plus safety/bucket reserve ({BUCKET_MEMORY_SAFETY_GB + graph_reserve:.2f} GiB) '
+            f'exceeds the requested {gpu_memory_gb:.2f} GiB per-card limit'
+        )
+    reference_activation_gb = (
+        BUCKET_CALIBRATION_MEMORY_GB - BUCKET_CALIBRATION_PERSISTENT_GB
+    )
     return max(1, math.floor(
         BUCKET_CALIBRATION_TOKEN_BUDGET
-        * gpu_memory_gb / BUCKET_CALIBRATION_MEMORY_GB
+        * available_gb / reference_activation_gb
     ))
 
 

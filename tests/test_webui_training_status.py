@@ -24,6 +24,7 @@ def _load_status_helpers(checkpoints_dir):
         "_detached_training_status",
         "_training_script_from_argv",
         "_training_mode_from_argv",
+        "_training_activity_from_log",
     }
     functions = [
         node for node in module.body
@@ -54,6 +55,22 @@ def test_detached_run_stays_running_while_process_exists(tmp_path):
     assert helpers["_detached_training_status"](
         str(log_path), True, None
     ) == "running"
+
+
+def test_pretraining_activity_distinguishes_background_prefetch(tmp_path):
+    helper = _load_status_helpers(tmp_path / "checkpoints")[
+        "_training_activity_from_log"
+    ]
+    log = (
+        "[Streaming Chunk] epoch=1, chunk=1/35\n"
+        "[Streaming Prefetch] first training batch completed; "
+        "packing chunk=2/35 in background thread\n"
+        "Tokenizing pretrain for sequence buckets:  73%|progress\n"
+    )
+
+    assert helper(log) == (
+        "Training warmup + background prefetch chunk 2/35: tokenizing 73%"
+    )
 
 
 def test_training_process_detection_requires_a_script_argv(tmp_path):

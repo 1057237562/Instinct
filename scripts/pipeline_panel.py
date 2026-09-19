@@ -15,7 +15,11 @@ def snapshot(state, model, trainer):
                     sequence_packing=False, sequence_packing_mode='fixed', seq_bucket=2,
                     bucket_gpu_memory_gb=16.0, bucket_max_seq_len=16384,
                     bucket_large_threshold=8192, packing_batch_size=1000,
-                    packing_num_proc=1, bucket_loader_workers=0, use_compile=True,
+                    packing_num_proc=1, bucket_loader_workers=0,
+                    data_cache_max_gb=5.0, use_compile=True,
+                    dataset_streaming='auto', streaming_chunk_mb=1024,
+                    streaming_prefetch_chunks=1,
+                    cache_build_mode='inline',
                     compile_mode='reduce-overhead', use_grad_checkpoint=0,
                     fp8_training='off', fp8_filter='auto', profile='off',
                     profile_warmup=10, profile_interval=100, profile_active_steps=5)

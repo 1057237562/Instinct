@@ -430,7 +430,7 @@ def build_parser():
     parser.add_argument('--hc_sinkhorn_iters', default=20, type=int, help="mHC Sinkhorn迭代次数")
     parser.add_argument('--attnres_variant', default='block', choices=['full', 'block'], help="AttnRes变体")
     parser.add_argument('--attnres_block_size', default=2, type=int, help="Block AttnRes块大小（按子层计）")
-    parser.add_argument('--inference_rope_scaling', default=False, action='store_true', help="启用RoPE位置编码外推（4倍，仅解决位置编码问题）")
+    parser.add_argument('--inference_rope_scaling', default=False, action='store_true', help="启用默认 YaRN；LongRoPE 请使用 --config_path")
     parser.add_argument('--max_new_tokens', default=8192, type=int, help="最大生成长度（注意：并非模型实际长文本能力）")
     parser.add_argument('--temperature', default=0.85, type=float, help="生成温度，控制随机性（0表示贪心生成）")
     parser.add_argument('--top_p', default=0.95, type=float, help="nucleus采样阈值（0-1）")

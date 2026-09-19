@@ -7,6 +7,7 @@ wandb（SwanLab）日志初始化、余弦 LR 调度、GradScaler 参数更新�
 """
 import os
 import sys
+import math
 
 __package__ = "trainer"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -21,6 +22,40 @@ from trainer.trainer_utils import (
 
 # 暂停退出码：与 0=成功 / 非0=失败 相区分，供 WebUI 识别“已暂停”状态。
 PAUSE_EXIT_CODE: int = 42
+
+
+def _apply_bucket_cuda_memory_limit(args) -> float | None:
+    """Make the auto-bucket per-card setting an allocator limit, not a hint."""
+    if not (
+        bool(getattr(args, 'sequence_packing', 0))
+        and str(getattr(args, 'sequence_packing_mode', 'fixed')) == 'bucket'
+        and torch.cuda.is_available()
+        and str(getattr(args, 'device', '')).startswith('cuda')
+    ):
+        return None
+    from dataset.sequence_bucket import BUCKET_MEMORY_SAFETY_GB
+
+    device = torch.device(args.device)
+    total_bytes = int(torch.cuda.get_device_properties(device).total_memory)
+    target_gb = float(getattr(args, 'bucket_gpu_memory_gb', 16.0))
+    if not math.isfinite(target_gb) or target_gb <= 0:
+        raise ValueError('--bucket_gpu_memory_gb must be a positive finite number')
+    gib = 1024 ** 3
+    # Context/cuBLAS/NCCL allocations are not all controlled by the caching
+    # allocator, so keep the same safety reserve used by the batch estimator.
+    allocator_bytes = min(
+        total_bytes,
+        max(0.25, target_gb - BUCKET_MEMORY_SAFETY_GB) * gib,
+    )
+    fraction = min(1.0, allocator_bytes / total_bytes)
+    torch.cuda.set_per_process_memory_fraction(fraction, device=device)
+    limit_gb = allocator_bytes / gib
+    setattr(args, 'bucket_allocator_limit_gb', limit_gb)
+    Logger(
+        f'[Packing VRAM Limit] device={device}, requested={target_gb:g}GiB, '
+        f'allocator_limit={limit_gb:.2f}GiB, physical={total_bytes / gib:.2f}GiB'
+    )
+    return limit_gb
 
 
 def build_trainer_parser(description: str, *, defaults: dict | None = None) -> argparse.ArgumentParser:
@@ -75,7 +110,7 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
         '--bucket_loader_workers', default=-1, type=int,
         help='Bucket 训练 DataLoader 进程数（-1=自动；Windows 默认 0，避免每个 worker 重复提交 PyTorch 内存）',
     )
-    parser.add_argument("--accumulation_steps", type=int, default=8, help="梯度累积步数")
+    parser.add_argument("--accumulation_steps", type=int, default=1, help="梯度累积步数")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
     parser.add_argument("--log_interval", type=int, default=100, help="日志打印间隔")
     parser.add_argument("--save_interval", type=int, default=1000, help="模型保存间隔")
@@ -88,7 +123,11 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     )
     parser.add_argument(
         '--bucket_gpu_memory_gb', default=16.0, type=float,
-        help='自动长度桶可用的单卡显存（GB）；基于 16GB/2048 tokens/batch 12 标定每桶 batch_size',
+        help='自动长度桶的单卡显存硬预算（GB）；先扣除全模型参数、梯度、优化器状态及多桶编译预留，再计算每桶 batch_size',
+    )
+    parser.add_argument(
+        '--bucket_token_budget', default=0, type=int,
+        help='每卡每步 packed token 硬上限（0=按模型和显存自动计算；正数=显式覆盖）',
     )
     parser.add_argument(
         '--bucket_max_seq_len', default=16384, type=int,
@@ -114,6 +153,27 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     parser.add_argument(
         '--packing_num_proc', default=0, type=int,
         help='Bucket token 统计和桶内 packing 的并行进程数（0=自动；Windows 为避免提交内存耗尽，最多使用 4）',
+    )
+    parser.add_argument(
+        '--data_cache_max_gb', default=float(os.environ.get('INSTINCT_DATA_CACHE_MAX_GB', 5.0)),
+        type=float,
+        help='可重建数据集/Arrow 缓存总上限（GB，默认 5；0=不限制）。超限时按 LRU 淘汰，允许重计算',
+    )
+    parser.add_argument(
+        '--dataset_streaming', default='auto', choices=['auto', 'on', 'off'],
+        help='大 JSONL 有界分片加载：auto=缓存预算无法容纳整库时启用；on/off=强制开关',
+    )
+    parser.add_argument(
+        '--streaming_chunk_mb', default=1024, type=int,
+        help='流式预训练每次展开的源 JSONL 分片大小（MiB，默认 1024）',
+    )
+    parser.add_argument(
+        '--streaming_prefetch_chunks', default=1, type=int, choices=[0, 1],
+        help='流式预训练时在后台线程 packing 下一分片（0=关，1=开；默认 1）',
+    )
+    parser.add_argument(
+        '--cache_build_mode', default='inline', choices=['inline', 'spawn'],
+        help='Arrow/packing 构建方式：inline=当前进程串行构建（Windows安全默认）；spawn=独立子进程',
     )
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument('--use_looped', default=0, type=int, choices=[0, 1], help="是否使用Instinct V2 latent recurrent-depth架构（0=否，1=是）")
@@ -207,6 +267,25 @@ def setup_dist_and_seed(args) -> int:
     """
     local_rank = init_distributed_mode()
     if dist.is_initialized(): args.device = f"cuda:{local_rank}"
+    _apply_bucket_cuda_memory_limit(args)
+    cache_max_gb = float(getattr(args, 'data_cache_max_gb', 5.0))
+    if cache_max_gb < 0:
+        raise ValueError('--data_cache_max_gb must be >= 0')
+    os.environ['INSTINCT_DATA_CACHE_MAX_GB'] = str(cache_max_gb)
+    os.environ['INSTINCT_CACHE_BUILD_MODE'] = str(
+        getattr(args, 'cache_build_mode', 'inline')
+    )
+    if not dist.is_initialized() or dist.get_rank() == 0:
+        from dataset.cache_budget import GIB, enforce_cache_budget
+        report = enforce_cache_budget(max_gb=cache_max_gb)
+        if report['budget_bytes'] is not None:
+            Logger(
+                f"[Data cache] budget={report['budget_bytes'] / GIB:.2f} GiB, "
+                f"usage={report['after_bytes'] / GIB:.2f} GiB, "
+                f"evicted={report['removed_bytes'] / GIB:.2f} GiB"
+            )
+    if dist.is_initialized():
+        dist.barrier()
     setup_seed(42 + (dist.get_rank() if dist.is_initialized() else 0))
     return local_rank
 
@@ -278,6 +357,33 @@ def set_cosine_lr(optimizer, epoch, step, iters, args) -> None:
         total_steps,
         args.learning_rate,
         warmup_steps=warmup_steps,
+        min_lr_ratio=float(getattr(args, "min_lr_ratio", 0.1)),
+    )
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+
+
+def set_cosine_lr_progress(optimizer, progress: int, total: int, args) -> None:
+    """Token-progress variant used when chunk counts are not materialized ahead.
+
+    ``warmup_ratio`` maps naturally to tokens. Explicit ``warmup_steps`` keeps
+    its historical micro-step meaning and is therefore rejected for this mode.
+    """
+    total = int(total)
+    if total <= 0:
+        raise ValueError("total progress must be positive")
+    if int(getattr(args, "warmup_steps", 0)) > 0:
+        raise ValueError(
+            "--warmup_steps is step-based and cannot be used with dataset streaming; "
+            "use --warmup_ratio instead"
+        )
+    ratio = float(getattr(args, "warmup_ratio", 0.0))
+    if not 0.0 <= ratio < 1.0:
+        raise ValueError("warmup_ratio must be in [0, 1)")
+    warmup = round(total * ratio)
+    lr = get_lr(
+        progress, total, args.learning_rate,
+        warmup_steps=warmup,
         min_lr_ratio=float(getattr(args, "min_lr_ratio", 0.1)),
     )
     for param_group in optimizer.param_groups:

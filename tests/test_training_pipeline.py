@@ -17,6 +17,8 @@ def test_snapshot_is_independent():
     state['learning_rate_pretrain'] = 0.1
     assert stage['model']['hidden_size'] == 768
     assert stage['args']['learning_rate'] == 0.001
+    assert stage['args']['data_cache_max_gb'] == 5.0
+    assert stage['args']['streaming_prefetch_chunks'] == 1
 
 
 @pytest.mark.parametrize('failure', [False, True])

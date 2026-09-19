@@ -13,12 +13,20 @@
   "rope_theta": 1000000.0,
   "inference_rope_scaling": true,
   "rope_scaling": {
-    "type": "yarn",
-    "beta_fast": 32.0,
-    "beta_slow": 1.0,
-    "factor": 4.0,
-    "original_max_position_embeddings": 4096.0,
-    "attention_factor": 1.1385
+    "type": "longrope",
+    "factor": 8.0,
+    "original_max_position_embeddings": 4096,
+    "short_factor": [
+      1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+      1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0
+    ],
+    "long_factor": [
+      8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0,
+      8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0
+    ],
+    "short_attention_factor": 1.0,
+    "short_retained_start_tokens": 0,
+    "long_retained_start_tokens": 0
   },
   "use_moe": true,
   "num_experts": 8,

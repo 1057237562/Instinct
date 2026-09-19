@@ -3,6 +3,8 @@ import json
 import math
 from pathlib import Path
 
+import pytest
+
 
 SOURCE = Path(__file__).parents[1] / "scripts" / "config_webui.py"
 
@@ -20,7 +22,7 @@ def _preset_helpers():
                 selected.append(node)
         elif isinstance(node, ast.FunctionDef) and node.name in {
             "compute_intermediate_size", "compute_head_dim", "calc_params",
-            "_config_preset_value", "arch_diagram",
+            "_config_preset_value", "arch_diagram", "estimate_bucket_vram_plan",
         }:
             selected.append(node)
     namespace = {"math": math}
@@ -122,12 +124,27 @@ def test_instinct_v1_moe_preserves_dense_per_token_ffn_capacity():
     assert config["num_experts"] == 8
     assert config["num_experts_per_tok"] == 1
     assert config["moe_intermediate_size"] == 1664
+    assert config["rope_scaling_type"] == "longrope"
+    assert config["factor"] == 8.0
+    assert config["original_max_position_embeddings"] == 4096.0
+    assert config["short_factor"] == [1.0] * 16
+    assert config["long_factor"] == [8.0] * 16
+    assert config["short_attention_factor"] == 1.0
     breakdown = helpers["calc_params"](config)
     assert breakdown["Total Params"]["value"] == 678_726_144
     assert breakdown["Active Total"]["value"] == 106_203_648
     diagram = helpers["arch_diagram"](config)
     assert "MoE-FFN (8E, top-1)" in diagram
     assert "Layer 32" in diagram
+
+    vram = helpers["estimate_bucket_vram_plan"](
+        config, target_gb=16.0, bucket_count=2, optimizer="muon",
+        param_dtype="fp32", use_compile=True,
+        compile_mode="max-autotune-no-cudagraphs",
+    )
+    assert vram["persistent_gb"] == pytest.approx(7.5854, abs=1e-3)
+    assert vram["token_budget"] == 12553
+    assert vram["token_budget"] // 4096 == 3
 
     serialized = json.loads(
         (SOURCE.parents[1] / "trainer" / "config_instinct_v1_moe.json").read_text(
@@ -154,3 +171,9 @@ def test_current_serialized_configs_match_instinct_v2_preset():
             helpers["_config_preset_value"](current, key) == value
             for key, value in preset.items()
         )
+
+
+def test_training_defaults_use_single_step_gradient_accumulation():
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "st.session_state.accumulation_steps = 16" not in source
+    assert "st.session_state.accumulation_steps = 4" not in source

@@ -1,7 +1,7 @@
 """
 Instinct 模型定义:配置类(InstinctConfig)与 Dense Transformer 主干。
 
-包含 RMSNorm、RoPE(支持 YaRN 外推)、GQA 注意力(flash / math / 梯度检查点
+包含 RMSNorm、RoPE(支持 YaRN / LongRoPE 外推)、GQA 注意力(flash / math / 梯度检查点
 三路实现)、SwiGLU FFN、MoE 路由、mHC / Attention Residuals 可选残差拓扑、
 Early Exit / logit lens,以及带完整采样参数(temperature / top_k / top_p /
 repetition_penalty)的自定义 generate 循环。
@@ -20,6 +20,11 @@ from model.attention_mask import apply_attention_mask
 from model.sequence_packing import (
     merge_packed_attention_mask, positions_from_sequence_ids,
 )
+from model.rope import (
+    build_rope_caches, precompute_freqs_cis, select_rope_cache,
+    validate_rope_scaling,
+)
+from model.moe_dispatch import routed_moe_forward
 
 # ═══════════════════════════════════════════════════════════════
 # InstinctConfig
@@ -76,7 +81,11 @@ class InstinctConfig(PretrainedConfig):
             "attention_factor": 1.0,
             "type": "yarn"
         } if self.inference_rope_scaling else None
-        self.rope_scaling = saved_rope_scaling or saved_rope_parameters or default_rope_scaling
+        self.rope_scaling = validate_rope_scaling(
+            saved_rope_scaling or saved_rope_parameters or default_rope_scaling,
+            self.head_dim,
+            self.max_position_embeddings,
+        )
         # Early Exit configs (LayerSkip-style: shared LM head, no auxiliary classifiers)
         self.early_exit_layers = kwargs.get("early_exit_layers", [4, 5, 6, 7])
         self.early_exit_loss_weight = kwargs.get("early_exit_loss_weight", 0.3)
@@ -213,24 +222,6 @@ class ManifoldHyperHead(nn.Module):
         pre = torch.sigmoid(logits * self.scale.float() + self.base.float()) + self.hc_eps
         return (pre.unsqueeze(-1) * hidden_streams).sum(dim=2).to(hidden_streams.dtype)
 
-def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float = 1e6, rope_scaling: dict = None):
-    freqs, attn_factor = 1.0 / (rope_base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)), 1.0
-    if rope_scaling is not None: # YaRN: f'(i) = f(i)((1-γ) + γ/s), where γ∈[0,1] is linear ramp
-        orig_max, factor, beta_fast, beta_slow, attn_factor = (
-            rope_scaling.get("original_max_position_embeddings", 2048), rope_scaling.get("factor", 16),
-            rope_scaling.get("beta_fast", 32.0), rope_scaling.get("beta_slow", 1.0), rope_scaling.get("attention_factor", 1.0)
-        )
-        if end / orig_max > 1.0:
-            inv_dim = lambda b: (dim * math.log(orig_max / (b * 2 * math.pi))) / (2 * math.log(rope_base))
-            low, high = max(math.floor(inv_dim(beta_fast)), 0), min(math.ceil(inv_dim(beta_slow)), dim // 2 - 1)
-            ramp = torch.clamp((torch.arange(dim // 2, device=freqs.device).float() - low) / max(high - low, 0.001), 0, 1)
-            freqs = freqs * (1 - ramp + ramp / factor)
-    t = torch.arange(end, device=freqs.device)
-    freqs = torch.outer(t, freqs).float()
-    freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1) * attn_factor
-    freqs_sin = torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1) * attn_factor
-    return freqs_cos, freqs_sin
-
 def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     def rotate_half(x): return torch.cat((-x[..., x.shape[-1] // 2:], x[..., : x.shape[-1] // 2]), dim=-1)
     if cos.ndim == 3:
@@ -336,26 +327,18 @@ class MOEFeedForward(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
-        batch_size, seq_len, hidden_dim = x.shape
-        x_flat = x.view(-1, hidden_dim)
-        scores = F.softmax(self.gate(x_flat), dim=-1)
-        topk_weight, topk_idx = torch.topk(scores, k=self.config.num_experts_per_tok, dim=-1, sorted=False)
-        if self.config.norm_topk_prob: topk_weight = topk_weight / (topk_weight.sum(dim=-1, keepdim=True) + 1e-20)
-        y = torch.zeros_like(x_flat)
-        for i, expert in enumerate(self.experts):
-            mask = (topk_idx == i)
-            if mask.any():
-                token_idx = mask.any(dim=-1).nonzero().flatten()
-                weight = topk_weight[mask].view(-1, 1)
-                y.index_add_(0, token_idx, (expert(x_flat[token_idx]) * weight).to(y.dtype))
-            elif self.training:
-                y[0, 0] += 0 * sum(p.sum() for p in expert.parameters())
+        y, scores, topk_idx = routed_moe_forward(
+            x, self.gate, self.experts,
+            num_experts_per_tok=self.config.num_experts_per_tok,
+            norm_topk_prob=self.config.norm_topk_prob,
+            act_fn=self.act_fn,
+        )
         if self.training and self.config.router_aux_loss_coef > 0:
             load = F.one_hot(topk_idx, self.config.num_experts).float().mean(0)
             self.aux_loss = (load * scores.mean(0)).sum() * self.config.num_experts * self.config.router_aux_loss_coef
         else:
             self.aux_loss = scores.new_zeros(1).squeeze()
-        return y.view(batch_size, seq_len, hidden_dim)
+        return y
 
 class InstinctBlock(nn.Module):
     def __init__(self, layer_id: int, config: InstinctConfig):
@@ -473,12 +456,14 @@ class InstinctModel(nn.Module):
             self.hc_head = ManifoldHyperHead(config)
         elif self.residual_type == "attnres":
             self.output_residual = AttentionResidual(config)
-        freqs_cos, freqs_sin = precompute_freqs_cis(
-            dim=config.head_dim, end=config.max_position_embeddings,
-            rope_base=config.rope_theta, rope_scaling=config.rope_scaling,
+        freqs_cos, freqs_sin, short_cos, short_sin = build_rope_caches(
+            config.head_dim, config.max_position_embeddings,
+            config.rope_theta, config.rope_scaling,
         )
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+        self.register_buffer("freqs_cos_short", short_cos, persistent=False)
+        self.register_buffer("freqs_sin_short", short_sin, persistent=False)
 
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False,
                 sequence_ids=None, position_ids=None, **kwargs):
@@ -497,24 +482,27 @@ class InstinctModel(nn.Module):
                 hidden_states = torch.stack((hidden_states, torch.zeros_like(hidden_states)), dim=0)
         # Recompute RoPE buffers lost during meta-device init (transformers>=5.x)
         if self.freqs_cos[0, 0] == 0:
-            freqs_cos, freqs_sin = precompute_freqs_cis(
-                dim=self.config.head_dim, end=self.config.max_position_embeddings,
-                rope_base=self.config.rope_theta, rope_scaling=self.config.rope_scaling,
+            freqs_cos, freqs_sin, short_cos, short_sin = build_rope_caches(
+                self.config.head_dim, self.config.max_position_embeddings,
+                self.config.rope_theta, self.config.rope_scaling,
             )
             self.freqs_cos, self.freqs_sin = freqs_cos.to(hidden_states.device), freqs_sin.to(hidden_states.device)
+            if short_cos is not None:
+                self.freqs_cos_short = short_cos.to(hidden_states.device)
+                self.freqs_sin_short = short_sin.to(hidden_states.device)
         if sequence_ids is not None:
             if past_key_values[0] is not None:
                 raise ValueError("sequence_ids cannot be used together with a KV cache")
             if position_ids is None:
                 position_ids = positions_from_sequence_ids(sequence_ids)
             attention_mask = merge_packed_attention_mask(sequence_ids, attention_mask)
-        if position_ids is None:
-            position_embeddings = (
-                self.freqs_cos[start_pos:start_pos + seq_length],
-                self.freqs_sin[start_pos:start_pos + seq_length],
-            )
-        else:
-            position_embeddings = (self.freqs_cos[position_ids], self.freqs_sin[position_ids])
+        position_embeddings = select_rope_cache(
+            self.freqs_cos, self.freqs_sin,
+            self.freqs_cos_short, self.freqs_sin_short,
+            self.config.rope_scaling,
+            start_pos=start_pos, seq_length=seq_length,
+            position_ids=position_ids,
+        )
         presents, intermediates = [], []
         aux_loss = hidden_states.new_zeros(1).squeeze()
         return_intermediate = kwargs.pop("return_intermediate", False)

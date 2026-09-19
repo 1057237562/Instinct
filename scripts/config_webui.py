@@ -60,6 +60,10 @@ def _text_input(*args, **kwargs):
     return _state_aware_widget(st.text_input, "value", *args, **kwargs)
 
 
+def _text_area(*args, **kwargs):
+    return _state_aware_widget(st.text_area, "value", *args, **kwargs)
+
+
 def _packing_preprocess_workers(value=None, *, platform_name=None, cpu_count=None):
     """Mirror the trainer's platform-aware packing worker safety limit."""
     platform_name = os.name if platform_name is None else str(platform_name)
@@ -89,6 +93,7 @@ PRESETS = {
         "max_position_embeddings": 32768,
         "rope_theta": 50000.0,
         "inference_rope_scaling": False,
+        "rope_scaling_type": "none",
         "use_moe": False,
         "num_experts": 4,
         "num_experts_per_tok": 1,
@@ -124,6 +129,7 @@ PRESETS = {
         "max_position_embeddings": 32768,
         "rope_theta": 1e6,
         "inference_rope_scaling": False,
+        "rope_scaling_type": "none",
         "beta_fast": 32,
         "beta_slow": 1,
         "factor": 16,
@@ -161,6 +167,7 @@ PRESETS = {
         "max_position_embeddings": 32768,
         "rope_theta": 1e6,
         "inference_rope_scaling": False,
+        "rope_scaling_type": "none",
         "beta_fast": 32,
         "beta_slow": 1,
         "factor": 16,
@@ -198,6 +205,7 @@ PRESETS = {
         "max_position_embeddings": 32768,
         "rope_theta": 1e6,
         "inference_rope_scaling": True,
+        "rope_scaling_type": "yarn",
         "beta_fast": 32,
         "beta_slow": 1,
         "factor": 4.0,
@@ -227,11 +235,15 @@ PRESETS = {
         "max_position_embeddings": 32768,
         "rope_theta": 1e6,
         "inference_rope_scaling": True,
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "factor": 4.0,
+        "rope_scaling_type": "longrope",
+        "factor": 8.0,
         "original_max_position_embeddings": 4096.0,
-        "attention_factor": 1.1385,
+        "short_factor": [1.0] * 16,
+        # Paper PI seed only. Replace it with the checkpoint-specific search result.
+        "long_factor": [8.0] * 16,
+        "short_attention_factor": 1.0,
+        "short_retained_start_tokens": 0,
+        "long_retained_start_tokens": 0,
         "use_moe": True,
         "num_experts": 8,
         "num_experts_per_tok": 1,
@@ -255,6 +267,7 @@ PRESETS = {
         "max_position_embeddings": 32768,
         "rope_theta": 1e6,
         "inference_rope_scaling": False,
+        "rope_scaling_type": "none",
         "beta_fast": 32,
         "beta_slow": 1,
         "factor": 16,
@@ -747,6 +760,35 @@ def calc_params(config: dict) -> dict:
     return breakdown
 
 
+def estimate_bucket_vram_plan(
+    config: dict, *, target_gb: float, bucket_count: int,
+    optimizer: str, param_dtype: str, use_compile: bool, compile_mode: str,
+) -> dict:
+    """Mirror the trainer's conservative per-card bucket budget for the UI."""
+    total_params = calc_params(config)["Total Params"]["value"]
+    element_bytes = 4 if str(param_dtype) == "fp32" else 2
+    optimizer = str(optimizer).lower()
+    # parameter + gradient + optimizer state. Muon has one momentum tensor;
+    # AdamW has two moments. This intentionally uses total MoE parameters.
+    tensors_per_param = 3 if optimizer in {"muon", "adafactor", "adafactory"} else 4
+    persistent_gb = total_params * element_bytes * tensors_per_param / 1024 ** 3
+    bucket_count = max(1, int(bucket_count))
+    graph_per_extra = (
+        0.50
+        if use_compile and compile_mode in ("reduce-overhead", "max-autotune")
+        else 0.125
+    )
+    reserve_gb = 0.50 + graph_per_extra * (bucket_count - 1)
+    available_gb = float(target_gb) - persistent_gb - reserve_gb
+    token_budget = max(0, math.floor(24576 * available_gb / 15.25))
+    return {
+        "persistent_gb": persistent_gb,
+        "reserve_gb": reserve_gb,
+        "available_gb": available_gb,
+        "token_budget": token_budget,
+    }
+
+
 def fmt_table(breakdown: dict) -> list:
     """Convert breakdown dict to list-of-dicts for st.dataframe."""
     rows = []
@@ -759,6 +801,26 @@ def fmt_table(breakdown: dict) -> list:
             }
         )
     return rows
+
+
+def _parse_longrope_factors(value, count, default_value):
+    """Parse a JSON array or comma-separated LongRoPE factor vector."""
+    if isinstance(value, (list, tuple)):
+        factors = [float(item) for item in value]
+    else:
+        text = str(value or "").strip()
+        if text.startswith("["):
+            factors = [float(item) for item in json.loads(text)]
+        else:
+            factors = [float(item.strip()) for item in text.split(",") if item.strip()]
+    if not factors:
+        factors = [float(default_value)] * count
+    if len(factors) != count:
+        raise ValueError(
+            f"LongRoPE factor vector needs {count} values for head_dim={count * 2}; "
+            f"got {len(factors)}"
+        )
+    return factors
 
 
 def build_config_dict() -> dict:
@@ -791,8 +853,12 @@ def build_config_dict() -> dict:
     q_heads = d["num_attention_heads"]
     d["head_dim"] = compute_head_dim(h, q_heads)
 
-    # YaRN rope_scaling
-    if d.get("inference_rope_scaling"):
+    scaling_type = st.session_state.get("rope_scaling_type")
+    if scaling_type is None:
+        scaling_type = "yarn" if d.get("inference_rope_scaling") else "none"
+    d["inference_rope_scaling"] = scaling_type != "none"
+
+    if scaling_type == "yarn":
         d["rope_scaling"] = {
             "type": "yarn",
             "beta_fast": st.session_state.get("beta_fast", 32),
@@ -803,6 +869,42 @@ def build_config_dict() -> dict:
             ),
             "attention_factor": st.session_state.get("attention_factor", 1.0),
         }
+    elif scaling_type == "longrope":
+        half_dim = d["head_dim"] // 2
+        original_max = int(st.session_state.get(
+            "original_max_position_embeddings", 4096
+        ))
+        factor = float(st.session_state.get(
+            "factor", d["max_position_embeddings"] / original_max
+        ))
+        rope_scaling = {
+            "type": "longrope",
+            "factor": factor,
+            "original_max_position_embeddings": original_max,
+            "short_factor": _parse_longrope_factors(
+                st.session_state.get("longrope_short_factors"), half_dim, 1.0
+            ),
+            # PI is only a safe initialization. Replace this vector with the
+            # model-specific result from the paper's perplexity search.
+            "long_factor": _parse_longrope_factors(
+                st.session_state.get("longrope_long_factors"), half_dim, factor
+            ),
+            "short_attention_factor": float(st.session_state.get(
+                "longrope_short_attention_factor", 1.0
+            )),
+            "short_retained_start_tokens": int(st.session_state.get(
+                "longrope_short_retained_tokens", 0
+            )),
+            "long_retained_start_tokens": int(st.session_state.get(
+                "longrope_long_retained_tokens", 0
+            )),
+        }
+        long_attention_factor = float(st.session_state.get(
+            "longrope_long_attention_factor", 0.0
+        ))
+        if long_attention_factor > 0:
+            rope_scaling["long_attention_factor"] = long_attention_factor
+        d["rope_scaling"] = rope_scaling
 
     # Model architecture
     d["model_architecture"] = st.session_state.get("model_architecture", "standard")
@@ -921,6 +1023,7 @@ def gen_python_code(cfg: dict) -> str:
 
     if cfg["inference_rope_scaling"]:
         params.append(("inference_rope_scaling", "True"))
+        params.append(("rope_scaling", repr(cfg["rope_scaling"])))
 
     if cfg.get("model_architecture") == "linear":
         params.append(("full_attention_interval", cfg.get("full_attention_interval", 4)))
@@ -1033,6 +1136,9 @@ def gen_config_json(cfg: dict) -> str:
 _ROPE_PRESET_KEYS = {
     "beta_fast", "beta_slow", "factor",
     "original_max_position_embeddings", "attention_factor",
+    "short_factor", "long_factor", "short_retained_start_tokens",
+    "long_retained_start_tokens", "short_attention_factor",
+    "long_attention_factor",
 }
 
 _LEGACY_PRESET_NAMES = {
@@ -1051,6 +1157,11 @@ _OPTIONAL_PRESET_DEFAULTS = {
 
 def _config_preset_value(config_dict, key):
     """Read flattened preset fields from serialized nested RoPE configs."""
+    if key == "rope_scaling_type":
+        if not config_dict.get("inference_rope_scaling", False):
+            return "none"
+        rope = config_dict.get("rope_scaling") or config_dict.get("rope_parameters") or {}
+        return rope.get("rope_type", rope.get("type", "yarn"))
     if key in config_dict:
         return config_dict[key]
     if key in _ROPE_PRESET_KEYS:
@@ -1112,14 +1223,33 @@ def load_config_to_session(config_dict: dict):
     arch = config_dict.get("model_architecture", "standard")
     st.session_state.model_architecture = arch
 
-    # YaRN params
+    # RoPE scaling params (legacy configs without a type are YaRN).
     rs = config_dict.get("rope_scaling") or {}
     if config_dict.get("inference_rope_scaling") and rs:
+        rope_type = rs.get("rope_type", rs.get("type", "yarn"))
+        st.session_state.rope_scaling_type = rope_type
         st.session_state.beta_fast = rs.get("beta_fast", 32)
         st.session_state.beta_slow = rs.get("beta_slow", 1)
         st.session_state.factor = rs.get("factor", 16)
         st.session_state.original_max_position_embeddings = rs.get("original_max_position_embeddings", 2048)
         st.session_state.attention_factor = rs.get("attention_factor", 1.0)
+        if rope_type == "longrope":
+            st.session_state.longrope_short_attention_factor = rs.get(
+                "short_attention_factor", rs.get("attention_factor", 1.0)
+            )
+            st.session_state.longrope_long_attention_factor = rs.get(
+                "long_attention_factor", rs.get("attention_factor", 0.0)
+            )
+            st.session_state.longrope_short_factors = json.dumps(rs.get("short_factor", []))
+            st.session_state.longrope_long_factors = json.dumps(rs.get("long_factor", []))
+            st.session_state.longrope_short_retained_tokens = rs.get(
+                "short_retained_start_tokens", rs.get("retained_start_tokens", 0)
+            )
+            st.session_state.longrope_long_retained_tokens = rs.get(
+                "long_retained_start_tokens", rs.get("retained_start_tokens", 0)
+            )
+    else:
+        st.session_state.rope_scaling_type = "none"
 
     # MoE
     if config_dict.get("use_moe"):
@@ -1493,11 +1623,27 @@ def init_from_preset(preset_name: str):
     )
     for k, v in data.items():
         st.session_state[k] = v
+    if data.get("rope_scaling_type") == "longrope":
+        st.session_state.longrope_short_factors = json.dumps(data["short_factor"])
+        st.session_state.longrope_long_factors = json.dumps(data["long_factor"])
+        st.session_state.longrope_short_retained_tokens = data.get(
+            "short_retained_start_tokens", 0
+        )
+        st.session_state.longrope_long_retained_tokens = data.get(
+            "long_retained_start_tokens", 0
+        )
+        st.session_state.longrope_short_attention_factor = float(
+            data.get("short_attention_factor", data.get("attention_factor", 1.0))
+        )
+        st.session_state.longrope_long_attention_factor = float(
+            data.get("long_attention_factor", data.get("attention_factor", 0.0))
+        )
     if preset_name == "Instinct V1 MoE":
-        # Safe starting point for a 16GB GPU; accumulation recovers global batch.
+        # Keep optimizer steps one-to-one with micro-batches by default. Users
+        # can still opt into accumulation when a larger effective batch is needed.
         st.session_state.batch_size = 1
-        st.session_state.accumulation_steps = 16
-        st.session_state.max_seq_len = 768
+        st.session_state.accumulation_steps = 1
+        st.session_state.max_seq_len = 4096
         st.session_state.optimizer = "muon"
         st.session_state.use_compile = True
         st.session_state.compile_mode = "max-autotune-no-cudagraphs"
@@ -1906,6 +2052,41 @@ def _training_log_is_complete(log_path):
         return False
     epoch, epochs, step, steps = map(int, progress[-1])
     return epoch >= epochs and step >= steps
+
+
+def _training_activity_from_log(log):
+    """Describe preprocessing/warmup before the first train-step record."""
+    if not log:
+        return "Initializing model and dataset..."
+    events = []
+    patterns = (
+        (r"Tokenizing pretrain for sequence buckets:\s+(\d+)%", "tokenizing {0}%"),
+        (r"Packing pretrain bucket at (\d+) tokens:\s+(\d+)%", "packing {0}-token bucket {1}%"),
+        (r"\[Packing DP\].*starting", "optimizing sequence buckets"),
+        (r"\[Streaming Build\] stage=materialize source_bytes=(\d+)MiB", "materializing {0}MiB source window"),
+        (r"\[Streaming Build\] stage=json-tokenize-pack starting", "loading JSON / tokenizing / packing"),
+    )
+    for pattern, template in patterns:
+        matches = list(re.finditer(pattern, log))
+        if matches:
+            match = matches[-1]
+            events.append((match.start(), template.format(*match.groups())))
+    if not events:
+        return "Initializing model or planning streaming chunks..."
+    position, activity = max(events, key=lambda item: item[0])
+    prefetches = list(re.finditer(
+        r"\[Streaming Prefetch\].*packing chunk=(\d+)/(\d+)", log,
+    ))
+    if prefetches and prefetches[-1].start() < position:
+        chunk, total = prefetches[-1].groups()
+        return f"Training warmup + background prefetch chunk {chunk}/{total}: {activity}"
+    chunks = list(re.finditer(
+        r"\[Streaming Chunk\].*chunk=(\d+)/(\d+)", log,
+    ))
+    if chunks:
+        chunk, total = chunks[-1].groups()
+        return f"Preparing streaming chunk {chunk}/{total}: {activity}"
+    return activity.capitalize() + "..."
 
 
 def _completed_checkpoint_exists(log_path):
@@ -2561,12 +2742,24 @@ with st.sidebar:
             format="%.0e",
             key="rope_theta",
         )
-        _checkbox(
-            "YaRN (inference_rope_scaling)",
-            value=st.session_state.get("inference_rope_scaling", False),
-            key="inference_rope_scaling",
+        legacy_scaling = (
+            "yarn" if st.session_state.get("inference_rope_scaling", False) else "none"
         )
-        if st.session_state.get("inference_rope_scaling", False):
+        rope_scaling_type = _selectbox(
+            "RoPE scaling",
+            ["none", "yarn", "longrope"],
+            index=["none", "yarn", "longrope"].index(
+                st.session_state.get("rope_scaling_type", legacy_scaling)
+            ),
+            format_func=lambda value: {
+                "none": "RoPE (native)",
+                "yarn": "YaRN",
+                "longrope": "LongRoPE (ICML 2024)",
+            }[value],
+            key="rope_scaling_type",
+        )
+        st.session_state.inference_rope_scaling = rope_scaling_type != "none"
+        if rope_scaling_type == "yarn":
             c1, c2 = st.columns(2)
             with c1:
                 _number_input(
@@ -2599,6 +2792,83 @@ with st.sidebar:
                     key="attention_factor",
                     format="%.1f",
                 )
+        elif rope_scaling_type == "longrope":
+            c1, c2 = st.columns(2)
+            with c1:
+                _number_input(
+                    "original_max_pos",
+                    min_value=2,
+                    value=int(st.session_state.get(
+                        "original_max_position_embeddings", 4096
+                    )),
+                    key="original_max_position_embeddings",
+                )
+                _number_input(
+                    "target extension factor",
+                    min_value=1.0,
+                    value=float(st.session_state.get("factor", 8.0)),
+                    step=1.0,
+                    key="factor",
+                )
+                _number_input(
+                    "short retained tokens (n-hat)",
+                    min_value=0,
+                    value=int(st.session_state.get(
+                        "longrope_short_retained_tokens", 0
+                    )),
+                    key="longrope_short_retained_tokens",
+                )
+            with c2:
+                _number_input(
+                    "short attention factor",
+                    min_value=0.01,
+                    value=float(st.session_state.get(
+                        "longrope_short_attention_factor", 1.0
+                    )),
+                    step=0.01,
+                    key="longrope_short_attention_factor",
+                    format="%.4f",
+                )
+                _number_input(
+                    "long attention factor (0 = paper formula)",
+                    min_value=0.0,
+                    value=float(st.session_state.get(
+                        "longrope_long_attention_factor", 0.0
+                    )),
+                    step=0.01,
+                    key="longrope_long_attention_factor",
+                    format="%.4f",
+                )
+                _number_input(
+                    "long retained tokens (n-hat)",
+                    min_value=0,
+                    value=int(st.session_state.get(
+                        "longrope_long_retained_tokens", 0
+                    )),
+                    key="longrope_long_retained_tokens",
+                )
+
+            half_dim = compute_head_dim(
+                st.session_state.get("hidden_size", 768),
+                st.session_state.get("num_attention_heads", 8),
+            ) // 2
+            default_factor = float(st.session_state.get("factor", 8.0))
+            _text_area(
+                f"short_factor ({half_dim} values)",
+                value=", ".join(["1.0"] * half_dim),
+                key="longrope_short_factors",
+                help="Short-context recovery factors found by LongRoPE search; 1.0 preserves native RoPE.",
+            )
+            _text_area(
+                f"long_factor ({half_dim} values)",
+                value=", ".join([f"{default_factor:g}"] * half_dim),
+                key="longrope_long_factors",
+                help="Per-dimension lambda_i search result. The uniform PI vector is only an initialization.",
+            )
+            st.caption(
+                "LongRoPE factors are checkpoint-specific search results. The displayed uniform vector is "
+                "the paper's PI seed, not an optimized LongRoPE result."
+            )
 
     # ── MoE ──
     with st.expander("MoE (Experimental)", expanded=True):
@@ -2723,7 +2993,7 @@ with st.sidebar:
             st.session_state.sequence_packing = True
             st.session_state.sequence_packing_mode = "fixed"
             st.session_state.batch_size = 4
-            st.session_state.accumulation_steps = 4
+            st.session_state.accumulation_steps = 1
             st.session_state.optimizer = "adamw"
             st.session_state.param_dtype = "fp32"
             st.session_state.activation_dtype = "bfloat16"
@@ -2852,6 +3122,55 @@ with st.sidebar:
             help="完整遍历训练数据的次数。续训时表示目标总 Epoch 数，而不是额外增加的轮数。",
         )
         _packing_supported = train_type in ("pretrain", "cpt", "full_sft", "lora", "distillation")
+        _number_input(
+            "Dataset cache budget (GB)",
+            min_value=0.0, max_value=1024.0,
+            value=float(st.session_state.get("data_cache_max_gb", 5.0)),
+            step=1.0, key="data_cache_max_gb",
+            help="Hugging Face/Arrow 可重建缓存的总上限。超限按 LRU 自动淘汰；"
+                 "正在训练使用的 mmap 文件受租约保护。0 表示不限制。",
+        )
+        _selectbox(
+            "Large dataset loading",
+            ["auto", "on", "off"],
+            index=["auto", "on", "off"].index(
+                st.session_state.get("dataset_streaming", "auto")
+            ),
+            key="dataset_streaming",
+            format_func=lambda value: {
+                "auto": "Auto — stream when cache is too small",
+                "on": "Streaming chunks — always",
+                "off": "Whole-dataset Arrow cache",
+            }[value],
+            help="Pretrain 将大型 JSONL 按字节范围逐片展开、packing、训练和释放；不会生成整库 Arrow。",
+        )
+        _number_input(
+            "Streaming source chunk (MiB)",
+            min_value=64, max_value=16384,
+            value=int(st.session_state.get("streaming_chunk_mb", 1024)),
+            step=64, key="streaming_chunk_mb",
+            help="开启下一片预取时，5GB 缓存最多使用 1024 MiB；峰值按最多约 5× 源分片预留。",
+        )
+        _checkbox(
+            "Pack next chunk while training",
+            value=bool(st.session_state.get("streaming_prefetch_chunks", 1)),
+            key="streaming_prefetch_chunks",
+            help="双缓冲：GPU 训练当前分片时，rank 0 用后台线程展开并 packing 下一分片；"
+                 "配合 Inline 模式不启动 Python 子进程。",
+        )
+        _selectbox(
+            "Cache build process",
+            ["inline", "spawn"],
+            index=["inline", "spawn"].index(
+                st.session_state.get("cache_build_mode", "inline")
+            ),
+            key="cache_build_mode",
+            format_func=lambda value: {
+                "inline": "Inline — spawn-free and Windows-safe",
+                "spawn": "Spawn worker — faster isolation, higher risk",
+            }[value],
+            help="Inline 流式预训练会强制 packing_num_proc=1、DataLoader workers=0，避免任何 Python spawn。",
+        )
         _checkbox(
             "Sequence packing",
             value=st.session_state.get("sequence_packing", False),
@@ -2915,17 +3234,38 @@ with st.sidebar:
                      "销毁该阶段的 CUDA Graph 和静态 GPU 张量并释放显存。",
             )
             st.caption("默认 >8192 tokens 的桶先连续训练，结束后会记录实际释放的 GPU 显存。")
-            _number_input(
+            _bucket_gpu_memory = _number_input(
                 "GPU VRAM per card (GB)",
                 min_value=1.0, max_value=192.0,
                 value=float(st.session_state.get("bucket_gpu_memory_gb", 16.0)),
                 step=1.0, key="bucket_gpu_memory_gb",
-                help="填写每张训练 GPU 可用的显存。根据 16GB 下 2048 tokens 可运行 batch 12 的"
-                     "实测曲线，自动计算每个长度桶的 batch_size。",
+                help="填写每张训练 GPU 的显存硬预算。会先扣除全模型参数、梯度、"
+                     "Muon/AdamW 状态，并按 bucket 数量预留编译图与 allocator 空间，"
+                     "再计算每个长度桶的 batch_size。",
             )
-            st.caption(
-                "标定：16GB = 24576 tokens/step/GPU；按显存线性缩放预算，再除以桶 max_seq_len。"
+            _vram_plan = estimate_bucket_vram_plan(
+                build_config_dict(),
+                target_gb=float(_bucket_gpu_memory),
+                bucket_count=int(st.session_state.get("seq_bucket", 2)),
+                optimizer=st.session_state.get("optimizer", "adamw"),
+                param_dtype=st.session_state.get("param_dtype", "fp32"),
+                use_compile=bool(st.session_state.get("use_compile", True)),
+                compile_mode=st.session_state.get("compile_mode", "default"),
             )
+            if _vram_plan["token_budget"] > 0:
+                _batch_4096 = max(1, _vram_plan["token_budget"] // 4096)
+                st.caption(
+                    f"模型常驻约 {_vram_plan['persistent_gb']:.2f} GiB；"
+                    f"安全/桶预留 {_vram_plan['reserve_gb']:.2f} GiB；"
+                    f"activation token budget ≈ {_vram_plan['token_budget']:,}/card。"
+                    f"例如 4096-token 桶预计 batch={_batch_4096}。"
+                )
+            else:
+                st.error(
+                    f"模型常驻约 {_vram_plan['persistent_gb']:.2f} GiB，"
+                    f"再加 {_vram_plan['reserve_gb']:.2f} GiB 安全/桶预留后已超过"
+                    f" {_bucket_gpu_memory:g} GiB；需要减少参数/桶数或提高显存预算。"
+                )
             st.caption("上方手动 batch_size 在 Auto buckets 模式中不会参与每桶批量计算。")
         else:
             _number_input(
@@ -3190,7 +3530,7 @@ with st.sidebar:
                     st.progress(pct)
                     st.caption(f"Epoch {ep}/{te} — Step {stp}/{tst} ({pct * 100:.1f}%)")
                 else:
-                    st.info("Training in progress...")
+                    st.info(_training_activity_from_log(log))
             else:
                 st.info("Training in progress...")
         elif st.session_state.get("train_status") == "success":
@@ -3337,6 +3677,21 @@ if st.session_state.get("train_triggered", False):
                     st.session_state.get("bucket_large_threshold", 8192)
                 )])
                 cmd.extend(["--packing_batch_size", str(st.session_state.get("packing_batch_size", 1000))])
+                cmd.extend(["--data_cache_max_gb", str(
+                    st.session_state.get("data_cache_max_gb", 5.0)
+                )])
+                cmd.extend(["--dataset_streaming", str(
+                    st.session_state.get("dataset_streaming", "auto")
+                )])
+                cmd.extend(["--streaming_chunk_mb", str(
+                    st.session_state.get("streaming_chunk_mb", 1024)
+                )])
+                cmd.extend(["--streaming_prefetch_chunks", str(int(bool(
+                    st.session_state.get("streaming_prefetch_chunks", 1)
+                )))])
+                cmd.extend(["--cache_build_mode", str(
+                    st.session_state.get("cache_build_mode", "inline")
+                )])
                 packing_workers = _packing_preprocess_workers(
                     st.session_state.get("packing_num_proc"),
                 )
@@ -3406,6 +3761,11 @@ if st.session_state.get("train_triggered", False):
                         f"# Sequence packing: {'ON' if packing_enabled else 'OFF'} "
                         f"(mode={packing_mode}, buckets={st.session_state.get('seq_bucket', 2)}, "
                         f"cache_batch={st.session_state.get('packing_batch_size', 1000)}, "
+                        f"disk_budget={st.session_state.get('data_cache_max_gb', 5.0)}GB, "
+                        f"streaming={st.session_state.get('dataset_streaming', 'auto')}, "
+                        f"stream_chunk={st.session_state.get('streaming_chunk_mb', 1024)}MiB, "
+                        f"prefetch={int(bool(st.session_state.get('streaming_prefetch_chunks', 1)))}, "
+                        f"cache_build={st.session_state.get('cache_build_mode', 'inline')}, "
                         f"gpu_memory={st.session_state.get('bucket_gpu_memory_gb', 16.0)}GB, "
                         f"max_context={st.session_state.get('bucket_max_seq_len', 16384)}, "
                         f"large_threshold={st.session_state.get('bucket_large_threshold', 8192)}, "
@@ -3544,7 +3904,7 @@ if st.session_state.get("train_status") == "running":
             pct = min(((ep - 1) + stp / tst) / te, 1.0)
             st.progress(pct, text=f"⏳ Training — Epoch {ep}/{te}, Step {stp}/{tst} ({pct*100:.1f}%)")
         else:
-            st.info("⏳ Training in progress... (waiting for first epoch output)")
+            st.info("⏳ " + _training_activity_from_log(log))
     else:
         st.info("⏳ Training started...")
 elif st.session_state.get("train_status") == "paused":
@@ -3604,6 +3964,9 @@ st.markdown(
     f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
     f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
     f"rope_theta: {cfg['rope_theta']:.0e}</span>"
+    f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
+    f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
+    f"rope: {(cfg.get('rope_scaling') or {}).get('type', 'native')}</span>"
     f"{loop_badges}"
     f"</div>",
     unsafe_allow_html=True,
