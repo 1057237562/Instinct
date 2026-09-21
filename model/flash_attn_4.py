@@ -9,8 +9,8 @@ mem-efficient backend(在 sm_120 上实测约 20x 于 math),极端情况再回�
 使用约定:
 - 输入 / 输出布局均为 (batch, seqlen, nheads, head_dim),与 FA4 / SDPA 统一,
   调用方无需手动 transpose 或 repeat_kv(集成层内部适配 GQA)。
-- FA4 仅处理无 attention_mask 的训练快路径;masked / packing 路径由原生 SDPA
-  处理;SDPA fallback 显式展开 K/V heads，以保持已验证的 fused backend。
+- PackedFlexMask 使用文档分块 FlexAttention 和紧凑 GQA；不适用时保持共享 bias SDPA。
+- FA4 仅处理无 attention_mask 的快路径；SDPA fallback 显式展开 K/V heads。
 - FA4 仅支持 bf16 / fp8,本项目训练默认 bf16;fp16 / fp32 自动走 SDPA。
 - seq_len 非 128 倍数时(FA4 non-varlen 接口的约束),causal 场景自动 pad 到
   128 倍数再截断(因果掩码下数值精确等价);非 causal 场景回退 SDPA。
@@ -19,7 +19,8 @@ from typing import Any, Callable, Optional
 
 import torch
 import torch.nn.functional as F
-from model.attention_mask import normalize_attention_mask
+from model.attention_mask import PreparedAttentionBias, normalize_attention_mask
+from model.packed_attention import PackedFlexMask, packed_flex_attention
 
 _flash_attn_4_func = None
 _tried_import = False
@@ -54,7 +55,7 @@ def flash_attention(
     v: torch.Tensor,
     dropout_p: float = 0.0,
     is_causal: bool = True,
-    attention_mask: Optional[torch.Tensor] = None,
+    attention_mask: Optional[torch.Tensor | PreparedAttentionBias | PackedFlexMask] = None,
 ) -> torch.Tensor:
     """Fused attention 快路径。
 
@@ -67,6 +68,10 @@ def flash_attention(
     Returns:
         (batch, seqlen, nheads, head_dim)
     """
+    if isinstance(attention_mask, PackedFlexMask):
+        if dropout_p != 0.0:
+            raise ValueError('Packed FlexAttention does not support attention dropout')
+        return packed_flex_attention(q, k, v, attention_mask)
     fa4 = _get_fa4()
     if (
         attention_mask is None
@@ -101,7 +106,12 @@ def flash_attention(
     v = _repeat_kv(v, n_rep).transpose(1, 2)
     sdpa_mask = None
     sdpa_is_causal = is_causal
-    if attention_mask is not None:
+    if isinstance(attention_mask, PreparedAttentionBias):
+        # Already combined, cast and aligned once at the model entry point.
+        # Every layer's backward can reference the same storage.
+        sdpa_mask = attention_mask.tensor
+        sdpa_is_causal = False
+    elif attention_mask is not None:
         sdpa_mask = normalize_attention_mask(attention_mask)
         if is_causal:
             query_len, key_len = q.size(-2), k.size(-2)

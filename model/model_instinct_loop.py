@@ -27,7 +27,8 @@ from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from model.flash_attn_4 import flash_attention
 from model.kv_cache_quant import parse_cache, make_cache
 from model.checkpointing import recompute_attention, checkpoint_ffn
-from model.attention_mask import apply_attention_mask
+from model.attention_mask import apply_attention_mask, prepare_sdpa_attention_bias
+from model.packed_attention import maybe_prepare_flex_mask
 from model.sequence_packing import merge_packed_attention_mask, positions_from_sequence_ids
 from model.model_instinct import AttentionResidual, ManifoldHyperConnection, ManifoldHyperHead
 from model.rope import (
@@ -305,6 +306,7 @@ class MOEFeedForward(nn.Module):
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
         self.experts = nn.ModuleList([FeedForward(config, intermediate_size=config.moe_intermediate_size) for _ in range(config.num_experts)])
         self.act_fn = ACT2FN[config.hidden_act]
+        self.router_load = None
 
     def forward(self, x):
         y, scores, topk_idx = routed_moe_forward(
@@ -313,9 +315,13 @@ class MOEFeedForward(nn.Module):
             norm_topk_prob=self.config.norm_topk_prob,
             act_fn=self.act_fn,
         )
-        if self.training and self.config.router_aux_loss_coef > 0:
+        if self.training:
             load = F.one_hot(topk_idx, self.config.num_experts).float().mean(0)
-            self.aux_loss = (load * scores.mean(0)).sum() * self.config.num_experts * self.config.router_aux_loss_coef
+            self.router_load = load.mean(dim=0).detach()
+            if self.config.router_aux_loss_coef > 0:
+                self.aux_loss = (load * scores.mean(0)).sum() * self.config.num_experts * self.config.router_aux_loss_coef
+            else:
+                self.aux_loss = scores.new_zeros(1).squeeze()
         else:
             self.aux_loss = scores.new_zeros(1).squeeze()
         return y
@@ -579,7 +585,20 @@ class _LegacyInstinctLoopModel(nn.Module):
                 raise ValueError("sequence_ids cannot be used together with a KV cache")
             if position_ids is None:
                 position_ids = positions_from_sequence_ids(sequence_ids)
-            attention_mask = merge_packed_attention_mask(sequence_ids, attention_mask)
+            flex_mask = maybe_prepare_flex_mask(
+                sequence_ids, hidden_states, attention_mask=attention_mask,
+                enabled=self.config.flash_attn,
+                dropout_p=self.config.dropout if self.training else 0.0,
+                head_dim=self.config.head_dim,
+            )
+            if flex_mask is not None:
+                attention_mask = flex_mask
+            else:
+                attention_mask = merge_packed_attention_mask(sequence_ids, attention_mask)
+                if self.config.flash_attn and seq_length > 1:
+                    attention_mask = prepare_sdpa_attention_bias(
+                        attention_mask, hidden_states, query_length=seq_length,
+                    )
         position_embeddings = select_rope_cache(
             self.freqs_cos, self.freqs_sin,
             self.freqs_cos_short, self.freqs_sin_short,
@@ -938,7 +957,20 @@ class InstinctLoopModel(nn.Module):
                 raise ValueError("sequence_ids cannot be used together with a KV cache")
             if position_ids is None:
                 position_ids = positions_from_sequence_ids(sequence_ids)
-            attention_mask = merge_packed_attention_mask(sequence_ids, attention_mask)
+            flex_mask = maybe_prepare_flex_mask(
+                sequence_ids, hidden_states, attention_mask=attention_mask,
+                enabled=self.config.flash_attn,
+                dropout_p=self.config.dropout if self.training else 0.0,
+                head_dim=self.config.head_dim,
+            )
+            if flex_mask is not None:
+                attention_mask = flex_mask
+            else:
+                attention_mask = merge_packed_attention_mask(sequence_ids, attention_mask)
+                if self.config.flash_attn and seq_length > 1:
+                    attention_mask = prepare_sdpa_attention_bias(
+                        attention_mask, hidden_states, query_length=seq_length,
+                    )
         position_embeddings = select_rope_cache(
             self.freqs_cos, self.freqs_sin,
             self.freqs_cos_short, self.freqs_sin_short,

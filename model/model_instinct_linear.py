@@ -464,6 +464,7 @@ class MOEFeedForward(nn.Module):
             for _ in range(config.num_experts)
         ])
         self.act_fn = ACT2FN[config.hidden_act]
+        self.router_load = None
 
     def forward(self, x):
         """前向:门控打分 → top-k 选择 → grouped GEMM 聚合;附带 aux_loss 计算。"""
@@ -473,9 +474,13 @@ class MOEFeedForward(nn.Module):
             norm_topk_prob=self.config.norm_topk_prob,
             act_fn=self.act_fn,
         )
-        if self.training and self.config.router_aux_loss_coef > 0:
+        if self.training:
             load = F.one_hot(topk_idx, self.config.num_experts).float().mean(0)
-            self.aux_loss = (load * scores.mean(0)).sum() * self.config.num_experts * self.config.router_aux_loss_coef
+            self.router_load = load.mean(dim=0).detach()
+            if self.config.router_aux_loss_coef > 0:
+                self.aux_loss = (load * scores.mean(0)).sum() * self.config.num_experts * self.config.router_aux_loss_coef
+            else:
+                self.aux_loss = scores.new_zeros(1).squeeze()
         else:
             self.aux_loss = scores.new_zeros(1).squeeze()
         return y

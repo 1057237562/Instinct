@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import torch
 import torch.nn.functional as F
 from torch import nn
+from model.grouped_mm import expert_grouped_mm, make_grouped_mm_plan
 
 
 def _cuda_compute_dtype(x: torch.Tensor) -> torch.dtype:
@@ -26,11 +27,10 @@ def _cuda_compute_dtype(x: torch.Tensor) -> torch.dtype:
 
 
 def _can_use_grouped_mm(x: torch.Tensor, experts: Sequence[nn.Module]) -> bool:
-    """Whether the native differentiable BF16 grouped GEMM is available."""
+    """Whether the packed BF16 expert path can run on this device."""
     if (
         not x.is_cuda
         or _cuda_compute_dtype(x) != torch.bfloat16
-        or not hasattr(F, "grouped_mm")
         or torch.cuda.get_device_capability(x.device)[0] < 8
         or not experts
     ):
@@ -89,31 +89,31 @@ def _grouped_expert_forward(
         num_tokens, device=x_flat.device, dtype=torch.long
     ).view(-1, 1).expand(-1, top_k).reshape(-1)
 
-    # Sort routes and find group boundaries on device. The grouped-MM backend
-    # below may still synchronize on platforms that use its per-expert fallback.
+    # Route metadata is shared by all three projections and their backward.
     order = torch.argsort(route_expert, stable=True)
     route_expert = route_expert.index_select(0, order)
     route_token = route_token.index_select(0, order)
     route_weight = topk_weight.reshape(-1).index_select(0, order).unsqueeze(-1)
     offsets = _sorted_expert_offsets(route_expert, num_experts)
+    plan = make_grouped_mm_plan(offsets)
 
     compute_dtype = torch.bfloat16
     routed_x = x_flat.index_select(0, route_token).to(dtype=compute_dtype)
-    gate = F.grouped_mm(
+    gate = expert_grouped_mm(
         routed_x,
         _stack_linear_weights(experts, "gate_proj", compute_dtype),
-        offs=offsets,
+        plan,
     )
-    up = F.grouped_mm(
+    up = expert_grouped_mm(
         routed_x,
         _stack_linear_weights(experts, "up_proj", compute_dtype),
-        offs=offsets,
+        plan,
     )
     hidden = act_fn(gate) * up
-    routed_y = F.grouped_mm(
+    routed_y = expert_grouped_mm(
         hidden,
         _stack_linear_weights(experts, "down_proj", compute_dtype),
-        offs=offsets,
+        plan,
     )
     routed_y = (routed_y * route_weight.to(routed_y.dtype)).to(x_flat.dtype)
 
@@ -124,8 +124,8 @@ def _grouped_expert_forward(
 
 # PyTorch 2.13 Inductor can select an invalid TMA layout for the grouped-MM
 # weight-gradient on Blackwell consumer GPUs. Keep this compact region eager:
-# Dynamo makes one graph break per MoE block, while the native grouped kernels
-# still run on CUDA and their autograd remains fully differentiable. This also
+# Dynamo makes one graph break per MoE block; our device-offset kernels avoid
+# that lowering and provide explicit first-order backward kernels. This also
 # avoids the eight data-dependent graph breaks made by the previous expert
 # loop. Remove the barrier once the upstream grouped-MM TMA lowering is fixed.
 if hasattr(torch, "compiler") and hasattr(torch.compiler, "disable"):

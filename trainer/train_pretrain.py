@@ -36,6 +36,7 @@ from trainer.trainer_cli import (
 )
 from trainer.packing_transition import packing_data_config, SequencePackingPlan
 from trainer.training_profiler import TrainingProfiler
+from trainer.moe_monitor import collect_moe_routing_stats
 from trainer.streaming_pretrain import (
     ChunkedPackedEpochLoader,
     should_stream_pretrain,
@@ -126,6 +127,11 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
             Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}{loop_str}, lr: {current_lr:.8f}{bucket_text}, epoch_time: {eta_min:.1f}min, elapsed_time: {elapsed_min:.1f}min')
             log_dict = {"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min, "elapsed_time": elapsed_min}
             if loop_steps: log_dict["loop_steps"] = loop_steps
+            if lm_config.use_moe:
+                routing_stats = collect_moe_routing_stats(model)
+                if routing_stats is not None:
+                    Logger(routing_stats.format_line())
+                    log_dict.update(routing_stats.metrics())
             if wandb: wandb.log(log_dict)
 
         if (
