@@ -7,14 +7,27 @@ independent. This preserves parameter IDs/order in existing resume checkpoints.
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 
 
 _NS_COEFFICIENTS = (3.4445, -4.7750, 2.0315)
 
+# Gram-form NS restarts after this many iterations to repair half-precision
+# drift (a rounding-level no-op in fp64); ns_steps=5 therefore restarts once.
+_GRAM_RESTART_AFTER = 3
+# The Gram form only pays off once the short side is large enough to amortize
+# its extra m×m products; smaller and square matrices stay on the classic path.
+_GRAM_MIN_SHORT_SIDE = 256
 
-def _batched_zeropower(update, *, ns_coefficients, ns_steps, eps):
+
+def gram_newton_schulz_enabled() -> bool:
+    """Whether the Gram-form NS kernel is active (``INSTINCT_MUON_GRAM=0`` restores the classic iteration)."""
+    return os.environ.get("INSTINCT_MUON_GRAM", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+def _standard_zeropower(update, *, ns_coefficients, ns_steps, eps):
     """Apply the native quintic iteration independently to each matrix."""
     x = update.to(torch.bfloat16)
     transposed = x.size(-2) > x.size(-1)
@@ -30,8 +43,78 @@ def _batched_zeropower(update, *, ns_coefficients, ns_steps, eps):
     return x.transpose(-2, -1) if transposed else x
 
 
+def _gram_zeropower(update, *, ns_coefficients, ns_steps, eps):
+    """Gram-form quintic Newton-Schulz; identical map to the classic iteration.
+
+    docs/GRAM_NEWTON_SCHULZ.md: the odd polynomial p(x) = x·h(x²) lets the
+    Gram matrix A = XXᵀ evolve on its own (A ← Z·A·Z with Z = aI + bA + cA²)
+    while Q accumulates the Z factors, so only two rectangular m×n matmuls
+    remain (A₀ = XXᵀ and the final Q·X). Equivalence validated to ~1e-15 in
+    fp64 and by short-training A/B. A restart after
+    ``_GRAM_RESTART_AFTER`` iterations repairs half-precision drift and is
+    exact in fp64.
+
+    Iterates in fp16 on CUDA (measured faster and more accurate than bf16),
+    bf16 elsewhere. Normalization happens in the input dtype before the cast,
+    so entries are ≤ 1 and cannot overflow the fp16 range.
+    """
+    x = update
+    transposed = x.size(-2) > x.size(-1)
+    if transposed:
+        x = x.transpose(-2, -1)
+    # Never normalize over the batch dimension: experts must remain independent.
+    x = x / torch.linalg.vector_norm(x, dim=(-2, -1), keepdim=True).clamp(min=eps)
+    compute_dtype = torch.float16 if x.is_cuda else torch.bfloat16
+    x = x.to(compute_dtype)
+    a, b, c = ns_coefficients
+    batch, m, _ = x.shape
+    eye = torch.eye(m, dtype=compute_dtype, device=x.device)
+    gram = torch.bmm(x, x.transpose(-2, -1))
+    Q = eye.expand(batch, m, m).clone()
+    done = 0
+    while done < ns_steps:
+        run = _GRAM_RESTART_AFTER if ns_steps - done > _GRAM_RESTART_AFTER else ns_steps - done
+        for _ in range(run):
+            Z = torch.baddbmm(gram, gram, gram, beta=b, alpha=c) + a * eye
+            Q = torch.bmm(Q, Z)
+            gram = torch.bmm(torch.bmm(Z, gram), Z)
+            done += 1
+        if done < ns_steps:  # stabilization restart: exact in fp64
+            x = torch.bmm(Q, x)
+            gram = torch.bmm(x, x.transpose(-2, -1))
+            Q = eye.expand(batch, m, m).clone()
+    x = torch.bmm(Q, x)
+    return x.transpose(-2, -1) if transposed else x
+
+
+def _batched_zeropower(update, *, ns_coefficients, ns_steps, eps):
+    """Orthogonalize each update matrix, dispatching between NS kernels.
+
+    Rectangular matrices with a short side ≥ ``_GRAM_MIN_SHORT_SIDE`` use the
+    Gram-form kernel by default (``INSTINCT_MUON_GRAM=0`` restores the classic
+    iteration everywhere). Square matrices, tiny routers and CPU fallbacks
+    stay on the classic path — measured faster there.
+    """
+    if (
+        gram_newton_schulz_enabled()
+        and update.size(-2) != update.size(-1)
+        and min(update.shape[-2:]) >= _GRAM_MIN_SHORT_SIDE
+    ):
+        return _gram_zeropower(
+            update, ns_coefficients=ns_coefficients, ns_steps=ns_steps, eps=eps,
+        )
+    return _standard_zeropower(
+        update, ns_coefficients=ns_coefficients, ns_steps=ns_steps, eps=eps,
+    )
+
+
 class BatchedMuon(torch.optim.Optimizer):
-    """Muon using foreach momentum/weight updates and batched BF16 matmuls.
+    """Muon using foreach momentum/weight updates and batched matmuls.
+
+    Large rectangular updates orthogonalize through the Gram-form kernel
+    (fp16 on CUDA, bf16 elsewhere; see docs/GRAM_NEWTON_SCHULZ.md); other
+    shapes keep the classic bf16 quintic iteration. ``INSTINCT_MUON_GRAM=0``
+    restores the classic iteration everywhere.
 
     ``workspace_mb`` bounds a conservative estimate of temporary tensor storage
     per chunk, not total CUDA allocation (parameters, momentum and library

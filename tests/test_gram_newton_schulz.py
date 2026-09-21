@@ -166,9 +166,11 @@ def test_gram_low_precision_tracks_fp64_reference(shape, dtype):
     assert gram_err < max(3.0 * standard_err, 5e-3), (standard_err, gram_err)
 
 
-def test_standard_mirror_is_bitwise_production():
-    """The dtype-flexible mirror reproduces the shipped bf16 function exactly,
-    so every equivalence result above transfers to production code."""
+def test_standard_mirror_is_bitwise_production(monkeypatch):
+    """The dtype-flexible mirror reproduces the classic iteration exactly, so
+    every equivalence result above transfers to the production kernel. Run
+    with the Gram dispatch disabled — _batched_zeropower now dispatches."""
+    monkeypatch.setenv("INSTINCT_MUON_GRAM", "0")
     torch.manual_seed(3)
     update = torch.randn(6, 32, 80, dtype=torch.float32)
 
@@ -178,6 +180,82 @@ def test_standard_mirror_is_bitwise_production():
     mirror = standard_zeropower(update, ns_steps=5, dtype=torch.bfloat16)
 
     torch.testing.assert_close(mirror, production, rtol=0, atol=0)
+
+
+def test_production_dispatch_uses_gram_for_large_rectangular(monkeypatch):
+    """Default env: large rectangular matrices take the production Gram kernel,
+    bitwise-equal to the validated reference on CPU (both normalize in bf16;
+    the CPU compute dtype is bf16 so the kernel's cast is a no-op)."""
+    monkeypatch.delenv("INSTINCT_MUON_GRAM", raising=False)
+    torch.manual_seed(8)
+    update = torch.randn(3, 512, 1664).to(torch.bfloat16)
+
+    production = _batched_zeropower(
+        update, ns_coefficients=_NS_COEFFICIENTS, ns_steps=5, eps=1e-7,
+    )
+    reference = gram_zeropower(update, ns_steps=5, dtype=torch.bfloat16,
+                               restart_after=3)
+
+    torch.testing.assert_close(production, reference, rtol=0, atol=0)
+
+
+def test_production_dispatch_small_matrices_stay_standard():
+    """Short side below the dispatch threshold (k/v-projection-like) keeps the
+    classic kernel — measured faster there."""
+    torch.manual_seed(9)
+    update = torch.randn(4, 128, 512).to(torch.bfloat16)
+
+    production = _batched_zeropower(
+        update, ns_coefficients=_NS_COEFFICIENTS, ns_steps=5, eps=1e-7,
+    )
+    mirror = standard_zeropower(update, ns_steps=5, dtype=torch.bfloat16)
+
+    torch.testing.assert_close(mirror, production, rtol=0, atol=0)
+
+
+def test_production_dispatch_square_matrices_stay_standard():
+    """Square matrices (α=1) gain nothing from the Gram form."""
+    torch.manual_seed(10)
+    update = torch.randn(2, 256, 256).to(torch.bfloat16)
+
+    production = _batched_zeropower(
+        update, ns_coefficients=_NS_COEFFICIENTS, ns_steps=5, eps=1e-7,
+    )
+    mirror = standard_zeropower(update, ns_steps=5, dtype=torch.bfloat16)
+
+    torch.testing.assert_close(mirror, production, rtol=0, atol=0)
+
+
+def test_production_dispatch_env_off_restores_standard(monkeypatch):
+    """INSTINCT_MUON_GRAM=0 is the full escape hatch back to the classic
+    iteration, even for the shapes the Gram path would claim."""
+    monkeypatch.setenv("INSTINCT_MUON_GRAM", "0")
+    torch.manual_seed(11)
+    update = torch.randn(3, 512, 1664).to(torch.bfloat16)
+
+    production = _batched_zeropower(
+        update, ns_coefficients=_NS_COEFFICIENTS, ns_steps=5, eps=1e-7,
+    )
+    mirror = standard_zeropower(update, ns_steps=5, dtype=torch.bfloat16)
+
+    torch.testing.assert_close(mirror, production, rtol=0, atol=0)
+
+
+@pytest.mark.gpu
+def test_production_gram_fp16_on_gpu():
+    """The production dispatch on CUDA runs the Gram kernel in fp16 (normalize
+    in bf16, then cast — range-safe) and stays within the bf16 rounding budget
+    of the exact fp64 iteration."""
+    torch.manual_seed(12)
+    update = torch.randn(24, 512, 1664, device="cuda").to(torch.bfloat16)
+
+    production = _batched_zeropower(
+        update, ns_coefficients=_NS_COEFFICIENTS, ns_steps=5, eps=1e-7,
+    )
+    assert production.dtype == torch.float16
+    exact = standard_zeropower(update, ns_steps=5)
+
+    assert _rel_err(production, exact) < 0.05
 
 
 @pytest.mark.parametrize(

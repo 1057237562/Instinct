@@ -186,3 +186,16 @@ def test_parameter_divergence_is_routing_chaos_not_algorithm():
     assert 0.1 < exact_divergence < 2.0            # chaos regime is present
     natural_band = max(exact_divergence, dtype_divergence)
     assert gram_divergence < 1.25 * natural_band
+
+
+def test_production_dispatch_short_training(monkeypatch):
+    """The shipped code path with default env (Gram dispatch active) trains
+    correctly end-to-end. The tiny model's matrices stay below the dispatch
+    threshold on CPU, so this also pins the classic-kernel path through the
+    new dispatcher; the dispatch itself is covered bitwise in
+    test_gram_newton_schulz.py."""
+    monkeypatch.delenv("INSTINCT_MUON_GRAM", raising=False)
+    losses, _ = _run_short_training("production", None, None)
+
+    assert all(torch.isfinite(torch.tensor(losses)))
+    assert min(losses[-5:]) < losses[0] - 0.25

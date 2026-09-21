@@ -812,7 +812,10 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
         - AdamW    -> torch.optim.AdamW（保持原有默认行为）
         - Adafactor-> torch.optim.Adafactor（显式 lr，关闭自动相对步长）
         - Muon     -> 隐藏层 2D 参数交给按形状分批的 BatchedMuon；
-                      INSTINCT_MUON_BACKEND=native 可切回原实现。1D 参数等
+                      INSTINCT_MUON_BACKEND=native 可切回原实现；
+                      大矩形矩阵默认走 Gram Newton-Schulz 内核
+                      （INSTINCT_MUON_GRAM=0 恢复经典迭代，
+                      见 docs/GRAM_NEWTON_SCHULZ.md）。1D 参数等
                       交给 AdamW。两类都存在时组合为 CombinedOptimizer 返回。
     """
     named_params = _materialize_named_params(params)
@@ -844,15 +847,19 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
         if muon_backend not in ('batched', 'native'):
             raise ValueError('INSTINCT_MUON_BACKEND must be batched or native')
         if muon_backend == 'batched':
-            from trainer.batched_muon import BatchedMuon
+            from trainer.batched_muon import BatchedMuon, gram_newton_schulz_enabled
             muon_kwargs = dict(kwargs)
             muon_kwargs.setdefault('adjust_lr_fn', 'match_rms_adamw')
             muon_kwargs.setdefault('batch_size', int(os.environ.get('INSTINCT_MUON_BATCH_SIZE', '16')))
-            muon_kwargs.setdefault('workspace_mb', float(os.environ.get('INSTINCT_MUON_WORKSPACE_MB', '64')))
+            # 256 MiB keeps the expert chunk at ~16 matrices — the measured
+            # sweet spot for the Gram NS kernel (docs/GRAM_NEWTON_SCHULZ.md).
+            muon_kwargs.setdefault('workspace_mb', float(os.environ.get('INSTINCT_MUON_WORKSPACE_MB', '256')))
             muon_opt = BatchedMuon(matrix_params, lr=lr, **muon_kwargs)
             Logger(
-                f'[Muon] shape-batched BF16 updates: batch_size<={muon_opt.batch_size}, '
-                f'temporary workspace target={muon_opt.workspace_bytes / 2**20:g}MiB'
+                f'[Muon] shape-batched updates: batch_size<={muon_opt.batch_size}, '
+                f'temporary workspace target={muon_opt.workspace_bytes / 2**20:g}MiB, '
+                f"ns={'gram' if gram_newton_schulz_enabled() else 'standard'} "
+                f"(INSTINCT_MUON_GRAM=0 restores the classic iteration)"
             )
         elif hasattr(torch.optim, 'Muon'):
             muon_kwargs = dict(kwargs)

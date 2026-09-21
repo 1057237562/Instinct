@@ -2,11 +2,15 @@
 
 ## 结论
 
-用 Gram 形式重写 `BatchedMuon` 的 Newton-Schulz 迭代（`trainer/batched_muon.py:17`）：
-**精确算术下与现有实现逐迭代恒等**，浮点下仅结合顺序不同。5070 Ti 小型实验
-（2026-09-22）实测：专家桶 **1.80×**，全 NS 1.88×，投影端到端 **tokens/s +19%**；
-等价性已由 `tests/test_gram_newton_schulz.py`（45 项，fp64 相对误差 ~1e-15）
-证明。详见下文实验结果章节。
+**已合入生产**（`trainer/batched_muon.py`，分支 `feat/gram-newton-schulz`）：
+`_batched_zeropower` 现按形状分发——短边 ≥256 的矩形矩阵走 Gram 内核
+（CUDA 上 fp16 迭代、第 3 步后单次重启），方阵/小矩阵/回退保持经典 bf16 迭代；
+`INSTINCT_MUON_GRAM=0` 一键恢复全经典路径。
+`trainer_utils.build_optimizer` 的 Muon workspace 默认 64 → 256 MiB（专家 chunk 4→16）。
+
+数学上**精确算术逐迭代恒等**，浮点下仅结合顺序不同。5070 Ti 实测：生产分发路径
+全 NS **204.1 → 122.0 ms（1.67×）**，投影端到端 tokens/s **+16%**；等价性由
+75 项测试证明（fp64 ~1e-15 + 短训轨迹一致）。回退无需转换任何检查点。
 
 来源：Tri Dao / Dao-AILab《Gram Newton-Schulz: A Fast, Hardware-Aware Newton-Schulz
 Algorithm for Muon》（2026-03）。官方仓库自述："mathematically equivalent to and
@@ -136,7 +140,33 @@ FLOPs −10%、每 FLOP 效率 +6%）。即：fp16 是大头，Gram 是叠加项
 端到端 +19% 为投影值：假设 optimizer 阶段随 NS 等比压缩（foreach 动量/
 cast 开销不变）；按 PLAN.md 护栏，合入前需固定种子短训 A/B 确认 loss 曲线。
 
-## 实现方案
+## 生产化结果（2026-09-22 合入，分支 `feat/gram-newton-schulz`）
+
+- **分发规则**（`_batched_zeropower`）：`短边 ≥ 256 且非方阵 → Gram`，其余
+  （q/o 方阵、k/v、router）保持经典迭代——实测这些形状 Gram 无收益。
+  CUDA 上 Gram 迭代用 fp16（bf16 输入先归一化再 cast，元素 ≤1 无溢出风险），
+  CPU 上 bf16。
+- **workspace 默认 64 → 256 MiB**（`trainer_utils.build_optimizer`，环境变量
+  `INSTINCT_MUON_WORKSPACE_MB` 仍可覆盖）：专家 chunk 4 → 16，甜点配置。
+- **生产符号实测**（真实桶形状，chunk 按新 workspace）：
+  全 NS 204.1 → 122.0 ms（**1.67×**；专家 193.7→112.9，其余形状按分发保持
+  经典共约 9.7 ms）。投影 step 600 → 518 ms，tokens/s 17,947 → 约 20,800
+  （**+16%**；略低于 +19% 上限是因为方阵/小矩阵未换 fp16——保守分发，
+  避免为 <5 ms 收益扩大改动面）。
+- **测试**：`tests/test_gram_newton_schulz.py`（含生产分发 bitwise、
+  env-off 回退、GPU fp16 路径）+ `tests/test_gram_muon_short_training.py`
+  （含生产分发短训）+ 既有 `tests/test_batched_muon.py`（与 native Muon
+  对照）全绿。
+- **兼容性**：momentum/param_groups/checkpoint 布局不变，resume 完全兼容；
+  `INSTINCT_MUON_GRAM=0` 恢复经典迭代（bitwise 与旧版一致，有测试守护）。
+- **真实训练验收**：恢复训练后预热两个 bucket、取 ≥20 步稳定区间比较
+  tokens/s 与 optimizer 阶段占比（预期 250 → 约 168 ms）；训练中的进程
+  不会热加载，需重启/resume 生效。注意：合入后首次启动会因代码变更触发
+  torch.compile 缓存失效而重编译一次（约 1–2 分钟），属一次性成本。
+
+## 实现方案（移植前设计）
+
+> 注：本节为移植前设计；实际合入形态见上节"生产化结果"。
 
 改动收敛在 `_batched_zeropower`（签名与返回值不变），要点：
 
