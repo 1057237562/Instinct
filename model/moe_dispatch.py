@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -41,7 +42,14 @@ def _can_use_grouped_mm(x: torch.Tensor, experts: Sequence[nn.Module]) -> bool:
     return hidden % 16 == 0 and intermediate % 16 == 0
 
 
-def _stack_linear_weights(
+class _StackCacheEntry(NamedTuple):
+    weights: tuple[torch.Tensor, ...]
+    versions: tuple[int, ...]
+    dtype: torch.dtype
+    stacked: torch.Tensor
+
+
+def _stacked_expert_weights(
     experts: Sequence[nn.Module], name: str, dtype: torch.dtype
 ) -> torch.Tensor:
     """Stack legacy expert weights in grouped-MM right-hand layout.
@@ -49,10 +57,37 @@ def _stack_linear_weights(
     Keeping the original Linear modules preserves existing checkpoint keys and
     optimizer state. The transpose produces the per-group column-major layout
     accepted by ``torch.nn.functional.grouped_mm``.
+
+    Inference callers marked by ``optimize_inference`` (via an
+    ``_inference_stack_cache`` dict on the experts module) reuse the stack
+    across forwards instead of recopying every expert weight each token.
+    Entries validate weight-tensor identity and in-place version counters, so
+    weight replacement, dtype/device casts, optimizer steps and
+    ``load_state_dict`` all force a rebuild. Grad-enabled forwards skip the
+    cache entirely: the stack must stay in the autograd graph so expert weight
+    gradients keep flowing through the grouped GEMMs.
     """
-    return torch.stack(
-        [getattr(expert, name).weight for expert in experts], dim=0
-    ).transpose(1, 2).to(dtype=dtype)
+    weights = [getattr(expert, name).weight for expert in experts]
+    cache = (
+        None
+        if torch.is_grad_enabled()
+        else getattr(experts, "_inference_stack_cache", None)
+    )
+    versions = None
+    if cache is not None:
+        versions = tuple(weight._version for weight in weights)
+        entry = cache.get(name)
+        if (
+            entry is not None
+            and entry.dtype == dtype
+            and entry.versions == versions
+            and all(stored is weight for stored, weight in zip(entry.weights, weights))
+        ):
+            return entry.stacked
+    stacked = torch.stack(weights, dim=0).transpose(1, 2).to(dtype=dtype)
+    if cache is not None:
+        cache[name] = _StackCacheEntry(tuple(weights), versions, dtype, stacked)
+    return stacked
 
 
 def _sorted_expert_offsets(
@@ -101,18 +136,18 @@ def _grouped_expert_forward(
     routed_x = x_flat.index_select(0, route_token).to(dtype=compute_dtype)
     gate = expert_grouped_mm(
         routed_x,
-        _stack_linear_weights(experts, "gate_proj", compute_dtype),
+        _stacked_expert_weights(experts, "gate_proj", compute_dtype),
         plan,
     )
     up = expert_grouped_mm(
         routed_x,
-        _stack_linear_weights(experts, "up_proj", compute_dtype),
+        _stacked_expert_weights(experts, "up_proj", compute_dtype),
         plan,
     )
     hidden = act_fn(gate) * up
     routed_y = expert_grouped_mm(
         hidden,
-        _stack_linear_weights(experts, "down_proj", compute_dtype),
+        _stacked_expert_weights(experts, "down_proj", compute_dtype),
         plan,
     )
     routed_y = (routed_y * route_weight.to(routed_y.dtype)).to(x_flat.dtype)

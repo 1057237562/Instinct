@@ -4,7 +4,7 @@
 
 Think 区域只在收到代码块外的显式 `<think>` 起始标签后显示；打开思考开关、空输出或单独的 `</think>` 均不会创建思考区域。
 
-CUDA 原生推理默认使用 `torch.compile` 编译共享 RMSNorm / SwiGLU 算子，融合稳定的数值计算，流式回传和可变长度 KV 缓存仍在编译图外。首次使用存在编译开销，后续复用；编译不可用会打印原因并回退。可通过 `--inference_compile off` 关闭评测编译，聊天通过 `INSTINCT_INFERENCE_COMPILE=off` 关闭。Windows 必须在启动前启用 `PYTHONUTF8=1`，两个 WebUI 启动脚本均已设置。修改需重新启动聊天服务/加载模型；正在运行的评测不变。
+CUDA 原生推理默认使用 `torch.compile` 编译共享 RMSNorm / SwiGLU 算子，融合稳定的数值计算，流式回传和可变长度 KV 缓存仍在编译图外。首次使用存在编译开销，后续复用；编译不可用会打印原因并回退。评测默认 `--inference_compile auto`（仅融合算子），传 `full` 可进一步对整个 Transformer 主干做动态形状 `torch.compile` 并在加载时预热 prefill/decode 两类图（MoE 解码实测提速约 38%）；聊天 WebUI 默认即 `full`。CUDA graphs（`reduce-overhead`）与逐步增长的 KV 缓存结构不兼容，传入会被自动改写为 `full` 并提示。可通过 `--inference_compile off` 关闭评测编译，聊天通过 `INSTINCT_INFERENCE_COMPILE=off` 关闭。Windows 必须在启动前启用 `PYTHONUTF8=1`，两个 WebUI 启动脚本均已设置。聊天侧 Inductor 缓存与训练共用仓库内 `.cache/torch_compile`，首进程编译约十几秒，之后秒级。修改需重新启动聊天服务/加载模型；正在运行的评测不变。
 
 生成循环预分配 token 和 attention-mask 缓冲区，避免逐步复制整段输入；这不等同于预分配 KV 缓存。训练路径和 checkpoint 参数名不变。编译融合可能存在浮点舍入差异，采样答案不保证逐字一致，首次编译时间也不代表稳定生成速度。
 

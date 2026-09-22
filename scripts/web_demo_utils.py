@@ -225,6 +225,7 @@ CONVERSATION_STATE_KEYS = (
     "regenerate",
     "last_user_message",
     "regenerate_index",
+    "confirm_clear_chat",
 )
 
 MODEL_STATE_KEYS = (

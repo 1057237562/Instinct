@@ -4,10 +4,11 @@ import copy
 
 import pytest
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from model.model_instinct import MOEFeedForward
-from model.moe_dispatch import _sorted_expert_offsets
+from model.moe_dispatch import _sorted_expert_offsets, _stacked_expert_weights
 from tests.helpers import make_tiny_config
 
 
@@ -151,3 +152,53 @@ def test_grouped_cuda_matches_legacy_forward_and_backward(top_k, empty_experts):
             atol=5e-3,
             msg=lambda message, name=grouped_name: f"{name}: {message}",
         )
+
+
+def test_stacked_expert_weights_cache_reuse_and_invalidation():
+    """Inference forwards reuse the stack; any weight change forces a rebuild."""
+    module = MOEFeedForward(make_tiny_config(use_moe=True)).eval()
+    experts = module.experts
+    experts._inference_stack_cache = {}
+
+    def expected_stack():
+        return torch.stack([e.gate_proj.weight for e in experts], 0).transpose(1, 2)
+
+    with torch.no_grad():
+        first = _stacked_expert_weights(experts, "gate_proj", torch.float32)
+        reused = _stacked_expert_weights(experts, "gate_proj", torch.float32)
+    assert reused is first
+    torch.testing.assert_close(reused, expected_stack())
+
+    with torch.no_grad():  # in-place load (load_state_dict) bumps the version
+        experts[1].gate_proj.weight.copy_(torch.randn_like(experts[1].gate_proj.weight))
+        after_update = _stacked_expert_weights(experts, "gate_proj", torch.float32)
+    assert after_update is not first
+    torch.testing.assert_close(after_update, expected_stack())
+
+    experts[0].gate_proj.weight = nn.Parameter(  # replaced tensors fail identity
+        torch.randn_like(experts[0].gate_proj.weight)
+    )
+    with torch.no_grad():
+        after_replace = _stacked_expert_weights(experts, "gate_proj", torch.float32)
+    assert after_replace is not after_update
+
+    fresh = _stacked_expert_weights(experts, "gate_proj", torch.float32)
+    assert fresh is not after_replace  # grad-enabled forwards bypass the cache
+
+
+@pytest.mark.gpu
+def test_grouped_eval_forward_with_stack_cache_matches_legacy():
+    """Cached decode path (eval + no-grad + BF16) keeps the routed output."""
+    torch.manual_seed(11)
+    module = MOEFeedForward(make_tiny_config(use_moe=True)).cuda().to(torch.bfloat16).eval()
+    module.experts._inference_stack_cache = {}
+    reference = copy.deepcopy(module)
+    x = torch.randn(1, 4, 64, device="cuda", dtype=torch.bfloat16)
+
+    with torch.no_grad():
+        first = module(x)
+        second = module(x)  # expert stacks served from the cache
+        expected, _ = _legacy_reference(reference, x)
+
+    torch.testing.assert_close(first, second)
+    torch.testing.assert_close(first.float(), expected.float(), rtol=2e-2, atol=2e-2)

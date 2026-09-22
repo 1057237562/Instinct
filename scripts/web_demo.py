@@ -4,10 +4,15 @@ import json
 import os
 import sys
 import gc
+import base64
+from functools import lru_cache
 
 # Resolve imports from repo root (same pattern as trainer scripts)
 __package__ = "scripts"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# Persistent Inductor cache shared with the trainers; must run before torch import
+import trainer.compile_cache  # noqa: F401
 
 from threading import Thread
 from types import SimpleNamespace
@@ -28,61 +33,45 @@ from scripts.web_demo_utils import (
     generation_loading_html,
 )
 
-st.set_page_config(page_title="Instinct", initial_sidebar_state="collapsed")
+_REPO_LOGO = os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', 'images', 'webui_logo.png'))
+
+st.set_page_config(
+    page_title="Instinct",
+    page_icon=_REPO_LOGO if os.path.isfile(_REPO_LOGO) else None,
+    initial_sidebar_state="collapsed",
+)
 
 st.markdown("""
     <style>
-        /* 添加操作按钮样式（仅作用于主聊天区的操作按钮，避免影响侧边栏按钮） */
-        [data-testid="stMain"] .stButton button {
-            border-radius: 50% !important;  /* 改为圆形 */
-            width: 32px !important;         /* 固定宽度 */
-            height: 32px !important;        /* 固定高度 */
-            padding: 0 !important;          /* 移除内边距 */
-            background-color: transparent !important;
-            border: 1px solid #ddd !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            font-size: 14px !important;
-            color: #666 !important;         /* 更柔和的颜色 */
-            margin: 5px 10px 5px 0 !important;  /* 调整按钮间距 */
-        }
-        [data-testid="stMain"] .stButton button:hover {
-            border-color: #999 !important;
-            color: #333 !important;
-            background-color: #f5f5f5 !important;
-        }
         .stMainBlockContainer > div:first-child {
             margin-top: -50px !important;
         }
         .stApp > div:last-child {
             margin-bottom: -35px !important;
         }
-        
-        /* 重置按钮基础样式（仅作用于主聊天区） */
-        [data-testid="stMain"] .stButton > button {
-            all: unset !important;  /* 重置所有默认样式 */
-            box-sizing: border-box !important;
-            border-radius: 50% !important;
-            width: 18px !important;
-            height: 18px !important;
-            min-width: 18px !important;
-            min-height: 18px !important;
-            max-width: 18px !important;
-            max-height: 18px !important;
-            padding: 0 !important;
-            background-color: transparent !important;
-            border: 1px solid #ddd !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            font-size: 14px !important;
-            color: #888 !important;
-            cursor: pointer !important;
-            transition: all 0.2s ease !important;
-            margin: 0 2px !important;  /* 调整这里的 margin 值 */
-        }
 
+        /* 聊天区操作按钮（新对话/重新生成）：胶囊化 + 紧凑，侧边栏按钮不受影响 */
+        [data-testid="stMain"] .stButton button {
+            border-radius: 999px !important;
+            font-size: 13px !important;
+            min-height: 30px !important;
+            padding: 2px 14px !important;
+            transition: background-color .15s ease, border-color .15s ease, color .15s ease !important;
+        }
+        [data-testid="stMain"] [data-testid="stBaseButton-tertiary"]:hover {
+            background-color: rgba(128, 128, 128, .12) !important;
+            color: inherit !important;
+        }
+        /* 破坏性确认（确认清空）：主区唯一的 primary 按钮转红，与加载模型等侧边栏按钮区分 */
+        [data-testid="stMain"] [data-testid="stBaseButton-primary"] {
+            background-color: #d32f2f !important;
+            border: 1px solid #d32f2f !important;
+        }
+        [data-testid="stMain"] [data-testid="stBaseButton-primary"]:hover {
+            background-color: #b71c1c !important;
+            border-color: #b71c1c !important;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -106,10 +95,17 @@ LANG_TEXTS = {
         'tool_select': '工具选择（最多4个）',
         'load_model': '🚀 加载模型',
         'unload_model': '🔄 卸载模型',
-        'new_chat': '✨ 新对话',
+        'new_chat': '新对话',
+        'new_chat_tip': '清空当前对话并开始新对话',
+        'confirm_clear_body': '当前对话将被清空，且无法恢复。',
+        'confirm_clear_yes': '确认清空',
+        'cancel': '取消',
+        'chat_cleared': '已开始新对话',
+        'regenerate': '重新生成',
         'regenerate_last': '重新生成最后一条回复',
         'copy_answer': '复制这条回复',
         'copied': '已复制',
+        'copy': '复制',
         'loading_model': '正在加载模型，请稍候...',
         'configure_first': '请先配置模型路径，然后点击"加载模型"开始对话',
         'path_changed': '路径已变更，点击加载模型以重新加载',
@@ -138,10 +134,17 @@ LANG_TEXTS = {
         'tool_select': 'Tool Selection (max 4)',
         'load_model': '🚀 Load Model',
         'unload_model': '🔄 Unload Model',
-        'new_chat': '✨ New Chat',
+        'new_chat': 'New Chat',
+        'new_chat_tip': 'Clear the current conversation and start a new one',
+        'confirm_clear_body': 'The current conversation will be deleted and cannot be recovered.',
+        'confirm_clear_yes': 'Clear Chat',
+        'cancel': 'Cancel',
+        'chat_cleared': 'Started a new chat',
+        'regenerate': 'Regenerate',
         'regenerate_last': 'Regenerate the last response',
         'copy_answer': 'Copy this response',
         'copied': 'Copied',
+        'copy': 'Copy',
         'loading_model': 'Loading model, please wait...',
         'configure_first': 'Please configure model paths and click "Load Model" to start',
         'path_changed': 'Path changed. Click Load Model to reload',
@@ -417,9 +420,9 @@ def load_model_tokenizer(config_path, tokenizer_path, weight_path=None):
     if weight_path:
         state_dict = torch.load(weight_path, map_location='cpu', weights_only=True)
         model.load_state_dict(state_dict, strict=False)
-    model = model.half().eval().to(device)
-    from model.inference_runtime import optimize_inference
-    model = optimize_inference(model, os.environ.get('INSTINCT_INFERENCE_COMPILE', 'auto'))
+    from model.inference_runtime import optimize_inference, select_inference_dtype
+    model = model.to(dtype=select_inference_dtype(device)).eval().to(device)
+    model = optimize_inference(model, os.environ.get('INSTINCT_INFERENCE_COMPILE', 'full'))
     return model, tokenizer
 
 
@@ -467,14 +470,17 @@ def init_chat_messages():
     return st.session_state.messages
 
 def regenerate_answer():
+    st.session_state.pop("confirm_clear_chat", None)
     if queue_last_response_regeneration(st.session_state):
         st.rerun()
 
 
 def render_regenerate_button(message_index):
-    """Render the action only for the final completed assistant response."""
+    """Offer a fresh generation for the final completed assistant response."""
     if st.button(
-        "↻",
+        get_text('regenerate'),
+        icon=":material/restart_alt:",
+        type="tertiary",
         key=f"regenerate_response_{message_index}",
         help=get_text('regenerate_last'),
     ):
@@ -482,29 +488,64 @@ def render_regenerate_button(message_index):
 
 
 def render_copy_button(answer_text, message_index):
-    """Render an icon-only clipboard button for one assistant response."""
+    """Render a clipboard pill that visually matches the native regenerate button.
+
+    Streamlit has no server-side clipboard API, so the click is handled inside
+    an iframe (same payload/fallback logic as before); only the chrome changes.
+    """
     payload = encode_clipboard_text(answer_text)
     tooltip = json.dumps(get_text('copy_answer'), ensure_ascii=False)
     copied_tooltip = json.dumps(get_text('copied'), ensure_ascii=False)
+    idle_label = get_text('copy')
+    copied_label = get_text('copied')
+    idle_label_js = json.dumps(idle_label, ensure_ascii=False)
+    copied_label_js = json.dumps(copied_label, ensure_ascii=False)
+
+    def text_width(text):
+        # 13px 字号下的近似宽度：CJK 全角 13px，拉丁字符 8px
+        return sum(13 if ord(char) > 127 else 8 for char in text)
+
+    # 宽度需同时容纳 idle 与 copied 两种文案（点击后文案会临时变长）
+    width = 52 + max(text_width(idle_label), text_width(copied_label))
+
     st.iframe(
         f"""
         <style>
             html, body {{ margin: 0; padding: 0; overflow: hidden; background: transparent; }}
             button {{
-                all: unset; box-sizing: border-box; width: 18px; height: 18px;
-                border: 1px solid #ddd; border-radius: 50%; color: #888;
-                display: flex; align-items: center; justify-content: center;
-                cursor: pointer; font: 14px sans-serif; transition: all .2s;
+                all: unset; box-sizing: border-box; width: 100%; height: 30px; margin-top: 1px;
+                display: flex; align-items: center; justify-content: center; gap: 6px;
+                border-radius: 999px; color: #808080;
+                font: 500 13px/1 "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+                cursor: pointer; transition: background-color .15s ease, color .15s ease;
             }}
-            button:hover {{ border-color: #999; color: #333; }}
-            button.copied {{ border-color: #43a047; color: #43a047; }}
+            button:hover {{ background-color: rgba(128, 128, 128, .12); color: #4d4d4d; }}
+            button.copied {{ color: #43a047; background-color: rgba(67, 160, 71, .08); }}
+            button svg {{ width: 14px; height: 14px; flex: none; }}
+            button .check {{ display: none; }}
+            button.copied .copy {{ display: none; }}
+            button.copied .check {{ display: block; }}
         </style>
-        <button id="copy-{message_index}" type="button">⧉</button>
+        <button id="copy-{message_index}" type="button">
+            <svg class="copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="9" y="9" width="13" height="13" rx="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+            <svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M20 6 9 17l-5-5"/>
+            </svg>
+            <span class="label">{_escape_html(idle_label)}</span>
+        </button>
         <script>
             const button = document.getElementById("copy-{message_index}");
+            const labelEl = button.querySelector(".label");
             const payload = "{payload}";
             const tooltip = {tooltip};
             const copiedTooltip = {copied_tooltip};
+            const idleLabel = {idle_label_js};
+            const copiedLabel = {copied_label_js};
             button.title = tooltip;
             button.setAttribute("aria-label", tooltip);
 
@@ -534,31 +575,54 @@ def render_copy_button(answer_text, message_index):
 
             button.addEventListener("click", async () => {{
                 if (!await copyText(decodePayload(payload))) return;
-                button.textContent = "✓";
-                button.title = copiedTooltip;
                 button.classList.add("copied");
+                labelEl.textContent = copiedLabel;
+                button.title = copiedTooltip;
                 setTimeout(() => {{
-                    button.textContent = "⧉";
-                    button.title = tooltip;
                     button.classList.remove("copied");
+                    labelEl.textContent = idleLabel;
+                    button.title = tooltip;
                 }}, 1200);
             }});
         </script>
         """,
-        width=24,
-        height=22,
+        width=width,
+        height=32,
         tab_index=0,
     )
 
 
 def render_answer_actions(answer_text, message_index, is_last):
-    """Show per-answer copy and optional last-answer regenerate actions."""
-    copy_column, regenerate_column, _ = st.columns([1, 1, 20], gap="small")
-    with copy_column:
+    """Show the copy control on every answer; the last answer can be regenerated."""
+    with st.container(horizontal=True, gap="small", vertical_alignment="center"):
         render_copy_button(answer_text, message_index)
-    if is_last:
-        with regenerate_column:
+        if is_last:
             render_regenerate_button(message_index)
+
+
+def render_chat_toolbar():
+    """Top-right chat actions. New chat clears irreversibly, so confirm inline first."""
+    messages = st.session_state.get("messages", [])
+    confirming = bool(messages) and st.session_state.get("confirm_clear_chat", False)
+
+    with st.container(horizontal=True, horizontal_alignment="right", gap="small"):
+        if confirming:
+            st.caption(get_text('confirm_clear_body'))
+            if st.button(get_text('cancel'), icon=":material/close:", type="tertiary"):
+                st.session_state.pop("confirm_clear_chat", None)
+                st.rerun()
+            if st.button(get_text('confirm_clear_yes'), icon=":material/delete_sweep:", type="primary"):
+                st.session_state.pop("confirm_clear_chat", None)
+                clear_chat_messages()
+                st.toast(get_text('chat_cleared'), icon=":material/check_circle:")
+                st.rerun()
+        elif st.button(get_text('new_chat'), icon=":material/add_comment:",
+                       help=get_text('new_chat_tip'), disabled=not messages):
+            if st.session_state.get("messages"):
+                st.session_state.confirm_clear_chat = True
+            else:
+                clear_chat_messages()
+            st.rerun()
 
 
 # 模型路径配置
@@ -650,9 +714,6 @@ else:
     if st.sidebar.button(get_text('unload_model'), width="stretch"):
         unload_model()
         st.rerun()
-    if st.sidebar.button(get_text('new_chat'), width="stretch"):
-        clear_chat_messages()
-        st.rerun()
 
 st.sidebar.markdown('<hr style="margin: 12px 0 16px 0;">', unsafe_allow_html=True)
 
@@ -692,12 +753,22 @@ with st.sidebar.expander(get_text('tools')):
         if checked and len(st.session_state.selected_tools) < 4:
             st.session_state.selected_tools.append(name)
 
-image_url = "https://raw.githubusercontent.com/1057237562/Instinct/main/images/logo2.png"
+@lru_cache(maxsize=1)
+def webui_logo_uri():
+    """本地 logo 以 data URI 内嵌（离线可用）；缺失时回退到远程图片。"""
+    logo_path = os.path.join(repo_root, "images", "webui_logo.png")
+    if os.path.isfile(logo_path):
+        with open(logo_path, 'rb') as f:
+            return "data:image/png;base64," + base64.b64encode(f.read()).decode("ascii")
+    return "https://raw.githubusercontent.com/1057237562/Instinct/main/images/logo2.png"
+
+
+image_url = webui_logo_uri()
 
 st.markdown(
     f'<div style="display: flex; flex-direction: column; align-items: center; text-align: center; margin: 0; padding: 0;">'
     '<div style="font-style: italic; font-weight: 900; margin: 0; padding-top: 4px; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; width: 100%;">'
-    f'<img src="{image_url}" style="width: 40px; height: 40px; "> '
+    f'<img src="{image_url}" style="width: 40px; height: 40px; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.18);"> '
     f'<span style="font-size: 26px; margin-left: 10px;">{slogan}</span>'
     '</div>'
     f'<span style="color: #bbb; font-style: italic; margin-top: 6px; margin-bottom: 10px;">{get_text("disclaimer")}</span>'
@@ -733,6 +804,10 @@ def main():
 
     messages = st.session_state.messages
 
+    # 工具栏占据顶部位置，但在运行结束时才渲染：「新对话」的禁用状态需要
+    # 反映本轮新增的回复，而不是生成开始前的会话快照
+    toolbar_slot = st.empty()
+
     for i, message in enumerate(messages):
         if message["role"] == "assistant":
             render_markdown_stream(st.empty(), message['content'],
@@ -752,6 +827,8 @@ def main():
         st.session_state.pop('regenerate_index', None)
 
     if prompt:
+        # 用户直接发消息：放弃未完成的清空确认
+        st.session_state.pop('confirm_clear_chat', None)
         st.markdown(
             f'<div style="display: flex; justify-content: flex-end;"><div style="display: inline-block; margin: 10px 0; padding: 8px 12px 8px 12px; background-color: #3d4450; border-radius: 22px; color: white;">{prompt}</div></div>',
             unsafe_allow_html=True)
@@ -873,6 +950,9 @@ def main():
                          "thinking_enabled": st.session_state.get('enable_thinking', False)})
         st.session_state.chat_messages.append({"role": "assistant", "content": answer})
         render_answer_actions(answer, len(messages) - 1, True)
+
+    with toolbar_slot.container():
+        render_chat_toolbar()
 
 
 if __name__ == "__main__":

@@ -102,8 +102,8 @@ def init_model(args):
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
     get_model_params(model, model.config)
-    from model.inference_runtime import optimize_inference
-    model = model.half().eval().to(args.device)
+    from model.inference_runtime import optimize_inference, select_inference_dtype
+    model = model.to(dtype=select_inference_dtype(args.device)).eval().to(args.device)
     return optimize_inference(model, getattr(args, 'inference_compile', 'auto')), tokenizer
 
 
@@ -417,7 +417,7 @@ def build_parser():
     parser.add_argument('--load_from', default='model', type=str, help="模型加载路径（model=原生torch权重，其他路径=transformers格式）")
     parser.add_argument('--save_dir', default='out', type=str, help="模型权重目录")
     parser.add_argument('--checkpoint_path', default=None, help='直接指定原生 .pth 权重文件')
-    parser.add_argument('--inference_compile', choices=['auto', 'off'], default='auto', help='编译融合推理算子；不可用时回退')
+    parser.add_argument('--inference_compile', choices=['full', 'auto', 'off'], default='auto', help='推理编译档位：full=主干整体 torch.compile（加载时预热）；auto=仅融合算子；off=纯 eager')
     parser.add_argument('--weight', default='full_sft', type=str, help="权重名称前缀（pretrain, full_sft, rlhf, reason, ppo_actor, grpo, spo）")
     parser.add_argument('--lora_weight', default='None', type=str, help="LoRA权重名称（None表示不使用，可选：lora_identity, lora_medical）")
     parser.add_argument('--hidden_size', default=768, type=int, help="隐藏层维度")
