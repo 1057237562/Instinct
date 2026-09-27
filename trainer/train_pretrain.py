@@ -42,10 +42,57 @@ from trainer.streaming_pretrain import (
     should_stream_pretrain,
     validate_streaming_budget,
 )
-from dataset.streaming_chunks import build_jsonl_chunk_plan
+from dataset.streaming_chunks import build_chunk_plan
 from dataset.sequence_bucket import packing_preprocess_workers
+from dataset.source_format import canonical_source_key
 
 warnings.filterwarnings('ignore')
+
+
+def _recompiled_resume_note(saved_data_config, streaming_plan, data_path):
+    """Explain what a chunk cursor means on a rebuilt plan.
+
+    Compiling the same corpus into another container (JSONL -> Parquet) rebuilds
+    the chunk plan.  When the file was compiled with a matching
+    ``--align-chunk-bytes`` its chunks cover exactly the rows the JSONL plan
+    covered and the cursor keeps its meaning; otherwise the saved chunk index
+    marks the same fraction of the corpus while its row range moves, so training
+    replays or skips part of one chunk.  Resuming at an epoch boundary has no
+    drift either way.  Returns the message to log, or ``None`` when the plan did
+    not change.
+    """
+    saved_path = str(saved_data_config.get('data_path') or '')
+    resume_chunk = int(saved_data_config.get('streaming_chunk_index', 0) or 0)
+    resume_step = int(saved_data_config.get('streaming_chunk_step', 0) or 0)
+    if not (resume_chunk or resume_step) or not saved_path:
+        return None
+    if canonical_source_key(saved_path) != canonical_source_key(data_path):
+        return None  # A different corpus is rejected before training starts.
+    if os.path.normcase(os.path.abspath(saved_path)) == os.path.normcase(
+        os.path.abspath(data_path)
+    ):
+        return None
+    chunks = streaming_plan['chunks']
+    if resume_chunk >= len(chunks):
+        return None
+    saved_chunk_bytes = int(saved_data_config.get('streaming_chunk_mb', 0) or 0) * 1024 ** 2
+    aligned = int((streaming_plan.get('identity') or {}).get('aligned_chunk_bytes') or 0)
+    if aligned and aligned == saved_chunk_bytes:
+        return (
+            f'[Dataset Streaming] resuming on a recompiled corpus: the plan was '
+            f'rebuilt for {os.path.basename(data_path)} ({len(chunks)} chunks) and '
+            'its chunks are aligned to the JSONL chunk boundaries, so the saved '
+            'cursor points at the same rows.'
+        )
+    row_start = sum(int(chunk['rows']) for chunk in chunks[:resume_chunk])
+    return (
+        f'[Dataset Streaming] resuming on a recompiled corpus: the plan was '
+        f'rebuilt for {os.path.basename(data_path)} ({len(chunks)} chunks), so '
+        f'saved cursor chunk {resume_chunk + 1} step {resume_step} now starts at '
+        f'row {row_start:,} of {int(streaming_plan["rows"]):,}; part of one chunk '
+        'is replayed or skipped.  Resuming at an epoch boundary has no drift, and '
+        'compiling with --align-chunk-bytes makes the cursor exact.'
+    )
 
 
 def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
@@ -289,7 +336,7 @@ if __name__ == "__main__":
         chunk_bytes = validate_streaming_budget(args)
         os.environ['INSTINCT_MANAGED_DATA_CACHE'] = '1'
         if not dist.is_initialized() or dist.get_rank() == 0:
-            streaming_plan = build_jsonl_chunk_plan(
+            streaming_plan = build_chunk_plan(
                 args.data_path, chunk_bytes=chunk_bytes,
                 max_length=packed_max_length, tokenizer=tokenizer,
             )
@@ -309,6 +356,11 @@ if __name__ == "__main__":
         ):
             if key in saved_data_config:
                 data_config[key] = saved_data_config[key]
+        note = _recompiled_resume_note(
+            saved_data_config, streaming_plan, args.data_path
+        )
+        if note:
+            Logger(note)
         data_config.update(
             streaming_enabled=True,
             streaming_chunks=len(streaming_plan['chunks']),

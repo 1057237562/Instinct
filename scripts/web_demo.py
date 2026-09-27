@@ -420,9 +420,19 @@ def load_model_tokenizer(config_path, tokenizer_path, weight_path=None):
     if weight_path:
         state_dict = torch.load(weight_path, map_location='cpu', weights_only=True)
         model.load_state_dict(state_dict, strict=False)
-    from model.inference_runtime import optimize_inference, select_inference_dtype
+    from model.inference_runtime import optimize_inference, select_inference_dtype, warmup_decode
     model = model.to(dtype=select_inference_dtype(device)).eval().to(device)
-    model = optimize_inference(model, os.environ.get('INSTINCT_INFERENCE_COMPILE', 'full'))
+    # 'auto' keeps model loading interactive: compiling the whole trunk costs
+    # tens of seconds (minutes for the 32-layer MoE), while the decode step is
+    # already captured as a CUDA graph. 'full' buys ~30% more decode throughput
+    # and a faster prefill; set INSTINCT_INFERENCE_COMPILE=full for it.
+    compile_mode = os.environ.get('INSTINCT_INFERENCE_COMPILE', 'auto')
+    model = optimize_inference(model, compile_mode)
+    # Auto mode intentionally skips the expensive full-trunk compile, but the
+    # two fused kernels and the reusable decode CUDA graph are cheap enough to
+    # prepare here.  This moves the one-time ~2 s cost out of the first answer.
+    if compile_mode == 'auto' and device.startswith('cuda'):
+        warmup_decode(model)
     return model, tokenizer
 
 
@@ -875,7 +885,8 @@ def main():
             "num_return_sequences": 1,
             "do_sample": True,
             "attention_mask": inputs.attention_mask,
-            "pad_token_id": tokenizer.pad_token_id,
+            # Native generate uses attention_mask for padding and EOS to stop.
+            # Do not pass unused HF metadata to the Transformer decode path.
             "eos_token_id": tokenizer.eos_token_id,
             "temperature": st.session_state.temperature,
             "repetition_penalty": st.session_state.repetition_penalty,

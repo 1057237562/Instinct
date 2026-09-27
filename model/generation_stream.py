@@ -12,6 +12,12 @@ class TokenChunkBuffer:
         self.pending = []
         self.overshoot = 0
 
+    def start_decode(self):
+        """Mark the prefill/decode boundary for stream metrics, if supported."""
+        callback = getattr(self.streamer, 'start_decode', None)
+        if callback is not None:
+            callback()
+
     def push(self, token, finished, final=False):
         self.pending.append(token)
         if len(self.pending) < self.chunk_size and not final:

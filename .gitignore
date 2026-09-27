@@ -54,6 +54,9 @@ experiments/data/
 experiments/results/
 trainer/logs/
 
+# ===== Rust 编译产物（dataset_compiler 的 Cargo.lock 仍然入库） =====
+dataset_compiler/target/
+
 # ===== Profiler trace 产物（单文件可达 GB 级） =====
 profiler_traces/
 

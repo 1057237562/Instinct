@@ -30,6 +30,25 @@ def _auto_backend(device):
     return 'cached'
 
 
+@lru_cache(maxsize=None)
+def inference_backend(device, dtype):
+    """Backend for traced inference grouped GEMMs, resolved outside the graph.
+
+    Same choice as training (``_auto_backend``), exposed separately because
+    ``optimize_inference`` must resolve it *before* Dynamo traces the MoE block:
+    tracing the ``lru_cache`` wrapper recurses until the C stack overflows. The
+    resolved string then travels as a plain value into the traced region.
+
+    The native op was measured slower than Triton here (ragged one-token groups
+    push it into padded copies, visible as extra device memcpy traffic), so the
+    backend is deliberately not upgraded for inference.
+    """
+    override = os.environ.get('INSTINCT_GROUPED_MM_BACKEND', 'auto')
+    if override != 'auto':
+        return override
+    return _auto_backend(device)
+
+
 @dataclass(frozen=True)
 class GroupedMMPlan:
     offsets: torch.Tensor
@@ -116,3 +135,20 @@ def expert_grouped_mm(x, weight, plan):
         raise ValueError('Triton grouped GEMM currently requires BF16 inputs')
     with torch.autocast(device_type=x.device.type, enabled=False):
         return _RaggedMM.apply(x, weight, plan)
+
+
+def inference_grouped_mm(x, weight, offsets, backend):
+    """Ragged expert GEMM for inference; traceable by ``torch.compile``.
+
+    ``expert_grouped_mm`` cannot stay inside a compiled graph: it routes through
+    an autograd Function with an inner ``torch.autocast`` context, and its plan
+    may carry host-side expert ends. Inference needs neither, and gradients are
+    not part of this path, so the native op and the raw Triton launch are both
+    called directly. Offsets must be monotone ends in ``[0, x.size(0)]``.
+    """
+    if backend == 'native':
+        return F.grouped_mm(x, weight, offs=offsets)
+    if backend == 'triton':
+        from model.grouped_mm_triton import ragged_mm
+        return ragged_mm(x, weight, offsets)
+    raise ValueError(f'unsupported inference grouped GEMM backend: {backend}')

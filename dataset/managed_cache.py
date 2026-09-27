@@ -97,17 +97,22 @@ def _worker(kind, kwargs, work, budget_root):
     kwargs.pop('source_fingerprint', None)
     if byte_range is not None:
         if kind != 'pretrain':
-            raise ValueError('byte-range streaming is currently supported for pretraining only')
-        from dataset.streaming_chunks import materialize_jsonl_range
+            raise ValueError('bounded dataset streaming is currently supported for pretraining only')
+        from dataset.source_format import classify
+        from dataset.streaming_chunks import materialize_range
         source = Path(kwargs['data_path']).resolve()
-        chunk_source = Path(work) / 'source.jsonl'
+        # The range counts bytes for JSONL and rows for parquet; the chunk file
+        # keeps the source format so the trainer loads it the same way.
+        suffix = '.parquet' if classify(source) == 'parquet' else '.jsonl'
+        chunk_source = Path(work) / f'source{suffix}'
         started = time.perf_counter()
         print(
-            f"[Streaming Build] stage=materialize source_bytes="
-            f"{(int(byte_range[1]) - int(byte_range[0])) / 1024 ** 2:.0f}MiB",
+            f"[Streaming Build] stage=materialize chunk="
+            f"{int(byte_range[1]) - int(byte_range[0]):,}"
+            f"{'rows' if suffix == '.parquet' else 'bytes'}",
             flush=True,
         )
-        materialize_jsonl_range(source, chunk_source, *byte_range)
+        materialize_range(source, chunk_source, *byte_range)
         print(
             f"[Streaming Build] stage=materialize complete "
             f"elapsed={time.perf_counter() - started:.1f}s",

@@ -806,3 +806,28 @@ def test_raw_checkpoint_can_enable_experimental_bucket_mode(tmp_path):
     assert validate_packing_resume(
         requested, {"data_config": packing_data_config(saved_args)}
     ) is True
+
+
+def test_resume_accepts_the_same_corpus_recompiled_into_parquet(tmp_path):
+    args = SimpleNamespace(
+        sequence_packing=1, packing_batch_size=10, max_seq_len=1024,
+        batch_size=4, data_path=str(tmp_path / "corpus.jsonl"),
+    )
+    checkpoint = {"data_config": packing_data_config(args)}
+
+    assert validate_packing_resume(args, checkpoint) is False
+
+    # The compiled container of the same corpus is the same dataset.
+    compiled = SimpleNamespace(**vars(args))
+    compiled.data_path = str(tmp_path / "corpus.parquet")
+    assert validate_packing_resume(compiled, checkpoint) is False
+
+    # A different stem, or the same name elsewhere, is still a different corpus.
+    other = SimpleNamespace(**vars(args))
+    other.data_path = str(tmp_path / "other.parquet")
+    with pytest.raises(ValueError, match="different dataset"):
+        validate_packing_resume(other, checkpoint)
+    moved = SimpleNamespace(**vars(args))
+    moved.data_path = str(tmp_path / "sub" / "corpus.parquet")
+    with pytest.raises(ValueError, match="different dataset"):
+        validate_packing_resume(moved, checkpoint)

@@ -77,14 +77,31 @@ def _ragged_weight_grad(
              acc.to(DW.dtype.element_ty), (rm[:, None] < K) & (rn[None, :] < N))
 
 
-def ragged_mm(x, weight, offsets):
+_PROGRAMS_CACHE = {}
+
+
+def _programs(device):
+    """Persistent-grid size for one device; resolved once, never per launch.
+
+    A plain dict rather than ``lru_cache``: Dynamo warns about (and traces
+    through) cache-wrapped callables it meets inside a graph, and this one is
+    reached from the traced MoE forward.
+    """
+    key = str(device)
+    if key not in _PROGRAMS_CACHE:
+        _PROGRAMS_CACHE[key] = 4 * torch.cuda.get_device_properties(device).multi_processor_count
+    return _PROGRAMS_CACHE[key]
+
+
+def ragged_mm(x, weight, offsets, programs=None):
     tokens, inner = x.shape
     experts, _, columns = weight.shape
     output = torch.empty((tokens, columns), device=x.device, dtype=x.dtype)
     if tokens == 0:
         return output
+    if programs is None:
+        programs = _programs(x.device)
     with torch.cuda.device(x.device):
-        programs = 4 * torch.cuda.get_device_properties(x.device).multi_processor_count
         _ragged_mm[(programs,)](
             x, weight, offsets, output, inner, columns, experts,
             *x.stride(), *weight.stride(), programs,

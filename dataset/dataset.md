@@ -4,16 +4,80 @@
 
 Place the downloaded dataset file in the current directory.
 
-## JSONL 自动分类
+## 数据集自动分类
 
-Config WebUI 会扫描本目录顶层的 `.jsonl` 文件，并按文件名前缀分类：
+Config WebUI 会扫描本目录顶层的 `.jsonl` / `.jsonl.gz` / `.parquet` 文件，
+并按文件名前缀分类：
 
 - `pretrain*.jsonl`：预训练数据，格式为 `{"text": "..."}`。
 - `sft*.jsonl`：SFT 数据，格式为 `{"conversations": [...]}`。
 - `lora*.jsonl`、`dpo*.jsonl`、`rlaif*.jsonl`、`agent*.jsonl`：对应训练器数据。
 
 将新的指令或 Coding 数据命名为 `sft_<name>.jsonl` 后，它会自动出现在
-`full_sft` 的 **Training dataset** 选项中。
+`full_sft` 的 **Training dataset** 选项中。同一份数据的 `.jsonl` 与
+`.parquet` 会同时出现在列表里，选择哪一个都可以；`.report.json` 报告文件
+不会被识别为数据集。
+
+## JSONL 编译为 Parquet
+
+`dataset_compiler/` 是一个 Rust 工具，把训练语料编译成 Parquet。编译后的
+文件是 `.jsonl` 的直接替代品：训练器、流式预训练、Config WebUI 都直接读取，
+无需改动配置。
+
+```bash
+cd dataset_compiler && cargo build --release
+
+# 编译（默认整文件预扫描，schema 覆盖每一行）
+./target/release/dataset_compiler compile \
+  -i ../dataset/pretrain_coder_12b.jsonl \
+  -o ../dataset/pretrain_coder_12b.parquet
+
+# 校验行数与取值完全一致
+./target/release/dataset_compiler verify \
+  ../dataset/pretrain_coder_12b.jsonl ../dataset/pretrain_coder_12b.parquet --rows 2000
+```
+
+收益与代价：
+
+- 体积约为 JSONL 的三分之一（zstd），加载时不再需要 Python 逐行解析 JSON。
+- 语料自带的 `token_count` 会被保留，因此有界流式（`--dataset_streaming`）
+  可以按 token 规划分块而不做任何分词；分块边界对齐 row group，物化一块
+  只需重编码这些 row group。
+- 代价是一次性的编译步骤：JSONL 更新后需要重新编译（`verify` 用于确认
+  编译结果没有丢行、没有改值）。
+- 编译输出旁边会生成 `<output>.report.json`，记录源文件摘要、行数、列类型、
+  压缩方式、吞吐与告警，便于审计。
+
+Schema 约定（由 `dataset/source_format.py` 与各 Dataset 类读取）：
+- 预训练：`text` 为字符串，其余标量键（`token_count`、`license`、`source` 等）
+  原样保留。
+- 对话：`conversations` / `chosen` / `rejected` 为 `list<struct<...>>`，字段
+  一律为字符串，字段顺序为 `role`、`content`、`reasoning_content`、`tools`、
+  `tool_calls`，之后是语料里出现的其它键（额外字段会被保留，比 JSONL 路径更宽松）。
+- 消息之外的嵌套对象（如 `metadata`）存为 JSON 文本；同一键在不同行出现
+  互不兼容的类型时也退化为 JSON 文本，并在报告中列为告警，不会丢行。
+
+### 与断点续训的关系
+
+同一语料的 `.jsonl` 与 `.parquet` 被视作同一个数据集：编译后切换到 parquet
+继续训练不会被续训校验拒绝（日志会打印 `[Resume] the corpus changed container`）。
+分块边界是否一致取决于编译方式：
+
+- **带 `--align-chunk-bytes` 编译**（数值取训练用的 `--streaming_chunk_mb`，例如
+  `--align-chunk-bytes 1GiB`）：编译器在 schema 扫描时复现 JSONL 计划的分块规则，
+  在每个分块边界处关闭一个 row group，于是「一个 row group = 一个流式分块」。
+  两份计划覆盖完全相同的行区间，**游标精确对齐**，日志会打印
+  `its chunks are aligned to the JSONL chunk boundaries, so the saved cursor
+  points at the same rows`。这是推荐做法。
+- **不带该参数**：chunk 边界会被重建，保存的 chunk 游标落在同一相对位置附近，
+  最多有一个 chunk 的重放或跳过；日志会给出
+  `[Dataset Streaming] resuming on a recompiled corpus: ... row X of Y` 提示。
+  偏差随块号增大（每块约 1.2 万行），在 epoch 边界恢复则完全没有偏差。
+- **非流式（整库 Arrow）路径**下，两种容器产生完全相同的 packed 数据，续训位置
+  一直精确一致。
+- 换成**别的**语料（文件名或目录不同）仍会被拒绝，请新建一个训练阶段。
+
+详细参数与实测数据见 `dataset_compiler/README.md`。
 
 ## 收集开放许可的 arXiv 论文全文
 

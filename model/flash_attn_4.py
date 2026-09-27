@@ -49,6 +49,16 @@ def _get_fa4() -> Optional[Callable[..., Any]]:
     return _flash_attn_4_func
 
 
+def resolve_flash_attn() -> Optional[Callable[..., Any]]:
+    """探测 FA4 并缓存结果,必须在 torch.compile 之前调用一次。
+
+    Dynamo 会执行被追踪帧里的 ``from flash_attn_interface import ...``: 未安装
+    flash-attn 时这条 import 抛错,于是**每一层注意力**都产生一次图断裂。提前
+    探测让追踪期只走 ``if not _tried_import`` 的短路分支。
+    """
+    return _get_fa4()
+
+
 def flash_attention(
     q: torch.Tensor,
     k: torch.Tensor,

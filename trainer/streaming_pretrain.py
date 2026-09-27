@@ -35,8 +35,10 @@ def should_stream_pretrain(args) -> bool:
     budget_gb = float(getattr(args, "data_cache_max_gb", 5.0))
     if budget_gb == 0:
         return False
-    # The ordinary loader reserves 1.25x source bytes before creating Arrow.
-    return os.path.getsize(source) * 1.25 > budget_gb * GIB
+    # The ordinary loader reserves the Arrow footprint of the source before
+    # creating it; a compressed parquet file expands far beyond its own size.
+    from dataset.source_format import estimated_arrow_bytes
+    return estimated_arrow_bytes(source) > budget_gb * GIB
 
 
 def validate_streaming_budget(args) -> int:
@@ -47,8 +49,10 @@ def validate_streaming_budget(args) -> int:
     prefetch = int(getattr(args, "streaming_prefetch_chunks", 1))
     if prefetch not in (0, 1):
         raise ValueError("--streaming_prefetch_chunks must be 0 or 1")
-    # A build can briefly contain source JSON, parsed Arrow, tokenized Arrow,
-    # final packed Arrow, plus the current mmap dataset while prefetching.
+    # A build can briefly contain the materialized chunk, parsed Arrow,
+    # tokenized Arrow, final packed Arrow, plus the current mmap dataset while
+    # prefetching.  ``chunk_bytes`` counts the Arrow footprint of a chunk, so a
+    # parquet source (compressed on disk) is covered by the same factor.
     factor = 5 if prefetch else 4
     if budget_gb > 0 and chunk_bytes * factor > budget_gb * GIB:
         safe_mb = max(1, int(budget_gb * 1024 // factor))
@@ -144,18 +148,24 @@ class ChunkedPackedEpochLoader:
         for position, chunk in enumerate(remaining):
             index = int(chunk["index"])
             local_skip = self.resume_chunk_step if index == self.resume_chunk else 0
-            byte_range = (int(chunk["start"]), int(chunk["end"]))
+            chunk_range = (int(chunk["start"]), int(chunk["end"]))
+            extent = chunk_range[1] - chunk_range[0]
+            # Ranges are byte offsets for JSONL sources and row offsets for
+            # parquet sources; the plan records which.
+            if self.plan["identity"].get("unit") == "rows":
+                extent_text = f"{extent:,} rows"
+            else:
+                extent_text = f"{extent / GIB:.2f}GiB"
             Logger(
                 f"[Streaming Chunk] epoch={self.epoch + 1}, "
                 f"chunk={index + 1}/{len(chunks)}, rows={chunk['rows']:,}, "
-                f"tokens={chunk['tokens']:,}, source="
-                f"{(byte_range[1] - byte_range[0]) / GIB:.2f}GiB"
+                f"tokens={chunk['tokens']:,}, source={extent_text}"
             )
             if prefetched_ready:
                 if not dist.is_initialized() or dist.get_rank() == 0:
                     dataset = prefetched_dataset
                 else:
-                    dataset = self.dataset_factory(True, None, byte_range)
+                    dataset = self.dataset_factory(True, None, chunk_range)
                 prefetched_dataset = None
                 prefetched_ready = False
                 Logger(
@@ -164,7 +174,7 @@ class ChunkedPackedEpochLoader:
                 )
             else:
                 dataset = build_dataset_with_cache_barrier(
-                    lambda: self.dataset_factory(True, None, byte_range),
+                    lambda: self.dataset_factory(True, None, chunk_range),
                     packing=True,
                 )
             files = cache_files(dataset.samples)

@@ -15,6 +15,7 @@ from dataset.cache_budget import (
     reserve_cache_space,
 )
 from dataset.compact_cache import features as compact_features, encode as encode_cache, decode as decode_cache, restore_labels
+from dataset.source_format import iter_source_rows, resolve_source
 from dataset.sequence_bucket import (
     bucket_token_budget,
     optimal_sequence_buckets,
@@ -241,6 +242,59 @@ def _best_fit_pack(input_sequences, label_sequences, max_length, pad_token_id):
     }
 
 
+def _load_source(samples_path, *, features=None, num_proc=None):
+    """Load a JSONL or parquet dataset through ``datasets``.
+
+    ``features`` is only applied to JSONL: there it forces one uniform struct
+    for every row, while parquet already carries a fixed schema and casting it
+    would drop any extra message field the compiled file preserved.
+    """
+    source = resolve_source(samples_path)
+    if source.is_parquet:
+        return load_dataset(
+            source.builder, data_files=source.data_files, split='train',
+            num_proc=num_proc,
+        )
+    return load_dataset(
+        source.builder, data_files=source.data_files, split='train',
+        features=features, num_proc=num_proc,
+    )
+
+
+def _require_message_lists(samples, columns):
+    """Reject a compiled file that cannot hold chat rows under these columns."""
+    features = getattr(samples, 'features', None)
+    for name in columns:
+        shape = features.get(name) if features is not None else None
+        inner = getattr(shape, 'feature', None)
+        if isinstance(inner, dict) and 'role' in inner and 'content' in inner:
+            continue
+        raise ValueError(
+            f"column {name!r} must be a list of {{role, content}} messages, found "
+            f"{shape!r}; was this file compiled with the SFT/DPO preset?"
+        )
+
+
+def _require_agent_rows(rows, path):
+    """Agent RL needs ``conversations`` as message dicts on every row."""
+    for row in rows:
+        conversations = row.get('conversations')
+        if not isinstance(conversations, list):
+            raise ValueError(
+                f"{path}: every row needs a 'conversations' list; was this file "
+                "compiled with the agent preset?"
+            )
+        if conversations and (
+            not isinstance(conversations[0], dict)
+            or not {'role', 'content'} <= set(conversations[0])
+        ):
+            raise ValueError(
+                f"{path}: 'conversations' must be a list of {{role, content}} "
+                "messages; was this file compiled with the agent preset?"
+            )
+        return
+
+
 def _print_packing_stats(name, raw_count, samples, bucket_ranges):
     # torchrun gives every worker the same stdout destination.  Emit the plan
     # once from rank 0 so multi-GPU logs remain readable.
@@ -394,9 +448,7 @@ class PretrainDataset(Dataset):
             )
         load_num_proc = _packing_map_num_proc(packing_num_proc, None)
         _print_packing_workers('pretrain load', load_num_proc)
-        self.samples = load_dataset(
-            'json', data_files=data_path, split='train', num_proc=load_num_proc,
-        )
+        self.samples = _load_source(data_path, num_proc=load_num_proc)
         self.full_raw_sample_count = len(self.samples)
         if sample_indices is not None:
             self.samples = self.samples.select([int(index) for index in sample_indices])
@@ -529,10 +581,8 @@ class SFTDataset(Dataset):
         features = Features({'conversations': [{'role': Value('string'), 'content': Value('string'), 'reasoning_content': Value('string'), 'tools': Value('string'), 'tool_calls': Value('string')}]})
         load_num_proc = _packing_map_num_proc(packing_num_proc, None)
         _print_packing_workers('SFT load', load_num_proc)
-        self.samples = load_dataset(
-            'json', data_files=jsonl_path, split='train', features=features,
-            num_proc=load_num_proc,
-        )
+        self.samples = _load_source(jsonl_path, features=features, num_proc=load_num_proc)
+        _require_message_lists(self.samples, ('conversations',))
         self.full_raw_sample_count = len(self.samples)
         if sample_indices is not None:
             self.samples = self.samples.select([int(index) for index in sample_indices])
@@ -677,7 +727,8 @@ class DPODataset(Dataset):
         self.padding = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
         self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids
         self.eos_id = tokenizer(f'{tokenizer.eos_token}\n', add_special_tokens=False).input_ids
-        self.samples = load_dataset('json', data_files=file_path, split='train')
+        self.samples = _load_source(file_path)
+        _require_message_lists(self.samples, ('chosen', 'rejected'))
 
     def __len__(self):
         return len(self.samples)
@@ -748,7 +799,8 @@ class RLAIFDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.thinking_ratio = thinking_ratio  # 按概率开启 thinking
-        self.samples = load_dataset('json', data_files=jsonl_path, split='train')
+        self.samples = _load_source(jsonl_path)
+        _require_message_lists(self.samples, ('conversations',))
         self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant', add_special_tokens=False).input_ids
         self.eos_id = tokenizer(f'{tokenizer.eos_token}', add_special_tokens=False).input_ids
 
@@ -778,10 +830,10 @@ class AgentRLDataset(Dataset):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.samples = []
-        with open(jsonl_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                self.samples.append(json.loads(line.strip()))
+        # Rows stay in memory: the RL loop needs ``gt`` as a Python list, and a
+        # dataset object would round-trip it through Arrow on every access.
+        self.samples = list(iter_source_rows(jsonl_path))
+        _require_agent_rows(self.samples, jsonl_path)
 
     def __len__(self):
         return len(self.samples)

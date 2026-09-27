@@ -10,6 +10,7 @@ def _load_helpers():
     module = ast.parse(source_path.read_text(encoding="utf-8"))
     assignments = {
         "_DATASET_KINDS_BY_TRAIN_TYPE",
+        "_DATASET_SUFFIXES",
         "_DEFAULT_DATASET_NAMES",
         "_DEFAULT_WEIGHT_PREFIX",
         "_DEFAULT_EPOCHS",

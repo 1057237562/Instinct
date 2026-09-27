@@ -21,6 +21,24 @@ def test_counts_blocks_excludes_prompt_and_freezes_elapsed():
     assert '5.0 tokens/s' in speed_caption(streamer.snapshot())
 
 
+def test_decode_marker_excludes_prefill_time():
+    times = iter([10.0, 20.0, 21.0, 22.0])
+    delegate = SimpleNamespace(put=lambda value: None, end=lambda: None)
+    streamer = TokenRateStreamer(delegate, clock=lambda: next(times))
+    token_block = lambda n: SimpleNamespace(numel=lambda: n)
+
+    streamer.put(token_block(100))  # prompt submitted at t=10
+    streamer.start_decode()         # prefill finishes at t=20
+    streamer.put(token_block(16))   # first decoded block at t=21
+    streamer.end()                  # generation finishes at t=22
+
+    assert streamer.snapshot() == {
+        'tokens': 16,
+        'seconds': 2.0,
+        'tokens_per_second': 8.0,
+    }
+
+
 def test_ui_updates_are_throttled_without_losing_text():
     times = iter(i * .01 for i in range(100))
     updates = list(render_updates(iter(['x'] * 100), clock=lambda: next(times)))

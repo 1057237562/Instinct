@@ -1,7 +1,7 @@
 # Instinct Agent Instructions
 
 ## What this is
-Instinct — train a ~64M LLM from scratch in ~2h on a single 3090. All core algorithms (Dense/MoE Transformer, Pretrain, SFT, LoRA, DPO, PPO, GRPO, CISPO, Agentic RL, KD) implemented in pure PyTorch — no `trl`/`peft` abstractions.
+Instinct — train InstinctV1Moe from scratch on a single GPU. The current V1 MoE configuration is about 678.7M total parameters / 106.2M active parameters. All core algorithms (Dense/MoE Transformer, Pretrain, SFT, LoRA, DPO, PPO, GRPO, CISPO, Agentic RL, KD) implemented in pure PyTorch — no `trl`/`peft` abstractions.
 
 ## Project layout
 
@@ -11,6 +11,8 @@ trainer/        # All training scripts (pretrain, SFT, LoRA, DPO, PPO, GRPO, Age
                 # + shared infra: trainer_cli.py, trainer_utils.py, training_pipeline.py,
                 #   training_profiler.py, rollout_engine.py, compile_cache.py
 dataset/        # Dataset loaders, corpora, reports, and dataset/scripts preparation utilities
+                # + source_format.py: JSONL/Parquet source resolution for every loader
+dataset_compiler/  # Rust tool: compile JSONL corpora into Parquet (see its README.md)
 scripts/        # Inference, API server, WebUI, model conversion, training launchers
 eval_llm.py     # CLI inference script
 eval_*.py       # Benchmark harnesses (gsm8k, humaneval, pass_k, batch, report); artifacts land in eval/
@@ -69,6 +71,33 @@ python eval_llm.py --weight full_sft --lora_weight lora_medical
 python eval_llm.py --load_from ./instinct-3 --open_thinking 1
 ```
 
+Decode fast path (`optimize_inference`, used by the Chat WebUI and `eval_llm.py`):
+- The Chat WebUI loads with `INSTINCT_INFERENCE_COMPILE=auto`: **no trunk compile**, so loading
+  stays instant (0.05 s, vs ~50 s for `full`). Decode does not need it — the decode step is
+  captured as a CUDA graph, which is what removes the per-token launch cost. Set
+  `INSTINCT_INFERENCE_COMPILE=full` to compile the whole trunk instead: about 2x faster prefill
+  and 30% more decode throughput, for ~50 s of compiling at load **plus a second compile on the
+  first real prompt** (each `generate()` allocates a new static cache, and the compiled graph is
+  guarded on those buffers).
+- `generate()` on a single unpadded sequence decodes into a **preallocated KV cache**
+  (`model/static_cache.py`) written in place, then **captures that step as one CUDA graph**, so
+  per-token kernel launches and compiler guard evaluations cost nothing. Measured (mode=auto,
+  the WebUI default): 512-dim MoE 3.7 ms/token (268 tok/s), dense 768 1.9 ms/token (515 tok/s);
+  with mode=full: 2.7 ms/token and 1.5 ms/token. `python experiments/check_load_time.py` reports
+  the load breakdown per mode.
+- The static cache stores keys/values in the **model dtype**; a quantized `kv_cache_dtype`
+  (e.g. `fp8_e5m2`) is not applied on that path, since it would need a full
+  dequantize+requantize per step. It logs when it overrides such a config.
+- Capture is skipped for batch > 1, padded batches, `return_kv`, logit lens
+  (`layer_callback`), and any dispatch that still synchronizes with the host (per-expert
+  loop, `cached` grouped backend) — those keep the previous eager/compiled loop.
+- MoE dispatch keeps the `torch.compiler.disable` barrier for training (Blackwell TMA
+  weight-gradient issue) and uses a traceable inference forward instead, which keeps the eager
+  (mode=auto) path 1.85x faster by removing a graph break per layer; it matters most where
+  capture cannot apply (logit lens, batch > 1, capture failure).
+- Regressions show up as graph breaks: `python experiments/graph_break_report.py`
+  (expect "graph count: 1"). Throughput A/B: `python experiments/bench_chat_moe_decode.py`.
+
 ### Model conversion
 ```bash
 cd scripts && python convert_model.py
@@ -88,10 +117,39 @@ cd scripts && python serve_openai_api.py
 cd scripts && streamlit run web_demo.py
 ```
 
+### Datasets: JSONL or Parquet
+Every trainer accepts either format on `--data_path`; `dataset/source_format.py`
+resolves a path (or a directory of shards) to the right `datasets` builder. The
+Config WebUI lists both, and ignores `*.report.json` sidecars.
+
+```bash
+# Compile a corpus (~3x smaller, no Python JSON parsing at load time).
+# Pass --align-chunk-bytes = the trainer's --streaming_chunk_mb so a streaming
+# chunk cursor keeps pointing at the same rows after switching to the parquet.
+cd dataset_compiler && cargo build --release
+./target/release/dataset_compiler compile \
+  -i ../dataset/pretrain_x.jsonl -o ../dataset/pretrain_x.parquet \
+  --align-chunk-bytes 1GiB
+./target/release/dataset_compiler verify ../dataset/pretrain_x.jsonl ../dataset/pretrain_x.parquet
+```
+
+- Keep the source JSONL: `verify` compares row counts and values, and a compiled
+  file is rebuilt from it whenever the corpus changes.
+- `token_count` is preserved by the compiler, which is what lets bounded
+  streaming plan chunks without tokenizing; a `--format auto` compile infers the
+  preset from the first row.
+- Loader contract: chat corpora are `list<struct<utf8...>>`, `tools`/`tool_calls`
+  stay JSON text, and nested non-message objects become JSON text. See
+  `dataset_compiler/README.md` for the full schema rules.
+- Resume: `x.jsonl` and `x.parquet` count as the same corpus, so recompiling a
+  corpus and continuing is allowed. Streaming chunk boundaries are rebuilt by
+  that switch, so a mid-chunk cursor replays or skips part of one chunk and the
+  trainer logs the new row offset; resuming at an epoch boundary is exact.
+
 ## Architecture and config
 
-- **Dense**: 8 layers, dim=768, 8 q-heads, 4 kv-heads, vocab 6400, max_pos 32768, SwiGLU, RMSNorm, RoPE θ=1e6
-- **MoE**: Same base + 4 experts, top-1 routing (198M total, 64M active)
+- **Dense legacy config**: 8 layers, dim=768, 8 q-heads, 4 kv-heads, vocab 6400, max_pos 32768, SwiGLU, RMSNorm, RoPE θ=1e6
+- **InstinctV1Moe**: hidden=512, 32 layers, 16 q-heads / 4 kv-heads, 8 experts, top-1 routing, MoE intermediate size 1664 (about 678.7M total / 106.2M active parameters; see `trainer/config_instinct_v1_moe.json`)
 - Config in `model/model_instinct.py` → `InstinctConfig`. Defaults: `hidden_size=768`, `num_hidden_layers=8`, `use_moe=False`
 - **Alternate topologies**: `model/model_instinct_loop.py` (looped) and `model/model_instinct_linear.py` (linear attention). Run trainers through the wrappers `python run_loop.py trainer/train_x.py` / `python run_linear.py trainer/train_x.py`, which swap `sys.modules["model.model_instinct"]` — don't edit `model_instinct.py` to switch topology
 - Aligned to Qwen3 ecosystem — compatible with `transformers`, `llama.cpp`, `vllm`, `ollama`
@@ -144,8 +202,60 @@ parent/
 
 ## Dataset formats
 
-- **Pretrain**: `{"text": "..."}` (one text per line in JSONL)
+- **Pretrain**: `{"text": "..."}` (one row per line in JSONL)
 - **SFT / LoRA / RLAIF**: `{"conversations": [{"role": "...", "content": "..."}, ...]}` (OpenAI chat format). Tool calls embedded in `conversations` with `tools`, `tool_calls`, `tool` roles.
+- **DPO**: `{"chosen": [...], "rejected": [...]}`; **Agent RL**: `{"conversations": [...], "gt": [...]}`.
+- The compiled `.parquet` form of any of these carries the same rows under the
+  same key names (see `dataset_compiler/README.md` for the column types).
+
+### Dataset identity hygiene (mandatory)
+
+Every dataset added or reused for pretraining, CPT, SFT, LoRA, DPO, RLAIF,
+Agent RL, or distillation MUST pass an identity-oriented data-cleaning step
+before it is used for training. Do not assume that a public, filtered, or
+Qwen-generated dataset is free of model-identity contamination.
+
+- The target model identity is **InstinctV1Moe**. Training data must not teach
+  the assistant to claim that it is Qwen, 通义千问, 千问, Alibaba Cloud, 阿里云,
+  阿里巴巴, or another unrelated model/provider. Also remove or normalize
+  self-referential answers that identify the assistant as a different named
+  model, unless the sample is explicitly an evaluation-only example.
+- For chat/SFT-style data, inspect both user prompts and assistant targets.
+  Drop identity-centric samples with contaminated targets, or rewrite them to
+  a canonical InstinctV1Moe answer. Apply the same check to both `chosen` and
+  `rejected` responses in DPO data and to generated assistant turns in RLAIF,
+  Agent RL, and distillation data.
+- For pretraining/CPT text, do not blindly delete every factual mention of a
+  third-party model. Preserve ordinary knowledge when appropriate, but remove
+  self-identification passages, model-card-style promotional text, and
+  question/answer examples that make the trained assistant adopt that identity.
+- Never perform a blind string replacement such as `Qwen` -> `InstinctV1Moe`;
+  this creates false facts. A Qwen/Alibaba factual answer should be removed,
+  retained as non-identity knowledge, or rewritten by a reviewed transformation.
+- Add a small, reviewed identity anchor set to the final SFT mix. It should
+  consistently answer variants of “你是谁/What model are you?” with
+  `我是 InstinctV1Moe，一个从头训练的语言模型。` and should state that the
+  model has no subjective consciousness or personal experiences. Keep identity
+  anchors small (normally about 0.5%--2% of the final SFT mix) so they do not
+  dominate normal behavior.
+- Every cleaning run MUST emit provenance and audit information: source
+  repository and revision, input/output row counts, dropped/rewritten counts,
+  identity-keyword hit counts, schema/length-filter counts, and output SHA-256.
+  Keep the original source data; name the cleaned training artifact with an
+  explicit `clean` or `identity_clean` suffix and do not overwrite raw data.
+- Before training, audit every selected artifact, including generated JSONL,
+  compressed JSONL, and compiled Parquet. Review keyword hits instead of
+  treating a zero-hit grep as sufficient proof. A basic text audit can start
+  with:
+
+  ```bash
+  rg -i -n "qwen|通义千问|千问|alibaba cloud|阿里云|阿里巴巴|通义万相|通义听悟" dataset/
+  ```
+
+  Matches in tokenizer vocabulary, compatibility code, or conversion configs
+  do not establish model identity and must not be “cleaned” by changing the
+  tokenizer or the Qwen3-compatible serialization path. The check is for
+  trainable content and generated assistant behavior.
 
 ## Key arguments for `eval_llm.py`
 

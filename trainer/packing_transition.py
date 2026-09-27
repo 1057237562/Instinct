@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import ConcatDataset, DistributedSampler
 
+from dataset.source_format import canonical_source_key
 from dataset.sequence_bucket import (
     BUCKET_CALIBRATION_BATCH_SIZE,
     BUCKET_CALIBRATION_MEMORY_GB,
@@ -59,6 +60,35 @@ def packing_data_config(args) -> dict:
     }
 
 
+def _validate_resume_data_path(saved, current) -> None:
+    """Reject a resume that points at a different corpus.
+
+    The comparison ignores the container format.  ``x.jsonl`` and ``x.parquet``
+    hold the same rows in the same order once the corpus has been compiled, so
+    recompiling a corpus and continuing is a supported move; a different stem or
+    directory is still a different dataset.  Chunk boundaries are rebuilt when
+    the container changes, which the streaming path reports separately.
+    """
+    saved_path = str(saved.get('data_path') or '')
+    current_path = str(current.get('data_path') or '')
+    if not saved_path or not current_path:
+        return
+    if canonical_source_key(saved_path) != canonical_source_key(current_path):
+        raise ValueError(
+            'Cannot resume with a different dataset: '
+            f'checkpoint={saved_path!r}, requested={current_path!r}. '
+            'Start a new training stage to change the corpus.'
+        )
+    if os.path.normcase(os.path.abspath(saved_path)) != os.path.normcase(
+        os.path.abspath(current_path)
+    ):
+        Logger(
+            f'[Resume] the corpus changed container: {saved_path} -> {current_path}. '
+            'Rows and order are unchanged; a streaming chunk cursor is rebuilt '
+            'against the new plan and may shift within one chunk.'
+        )
+
+
 def validate_lr_schedule_resume(args, ckp_data) -> None:
     """Keep the global re-warm/re-decay curve unchanged across resume."""
     if not ckp_data:
@@ -91,12 +121,13 @@ def validate_packing_resume(args, ckp_data) -> bool:
         )
     transition = pending or saved_active != current['target_sequence_packing']
     if transition:
+        _validate_resume_data_path(saved, current)
         # Reconstructing an in-epoch migration requires the original raw cursor
         # and exactly the same packed side after another pause/resume.  A first
         # switch from raw -> packed may choose either packing strategy because
         # no packed rows from the checkpoint need reconstruction yet.
         keys = [
-            'batch_size', 'data_path', 'dataset_streaming',
+            'batch_size', 'dataset_streaming',
             'streaming_chunk_mb', 'cache_build_mode',
         ]
         if not saved_active:
@@ -122,6 +153,7 @@ def validate_packing_resume(args, ckp_data) -> bool:
         return True
     if not saved_active:
         return False
+    _validate_resume_data_path(saved, current)
     current_mode = current['sequence_packing_mode']
     saved_mode = saved.get('sequence_packing_mode', 'fixed')
     if saved_mode != current_mode:
@@ -130,7 +162,7 @@ def validate_packing_resume(args, ckp_data) -> bool:
             f"checkpoint={saved_mode!r}, requested={current_mode!r}."
         )
     keys = [
-        'packing_batch_size', 'data_path', 'dataset_streaming',
+        'packing_batch_size', 'dataset_streaming',
         'streaming_chunk_mb', 'cache_build_mode',
     ]
     if current_mode == 'bucket':

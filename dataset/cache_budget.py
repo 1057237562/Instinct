@@ -439,13 +439,25 @@ def reserve_cache_space(additional_bytes, protected=(), root=None):
 
 
 def _source_files_size(data_files) -> int:
+    """Expected Arrow footprint of the sources a loader is about to convert.
+
+    JSONL expands to roughly its own size plus parsing overhead; a compiled
+    parquet file is compressed, so its footer holds the uncompressed totals
+    that the Arrow cache will actually occupy.
+    """
     if isinstance(data_files, dict):
         return sum(_source_files_size(value) for value in data_files.values())
     if isinstance(data_files, (list, tuple)):
         return sum(_source_files_size(value) for value in data_files)
     if isinstance(data_files, (str, os.PathLike)):
         path = Path(data_files)
-        return _tree_size(path.resolve()) if path.exists() else 0
+        if not path.exists():
+            return 0
+        try:
+            from dataset.source_format import estimated_arrow_bytes
+            return estimated_arrow_bytes(path)
+        except (OSError, ValueError):
+            return _tree_size(path.resolve())
     return 0
 
 
@@ -459,11 +471,11 @@ def load_dataset_with_budget(*args, **kwargs):
     # when a stage/test changes HF_DATASETS_CACHE afterwards.
     datasets.config.HF_DATASETS_CACHE = cache_root
     with cache_budget_guard(root):
-        # Arrow size is data-dependent; 1.25x local source bytes is a practical
-        # preflight estimate and is reconciled against the real size afterwards.
+        # The estimate is data-dependent and reconciled against the real size
+        # after the cache exists.
         source_bytes = _source_files_size(kwargs.get("data_files"))
         enforce_cache_budget(
-            root, reserve_bytes=int(source_bytes * 1.25), acquire_lock=False
+            root, reserve_bytes=source_bytes, acquire_lock=False
         )
         dataset = datasets.load_dataset(*args, **kwargs)
         files = cache_files(dataset)

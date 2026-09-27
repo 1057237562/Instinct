@@ -1871,10 +1871,16 @@ def _trainer_name(train_type):
     return _TRAINER_NAME.get(train_type, train_type)
 
 
+# Trainers read JSONL sources and their compiled parquet equivalents.  Report
+# sidecars (``*.report.json``) deliberately do not match, so a compiled corpus
+# never contributes a second, unreadable entry to the picker.
+_DATASET_SUFFIXES = (".jsonl", ".jsonl.gz", ".parquet", ".pq")
+
+
 def _dataset_kind(filename):
-    """Classify top-level JSONL files by their filename prefix."""
+    """Classify top-level dataset files by their filename prefix."""
     name = os.path.basename(os.fspath(filename)).lower()
-    if not name.endswith(".jsonl"):
+    if not name.endswith(_DATASET_SUFFIXES):
         return None
     for prefix in ("pretrain", "sft", "lora", "dpo", "rlaif", "agent"):
         if name.startswith(prefix):
@@ -1883,7 +1889,7 @@ def _dataset_kind(filename):
 
 
 def _available_training_datasets(train_type, dataset_dir=None):
-    """Return JSONL datasets compatible with a trainer; ``sft*`` means SFT."""
+    """Return JSONL/parquet datasets for a trainer; ``sft*`` means SFT."""
     if dataset_dir is None:
         repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
         dataset_dir = os.path.join(repo_root, "dataset")
@@ -3022,11 +3028,11 @@ with st.sidebar:
                 _dataset_options,
                 key=_dataset_key,
                 format_func=_dataset_option_label,
-                help="自动扫描 dataset/ 顶层 JSONL；文件名以 sft 开头的文件会被判定为 SFT 数据集。",
+                help="自动扫描 dataset/ 顶层的 .jsonl / .parquet；文件名以 sft、pretrain 等前缀开头即被归类。",
             )
             _dataset_missing = False
         else:
-            st.error(f"No compatible JSONL dataset found for {train_type} in dataset/.")
+            st.error(f"No compatible JSONL/Parquet dataset found for {train_type} in dataset/.")
             _dataset_missing = True
         config_file = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", "trainer",
@@ -3142,7 +3148,8 @@ with st.sidebar:
                 "on": "Streaming chunks — always",
                 "off": "Whole-dataset Arrow cache",
             }[value],
-            help="Pretrain 将大型 JSONL 按字节范围逐片展开、packing、训练和释放；不会生成整库 Arrow。",
+            help="Pretrain 把大型语料按块逐片展开、packing、训练和释放；不会生成整库 Arrow。"
+                 "JSONL 按字节范围切块，Parquet 按 row group 切块（token_count 直接取自列，无需分词）。",
         )
         _number_input(
             "Streaming source chunk (MiB)",

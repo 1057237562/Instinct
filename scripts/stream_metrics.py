@@ -11,6 +11,11 @@ class TokenRateStreamer:
         self.state = (0, None)
         self.first = True
 
+    def start_decode(self):
+        """Exclude prompt prefill/compilation from the conventional decode rate."""
+        self.started = self.clock()
+        self.state = (0, None)
+
     def put(self, tokens):
         now = self.clock()
         if self.first:
@@ -36,7 +41,7 @@ class TokenRateStreamer:
 
 
 def speed_caption(stats):
-    return f"{stats['tokens_per_second']:.1f} tokens/s · {stats['tokens']} tokens · {stats['seconds']:.2f}s（含首轮处理，不含前端动画）"
+    return f"{stats['tokens_per_second']:.1f} tokens/s · {stats['tokens']} tokens · {stats['seconds']:.2f}s（解码吞吐，不含预填充和前端动画）"
 
 
 def render_updates(streamer, interval=0.1, clock=time.perf_counter):
