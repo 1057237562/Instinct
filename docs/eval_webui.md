@@ -4,9 +4,9 @@
 
 Think 区域只在收到代码块外的显式 `<think>` 起始标签后显示；打开思考开关、空输出或单独的 `</think>` 均不会创建思考区域。
 
-CUDA 原生推理默认使用 `torch.compile` 编译共享 RMSNorm / SwiGLU 算子，融合稳定的数值计算，流式回传和可变长度 KV 缓存仍在编译图外。首次使用存在编译开销，后续复用；编译不可用会打印原因并回退。评测默认 `--inference_compile auto`（仅融合算子），传 `full` 可进一步对整个 Transformer 主干做动态形状 `torch.compile` 并在加载时预热 prefill/decode 两类图（MoE 解码实测提速约 38%）；聊天 WebUI 默认即 `full`。CUDA graphs（`reduce-overhead`）与逐步增长的 KV 缓存结构不兼容，传入会被自动改写为 `full` 并提示。可通过 `--inference_compile off` 关闭评测编译，聊天通过 `INSTINCT_INFERENCE_COMPILE=off` 关闭。Windows 必须在启动前启用 `PYTHONUTF8=1`，两个 WebUI 启动脚本均已设置。聊天侧 Inductor 缓存与训练共用仓库内 `.cache/torch_compile`，首进程编译约十几秒，之后秒级。修改需重新启动聊天服务/加载模型；正在运行的评测不变。
+CUDA 原生推理默认使用 `optimize_inference(..., 'auto')`：融合 RMSNorm / SwiGLU，并为单条、无填充的生成使用静态 KV Cache 和 CUDA Graph。Eval CLI、ToolCall 和 `batch_size=1` 的评测会在模型加载时预热这条快路径；首题不再承担图捕获开销。`full` 还会编译 Transformer 主干，但加载和首次实际提示可能花较长时间编译。批量或带填充的生成仍走普通解码；其总 tokens/s 是整个批次的吞吐，不能当作单条回答的 tokens/s。Windows 必须在启动前启用 `PYTHONUTF8=1`，Eval WebUI 启动子进程时会设置。修改代码只影响新启动的评测任务，正在运行的任务不会自动更新。
 
-生成循环预分配 token 和 attention-mask 缓冲区，避免逐步复制整段输入；这不等同于预分配 KV 缓存。训练路径和 checkpoint 参数名不变。编译融合可能存在浮点舍入差异，采样答案不保证逐字一致，首次编译时间也不代表稳定生成速度。
+单条生成的静态 KV Cache 从较小容量开始，回答实际变长时才扩容，最大生成长度保持不变。原生 MoE 的多条批量生成若配置为 FP8 KV Cache，评测进程会先按批量大小和最大生成长度估算 BF16/FP16 缓存占用；显存余量足够时暂时使用模型精度，避免每步对增长的整段缓存反量化、再量化，批次结束后恢复原配置。余量不足时继续用 FP8。日志中的 `kv_cache_dtype` 标明本批实际精度。精度变化可能导致采样结果不同；需要与旧结果严格对照时，应固定环境并从空答案文件重跑。训练路径和 checkpoint 参数名不变。
 
 聊天展示按块解析 Markdown，未闭合的 think 区域立即展开。展示层合并已到达的文本块，常规刷新上限 10Hz，长回答逐步降低到约 3.3Hz；结束时强制刷新，确保尾部完整。动画在 Markdown 解析后的文字节点上执行，每帧最多 64 个动画节点，超过 5 万字符停止逐字动画。解析结果使用有界缓存，避免反复解析上一帧；这些刷新策略不改变模型的 16-token 回传设置。
 

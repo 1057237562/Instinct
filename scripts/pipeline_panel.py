@@ -36,6 +36,13 @@ def snapshot(state, model, trainer):
                 early_exit=bool(model.get('early_exit_layers') and state.get('early_exit_enabled')))
     if not args['data_path']:
         raise ValueError('请先选择该阶段的数据集')
+    try:
+        from scripts.moe_router_controls import migration_args
+    except ModuleNotFoundError:
+        from moe_router_controls import migration_args
+    args.update(migration_args(
+        state, model, trainer, from_resume=bool(state.get('from_resume', False)),
+    ))
     return json.loads(json.dumps(dict(name=trainer, trainer=trainer, model=model, args=args)))
 
 

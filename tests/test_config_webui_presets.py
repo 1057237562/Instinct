@@ -49,6 +49,12 @@ def test_instinct_v1_replaces_instinct2_with_current_architecture():
     assert helpers["calc_params"](config)["Total Params"]["value"] == 152_406_528
 
 
+def test_new_moe_presets_keep_top1_router_task_gradient():
+    for config in _preset_helpers()["PRESETS"].values():
+        if config["use_moe"] and config["num_experts_per_tok"] == 1:
+            assert config["norm_topk_prob"] is False
+
+
 def test_instinct_v2_uses_latent_recurrent_depth_architecture():
     helpers = _preset_helpers()
     presets = helpers["PRESETS"]
@@ -157,13 +163,15 @@ def test_instinct_v1_moe_preserves_dense_per_token_ffn_capacity():
     )
 
 
-def test_current_serialized_configs_match_instinct_v2_preset():
+def test_current_serialized_configs_match_their_training_presets():
     helpers = _preset_helpers()
-    preset = helpers["PRESETS"]["Instinct V2"]
-    for filename in (
-        "config_pretrain.json", "config_full_sft.json",
-        "config_dpo.json", "config_instinct_v2.json",
+    for filename, preset_name in (
+        ("config_pretrain.json", "Instinct V1 MoE"),
+        ("config_full_sft.json", "Instinct V2"),
+        ("config_dpo.json", "Instinct V2"),
+        ("config_instinct_v2.json", "Instinct V2"),
     ):
+        preset = helpers["PRESETS"][preset_name]
         current = json.loads(
             (SOURCE.parents[1] / "trainer" / filename).read_text(encoding="utf-8")
         )

@@ -277,6 +277,10 @@ def config_from_args(args, **overrides):
         return cfg_cls(**cfg_dict)
     architecture = architecture or 'standard'
     cfg_cls, _ = _architecture_classes(architecture)
+    # Fresh CLI models need a differentiable top-1 gate. Saved configs retain
+    # their historical behavior; changing an existing gate requires opt-in.
+    if use_moe:
+        overrides.setdefault('norm_topk_prob', False)
     return cfg_cls(
         hidden_size=hidden_size,
         num_hidden_layers=num_hidden_layers,
@@ -990,7 +994,37 @@ def pause_save_checkpoint(args, lm_config, *, weight, model, optimizer, epoch, s
     model.train()
 
 
-def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = './model', save_dir: str = './out', device: str = 'cuda') -> tuple:
+def configure_moe_training_router(config, *, norm_topk_prob=None, top_k=None):
+    """Apply an explicit new-stage migration after restoring the base config."""
+    if norm_topk_prob is not None or top_k is not None:
+        if not config.use_moe:
+            raise ValueError('Router migration requires a MoE model')
+        if top_k is not None and not 1 <= top_k <= config.num_experts:
+            raise ValueError('Router top-k must be between 1 and the saved number of experts')
+    if top_k is not None:
+        previous_k = config.num_experts_per_tok
+        config.num_experts_per_tok = top_k
+        Logger(f'[MoE Router] explicit migration: top-k={previous_k} -> {top_k}')
+    if norm_topk_prob is not None:
+        previous = config.norm_topk_prob
+        config.norm_topk_prob = bool(norm_topk_prob)
+        Logger(
+            f'[MoE Router] explicit migration: norm_topk_prob={previous}'
+            f' -> {config.norm_topk_prob}; expert output scaling changes. '
+            'Validate this new training stage before extending its budget.'
+        )
+    if (config.use_moe and config.num_experts_per_tok == 1
+            and config.norm_topk_prob):
+        Logger(
+            '[MoE Router] WARNING: normalized top-1 weights are constant (p/p). '
+            'The router receives effectively no language-model loss gradient. '
+            'Keeping legacy checkpoint behavior. For a new pretrain/CPT/SFT '
+            'stage, use --moe_router_norm_topk_prob 0 with --from_resume 0; '
+            'use a new --save_weight and validate adaptation first.'
+        )
+
+
+def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = './model', save_dir: str = './out', device: str = 'cuda', *, router_norm_topk_prob=None, router_top_k=None) -> tuple:
     restored_config = restore_config_from_weight(lm_config, from_weight, save_dir=save_dir)
     if restored_config is not lm_config:
         if type(restored_config) is not type(lm_config):
@@ -1002,6 +1036,7 @@ def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = '
         # for checkpoint naming/saving after ``init_model`` returns.
         lm_config.__dict__.clear()
         lm_config.__dict__.update(restored_config.__dict__)
+    configure_moe_training_router(lm_config, norm_topk_prob=router_norm_topk_prob, top_k=router_top_k)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     architecture = getattr(lm_config, 'model_architecture', 'standard')
     _, model_cls = _architecture_classes(architecture)

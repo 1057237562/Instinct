@@ -20,6 +20,15 @@ import sys
 import subprocess
 import time
 
+try:
+    from scripts.moe_router_controls import migration_args as moe_router_migration_args
+    from scripts.cpt_defaults import apply_cpt_defaults
+    from scripts.sft_profiles import track_sft_training_type, switch_sft_profile
+except ModuleNotFoundError:
+    from moe_router_controls import migration_args as moe_router_migration_args
+    from cpt_defaults import apply_cpt_defaults
+    from sft_profiles import track_sft_training_type, switch_sft_profile
+
 # ═══════════════════════════════════════════════════════════════
 # Page config
 # ═══════════════════════════════════════════════════════════════
@@ -138,7 +147,7 @@ PRESETS = {
         "use_moe": True,
         "num_experts": 4,
         "num_experts_per_tok": 1,
-        "norm_topk_prob": True,
+        "norm_topk_prob": False,
         "router_aux_loss_coef": 5e-4,
         "rms_norm_eps": 1e-6,
         "flash_attn": True,
@@ -248,7 +257,7 @@ PRESETS = {
         "num_experts": 8,
         "num_experts_per_tok": 1,
         "moe_intermediate_size": 1664,
-        "norm_topk_prob": True,
+        "norm_topk_prob": False,
         "router_aux_loss_coef": 5e-4,
         "rms_norm_eps": 1e-6,
         "flash_attn": True,
@@ -1317,8 +1326,8 @@ def parse_training_metrics(log_text):
     """Extract training metrics from log for charting. Returns list of dicts."""
     rows = []
     for line in log_text.strip().split("\n"):
-        ep = re.search(r"Epoch:\[(\d+)/(\d+)\]\((\d+)/(\d+)\)", line)
-        if not ep:
+        ep = re.search(r"Epoch:\[(\d+)/(\d+)\]\((\d+)/~?(\d+)\)", line)
+        if not ep or 'loss:' not in line:
             continue
         epoch, _epochs, epoch_step, epoch_steps = map(int, ep.groups())
         row = {
@@ -1811,7 +1820,7 @@ _DEFAULT_EPOCHS = {
 
 _DEFAULT_LEARNING_RATES = {
     "pretrain": 5e-4,
-    "cpt": 5e-5,
+    "cpt": 3e-5,
     "full_sft": 1e-5,
     "lora": 1e-4,
     "dpo": 4e-8,
@@ -2042,22 +2051,49 @@ def _resume_checkpoint_exists(weight, hidden_size, use_moe):
     ))
 
 
+def _training_progress_from_log(log):
+    """Use tokens for streaming progress; estimated batch counts are not totals."""
+    # A resume appends to the same log. Ignore the previous launch's completion.
+    log = log.rsplit('# epochs:', 1)[-1]
+    matches = list(re.finditer(
+        r'Epoch:\[(\d+)/(\d+)\]\((\d+)/(~?)(\d+)\)([^\n]*)', log,
+    ))
+    if not matches:
+        return None
+    ep, epochs, step, estimated, steps, tail = matches[-1].groups()
+    ep, epochs, step, steps = map(int, (ep, epochs, step, steps))
+    tokens = re.search(r'tokens:\s*(\d+)/(\d+)', tail)
+    saved = bool(re.search(r'checkpoint_saved:\s*1\b', tail))
+    if tokens:
+        done, total = map(int, tokens.groups())
+        fraction = done / max(total, 1)
+        detail = f'Step {step:,} — Tokens {done:,}/{total:,}'
+    elif estimated:
+        return None
+    else:
+        fraction = step / max(steps, 1)
+        detail = f'Step {step:,}/{steps:,}'
+    complete = ep >= epochs and not estimated and step >= steps
+    if saved:
+        fraction = 1.0
+        detail = f'Completed — {step:,} steps; checkpoint saved'
+    pct = min(max(((ep - 1) + min(fraction, 1.0)) / max(epochs, 1), 0.0), 1.0)
+    return {'fraction': pct, 'caption': f'Epoch {ep}/{epochs} — {detail} ({pct * 100:.1f}%)',
+            'complete': complete, 'checkpoint_saved': saved}
+
+
 def _training_log_is_complete(log_path):
     """Whether the last logged epoch/step reached the declared end of training."""
     if not log_path or not os.path.exists(log_path):
         return False
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as log_file:
-            progress = re.findall(
-                r"Epoch:\[(\d+)/(\d+)\]\((\d+)/(\d+)\)",
-                log_file.read(),
-            )
+            progress = _training_progress_from_log(log_file.read())
     except OSError:
         return False
     if not progress:
         return False
-    epoch, epochs, step, steps = map(int, progress[-1])
-    return epoch >= epochs and step >= steps
+    return progress['complete']
 
 
 def _training_activity_from_log(log):
@@ -2120,6 +2156,9 @@ def _completed_checkpoint_exists(log_path):
     try:
         log_mtime = os.path.getmtime(log_path)
         checkpoint_names = os.listdir(_checkpoints_dir())
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as log_file:
+            progress = _training_progress_from_log(log_file.read())
+        saved_marker = bool(progress and progress['complete'] and progress['checkpoint_saved'])
     except OSError:
         return False
 
@@ -2129,7 +2168,7 @@ def _completed_checkpoint_exists(log_path):
                 continue
             checkpoint_path = os.path.join(_checkpoints_dir(), name)
             try:
-                if os.path.getmtime(checkpoint_path) >= log_mtime:
+                if os.path.isfile(checkpoint_path) and (saved_marker or os.path.getmtime(checkpoint_path) >= log_mtime):
                     return True
             except OSError:
                 continue
@@ -2891,12 +2930,17 @@ with st.sidebar:
                 st.session_state.get("num_experts", 4),
                 key="num_experts",
             )
+            _experts = int(st.session_state.get("num_experts", 4))
+            st.session_state.num_experts_per_tok = max(
+                1, min(_experts, int(st.session_state.get("num_experts_per_tok", 1)))
+            )
             _slider(
                 "num_experts_per_tok",
                 1,
-                4,
+                _experts,
                 st.session_state.get("num_experts_per_tok", 1),
                 key="num_experts_per_tok",
+                help="每个 token 激活的专家数，可选 1 到 num_experts。迁移开关开启后将采用这里的设置。",
             )
             _moe_int = st.session_state.get(
                 "moe_intermediate_size", compute_intermediate_size(_h)
@@ -2933,6 +2977,13 @@ with st.sidebar:
                 value=st.session_state.get("norm_topk_prob", True),
                 key="norm_topk_prob",
             )
+            if (st.session_state.get("num_experts_per_tok", 1) == 1
+                    and st.session_state.get("norm_topk_prob", True)):
+                st.warning(
+                    "Top-1 归一化会让专家权重变成 1，阻断 router 的任务损失梯度。"
+                    "从头训练请取消勾选；旧权重会保留原配置。迁移旧权重请在训练设置的"
+                    "基础权重下方开启『显式迁移 MoE 路由』。"
+                )
             _number_input(
                 "router_aux_loss_coef",
                 0.0,
@@ -2991,32 +3042,57 @@ with st.sidebar:
             key="train_type",
             format_func=lambda value: "cpt (continual pretraining)" if value == "cpt" else value,
         )
-        if train_type == "cpt" and int(st.session_state.get("cpt_defaults_version", 0)) < 3:
-            st.session_state.epochs_cpt = 1
-            st.session_state.learning_rate_cpt = 5e-5
-            st.session_state.warmup_ratio_cpt = 0.01
-            st.session_state.max_seq_len = 4096
-            st.session_state.sequence_packing = True
-            st.session_state.sequence_packing_mode = "fixed"
-            st.session_state.batch_size = 4
-            st.session_state.accumulation_steps = 1
-            st.session_state.optimizer = "adamw"
-            st.session_state.param_dtype = "fp32"
-            st.session_state.activation_dtype = "bfloat16"
-            st.session_state.compile_mode = "default"
-            st.session_state.from_resume = False
-            st.session_state.cpt_defaults_initialized = True
-            st.session_state.cpt_defaults_version = 3
+        _entering_sft = track_sft_training_type(st.session_state, train_type)
+        if train_type == "full_sft":
+            _sft_start_modes = ["base", "continue", "resume"]
+            _sft_start_labels = {
+                "base": "首次 SFT（从 pretrain/CPT 权重开始）",
+                "continue": "继续 SFT（从已完成 SFT 权重开始）",
+                "resume": "断点续训（恢复完整训练状态）",
+            }
+            if "sft_start_mode" not in st.session_state:
+                st.session_state.sft_start_mode = (
+                    "resume" if st.session_state.get("from_resume", False) else "base"
+                )
+            _sft_start_mode = _radio(
+                "SFT start mode", _sft_start_modes, key="sft_start_mode",
+                format_func=lambda mode: _sft_start_labels[mode],
+                disabled=st.session_state.get("train_status") == "running",
+                help="切换时保存并加载各模式独立配置。继续 SFT 新建 optimizer/scheduler/step；"
+                     "断点续训恢复原运行。",
+            )
+            switch_sft_profile(st.session_state, _sft_start_mode, entering=_entering_sft)
+            st.session_state.from_resume = _sft_start_mode == "resume"
+            _continue_completed_sft = _sft_start_mode == "continue"
+            if _sft_start_mode == "resume":
+                st.caption("断点续训不套用首次/继续 SFT 的默认配置，沿用当前运行设置并恢复 checkpoint。")
+            else:
+                st.caption(
+                    f"{'继续' if _continue_completed_sft else '首次'} SFT 独立配置："
+                    f"LR={st.session_state.get('learning_rate_full_sft', 1e-5):g}，"
+                    f"epochs={st.session_state.get('epochs_full_sft', 2)}，"
+                    f"warmup={st.session_state.get('warmup_ratio_full_sft', 0):.0%}。"
+                    "可手动调整，切换回来会恢复你的修改。"
+                )
+        else:
+            _continue_completed_sft = False
         if train_type == "cpt":
+            apply_cpt_defaults(st.session_state)
+            if st.button(
+                "应用推荐 CPT 默认配置", key="btn_cpt_defaults",
+                disabled=bool(st.session_state.get("from_resume", False))
+                or st.session_state.get("train_status") in ("running", "paused"),
+            ):
+                apply_cpt_defaults(st.session_state, force=True)
             st.info(
                 "CPT 使用 train_pretrain.py 的 next-token 预训练目标，从已有 pretrain/cpt 权重继续。"
                 "它不使用 reward、chosen/rejected 或 RL rollout。"
             )
             st.caption(
-                "默认 peak LR=5e-5（原始预训练 5e-4 峰值的 10%，也等于其余弦末端学习率），"
-                "先用前 1% micro-steps 线性 re-warm，再在剩余 99% 内余弦衰减到 5e-6。"
-                "保守实验可用 3e-5，"
-                "更强领域适应可试 1e-4。"
+                "低预算适应起点：LR=3e-5、3% warmup、余弦衰减至3e-6，1 epoch；"
+                "Muon、FP32主权重、BF16/FP8、4096分桶packing、20GB缓存、流式加载。"
+                "MoE 显式迁移采用模型面板当前的激活专家数（低预算推荐top-1）。显存预算保留你的设置；FP8需要torchao。"
+                "这不是实测最优，1 epoch仍会遍历所选全量数据，请先使用经过审核的小子集。"
             )
         _dataset_options = _available_training_datasets(train_type)
         _dataset_key = f"data_path_{train_type}"
@@ -3048,31 +3124,9 @@ with st.sidebar:
                 with open(config_file, "r", encoding="utf-8") as f:
                     st.session_state._pending_config_load = json.load(f)
                 st.rerun()
-        if train_type == "full_sft":
-            _sft_start_modes = ["base", "continue", "resume"]
-            _sft_start_labels = {
-                "base": "Start from base weights",
-                "continue": "Continue a completed SFT on new data",
-                "resume": "Resume an interrupted run",
-            }
-            if "sft_start_mode" not in st.session_state:
-                st.session_state.sft_start_mode = (
-                    "resume" if st.session_state.get("from_resume", False) else "base"
-                )
-            _sft_start_mode = _radio(
-                "SFT start mode",
-                _sft_start_modes,
-                key="sft_start_mode",
-                format_func=lambda mode: _sft_start_labels[mode],
-                help="Continue 会加载已完成的 full_sft 普通权重，但重新创建 optimizer、scheduler 和 step；"
-                     "Resume 会恢复同一轮训练的完整 checkpoint。",
-            )
-            st.session_state.from_resume = _sft_start_mode == "resume"
-            _continue_completed_sft = _sft_start_mode == "continue"
-        else:
+        if train_type != "full_sft":
             _checkbox("Resume from checkpoint (--from_resume)", value=False, key="from_resume",
                       help="Auto-detect and resume from checkpoints/{weight}_{dim}{_moe}_resume.pth")
-            _continue_completed_sft = False
         _weight_files = _available_weight_files()
         _auto_label = "auto (newest matching base)"
         if _continue_completed_sft:
@@ -3087,6 +3141,12 @@ with st.sidebar:
             _continue_without_weight = not _cpt_weights
             if _continue_without_weight:
                 st.error("CPT requires a completed pretrain or CPT .pth weight in out/ or checkpoints/.")
+        elif train_type == "full_sft" and _sft_start_mode == "base":
+            _first_sft_weights = [path for path in _weight_files if _is_cpt_base_weight(path)]
+            _base_options = [_auto_label] + _first_sft_weights
+            _continue_without_weight = not _first_sft_weights
+            if _continue_without_weight:
+                st.error("首次 SFT 需要已完成的 pretrain/CPT 权重；继续 SFT 请切换对应模式。")
         else:
             _base_options = ["none (from scratch)", _auto_label] + _weight_files
             _continue_without_weight = False
@@ -3104,6 +3164,26 @@ with st.sidebar:
                  "或 'auto' 自动选择最新匹配权重；'none' 从随机初始化开始。"
                  "选中 Resume 且检查点含完整状态时，基础权重会自动跳过。",
         )
+        if train_type in ("pretrain", "cpt", "full_sft") and st.session_state.get("use_moe", False):
+            _router_resume = bool(st.session_state.get("from_resume", False))
+            _checkbox(
+                "显式迁移 MoE 路由（新训练阶段）",
+                value=False, key="moe_router_migration", disabled=_router_resume,
+                help="覆盖所选基座保存的路由设置，启动时传入明确参数；不修改原权重。",
+            )
+            if _router_resume:
+                st.caption("断点续训沿用 checkpoint 的路由，迁移设置不会传入。")
+            elif st.session_state.get("moe_router_migration", False):
+                _router_args = moe_router_migration_args(
+                    st.session_state, build_config_dict(), train_type,
+                )
+                st.caption(
+                    f"迁移目标：top-{_router_args['moe_router_top_k']}，"
+                    "采用上方 MoE 面板的 num_experts_per_tok；top-1 自动关闭归一化，"
+                    "top-k>1 沿用 norm_topk_prob 选择。"
+                )
+                st.code(" ".join(f"--{key} {value}" for key, value in _router_args.items()), language="text")
+                st.caption("当前路由设置将覆盖基座的 top-k；专家总数仍取自基座。输出幅度/路由会改变，请先做短适应验证。")
         _bucket_auto_batch = (
             train_type in ("pretrain", "cpt", "full_sft", "lora", "distillation")
             and st.session_state.get("sequence_packing", False)
@@ -3371,10 +3451,10 @@ with st.sidebar:
             "LR warmup ratio",
             min_value=0.0, max_value=0.2,
             value=float(st.session_state.get(
-                warmup_ratio_key, 0.01 if train_type == "cpt" else 0.0
+                warmup_ratio_key, 0.03 if train_type == "cpt" else 0.0
             )),
             step=0.005, format="%.3f", key=warmup_ratio_key,
-            help="总 micro-steps 中用于线性 warmup 的比例；CPT 默认 1%。warmup 后从 peak LR "
+            help="线性 warmup 比例；CPT 默认 3%，流式模式按有效 token 计进度。warmup 后从 peak LR "
                  "余弦衰减到 peak 的 10%。0 保持旧版纯余弦调度。",
         )
         _checkbox(
@@ -3530,12 +3610,10 @@ with st.sidebar:
             if log_path and os.path.exists(log_path):
                 with open(log_path, "r", encoding="utf-8") as f:
                     log = f.read()
-                pi = re.findall(r'Epoch:\[(\d+)/(\d+)\]\((\d+)/(\d+)\)', log)
-                if pi:
-                    ep, te, stp, tst = map(int, pi[-1])
-                    pct = min(((ep - 1) + stp / tst) / te, 1.0)
-                    st.progress(pct)
-                    st.caption(f"Epoch {ep}/{te} — Step {stp}/{tst} ({pct * 100:.1f}%)")
+                progress = _training_progress_from_log(log)
+                if progress:
+                    st.progress(progress['fraction'])
+                    st.caption(progress['caption'])
                 else:
                     st.info(_training_activity_from_log(log))
             else:
@@ -3658,6 +3736,10 @@ if st.session_state.get("train_triggered", False):
                         cmd.extend(["--from_teacher_weight", from_weight])
                 else:
                     cmd.extend(["--from_weight", from_weight])
+                for key, value in moe_router_migration_args(
+                    st.session_state, cfg, train_type, from_resume=from_resume,
+                ).items():
+                    cmd.extend([f"--{key}", str(value)])
                 cmd.extend(["--batch_size", str(st.session_state.get("batch_size", 32))])
                 epochs = int(st.session_state.get(
                     f"epochs_{train_type}", _default_epochs(train_type)
@@ -3712,7 +3794,7 @@ if st.session_state.get("train_triggered", False):
                     f"learning_rate_{train_type}", _default_learning_rate(train_type)
                 ))])
                 cmd.extend(["--warmup_ratio", str(st.session_state.get(
-                    f"warmup_ratio_{train_type}", 0.01 if train_type == "cpt" else 0.0
+                    f"warmup_ratio_{train_type}", 0.03 if train_type == "cpt" else 0.0
                 ))])
                 cmd.extend(["--min_lr_ratio", "0.1"])
                 cmd.extend(["--dtype", st.session_state.get("activation_dtype", "bfloat16")])
@@ -3760,7 +3842,7 @@ if st.session_state.get("train_triggered", False):
                     log_file.write(f"# epochs: {epochs}\n")
                     log_file.write(
                         f"# LR schedule: linear warmup ratio="
-                        f"{st.session_state.get(f'warmup_ratio_{train_type}', 0.01 if train_type == 'cpt' else 0.0)} "
+                        f"{st.session_state.get(f'warmup_ratio_{train_type}', 0.03 if train_type == 'cpt' else 0.0)} "
                         f"then cosine decay to 0.1x peak\n"
                     )
                     log_file.write(f"# gradient accumulation steps: {st.session_state.get('accumulation_steps', 1)}\n")
@@ -3905,11 +3987,9 @@ if st.session_state.get("train_status") == "running":
     if log_path and os.path.exists(log_path):
         with open(log_path, "r", encoding="utf-8") as f:
             log = f.read()
-        pi = re.findall(r'Epoch:\[(\d+)/(\d+)\]\((\d+)/(\d+)\)', log)
-        if pi:
-            ep, te, stp, tst = map(int, pi[-1])
-            pct = min(((ep - 1) + stp / tst) / te, 1.0)
-            st.progress(pct, text=f"⏳ Training — Epoch {ep}/{te}, Step {stp}/{tst} ({pct*100:.1f}%)")
+        progress = _training_progress_from_log(log)
+        if progress:
+            st.progress(progress['fraction'], text=f"⏳ Training — {progress['caption']}")
         else:
             st.info("⏳ " + _training_activity_from_log(log))
     else:

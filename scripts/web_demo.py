@@ -14,7 +14,6 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 # Persistent Inductor cache shared with the trainers; must run before torch import
 import trainer.compile_cache  # noqa: F401
 
-from threading import Thread
 from types import SimpleNamespace
 
 import torch
@@ -22,6 +21,7 @@ import numpy as np
 import streamlit as st
 from transformers import AutoTokenizer, TextIteratorStreamer
 from scripts.stream_metrics import TokenRateStreamer, speed_caption, render_updates
+from scripts.chat_generation import GenerationTask, stop_generation
 from model.model_instinct import InstinctConfig, InstinctForCausalLM
 from scripts.web_demo_utils import (
     clear_conversation_state,
@@ -111,6 +111,15 @@ LANG_TEXTS = {
         'path_changed': '路径已变更，点击加载模型以重新加载',
         'model_loaded': '已加载',
         'load_failed': '加载失败',
+        'generation_failed': '生成失败',
+        'generation_stopping': '正在停止上一轮生成，请稍后重试。',
+        'matched_config': '所选权重匹配的配置',
+        'loaded_config': '已加载模型实际使用的配置',
+        'config_details': '配置详情',
+        'config_missing': '未找到配置文件',
+        'config_path_unknown': '本次加载未记录配置路径；下方为模型实际配置',
+        'config_error': '无法读取配置',
+        'config_fallback': '未找到同名配置，使用默认 config_pretrain.json',
         'logit_lens': '逐层解释',
         'logit_lens_caption': '每个已生成token在各层的Top-1预测',
         'logit_lens_layer': '第{n}层',
@@ -150,6 +159,15 @@ LANG_TEXTS = {
         'path_changed': 'Path changed. Click Load Model to reload',
         'model_loaded': 'Loaded',
         'load_failed': 'Load failed',
+        'generation_failed': 'Generation failed',
+        'generation_stopping': 'Stopping the previous generation; please try again shortly.',
+        'matched_config': 'Config matched to selected weight',
+        'loaded_config': 'Config used by loaded model',
+        'config_details': 'Config details',
+        'config_missing': 'No config file found',
+        'config_path_unknown': 'Config path was not recorded; showing the actual model config below',
+        'config_error': 'Cannot read config',
+        'config_fallback': 'No matching config found; using default config_pretrain.json',
         'logit_lens': 'Logit Lens',
         'logit_lens_caption': 'Per-layer Top-1 prediction for each generated token',
         'logit_lens_layer': 'Layer {n}',
@@ -405,6 +423,33 @@ def setup_logit_lens(model, tokenizer, temperature=None, top_p=None,
     return SimpleNamespace(streamer=LogitLensStreamer(tokenizer, gen_ids, on_block=flush_layers), layer_cb=layer_cb, render=render)
 
 
+def render_model_config(config_path, *, config=None):
+    """Show the resolved file and effective architecture without loading weights."""
+    if config_path:
+        st.sidebar.code(os.path.abspath(config_path), language=None)
+    elif config is not None:
+        st.sidebar.caption(get_text('config_path_unknown'))
+    else:
+        st.sidebar.warning(get_text('config_missing'))
+        return
+    try:
+        if config is None:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = InstinctConfig(**json.load(f))
+    except (OSError, ValueError, TypeError) as exc:
+        st.sidebar.error(f"{get_text('config_error')}: {exc}")
+        return
+    architecture = 'MoE' if config.use_moe else 'Dense'
+    summary = (f"{architecture} · layers={config.num_hidden_layers} · "
+               f"hidden={config.hidden_size} · "
+               f"Q/KV={config.num_attention_heads}/{config.num_key_value_heads}")
+    if config.use_moe:
+        summary += f" · experts={config.num_experts} · top-{config.num_experts_per_tok}"
+    st.sidebar.caption(summary)
+    with st.sidebar.expander(get_text('config_details')):
+        st.json(config.to_dict())
+
+
 def load_model_tokenizer(config_path, tokenizer_path, weight_path=None):
     """Load a model owned by the current Streamlit session.
 
@@ -438,6 +483,9 @@ def load_model_tokenizer(config_path, tokenizer_path, weight_path=None):
 
 def unload_model():
     """Release this session's model and return cached CUDA blocks to the driver."""
+    if not stop_generation(st.session_state):
+        st.sidebar.warning(get_text('generation_stopping'))
+        return
     model, tokenizer = detach_model_state(st.session_state)
 
     # Drop entries created by older versions that cached the model globally.
@@ -639,6 +687,12 @@ def render_chat_toolbar():
 script_dir = os.path.dirname(os.path.abspath(__file__))
 repo_root = os.path.abspath(os.path.join(script_dir, ".."))
 
+# A Streamlit rerun can interrupt the consumer while its producer thread is
+# still using CUDA weights/cache. Finish that thread before any model controls.
+if not stop_generation(st.session_state):
+    st.warning(get_text('generation_stopping'))
+    st.stop()
+
 st.sidebar.markdown("### Model Paths")
 
 default_tokenizer = os.path.join(repo_root, "model")
@@ -691,6 +745,12 @@ else:
 
 config_path = resolve_model_config_path(weight_path, repo_root)
 
+st.sidebar.caption(get_text('matched_config'))
+render_model_config(config_path)
+if config_path and os.path.normcase(os.path.abspath(config_path)) == os.path.normcase(
+        os.path.join(repo_root, 'trainer', 'config_pretrain.json')):
+    st.sidebar.info(get_text('config_fallback'))
+
 st.session_state.config_path = config_path
 st.session_state.tokenizer_path = tokenizer_path
 st.session_state.weight_path = weight_path
@@ -711,6 +771,7 @@ if not st.session_state.get('model_loaded', False):
                     st.session_state.tokenizer = tokenizer
                     st.session_state.model_loaded = True
                     st.session_state.loaded_weight_path = weight_path
+                    st.session_state.loaded_config_path = config_path
                     st.rerun()
                 except Exception as e:
                     st.sidebar.error(f"{get_text('load_failed')}: {e}")
@@ -719,6 +780,11 @@ if not st.session_state.get('model_loaded', False):
 else:
     loaded_name = os.path.basename(st.session_state.get('loaded_weight_path', ''))
     st.sidebar.success(f"✅ {get_text('model_loaded')}: {loaded_name}")
+    st.sidebar.caption(get_text('loaded_config'))
+    render_model_config(
+        st.session_state.get('loaded_config_path', ''),
+        config=st.session_state.model.config,
+    )
     if st.session_state.get('loaded_weight_path', '') != weight_path:
         st.sidebar.warning(get_text('path_changed'))
     if st.sidebar.button(get_text('unload_model'), width="stretch"):
@@ -795,6 +861,36 @@ def setup_seed(seed):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def render_chat_generation(model, generation_kwargs, placeholder, speed_slot,
+                           loading_slot, *, prefix='', lens=None):
+    streamer = generation_kwargs['streamer']
+    task = GenerationTask(model, generation_kwargs)
+    st.session_state.generation_task = task
+    task.start()
+    answer = ''
+    try:
+        for updated_answer, final_update in render_updates(streamer):
+            speed_slot.caption(speed_caption(streamer.snapshot()))
+            render_markdown_stream(
+                placeholder, prefix + updated_answer, previous=prefix + answer,
+                thinking=st.session_state.get('enable_thinking', False),
+                streaming=not final_update,
+            )
+            answer = updated_answer
+            if lens is not None:
+                lens.render()
+        task.raise_if_failed()
+        return answer
+    except Exception as exc:
+        loading_slot.empty()
+        st.error(f"{get_text('generation_failed')}: {exc}")
+        return None
+    finally:
+        task.stop()
+        if not task.thread.is_alive() and st.session_state.get('generation_task') is task:
+            st.session_state.pop('generation_task', None)
 
 
 def main():
@@ -898,16 +994,10 @@ def main():
             generation_kwargs["layer_callback"] = lens.layer_cb
 
         render_markdown_stream(placeholder, '', thinking=st.session_state.get('enable_thinking', False))
-        Thread(target=model.generate, kwargs=generation_kwargs).start()
-
-        answer = ""
-        for updated_answer, final_update in render_updates(streamer):
-            speed_slot.caption(speed_caption(streamer.snapshot()))
-            render_markdown_stream(placeholder, updated_answer, previous=answer,
-                                   thinking=st.session_state.get('enable_thinking', False), streaming=not final_update)
-            answer = updated_answer
-            if lens is not None:
-                lens.render()
+        answer = render_chat_generation(
+            model, generation_kwargs, placeholder, speed_slot, loading_slot, lens=lens)
+        if answer is None:
+            return
         if lens is not None:
             lens.render(final=True)
             # 工具调用多轮复用 generation_kwargs：摘掉钩子，避免后续轮次继续污染已冻结的逐层解释表
@@ -940,13 +1030,11 @@ def main():
             generation_kwargs["attention_mask"] = inputs.attention_mask
             generation_kwargs["max_new_tokens"] = st.session_state.max_new_tokens
             generation_kwargs["streamer"] = streamer
-            Thread(target=model.generate, kwargs=generation_kwargs).start()
-            answer = ""
-            for updated_answer, final_update in render_updates(streamer):
-                speed_slot.caption(speed_caption(streamer.snapshot()))
-                render_markdown_stream(placeholder, full_answer + updated_answer, previous=full_answer + answer,
-                                       thinking=st.session_state.get('enable_thinking', False), streaming=not final_update)
-                answer = updated_answer
+            answer = render_chat_generation(
+                model, generation_kwargs, placeholder, speed_slot, loading_slot,
+                prefix=full_answer)
+            if answer is None:
+                return
             full_answer += answer
             generation_stats.append(streamer.snapshot())
         answer = full_answer

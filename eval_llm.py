@@ -102,9 +102,16 @@ def init_model(args):
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
     get_model_params(model, model.config)
-    from model.inference_runtime import optimize_inference, select_inference_dtype
+    from model.inference_runtime import optimize_inference, select_inference_dtype, warmup_decode
     model = model.to(dtype=select_inference_dtype(args.device)).eval().to(args.device)
-    return optimize_inference(model, getattr(args, 'inference_compile', 'auto')), tokenizer
+    compile_mode = getattr(args, 'inference_compile', 'auto')
+    model = optimize_inference(model, compile_mode)
+    # Match the Chat WebUI's first-turn latency. Batch evaluations cannot use
+    # the single-sequence graph and skip this extra allocation at load time.
+    batch_size = max(getattr(args, 'batch_size', 1), getattr(args, 'lcb_batch_size', 1))
+    if compile_mode == 'auto' and getattr(model, '_static_cache_ok', False) and batch_size == 1:
+        warmup_decode(model)
+    return model, tokenizer
 
 
 def format_livecodebench_prompt(problem):
@@ -418,6 +425,8 @@ def build_parser():
     parser.add_argument('--save_dir', default='out', type=str, help="模型权重目录")
     parser.add_argument('--checkpoint_path', default=None, help='直接指定原生 .pth 权重文件')
     parser.add_argument('--inference_compile', choices=['full', 'auto', 'off'], default='auto', help='推理编译档位：full=主干整体 torch.compile（加载时预热）；auto=仅融合算子；off=纯 eager')
+    parser.add_argument('--eval_kv_cache_dtype', choices=['auto', 'configured'], default='auto',
+                        help='批量评测 KV 缓存：auto=显存充足时使用模型精度以加速；configured=严格沿用模型配置')
     parser.add_argument('--weight', default='full_sft', type=str, help="权重名称前缀（pretrain, full_sft, rlhf, reason, ppo_actor, grpo, spo）")
     parser.add_argument('--lora_weight', default='None', type=str, help="LoRA权重名称（None表示不使用，可选：lora_identity, lora_medical）")
     parser.add_argument('--hidden_size', default=768, type=int, help="隐藏层维度")

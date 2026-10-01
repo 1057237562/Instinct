@@ -608,7 +608,9 @@ To modify model configuration, see [./model/model_instinct.py](./model/model_ins
 
 Regarding LLM parameter configuration, [MobileLLM](https://arxiv.org/pdf/2402.14905) has conducted a very representative systematic study on small models. For ~100M-level models like Instinct, the trade-off between `d_model` and `n_layers` is not just a parameter allocation issue, but also directly affects training stability and final performance.
 
-The current `instinct-3` main branch uses `dim=768, n_layers=8`, which is essentially an engineering trade-off: shallower networks train faster, while `dim` is still large enough to avoid a severe representation bottleneck, giving a reasonable balance between training efficiency, stability, and final performance.
+The legacy `instinct-3` configuration and `InstinctConfig` constructor defaults use `dim=768, n_layers=8`. The trained **Instinct V1 Dense** instead uses 20 layers, hidden size 768, FFN size 2432, and 8 query / 4 KV heads: 152,406,528 total and active parameters (about 152.4M). **Instinct V1 MoE** uses 32 layers, hidden size 512, 16 query / 4 KV heads, and 8 experts with FFN size 1664 and top-1 routing: 678,726,144 total / 106,203,648 active parameters. Use the checkpoint's configuration when loading or comparing these models; the historical `instinct-3` tables and experiments refer to the older models.
+
+According to the model trainer, V1 MoE used a 34GB dataset, while V1 Dense used two mini datasets for pretraining and SFT respectively. Dataset file size alone does not establish consumed token count or code-token coverage, and MoE total parameter count is not its per-token active capacity.
 
 <details>
 <summary>View Detailed Explanation</summary>

@@ -148,9 +148,11 @@ cd dataset_compiler && cargo build --release
 
 ## Architecture and config
 
-- **Dense legacy config**: 8 layers, dim=768, 8 q-heads, 4 kv-heads, vocab 6400, max_pos 32768, SwiGLU, RMSNorm, RoPE θ=1e6
+- **Instinct V1 Dense**: 20 layers, hidden=768, FFN intermediate size 2432, 8 q-heads / 4 kv-heads, head_dim=96, tied embeddings; 152,406,528 total / active parameters (about 152.4M). Verified against `checkpoints/pretrain_20260912_180004_768.json`, used by the `instinct-v1-0914` evaluation. Vocab 6400, max_pos 32768, SwiGLU, RMSNorm, RoPE θ=1e6.
+- **Dense legacy/default config**: 8 layers, hidden=768, 8 q-heads / 4 kv-heads. This is the old `instinct-3` / constructor default, NOT the trained Instinct V1 Dense configuration. Historical 8-layer experiment reports describe their own baselines.
 - **InstinctV1Moe**: hidden=512, 32 layers, 16 q-heads / 4 kv-heads, 8 experts, top-1 routing, MoE intermediate size 1664 (about 678.7M total / 106.2M active parameters; see `trainer/config_instinct_v1_moe.json`)
 - Config in `model/model_instinct.py` → `InstinctConfig`. Defaults: `hidden_size=768`, `num_hidden_layers=8`, `use_moe=False`
+- **V1 comparison context**: the user reports that V1 MoE was trained on a 34GB dataset, while V1 Dense used two mini datasets for pretraining and SFT. File size does not establish consumed token count or code-token coverage. Compare checkpoint configs and actual training/evaluation records; do not infer that MoE saw less total data, or equate its 678.7M total parameters with dense per-token capacity (V1 Dense: 152.4M active; V1 MoE: 106.2M active).
 - **Alternate topologies**: `model/model_instinct_loop.py` (looped) and `model/model_instinct_linear.py` (linear attention). Run trainers through the wrappers `python run_loop.py trainer/train_x.py` / `python run_linear.py trainer/train_x.py`, which swap `sys.modules["model.model_instinct"]` — don't edit `model_instinct.py` to switch topology
 - Aligned to Qwen3 ecosystem — compatible with `transformers`, `llama.cpp`, `vllm`, `ollama`
 
@@ -243,6 +245,18 @@ Qwen-generated dataset is free of model-identity contamination.
   identity-keyword hit counts, schema/length-filter counts, and output SHA-256.
   Keep the original source data; name the cleaned training artifact with an
   explicit `clean` or `identity_clean` suffix and do not overwrite raw data.
+- Use `dataset/scripts/filter_anomaly_candidates.py` as the first-pass triage
+  CLI for suspicious questions and identity contamination. It supports JSONL,
+  gzip JSONL, Parquet, and shard directories; it emits whole rows with source
+  path, row number, rule hits, reviewer instructions, and a companion hash
+  report. Treat its output as AI/human review candidates, never as automatic
+  deletion decisions. Example:
+
+  ```bash
+  python dataset/scripts/filter_anomaly_candidates.py dataset/sft_t2t_mini.jsonl \
+    --profile all --output dataset/review_candidates/t2t_mini_candidates.jsonl
+  ```
+
 - Before training, audit every selected artifact, including generated JSONL,
   compressed JSONL, and compiled Parquet. Review keyword hits instead of
   treating a zero-hit grep as sufficient proof. A basic text audit can start

@@ -67,7 +67,7 @@ def build_command(config):
         if kind != 'ToolCall':
             for key in ('model_architecture', 'residual_type', 'lora_weight',
                         'open_thinking', 'hc_mult', 'hc_sinkhorn_iters',
-                        'attnres_variant', 'attnres_block_size'):
+                        'attnres_variant', 'attnres_block_size', 'eval_kv_cache_dtype'):
                 add(key, c.get(key))
         if c.get('num_samples', 1) > 1 and c.get('temperature', 0) <= 0:
             raise ValueError('多样本生成需要 temperature > 0')

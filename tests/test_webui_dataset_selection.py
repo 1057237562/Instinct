@@ -115,7 +115,7 @@ def test_cpt_uses_pretrain_trainer_and_requires_pretrain_family_weights():
     assert helpers["_base_weight_type"]("cpt") == "pretrain"
     assert helpers["_default_weight_prefix"]("cpt") == "cpt"
     assert helpers["_default_epochs"]("cpt") == 1
-    assert helpers["_default_learning_rate"]("cpt") == 5e-5
+    assert helpers["_default_learning_rate"]("cpt") == 3e-5
     assert helpers["_is_cpt_base_weight"]("out/pretrain_run_768.pth")
     assert helpers["_is_cpt_base_weight"]("out/cpt_run_768.pth")
     assert not helpers["_is_cpt_base_weight"]("out/full_sft_run_768.pth")

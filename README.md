@@ -306,6 +306,8 @@ eval_llm.py     # CLI 推理入口
 | Instinct V1 MoE | 678.7M-A106.2M | 16GB + Muon deep-thin：hidden 512、32 层、16Q/4KV、8 个 FFN=1664 专家，top-1；见 [architecture-v1-moe.html](architecture-v1-moe.html) |
 | Instinct V2 | 187.5M | latent recurrent depth，物理层 `(2,4,2)`，平均有效深度 132；见 [architecture.html](architecture.html) |
 
+Instinct V1 Dense 的总参数和每 token 激活参数均为 152,406,528（约 152.4M）；V1 MoE 为 678,726,144 总参数 / 106,203,648 激活参数。V1 Dense 使用 20 层、hidden=768、FFN=2432，不能与 `InstinctConfig` 默认的 8 层旧版 `instinct-3` 混淆；加载和评测应以权重对应的配置为准。按训练者提供的信息，V1 MoE 使用了 34GB 数据集，V1 Dense 则使用两个 mini 数据集分别进行预训练和 SFT；文件大小不等于实际训练 token 数或代码数据量。
+
 Instinct V2 参考 [Scaling up Test-Time Compute with Latent Reasoning](https://arxiv.org/abs/2502.05171)：Prelude 将 token 映射到隐空间，共享的多层 recurrent core 每轮通过 `Linear([state; input])` 重新注入输入，Coda 解码最终状态。训练时递归次数使用 log-normal Poisson 采样，并只对最后 `k` 轮反传；推理可用 `eval_llm.py --model_architecture looped --num_steps 32` 增加隐空间计算。200M 级 V2 默认为 187,521,984 参数：`hidden=1248`、13 个 96 维 MHA heads、`FFN=4224`、物理层 `(Prelude, Core, Coda)=(2,4,2)`，平均递归 32 次（平均有效深度 132），只对最后 8 次递归保留梯度。
 
 ---

@@ -194,6 +194,9 @@ with configure:
                 config['num_samples'] = choose('每题样本数', [samples, 1, 5, 10, 20, 50, 100, 200], samples, minimum=1, key=f'samples_{samples}')
                 config['temperature'] = choose('Temperature', [0.0, 0.2, 0.8, 1.0], 0.8 if config['num_samples'] > 1 else 0.0, minimum=0.0, key=f'temp_{config["num_samples"] > 1}')
                 config['max_new_tokens'] = choose('最大生成 tokens', [256, 512, 1024, 2048, 4096, 8192], 512, minimum=1)
+                config['eval_kv_cache_dtype'] = st.selectbox(
+                    '批量 KV Cache 精度', ['auto', 'configured'],
+                    help='auto 在显存充足时临时使用 BF16/FP16 提速；configured 沿用模型配置，便于严格比较旧结果。')
                 config['prompt_style'] = choose('提示方式', ['auto', 'base', 'chat'], 'auto')
                 config['open_thinking'] = st.checkbox('开启思考')
             config['limit'] = choose('题数限制（0 = 全部）', [0, 3, 10, 50, 100], 0, minimum=0)

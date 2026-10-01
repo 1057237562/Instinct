@@ -27,6 +27,7 @@ Coverage:
    must equal Mode 0.
 """
 
+import pytest
 import torch
 
 from model import model_instinct_loop
@@ -230,3 +231,41 @@ def test_dense_weight_partition_migrates_into_v2_stages():
         recurrent.model.coda[0].self_attn.q_proj.weight,
         dense.model.layers[3].self_attn.q_proj.weight,
     )
+
+
+@pytest.mark.parametrize("mode", [0, 1, 2])
+@pytest.mark.parametrize("use_moe", [False, True])
+def test_compile_reuses_graphs_across_recurrence_depths(mode, use_moe, monkeypatch):
+    """Changing depth must not specialize the scheduler/core/output per step."""
+    from torch._dynamo.testing import CompileCounter
+
+    torch.compiler.reset()
+    counter = CompileCounter()
+    eager = _make_loop_causal_lm(use_moe=use_moe, mode=mode)
+    candidate = _make_loop_causal_lm(use_moe=use_moe, mode=mode)
+    eager.config.mean_backprop_depth = 2
+    candidate.config.mean_backprop_depth = 2
+    # Exercise both explicit depths and the training sampler boundary with
+    # deterministic draws, including more values than Dynamo's default limit.
+    sampled_depths = iter(range(3, 14))
+    monkeypatch.setattr(candidate.model, "_sample_total_steps", lambda device: next(sampled_depths))
+    compiled = torch.compile(candidate, backend=counter)
+    try:
+        with torch._dynamo.config.patch(fail_on_recompile_limit_hit=True):
+            for depth in range(3, 14):
+                eager.zero_grad(set_to_none=True)
+                candidate.zero_grad(set_to_none=True)
+                expected = eager(INPUT_IDS, labels=LABELS, num_steps=depth)
+                actual = compiled(INPUT_IDS, labels=LABELS)
+                torch.testing.assert_close(actual.logits, expected.logits)
+                assert actual.recurrent_steps == depth
+                (expected.loss + expected.aux_loss).backward()
+                (actual.loss + actual.aux_loss).backward()
+                assert_grads_equal(eager, candidate)
+                if depth == 4:
+                    warmed_frames = counter.frame_count
+                elif depth > 4:
+                    assert counter.frame_count == warmed_frames
+            assert counter.frame_count > 0, "Tensor computation must still compile"
+    finally:
+        torch.compiler.reset()

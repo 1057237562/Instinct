@@ -261,17 +261,37 @@ def _load_source(samples_path, *, features=None, num_proc=None):
     )
 
 
+def _message_struct(shape):
+    """Return the message struct of a conversations column, or None.
+
+    A chat column is ``List(Struct{role, content, ...})``. Which of the two
+    spellings reaches this check depends on the ``datasets`` version: the JSON
+    loader may still report the template it was handed, a plain
+    ``[{"role": Value, "content": Value}]`` list, for the very same shape. Both
+    are accepted; a column that is a single bare struct is not a chat column and
+    is what the caller rejects.
+    """
+    inner = getattr(shape, 'feature', None)
+    if isinstance(inner, dict):
+        return inner
+    if isinstance(shape, list) and shape and isinstance(shape[0], dict):
+        return shape[0]
+    return None
+
+
 def _require_message_lists(samples, columns):
     """Reject a compiled file that cannot hold chat rows under these columns."""
     features = getattr(samples, 'features', None)
     for name in columns:
         shape = features.get(name) if features is not None else None
-        inner = getattr(shape, 'feature', None)
-        if isinstance(inner, dict) and 'role' in inner and 'content' in inner:
+        inner = _message_struct(shape)
+        if inner is not None and 'role' in inner and 'content' in inner:
             continue
         raise ValueError(
             f"column {name!r} must be a list of {{role, content}} messages, found "
-            f"{shape!r}; was this file compiled with the SFT/DPO preset?"
+            f"{shape!r}; was this file compiled with the SFT/DPO preset? "
+            "(a parquet chat corpus needs list<struct<role, content>>; recompile it with the same "
+            "preset the loader expects, or point the trainer at the source JSONL)"
         )
 
 

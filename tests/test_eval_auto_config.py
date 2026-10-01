@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from streamlit.testing.v1 import AppTest
 
 from scripts.eval_webui_utils import checkpoint_config, ROOT
@@ -22,6 +24,13 @@ def test_exact_sidecar_and_precedence(tmp_path):
 
 def test_ui_automates_samples_and_uses_saved_architecture():
     app = AppTest.from_file(str(ROOT / 'scripts/eval_webui.py'), default_timeout=15).run()
+    # A user's newest weight may not have its sidecar yet. Select one with a
+    # verified config so this UI test is independent of local output ordering.
+    choices = app.selectbox(key='out_checkpoint').options
+    configured = next((choice for choice in choices if checkpoint_config(choice)[0]), None)
+    if configured is None:
+        pytest.skip('no local weight with matching config JSON')
+    app.selectbox(key='out_checkpoint').select(configured).run()
     app.selectbox(key='choice_pass@K').select('1,5,10').run()
     command = next(code.value for code in app.code if '--num_samples' in code.value)
     assert '--num_samples 10' in command

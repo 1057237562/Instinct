@@ -38,6 +38,57 @@ def test_cpu_and_disabled_paths_keep_sdpa(monkeypatch):
         maybe_prepare_flex_mask(ids, ref)
 
 
+def test_compiled_mask_survives_streaming_bucket_shapes_on_cpu(monkeypatch):
+    """Exercise real Dynamo guards without CUDA/Triton compilation costs."""
+    import model.packed_attention as packed
+    from torch.nn.attention.flex_attention import create_mask
+
+    original_compile = torch.compile
+    def cpu_compile(fn, **kwargs):
+        return original_compile(fn, backend='eager', **kwargs)
+
+    packed._flex_functions.cache_clear()
+    monkeypatch.setattr(torch, 'compile', cpu_compile)
+    torch.compiler.reset()
+    try:
+        with torch._dynamo.config.patch(
+            cache_size_limit=8, accumulated_cache_size_limit=256,
+            fail_on_recompile_limit_hit=True, suppress_errors=False,
+        ):
+            for index, length in enumerate(range(129, 1666, 128)):
+                batch = 1 + index % 3
+                ids = (torch.arange(length) // 31)[None].expand(batch, -1).clone()
+                mask = packed.build_packed_flex_mask(ids)
+                dense = create_mask(mask.block_mask.mask_mod, batch, 1, length, length, device='cpu')
+                expected = merge_packed_attention_mask(ids, None) & torch.ones(length, length, dtype=torch.bool).tril()
+                torch.testing.assert_close(dense[:, 0], expected)
+    finally:
+        packed._flex_functions.cache_clear()
+        torch.compiler.reset()
+
+
+def test_flex_compilation_preserves_kernel_options_and_sets_both_limits(monkeypatch):
+    import model.packed_attention as packed
+    calls = []
+    def compile_region(fn, **kwargs):
+        calls.append(kwargs)
+        return fn
+    monkeypatch.setattr(torch, 'compile', compile_region)
+    packed._flex_functions.cache_clear()
+    try:
+        with torch._dynamo.config.patch(
+            cache_size_limit=8, accumulated_cache_size_limit=256,
+            fail_on_recompile_limit_hit=False, suppress_errors=False,
+        ):
+            packed._flex_functions()
+            assert calls == [{'fullgraph': True}, {'fullgraph': True}]
+            assert torch._dynamo.config.cache_size_limit == 128
+            assert torch._dynamo.config.accumulated_cache_size_limit == 4096
+            assert torch._dynamo.config.fail_on_recompile_limit_hit
+    finally:
+        packed._flex_functions.cache_clear()
+
+
 @pytest.mark.gpu
 @pytest.mark.parametrize('length,kv_heads', [(80, 2), (137, 4)])
 def test_cuda_forward_backward_and_document_isolation(length, kv_heads):

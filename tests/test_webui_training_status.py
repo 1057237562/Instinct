@@ -20,6 +20,8 @@ def _load_status_helpers(checkpoints_dir):
     module = ast.parse(source_path.read_text(encoding="utf-8"))
     names = {
         "_training_log_is_complete",
+        "_training_progress_from_log",
+        "parse_training_metrics",
         "_completed_checkpoint_exists",
         "_detached_training_status",
         "_training_script_from_argv",
@@ -57,6 +59,57 @@ def test_detached_run_stays_running_while_process_exists(tmp_path):
     ) == "running"
 
 
+def test_streaming_progress_uses_tokens_not_estimated_steps(tmp_path):
+    helpers = _load_status_helpers(tmp_path)
+    log = 'Epoch:[1/1](400000/~465048), tokens: 11999000000/12000000000, loss: 1.2'
+    progress = helpers['_training_progress_from_log'](log)
+    assert progress['fraction'] == 11999000000 / 12000000000
+    assert not progress['complete']
+    assert 'Tokens' in progress['caption']
+    assert '465,048' not in progress['caption']
+    assert helpers['parse_training_metrics'](log)[0]['loss'] == 1.2
+
+
+def test_streaming_token_total_alone_does_not_claim_saved_completion(tmp_path):
+    helpers = _load_status_helpers(tmp_path)
+    progress = helpers['_training_progress_from_log'](
+        'Epoch:[2/2](105/~100), tokens: 1000/1000, loss: 1.2'
+    )
+    assert progress['fraction'] == 1.0
+    assert not progress['complete']
+    assert not progress['checkpoint_saved']
+
+
+def test_streaming_multi_epoch_progress(tmp_path):
+    helpers = _load_status_helpers(tmp_path)
+    progress = helpers['_training_progress_from_log'](
+        'Epoch:[2/3](20/~90), tokens: 250/1000, loss: 1.2'
+    )
+    assert progress['fraction'] == 1.25 / 3
+
+
+def test_streaming_completion_after_saved_checkpoint_and_resume_reset(tmp_path):
+    checkpoints = tmp_path / 'checkpoints'
+    checkpoints.mkdir()
+    helpers = _load_status_helpers(checkpoints)
+    checkpoint = checkpoints / 'pretrain_run_512_moe_resume.pth'
+    checkpoint.write_bytes(b'saved')
+    log = (
+        '# epochs: 1\n'
+        'Epoch:[1/1](400000/~465048), tokens: 11999000000/11999990666, loss: 1.2\n'
+        'Epoch:[1/1](400052/400052), chunks_complete: 35, epoch_time: 0.0min, '
+        'checkpoint_saved: 1, Streaming epoch complete (all chunks consumed).\n'
+    )
+    log_path = _write_log(tmp_path / 'train_pretrain_run.log', log)
+    os.utime(checkpoint, (log_path.stat().st_mtime - 1, log_path.stat().st_mtime - 1))
+    assert helpers['_detached_training_status'](str(log_path), False, None) == 'success'
+    assert helpers['_training_progress_from_log'](log)['fraction'] == 1.0
+    assert len(helpers['parse_training_metrics'](log)) == 1
+    log_path.write_text(log + '# epochs: 2\ninitializing\n', encoding='utf-8')
+    assert not helpers['_training_log_is_complete'](str(log_path))
+    assert helpers['_training_progress_from_log'](log + '# epochs: 2\n') is None
+
+
 def test_pretraining_activity_distinguishes_background_prefetch(tmp_path):
     helper = _load_status_helpers(tmp_path / "checkpoints")[
         "_training_activity_from_log"
@@ -81,7 +134,7 @@ def test_training_process_detection_requires_a_script_argv(tmp_path):
     assert helper([
         r"E:\miniconda3\python.exe",
         "-u",
-        r"D:\AI\Instinct\trainer\train_full_sft.py",
+        str(Path('repo') / 'trainer' / 'train_full_sft.py'),
         "--from_resume",
         "1",
     ]) == "train_full_sft"
@@ -98,7 +151,7 @@ def test_cpt_process_is_distinguished_from_scratch_pretraining(tmp_path):
     ]
     argv = [
         r"E:\miniconda3\python.exe", "-u",
-        r"D:\AI\Instinct\trainer\train_pretrain.py",
+        str(Path('repo') / 'trainer' / 'train_pretrain.py'),
         "--save_weight", "cpt_20260916_768",
     ]
 

@@ -233,6 +233,7 @@ MODEL_STATE_KEYS = (
     "tokenizer",
     "model_loaded",
     "loaded_weight_path",
+    "loaded_config_path",
 )
 
 

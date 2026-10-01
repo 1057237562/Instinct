@@ -10,6 +10,7 @@ import os
 from typing import Any, NamedTuple
 
 import torch
+from model.compile_policy import configure_compile_limits
 
 _FLEX_AVAILABLE = (
     importlib.util.find_spec('triton') is not None
@@ -39,6 +40,9 @@ def document_mask(sequence_ids):
 def _flex_functions():
     from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
+    # Flex also compiles when the outer trainer uses --use_compile 0.
+    # Configure both Dynamo limits before constructing its lazy wrappers.
+    configure_compile_limits()
     return (
         torch.compile(create_block_mask, fullgraph=True),
         torch.compile(flex_attention, fullgraph=True),

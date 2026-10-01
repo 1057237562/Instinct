@@ -753,6 +753,7 @@ class InstinctLoopModel(nn.Module):
         self.last_num_steps_no_grad = 0
         self.last_num_steps_with_grad = self.loop_iters
 
+    @torch.compiler.disable
     def effective_layers(self, num_steps):
         return (
             self.prelude_layers
@@ -820,6 +821,7 @@ class InstinctLoopModel(nn.Module):
             sampled = int(sampled_tensor.item())
         return max(1, min(sampled, self.config.max_recurrence))
 
+    @torch.compiler.disable
     def _resolve_steps(self, num_steps, device):
         if num_steps is None:
             total = self._sample_total_steps(device) if self.training else self.loop_iters
@@ -880,6 +882,18 @@ class InstinctLoopModel(nn.Module):
 
     def _core_iteration(self, state, embedded_input, position_embeddings,
                         past_key_values, use_cache, attention_mask, kv_idx):
+        torch._dynamo.skip_frame()
+        # Standard/mHC residuals do not use effective depth. Normalize it
+        # before entering Dynamo so every recurrence reuses the same graph.
+        if self.residual_type != "attnres":
+            kv_idx = 0
+        return self._core_iteration_impl(
+            state, embedded_input, position_embeddings, past_key_values,
+            use_cache, attention_mask, kv_idx,
+        )
+
+    def _core_iteration_impl(self, state, embedded_input, position_embeddings,
+                             past_key_values, use_cache, attention_mask, kv_idx):
         state = self._inject_input(state, embedded_input, kv_idx)
         presents = []
         aux_loss = state.new_zeros(1).squeeze()
@@ -898,10 +912,14 @@ class InstinctLoopModel(nn.Module):
                 aux_loss = aux_loss + layer.mlp.aux_loss
         return state, presents, aux_loss
 
+    # Keep sampled-depth loops and cache-list bookkeeping in Python, while
+    # allowing tensor helpers (especially the shared core) to compile.
+    # skip_frame is intentional: it leaves child frames eligible for tracing.
     def forward(self, input_ids, attention_mask=None, past_key_values=None,
                 use_cache=False, return_intermediate=False, layer_callback=None,
                 sequence_ids=None, position_ids=None, num_steps=None,
                 input_states=None, **kwargs):
+        torch._dynamo.skip_frame()
         _, seq_length = input_ids.shape
         no_grad_steps, grad_steps = self._resolve_steps(num_steps, input_ids.device)
         total_steps = no_grad_steps + grad_steps
@@ -983,6 +1001,7 @@ class InstinctLoopModel(nn.Module):
         aux_loss = hidden_states.new_zeros(1).squeeze()
         kv_idx = 0
 
+        @torch.compiler.disable
         def record(state, completed_layers):
             if layer_callback is None and not return_intermediate:
                 return
@@ -1040,7 +1059,8 @@ class InstinctLoopModel(nn.Module):
             if can_checkpoint:
                 depth_index = kv_idx
 
-                def checkpointed_iteration(current_state, recurrent_input):
+                def checkpointed_iteration(current_state, recurrent_input,
+                                           depth_index=depth_index):
                     output, _, iteration_aux = self._core_iteration(
                         current_state,
                         recurrent_input,
@@ -1104,6 +1124,12 @@ def _compute_lm_loss(logits: torch.Tensor, labels):
         return None
     x, y = logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
     return F.cross_entropy(x.view(-1, x.size(-1)), y.view(-1), ignore_index=-100)
+
+
+@torch.compiler.disable
+def _make_loop_output(**kwargs):
+    return MoeCausalLMOutputWithPast(**kwargs)
+
 
 class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
     config_class = InstinctConfig
@@ -1224,8 +1250,10 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
             )
         return incompatible
 
+    # Output metadata and cache lengths vary with sampled recurrence depth.
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False,
                 logits_to_keep=0, labels=None, logit_lens=False, **kwargs):
+        torch._dynamo.skip_frame()
         def _compute_logits(hidden_states):
             slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
             return self.lm_head(hidden_states[:, slice_indices, :])
@@ -1239,7 +1267,7 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
             layer_logits = [_compute_logits(h) for h in intermediates]
             logits = _compute_logits(hidden_states)
             loss = _compute_lm_loss(logits, labels)
-            output = MoeCausalLMOutputWithPast(
+            output = _make_loop_output(
                 loss=loss, aux_loss=aux_loss, logits=logits,
                 past_key_values=past_key_values, hidden_states=hidden_states
             )
@@ -1252,7 +1280,7 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         )
         logits = _compute_logits(hidden_states)
         loss = _compute_lm_loss(logits, labels)
-        output = MoeCausalLMOutputWithPast(
+        output = _make_loop_output(
             loss=loss, aux_loss=aux_loss, logits=logits,
             past_key_values=past_key_values, hidden_states=hidden_states
         )

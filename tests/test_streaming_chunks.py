@@ -12,12 +12,34 @@ from trainer.streaming_pretrain import (
     ChunkedPackedEpochLoader,
     should_stream_pretrain,
     validate_streaming_budget,
+    streaming_token_progress,
 )
 
 
 class NeverCalledTokenizer:
     def __call__(self, *_args, **_kwargs):
         raise AssertionError("token_count rows must not be tokenized during planning")
+
+
+def test_streaming_eta_uses_tokens_since_resume_and_current_epoch():
+    # Epoch 2: resumed at 200 tokens, consumed another 100 in one minute.
+    done, eta = streaming_token_progress(1300, 1200, 1000, 1, 60)
+    assert done == 300
+    assert eta == 7
+    assert streaming_token_progress(2000, 1200, 1000, 1, 60) == (1000, 0)
+
+
+def test_completed_streaming_cursor_does_not_read_another_chunk():
+    def no_dataset(*args):
+        raise AssertionError('Completed epoch must not read any data')
+
+    loader = ChunkedPackedEpochLoader(
+        plan={'chunks': [None] * 35}, dataset_factory=no_dataset,
+        packing_plan=None, args=SimpleNamespace(streaming_prefetch_chunks=0),
+        epoch=0, data_config={},
+        resume_config={'streaming_chunk_index': 35, 'streaming_chunk_step': 0},
+    )
+    assert list(iter(loader)) == []
 
 
 def _write_rows(path: Path, count=12):

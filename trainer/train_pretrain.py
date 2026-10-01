@@ -33,6 +33,7 @@ from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx, init_wandb_logger,
     set_cosine_lr, set_cosine_lr_progress, step_with_scaler, flush_remaining_grad,
     PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
+    add_moe_router_migration_arg, validate_moe_router_migration,
 )
 from trainer.packing_transition import packing_data_config, SequencePackingPlan
 from trainer.training_profiler import TrainingProfiler
@@ -41,6 +42,7 @@ from trainer.streaming_pretrain import (
     ChunkedPackedEpochLoader,
     should_stream_pretrain,
     validate_streaming_budget,
+    streaming_token_progress,
 )
 from dataset.streaming_chunks import build_chunk_plan
 from dataset.sequence_bucket import packing_preprocess_workers
@@ -111,6 +113,7 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
         → 按 accumulation_steps 累积后裁剪梯度并更新参数 → 周期性打日志 / 存检查点。
     """
     start_time = time.time()
+    start_tokens = int(data_config.get('streaming_processed_tokens', 0))
     data_config['epoch_steps'] = int(iters)
     last_step = start_step
     for step, batch in enumerate(loader, start=start_step + 1):
@@ -167,11 +170,22 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
             current_logits_loss = current_loss - current_aux_loss
             current_lr = optimizer.param_groups[-1]['lr']
             eta_min = spend_time / max(step - start_step, 1) * (iters - step) / 60
+            progress_text = f'({step}/{iters})'
+            if token_schedule is not None:
+                epoch_tokens = int(token_schedule['total_tokens']) // args.epochs
+                epoch_done, eta_min = streaming_token_progress(
+                    completed, start_tokens, epoch_tokens, epoch, spend_time,
+                )
+                progress_text = (
+                    f'({step}/~{iters}), tokens: {epoch_done}/{epoch_tokens}, '
+                    f'chunk: {data_config.get("streaming_chunk_index", 0) + 1}/'
+                    f'{data_config["streaming_chunks"]}'
+                )
             elapsed_min = spend_time / 60
             loop_steps = getattr(res, 'recurrent_steps', None)
             loop_str = f', loop_steps: {loop_steps:.2f}' if loop_steps else ''
             bucket_text = f', {bucket_status}' if bucket_status else ''
-            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}{loop_str}, lr: {current_lr:.8f}{bucket_text}, epoch_time: {eta_min:.1f}min, elapsed_time: {elapsed_min:.1f}min')
+            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]{progress_text}, loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}{loop_str}, lr: {current_lr:.8f}{bucket_text}, epoch_time: {eta_min:.1f}min, elapsed_time: {elapsed_min:.1f}min')
             log_dict = {"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min, "elapsed_time": elapsed_min}
             if loop_steps: log_dict["loop_steps"] = loop_steps
             if lm_config.use_moe:
@@ -238,7 +252,9 @@ if __name__ == "__main__":
         },
     )
     parser.add_argument("--data_path", type=str, default="./dataset/pretrain_t2t_mini.jsonl", help="预训练数据路径")
+    add_moe_router_migration_arg(parser)
     args = parser.parse_args()
+    validate_moe_router_migration(args)
 
     # 1. 初始化环境和随机种子
     local_rank = setup_dist_and_seed(args)
@@ -279,7 +295,11 @@ if __name__ == "__main__":
     wandb = init_wandb_logger(args, ckp_data, run_name=f"Instinct-Pretrain-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}")
 
     # 5. 定义模型、数据、优化器
-    model, tokenizer = init_model(lm_config, 'none' if ckp_data else args.from_weight, device=args.device)
+    model, tokenizer = init_model(
+        lm_config, 'none' if ckp_data else args.from_weight, device=args.device,
+        router_norm_topk_prob=args.moe_router_norm_topk_prob,
+        router_top_k=args.moe_router_top_k,
+    )
     configure_bucket_memory_budget(model, args, checkpoint_data=ckp_data)
     data_config = packing_data_config(args)
     if getattr(lm_config, 'model_architecture', '') == 'looped':
@@ -432,7 +452,10 @@ if __name__ == "__main__":
                 data_config=data_config,
                 resume_config=resume_config,
             )
-            if skip > 0:
+            if skip > 0 and loader.resume_chunk == len(streaming_plan['chunks']):
+                Logger(f'[Resume] Epoch {epoch + 1}/{args.epochs} already complete: '
+                       f'all {loader.resume_chunk} chunks consumed, {skip} steps completed.')
+            elif skip > 0:
                 Logger(
                     f'Epoch [{epoch + 1}/{args.epochs}]: resume global step '
                     f'{skip + 1}, chunk={resume_config.get("streaming_chunk_index", 0) + 1}, '
@@ -451,6 +474,12 @@ if __name__ == "__main__":
                     args, lm_config, weight=args.save_weight, model=model,
                     optimizer=optimizer, scaler=scaler, epoch=epoch,
                     step=last_step, wandb=wandb, data_config=data_config,
+                )
+                Logger(
+                    f'Epoch:[{epoch + 1}/{args.epochs}]({last_step}/{last_step}), '
+                    f'chunks_complete: {len(streaming_plan["chunks"])}, '
+                    f'epoch_time: 0.0min, checkpoint_saved: 1, '
+                    'Streaming epoch complete (all chunks consumed).'
                 )
         else:
             train_ds, transition_batches, active_packing = packing_plan.epoch_data(

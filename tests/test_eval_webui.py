@@ -43,6 +43,11 @@ def test_batch_size_forwarding(tmp_path, benchmark, flag):
     assert command[command.index(flag) + 1] == '8'
 
 
+def test_eval_kv_cache_policy_forwarding(tmp_path):
+    command = build_command(config(tmp_path, 'HumanEval', eval_kv_cache_dtype='configured'))
+    assert command[command.index('--eval_kv_cache_dtype') + 1] == 'configured'
+
+
 def test_no_shell_and_no_overwrite(tmp_path):
     c = config(tmp_path, weight='weight with spaces; echo test', load_from='model')
     command = build_command(c)

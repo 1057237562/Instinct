@@ -225,6 +225,32 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     return parser
 
 
+def add_moe_router_migration_arg(parser):
+    """Pretrain/CPT and full SFT can explicitly adapt a legacy router."""
+    parser.add_argument(
+        '--moe_router_top_k', type=int, default=None,
+        help='显式迁移基座的每token激活专家数；范围1到基座专家总数，仅用于新训练阶段',
+    )
+    parser.add_argument(
+        '--moe_router_norm_topk_prob', type=int, choices=[0, 1], default=None,
+        help='显式覆盖基座路由归一化；top-1新训练用0。改变专家输出幅度，仅用于新阶段，不能与from_resume=1同时使用',
+    )
+
+
+def validate_moe_router_migration(args):
+    top_k = getattr(args, 'moe_router_top_k', None)
+    if top_k is not None and top_k < 1:
+        raise ValueError('--moe_router_top_k must be a positive integer')
+    if ((getattr(args, 'moe_router_norm_topk_prob', None) is not None
+         or getattr(args, 'moe_router_top_k', None) is not None)
+            and args.from_resume):
+        raise ValueError(
+            'Router migration cannot use --from_resume 1. Start a new stage '
+            'with --from_weight, --from_resume 0 and a new --save_weight; '
+            'ordinary resume must preserve the saved routing semantics.'
+        )
+
+
 def pause_requested(args) -> bool:
     """检查是否存在暂停请求标记文件（--pause_file），存在则训练应在下个 step 边界暂停。
 
@@ -265,6 +291,9 @@ def setup_dist_and_seed(args) -> int:
         先 init_distributed_mode() 初始化进程组；已初始化时把 args.device 指向当前卡；
         随机种子 = 42 + 全局 rank，保证各进程采样一致。
     """
+    if getattr(args, 'use_compile', 0):
+        from model.compile_policy import configure_compile_limits
+        configure_compile_limits()
     local_rank = init_distributed_mode()
     if dist.is_initialized(): args.device = f"cuda:{local_rank}"
     _apply_bucket_cuda_memory_limit(args)

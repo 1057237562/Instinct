@@ -4,7 +4,7 @@ from datasets import load_dataset  # noqa: F401
 import torch
 import pytest
 
-from eval_batch import generate_batches
+from eval_batch import _eval_kv_cache_precision, generate_batches
 
 
 class Tokenizer:
@@ -70,3 +70,31 @@ def test_linear_uses_equal_length_groups():
     results = list(generate_batches(args(), model, Tokenizer(), jobs, 3, 42))
     assert model.sizes == [2, 1]
     assert sorted(r[0]['index'] for r in results) == [0, 1, 2]
+
+
+@pytest.mark.gpu
+def test_eval_batch_uses_fast_kv_precision_only_with_memory_headroom(monkeypatch):
+    from model.model_instinct import InstinctConfig, InstinctForCausalLM
+
+    config = InstinctConfig(hidden_size=32, num_hidden_layers=2, vocab_size=64,
+                            num_attention_heads=4, num_key_value_heads=2,
+                            intermediate_size=64, max_position_embeddings=512,
+                            kv_cache_dtype='fp8_e5m2')
+    model = InstinctForCausalLM(config).eval().to(torch.bfloat16).cuda()
+    model._static_cache_ok = True
+    layers = [layer.self_attn for layer in model.model.layers]
+
+    monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (2**30, 2**30))
+    with _eval_kv_cache_precision(model, 4, 64, 128) as dtype:
+        assert dtype == 'bf16'
+        assert all(layer.kv_cache_dtype == 'bf16' for layer in layers)
+    assert all(layer.kv_cache_dtype == 'fp8_e5m2' for layer in layers)
+
+    with _eval_kv_cache_precision(model, 4, 64, 128, policy='configured') as dtype:
+        assert dtype == 'fp8_e5m2'
+        assert all(layer.kv_cache_dtype == 'fp8_e5m2' for layer in layers)
+
+    monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (1, 2**30))
+    with _eval_kv_cache_precision(model, 4, 64, 128) as dtype:
+        assert dtype == 'fp8_e5m2'
+    assert all(layer.kv_cache_dtype == 'fp8_e5m2' for layer in layers)
