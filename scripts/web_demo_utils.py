@@ -38,6 +38,7 @@ def _thinking_parts(content, implicit=False):
     for match in re.finditer(r'`+|~{3,}|</?think>', content):
         token = match.group()
         prefix = content[content.rfind('\n', 0, match.start()) + 1:match.start()]
+        prefix = prefix.replace('<think>', '').replace('</think>', '')
         is_fence = token[0] in '`~' and len(token) >= 3 and len(prefix) <= 3 and not prefix.strip()
         if fence:
             if is_fence and token[0] == fence[0] and len(token) >= len(fence):

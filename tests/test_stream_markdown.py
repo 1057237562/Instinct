@@ -1,5 +1,6 @@
 import html
 import re
+import pytest
 
 from scripts.web_demo_utils import markdown_stream_html, _thinking_parts
 
@@ -90,3 +91,40 @@ render_markdown_stream(st.empty(), "<think>```python\\nx = 1\\n```", streaming=T
     assert not app.exception
     assert app.expander[0].label == '💭 思考过程 · 思考中…'
     assert app.markdown[0].value == '```python\nx = 1\n```'
+
+
+@pytest.mark.parametrize('body', ['先分析条件。', '```python\nx = 1\n```'])
+@pytest.mark.parametrize('closed, streaming, label, expanded', [
+    (False, True, '💭 思考过程 · 思考中…', True),
+    (True, True, '💭 思考过程 · 已结束', False),
+    (True, False, '💭 思考过程 · 已结束', False),
+    (False, False, '💭 思考过程 · 未完成', False),
+])
+def test_thinking_has_same_explicit_label_with_or_without_code(body, closed, streaming, label, expanded):
+    from streamlit.testing.v1 import AppTest
+    content = '<think>' + body + ('</think>这是正文。' if closed else '')
+    app = AppTest.from_string(
+        'import streamlit as st\n'
+        'from scripts.web_demo_utils import render_markdown_stream\n'
+        f'render_markdown_stream(st.empty(), {content!r}, streaming={streaming!r})\n'
+    ).run()
+    assert not app.exception
+    assert len(app.expander) == 1
+    assert app.expander[0].label == label
+    assert app.expander[0].proto.expanded == expanded
+    assert all(item.value != '正文' for item in app.expander[0].caption)
+    assert any(item.value == '正文' for item in app.caption) == closed
+    if closed:
+        assert any('这是正文。' in without_animation(item.proto.body) for item in app.get('html'))
+
+
+def test_empty_closed_thinking_does_not_create_empty_box():
+    from streamlit.testing.v1 import AppTest
+    app = AppTest.from_string('''
+import streamlit as st
+from scripts.web_demo_utils import render_markdown_stream
+render_markdown_stream(st.empty(), '<think>\\n\\n</think>正文内容', streaming=False)
+''').run()
+    assert not app.exception
+    assert not app.expander
+    assert [item.value for item in app.caption] == ['正文']

@@ -6,6 +6,7 @@ from scripts.chat_tools import (
     ChatTextIteratorStreamer, calculate_expression, run_tool_calls,
     split_tool_calls, tool_request_message,
     ordered_response_parts,
+    restore_thinking_prefix,
 )
 
 
@@ -65,6 +66,13 @@ def test_tool_offsets_preserve_text_between_multiple_calls():
     parts = ordered_response_parts(body, calls)
     assert [kind for kind, _, _ in parts] == ['text', 'tool', 'text', 'tool', 'text']
     assert [value for kind, value, _ in parts if kind == 'text'] == ['before', 'between', 'after']
+
+
+def test_thinking_prefix_comes_from_prompt_state_and_is_not_duplicated():
+    content = '分析</think>答案'
+    assert restore_thinking_prefix(content, True) == '<think>\n' + content
+    assert restore_thinking_prefix(content, False) == content
+    assert restore_thinking_prefix('<think>' + content, True) == '<think>' + content
 
 
 @pytest.mark.parametrize('raw', [
@@ -240,3 +248,48 @@ def test_webui_renders_tool_cards_at_call_positions_live_and_after_refresh(multi
     assert not app.exception
     assert_order()
     assert app.session_state.messages[-1] == message
+
+
+def test_webui_recognizes_prefilled_thinking_and_keeps_labels_after_refresh():
+    from types import SimpleNamespace
+    from streamlit.testing.v1 import AppTest
+    from transformers import AutoTokenizer
+    from model.model_instinct import InstinctConfig
+
+    tokenizer = AutoTokenizer.from_pretrained('model', trust_remote_code=True)
+    prompts = []
+
+    def generate(input_ids, streamer, **kwargs):
+        prompts.append(tokenizer.decode(input_ids[0].cpu(), skip_special_tokens=False))
+        streamer.put(input_ids.cpu())
+        # <think> was supplied by the prompt, so generate only emits its body.
+        reply = '先分析条件。\n</think>\n这是最终回答。<|im_end|>'
+        streamer.put(torch.tensor(tokenizer.encode(reply, add_special_tokens=False)))
+        streamer.end()
+
+    app = AppTest.from_file('scripts/web_demo.py', default_timeout=60).run()
+    app.session_state.model = SimpleNamespace(config=InstinctConfig(), generate=generate)
+    app.session_state.tokenizer = tokenizer
+    app.session_state.model_loaded = True
+    app.session_state.loaded_weight_path = 'test.pth'
+    app.session_state.loaded_config_path = 'test.json'
+    app.run()
+    app.checkbox[0].check().run()  # thinking toggle precedes logit lens/tool toggles
+    app.chat_input[0].set_value('你好').run()
+    assert not app.exception, [item.message for item in app.exception]
+    assert prompts[0].rstrip().endswith('<think>')
+    assert app.session_state.messages[-1]['content'].startswith('<think>')
+
+    def assert_labels():
+        thoughts = [item for item in app.expander if '思考过程' in item.label]
+        assert len(thoughts) == 1
+        assert thoughts[0].label == '💭 思考过程 · 已结束'
+        assert not thoughts[0].proto.expanded
+        assert any('先分析条件。' in item.proto.body for item in thoughts[0].get('html'))
+        assert any(item.value == '正文' for item in app.caption)
+        assert not any('这是最终回答。' in item.proto.body for item in thoughts[0].get('html'))
+
+    assert_labels()
+    app.run()
+    assert not app.exception
+    assert_labels()

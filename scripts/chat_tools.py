@@ -85,6 +85,7 @@ def split_tool_calls(content, *, streaming=False):
                 cursor = match.end()
             continue
         prefix = content[content.rfind('\n', 0, match.start()) + 1:match.start()]
+        prefix = prefix.replace('<think>', '').replace('</think>', '')
         is_fence = token[0] in '`~' and len(token) >= 3 and len(prefix) <= 3 and not prefix.strip()
         if fence:
             if is_fence and token[0] == fence[0] and len(token) >= len(fence):
