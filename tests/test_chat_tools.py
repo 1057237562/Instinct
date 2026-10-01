@@ -283,7 +283,8 @@ def test_webui_recognizes_prefilled_thinking_and_keeps_labels_after_refresh():
     def assert_labels():
         thoughts = [item for item in app.expander if '思考过程' in item.label]
         assert len(thoughts) == 1
-        assert thoughts[0].label == '💭 思考过程 · 已结束'
+        assert thoughts[0].label.endswith('思考过程 · 已结束')
+        assert 'data:image/svg+xml;base64,' in thoughts[0].label
         assert not thoughts[0].proto.expanded
         assert any('先分析条件。' in item.proto.body for item in thoughts[0].get('html'))
         assert any(item.value == '正文' for item in app.caption)

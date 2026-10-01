@@ -22,6 +22,7 @@ import streamlit as st
 from transformers import AutoTokenizer
 from scripts.stream_metrics import TokenRateStreamer, speed_caption, render_updates
 from scripts.chat_generation import GenerationTask, stop_generation
+from scripts.chat_icons import svg_label
 from scripts.chat_tools import (
     ChatTextIteratorStreamer, split_tool_calls, tool_request_message, run_tool_calls,
     calculate_expression,
@@ -99,8 +100,8 @@ LANG_TEXTS = {
         'disclaimer': 'AI 生成内容可能存在错误，请仔细核实',
         'think_tip': '自适应思考，目前多轮对话或Tool Call共存时思考不稳定',
         'tool_select': '工具选择（最多4个）',
-        'load_model': '🚀 加载模型',
-        'unload_model': '🔄 卸载模型',
+        'load_model': '加载模型',
+        'unload_model': '卸载模型',
         'new_chat': '新对话',
         'new_chat_tip': '清空当前对话并开始新对话',
         'confirm_clear_body': '当前对话将被清空，且无法恢复。',
@@ -154,8 +155,8 @@ LANG_TEXTS = {
         'disclaimer': 'AI-generated content may be inaccurate, please verify',
         'think_tip': 'Adaptive thinking; may be unstable with multi-turn or Tool Call',
         'tool_select': 'Tool Selection (max 4)',
-        'load_model': '🚀 Load Model',
-        'unload_model': '🔄 Unload Model',
+        'load_model': 'Load Model',
+        'unload_model': 'Unload Model',
         'new_chat': 'New Chat',
         'new_chat_tip': 'Clear the current conversation and start a new one',
         'confirm_clear_body': 'The current conversation will be deleted and cannot be recovered.',
@@ -556,8 +557,7 @@ def regenerate_answer():
 def render_regenerate_button(message_index):
     """Offer a fresh generation for the final completed assistant response."""
     if st.button(
-        get_text('regenerate'),
-        icon=":material/restart_alt:",
+        svg_label('refresh', get_text('regenerate')),
         type="tertiary",
         key=f"regenerate_response_{message_index}",
         help=get_text('regenerate_last'),
@@ -686,15 +686,15 @@ def render_chat_toolbar():
     with st.container(horizontal=True, horizontal_alignment="right", gap="small"):
         if confirming:
             st.caption(get_text('confirm_clear_body'))
-            if st.button(get_text('cancel'), icon=":material/close:", type="tertiary"):
+            if st.button(svg_label('close', get_text('cancel')), type="tertiary"):
                 st.session_state.pop("confirm_clear_chat", None)
                 st.rerun()
-            if st.button(get_text('confirm_clear_yes'), icon=":material/delete_sweep:", type="primary"):
+            if st.button(svg_label('delete', get_text('confirm_clear_yes')), type="primary"):
                 st.session_state.pop("confirm_clear_chat", None)
                 clear_chat_messages()
-                st.toast(get_text('chat_cleared'), icon=":material/check_circle:")
+                st.toast(svg_label('success', get_text('chat_cleared')))
                 st.rerun()
-        elif st.button(get_text('new_chat'), icon=":material/add_comment:",
+        elif st.button(svg_label('new_chat', get_text('new_chat')),
                        help=get_text('new_chat_tip'), disabled=not messages):
             if st.session_state.get("messages"):
                 st.session_state.confirm_clear_chat = True
@@ -743,7 +743,7 @@ weight_options = _scan_weights()
 weight_labels = list(weight_options.keys())
 
 if weight_labels:
-    CUSTOM_TOKEN = "📂 Custom path..."
+    CUSTOM_TOKEN = "Custom path..."
     weight_labels.append(CUSTOM_TOKEN)
     current = st.session_state.weight_path
     default_idx = 0
@@ -752,10 +752,10 @@ if weight_labels:
             default_idx = i
             break
 
-    selected = st.sidebar.selectbox("weight .pth", weight_labels, index=default_idx,
+    selected = st.sidebar.selectbox(svg_label('folder', "weight .pth"), weight_labels, index=default_idx,
                                     key="wt_select", help="Detected weight files in out/ and checkpoints/")
     if selected == CUSTOM_TOKEN:
-        weight_path = st.sidebar.text_input("Custom path", value=current, key="wt_custom")
+        weight_path = st.sidebar.text_input(svg_label('folder', "Custom path"), value=current, key="wt_custom")
     else:
         weight_path = weight_options.get(selected, current)
         if "_wt_custom" in st.session_state:
@@ -780,7 +780,7 @@ slogan = "Instinct Chat"
 
 if not st.session_state.get('model_loaded', False):
     if ready:
-        if st.sidebar.button(get_text('load_model'), width="stretch", type="primary"):
+        if st.sidebar.button(svg_label('load', get_text('load_model')), width="stretch", type="primary"):
             with st.spinner(get_text('loading_model')):
                 try:
                     model, tokenizer = load_model_tokenizer(
@@ -796,10 +796,10 @@ if not st.session_state.get('model_loaded', False):
                 except Exception as e:
                     st.sidebar.error(f"{get_text('load_failed')}: {e}")
     else:
-        st.sidebar.warning("⚠️ Please configure valid config & tokenizer paths first")
+        st.sidebar.warning(svg_label('warning', "Please configure valid config & tokenizer paths first"))
 else:
     loaded_name = os.path.basename(st.session_state.get('loaded_weight_path', ''))
-    st.sidebar.success(f"✅ {get_text('model_loaded')}: {loaded_name}")
+    st.sidebar.success(svg_label('success', f"{get_text('model_loaded')}: {loaded_name}"))
     st.sidebar.caption(get_text('loaded_config'))
     render_model_config(
         st.session_state.get('loaded_config_path', ''),
@@ -807,7 +807,7 @@ else:
     )
     if st.session_state.get('loaded_weight_path', '') != weight_path:
         st.sidebar.warning(get_text('path_changed'))
-    if st.sidebar.button(get_text('unload_model'), width="stretch"):
+    if st.sidebar.button(svg_label('unload', get_text('unload_model')), width="stretch"):
         unload_model()
         st.rerun()
 
@@ -890,7 +890,7 @@ def render_tool_events(events):
         if st.session_state.get('lang', 'en') == 'zh':
             name = TOOL_SHORT_NAMES.get(name, name)
         status = get_text('tool_failed' if failed else 'tool_completed')
-        with st.expander(f"{'❌' if failed else '🔧'} {name} · {status}", expanded=False):
+        with st.expander(svg_label('error' if failed else 'tool', f"{name} · {status}"), expanded=False):
             st.caption(get_text('tool_parameters'))
             st.json(event.get('arguments', {}))
             if failed:

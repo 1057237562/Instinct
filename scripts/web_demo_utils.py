@@ -6,6 +6,7 @@ import re
 from functools import lru_cache
 from html.parser import HTMLParser
 from pathlib import Path
+from scripts.chat_icons import svg_icon, svg_label
 
 
 def animated_stream_html(previous, chunk):
@@ -112,7 +113,7 @@ def _markdown_parser():
 
 def _thinking_label(closed, streaming):
     state = '已结束' if closed else ('思考中…' if streaming else '未完成')
-    return f'💭 思考过程 · {state}'
+    return f'思考过程 · {state}'
 
 
 @lru_cache(maxsize=8)
@@ -125,7 +126,8 @@ def _render_markdown_body(text, thinking, streaming, section_labels=True):
                 continue
             label = _thinking_label(closed, streaming)
             opened = ' open' if streaming and not closed else ''
-            rendered = ('<details' + opened + ' class="instinct-think"><summary>' + label
+            rendered = ('<details' + opened + ' class="instinct-think"><summary>'
+                        + svg_icon('thinking') + ' ' + label
                         + '</summary>' + (rendered or '<p>等待思考内容…</p>') + '</details>')
         elif section_labels and body.strip():
             rendered = '<div class="instinct-section-label">正文</div>' + rendered
@@ -159,6 +161,7 @@ def markdown_stream_html(content, previous='', thinking=False, streaming=True,
             '.instinct-think{border-left:3px solid #888;padding:10px 12px;margin:8px 0;'
             'background:rgba(128,128,128,.08);border-radius:6px;}'
             '.instinct-think summary{font-weight:600;cursor:pointer;}'
+            '.instinct-think summary svg{vertical-align:middle;margin-right:4px;}'
             '.instinct-section-label{font-size:13px;font-weight:600;opacity:.7;margin:8px 0;}'
             '@media(prefers-reduced-motion:reduce){.instinct-new{animation:none;}}'
             '</style><div class="instinct-markdown">' + ''.join(animated.output) + '</div>')
@@ -230,7 +233,8 @@ def render_markdown_stream(placeholder, content, previous='', thinking=False, st
                     st.html(markdown_stream_html(body, old, streaming=streaming,
                                                  section_labels=False))
             if is_think:
-                with st.expander(_thinking_label(closed, streaming), expanded=streaming and not closed):
+                with st.expander(svg_label('thinking', _thinking_label(closed, streaming)),
+                                 expanded=streaming and not closed):
                     if body.strip():
                         render_body()
                     else:

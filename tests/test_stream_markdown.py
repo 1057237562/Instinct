@@ -89,16 +89,17 @@ from scripts.web_demo_utils import render_markdown_stream
 render_markdown_stream(st.empty(), "<think>```python\\nx = 1\\n```", streaming=True)
 ''').run()
     assert not app.exception
-    assert app.expander[0].label == '💭 思考过程 · 思考中…'
+    assert app.expander[0].label.endswith('思考过程 · 思考中…')
+    assert 'data:image/svg+xml;base64,' in app.expander[0].label
     assert app.markdown[0].value == '```python\nx = 1\n```'
 
 
 @pytest.mark.parametrize('body', ['先分析条件。', '```python\nx = 1\n```'])
 @pytest.mark.parametrize('closed, streaming, label, expanded', [
-    (False, True, '💭 思考过程 · 思考中…', True),
-    (True, True, '💭 思考过程 · 已结束', False),
-    (True, False, '💭 思考过程 · 已结束', False),
-    (False, False, '💭 思考过程 · 未完成', False),
+    (False, True, '思考过程 · 思考中…', True),
+    (True, True, '思考过程 · 已结束', False),
+    (True, False, '思考过程 · 已结束', False),
+    (False, False, '思考过程 · 未完成', False),
 ])
 def test_thinking_has_same_explicit_label_with_or_without_code(body, closed, streaming, label, expanded):
     from streamlit.testing.v1 import AppTest
@@ -110,7 +111,8 @@ def test_thinking_has_same_explicit_label_with_or_without_code(body, closed, str
     ).run()
     assert not app.exception
     assert len(app.expander) == 1
-    assert app.expander[0].label == label
+    assert app.expander[0].label.endswith(label)
+    assert 'data:image/svg+xml;base64,' in app.expander[0].label
     assert app.expander[0].proto.expanded == expanded
     assert all(item.value != '正文' for item in app.expander[0].caption)
     assert any(item.value == '正文' for item in app.caption) == closed
