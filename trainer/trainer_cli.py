@@ -33,7 +33,7 @@ def _apply_bucket_cuda_memory_limit(args) -> float | None:
         and str(getattr(args, 'device', '')).startswith('cuda')
     ):
         return None
-    from dataset.sequence_bucket import BUCKET_MEMORY_SAFETY_GB
+    from scripts.data_loader.sequence_bucket import BUCKET_MEMORY_SAFETY_GB
 
     device = torch.device(args.device)
     total_bytes = int(torch.cuda.get_device_properties(device).total_memory)
@@ -305,7 +305,7 @@ def setup_dist_and_seed(args) -> int:
         getattr(args, 'cache_build_mode', 'inline')
     )
     if not dist.is_initialized() or dist.get_rank() == 0:
-        from dataset.cache_budget import GIB, enforce_cache_budget
+        from scripts.data_loader.cache_budget import GIB, enforce_cache_budget
         report = enforce_cache_budget(max_gb=cache_max_gb)
         if report['budget_bytes'] is not None:
             Logger(

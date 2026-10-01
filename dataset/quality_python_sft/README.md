@@ -53,6 +53,6 @@
 - `provenance_and_tests.jsonl.gz`：混合与验证每一行对应的来源、题号、token 数、上游测试及验证声明；测试保存在旁文件，不出现在训练对话中。
 - `all_curated_sources_metadata.jsonl.gz`：全部精选源样本的题号、分组及测试。
 
-构建顺序：仓库根目录运行 `python dataset/scripts/collect_quality_python_sft.py`，然后 `python dataset/scripts/build_quality_python_sft.py`，最后 `python dataset/scripts/finalize_continuation_sft.py`。GSM8K 的固定版本下载地址记录在 `raw/gsm8k/source.json`，最终步骤需要该目录已下载的数据。若要完整重建，应从初筛脚本重新运行，不要只对已完成的最终混合重复运行 finalizer。
+构建顺序：仓库根目录运行 `python scripts/data_builder/collect_quality_python_sft.py`，然后 `python scripts/data_builder/build_quality_python_sft.py`，最后 `python scripts/data_builder/finalize_continuation_sft.py`。GSM8K 的固定版本下载地址记录在 `raw/gsm8k/source.json`，最终步骤需要该目录已下载的数据。若要完整重建，应从初筛脚本重新运行，不要只对已完成的最终混合重复运行 finalizer。
 
 详细 GSM8K 诊断见 `eval/gsm8k_20260915_weakness_report.md`。

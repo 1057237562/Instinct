@@ -22,4 +22,4 @@
 4. 验证集按题目/仓库隔离；整合标准集的中文、多轮及工具调用样本。
 5. 在过滤后的可用量基础上确定最终配比，并记录本地测试状态。
 
-重现下载：在仓库根目录运行 `python dataset/scripts/collect_first_sft_sources.py`。
+重现下载：在仓库根目录运行 `python scripts/data_builder/collect_first_sft_sources.py`。

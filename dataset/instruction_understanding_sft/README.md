@@ -19,9 +19,9 @@
 完整重建和复核：
 
 ```powershell
-python dataset/scripts/build_instruction_understanding_sft.py
-python dataset/scripts/audit_instruction_understanding_sft.py
-python dataset/scripts/audit_instruction_overlap.py
+python scripts/data_builder/build_instruction_understanding_sft.py
+python scripts/data_builder/audit_instruction_understanding_sft.py
+python scripts/data_builder/audit_instruction_overlap.py
 ```
 
 建议先从当前 20 层检查点进行约 100 万 token 的试训：

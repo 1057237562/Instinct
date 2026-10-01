@@ -1,8 +1,8 @@
 import ast
 from fractions import Fraction
-from dataset.scripts.build_quality_python_sft import static_check, code_key
-from dataset.scripts.finalize_continuation_sft import arithmetic
-from dataset.scripts.apply_sft_manual_review import structural_key
+from scripts.data_builder.build_quality_python_sft import static_check, code_key
+from scripts.data_builder.finalize_continuation_sft import arithmetic
+from scripts.data_builder.apply_sft_manual_review import structural_key
 
 
 def test_short_functions_and_broken_outputs():

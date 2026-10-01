@@ -1,17 +1,17 @@
 import orjson
 
-from dataset.scripts.coder_pretrain_common import (
+from scripts.data_builder.coder_pretrain_common import (
     classify_base,
     classify_continued,
     has_benchmark_overlap,
     ngrams,
 )
-from dataset.scripts.collect_coder_pretrain_12b import (
+from scripts.data_builder.collect_coder_pretrain_12b import (
     TARGETS as SUPPLEMENT_TARGETS,
     clean_text,
     stable_order,
 )
-from dataset.scripts.build_coder_pretrain_12b import (
+from scripts.data_builder.build_coder_pretrain_12b import (
     TARGETS as FINAL_TARGETS,
     audit_contiguous_mixing,
     classify_collected,

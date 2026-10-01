@@ -1,5 +1,5 @@
 import json
-from dataset.scripts.build_reasoning_sft_v2 import rule_rows, selection_units
+from scripts.data_builder.build_reasoning_sft_v2 import rule_rows, selection_units
 
 
 def test_reference_rule_curriculum():

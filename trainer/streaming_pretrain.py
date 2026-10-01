@@ -11,13 +11,13 @@ import traceback
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 
-from dataset.cache_budget import (
+from scripts.data_loader.cache_budget import (
     GIB,
     cache_files,
     enforce_cache_budget,
     release_cache_use,
 )
-from dataset.sequence_bucket import bucket_token_budget
+from scripts.data_loader.sequence_bucket import bucket_token_budget
 from trainer.packing_transition import build_dataset_with_cache_barrier
 from trainer.trainer_utils import Logger
 
@@ -44,7 +44,7 @@ def should_stream_pretrain(args) -> bool:
         return False
     # The ordinary loader reserves the Arrow footprint of the source before
     # creating it; a compressed parquet file expands far beyond its own size.
-    from dataset.source_format import estimated_arrow_bytes
+    from scripts.data_loader.source_format import estimated_arrow_bytes
     return estimated_arrow_bytes(source) > budget_gb * GIB
 
 

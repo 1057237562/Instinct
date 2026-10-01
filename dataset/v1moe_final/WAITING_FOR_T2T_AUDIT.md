@@ -4,7 +4,7 @@
 
 The same-hash T2T audit still lists 17 suspected contamination and 112 review rows, including potential false positives. The anchor generator has 225 unique QA pairs cross-producted across questions/answers; some pairs fail to answer their question. No source files were modified.
 
-User offered to dispatch a lighter model for remaining audit work. Handoff package: `dataset/review_candidates/final_sft_handoff_20260928/README.md`, 677 review items in 116 batches. P0 covers all 129 residuals and 225 anchor pairs. Other categories are exploratory samples / non-T2T identity candidates. Results belong in that package's `results/`; validate with `dataset/scripts/validate_final_sft_review_results.py`.
+User offered to dispatch a lighter model for remaining audit work. Handoff package: `dataset/review_candidates/final_sft_handoff_20260928/README.md`, 677 review items in 116 batches. P0 covers all 129 residuals and 225 anchor pairs. Other categories are exploratory samples / non-T2T identity candidates. Results belong in that package's `results/`; validate with `scripts/data_builder/validate_final_sft_review_results.py`.
 
 Use the user's newly approved outward identity **Instinct**, developed/trained by L1bra independently, no commercial affiliation. Architecture name remains InstinctV1Moe. Do not blindly rewrite the supplied anchor wording. Unify the eventual system prompt with the approved identity after reviews.
 

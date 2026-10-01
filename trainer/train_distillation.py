@@ -21,7 +21,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
-from dataset.lm_dataset import SFTDataset
+from scripts.data_loader.lm_dataset import SFTDataset
 from trainer.trainer_cli import (
     PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
     build_autocast_ctx, build_trainer_parser, flush_remaining_grad,

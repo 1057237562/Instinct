@@ -10,8 +10,9 @@ model/          # Model definition (InstinctConfig, InstinctForCausalLM, LoRA), 
 trainer/        # All training scripts (pretrain, SFT, LoRA, DPO, PPO, GRPO, Agent RL, KD, tokenizer)
                 # + shared infra: trainer_cli.py, trainer_utils.py, training_pipeline.py,
                 #   training_profiler.py, rollout_engine.py, compile_cache.py
-dataset/        # Dataset loaders, corpora, reports, and dataset/scripts preparation utilities
-                # + source_format.py: JSONL/Parquet source resolution for every loader
+dataset/        # Dataset corpora, data files, provenance, and audit reports
+scripts/data_loader/ # Training dataset loaders, source resolution, packing, and caching
+scripts/data_builder/ # Offline dataset collection, generation, cleaning, and audit utilities
 dataset_compiler/  # Rust tool: compile JSONL corpora into Parquet (see its README.md)
 scripts/        # Inference, API server, WebUI, model conversion, training launchers
 eval_llm.py     # CLI inference script
@@ -118,7 +119,7 @@ cd scripts && streamlit run web_demo.py
 ```
 
 ### Datasets: JSONL or Parquet
-Every trainer accepts either format on `--data_path`; `dataset/source_format.py`
+Every trainer accepts either format on `--data_path`; `scripts/data_loader/source_format.py`
 resolves a path (or a directory of shards) to the right `datasets` builder. The
 Config WebUI lists both, and ignores `*.report.json` sidecars.
 
@@ -245,7 +246,7 @@ Qwen-generated dataset is free of model-identity contamination.
   identity-keyword hit counts, schema/length-filter counts, and output SHA-256.
   Keep the original source data; name the cleaned training artifact with an
   explicit `clean` or `identity_clean` suffix and do not overwrite raw data.
-- Use `dataset/scripts/filter_anomaly_candidates.py` as the first-pass triage
+- Use `scripts/data_builder/filter_anomaly_candidates.py` as the first-pass triage
   CLI for suspicious questions and identity contamination. It supports JSONL,
   gzip JSONL, Parquet, and shard directories; it emits whole rows with source
   path, row number, rule hits, reviewer instructions, and a companion hash
@@ -253,7 +254,7 @@ Qwen-generated dataset is free of model-identity contamination.
   deletion decisions. Example:
 
   ```bash
-  python dataset/scripts/filter_anomaly_candidates.py dataset/sft_t2t_mini.jsonl \
+  python scripts/data_builder/filter_anomaly_candidates.py dataset/sft_t2t_mini.jsonl \
     --profile all --output dataset/review_candidates/t2t_mini_candidates.jsonl
   ```
 

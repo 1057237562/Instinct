@@ -5,7 +5,7 @@ Rows scanned: 905,718
 Source SHA-256: `10fae2358aeed89a4828e9270c36a7d764adf20dcfb428870cc3612831f1dd6c`
 Target identity: Instinct, developed by L1bra, affiliated with no commercial organization.
 
-Tool: `dataset/scripts/audit_identity_contamination.py` (this run's candidate output and
+Tool: `scripts/data_builder/audit_identity_contamination.py` (this run's candidate output and
 report are `sft_t2t_mini.identity_candidates.jsonl` / `sft_t2t_mini.identity_audit.json`).
 The source dataset was not modified.
 
@@ -68,7 +68,7 @@ foreign identity belongs to composed third-party text were all kept out of the c
 2. Decide the 874 brand-fact rows individually: some are irrecoverable false facts about
    L1bra (drop), others are Alibaba Cloud tutorial text that only needs the brand restored.
 3. `AGENTS.md` names the identity answer as `我是 InstinctV1Moe…` while this audit target and
-   the trainer's system prompts (`dataset/lm_dataset.py: pre_processing_chat`) use `Instinct`.
+   the trainer's system prompts (`scripts/data_loader/lm_dataset.py: pre_processing_chat`) use `Instinct`.
    Align the anchor text with the trainer before generating identity anchors.
 
 ---
@@ -112,7 +112,7 @@ origin; unfixable persona turn → regenerated answer in Instinct's voice.
 
 # Topic filter (LGBT profile)
 
-`dataset/scripts/remove_topic_rows.py --profile lgbt` removed 809 rows of
+`scripts/data_builder/remove_topic_rows.py --profile lgbt` removed 809 rows of
 904,909 (0.089%) from the repaired corpus, matched on unambiguous terms
 (同性恋 / 同性婚姻 / 跨性别 / 性取向 / 性别认同 / LGBT / gay / lesbian /
 transgender / same-sex ...). Ambiguous terms (同志, 百合, 同性, pride, trans,

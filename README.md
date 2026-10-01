@@ -70,19 +70,19 @@ PyTorch。无 GPU 也可进行 CPU smoke test，但完整训练建议使用 NVID
 
 ### 准备与混合 SFT 数据
 
-`dataset/scripts/prepare_sft_data.py` 可将 CodeAlpaca、SmolTalk、BigCode Exec、Magicoder
+`scripts/data_builder/prepare_sft_data.py` 可将 CodeAlpaca、SmolTalk、BigCode Exec、Magicoder
 和 No Robots 等数据统一转换为 Instinct 的 `conversations` JSONL：
 
 ```bash
-python dataset/scripts/prepare_sft_data.py codealpaca-local
-python dataset/scripts/prepare_sft_data.py smol-smoltalk --max-samples 100000
-python dataset/scripts/prepare_sft_data.py bigcode-exec-50k
+python scripts/data_builder/prepare_sft_data.py codealpaca-local
+python scripts/data_builder/prepare_sft_data.py smol-smoltalk --max-samples 100000
+python scripts/data_builder/prepare_sft_data.py bigcode-exec-50k
 ```
 
 混合大规模 Coding、Math 与原始 T2T replay 时可运行：
 
 ```bash
-python dataset/scripts/mix_sft_datasets.py
+python scripts/data_builder/mix_sft_datasets.py
 ```
 
 该脚本用 reservoir sampling 流式抽取大型 T2T 数据，并通过磁盘分块外部混洗限制峰值

@@ -160,7 +160,7 @@ The TACO dataset authored by BAAI, Shandong Normal University and Peking Univers
 
 ## Cleaned derivative (Instinct)
 
-`taco.clean.jsonl` (16,189 rows, 2.6 GB) — produced by `dataset/scripts/clean_taco.py`, full stats in `taco.clean.report.json`, dropped rows in `taco.excluded.jsonl`.
+`taco.clean.jsonl` (16,189 rows, 2.6 GB) — produced by `scripts/data_builder/clean_taco.py`, full stats in `taco.clean.report.json`, dropped rows in `taco.excluded.jsonl`.
 
 - Per-row schema: `question` (HTML→text), `source/difficulty/url/tags/raw_tags/skill_types`, `starter_code`, `is_fn_call`+`fn_name` (5,279 fn-call rows run in-process; 10,910 stdio rows diff in sandbox), `tests{inputs,outputs}` (paired), `n_tests`, `solutions` (python, ≤8 each, exact-deduped).
 - Cleaning: 26,443 → 16,189 kept. Excluded: **8,777 cross-duplicates of code_contests** (normalized statement text; CC is canonical), 698 image-in-statement, 739 no/mismatched tests, 39 in-dataset dups, 1 bad JSON.

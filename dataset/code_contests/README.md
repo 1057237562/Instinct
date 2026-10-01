@@ -199,7 +199,7 @@ itself declares CC BY 4.0, which is what applies to the data.
 
 ## Cleaned derivative (Instinct)
 
-`code_contests.clean.jsonl` (12,559 rows, 1.6 GB) — produced by `dataset/scripts/clean_code_contests.py`, full stats in `code_contests.clean.report.json`, dropped rows in `code_contests.excluded.jsonl`.
+`code_contests.clean.jsonl` (12,559 rows, 1.6 GB) — produced by `scripts/data_builder/clean_code_contests.py`, full stats in `code_contests.clean.report.json`, dropped rows in `code_contests.excluded.jsonl`.
 
 - Per-row schema: `problem_id/name/source/difficulty/cf_rating/cf_tags`, `description` (HTML→text, `<img>` rows excluded), `description_is_translated`+`untranslated_description` (1,088 machine-translated), `time_limit_s/memory_limit_mb/file_io` (22 file-IO rows flagged), `tests{public,private,generated}` (parallel `input[]`/`output[]` lists, zip pairs), `n_tests_*`, `solutions_python3`/`solutions_cpp` (≤8 each, exact-deduped), `n_incorrect_solutions`.
 - Cleaning: 13,610 → 12,559 kept; excluded 1,038 duplicate statements (multi-source aggregation) + 13 test-less. Language enum verified by syntax sampling: 1=python2, 2=cpp, 3=python3, 4=java; py2/java solutions dropped.

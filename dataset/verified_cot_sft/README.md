@@ -9,9 +9,9 @@
 重建和审计：
 
 ```powershell
-python dataset/scripts/build_verified_cot_sft.py
-python dataset/scripts/audit_verified_cot_sft.py
-python dataset/scripts/audit_verified_cot_overlap.py
+python scripts/data_builder/build_verified_cot_sft.py
+python scripts/data_builder/audit_verified_cot_sft.py
+python scripts/data_builder/audit_verified_cot_overlap.py
 ```
 
 这只能保证有限生成域内的关系、算式和终答一致，不能证明开放式推理泛化。

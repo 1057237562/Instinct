@@ -62,12 +62,12 @@ HumanEval 仅作为排除依据：检查显式 benchmark 名称、题面、参�
 在仓库根目录运行；脚本默认拒绝覆盖已完成输出。重建应先把旧成品归档到另一个明确命名的目录。
 
 ```powershell
-python -X utf8 dataset/scripts/build_v1moe_sft64k.py prepare
-python -X utf8 dataset/scripts/filter_anomaly_candidates.py dataset/v1moe_sft64k/candidates.jsonl --profile identity --output dataset/v1moe_sft64k/triage.jsonl
-python -X utf8 dataset/scripts/build_v1moe_sft64k.py finalize
-python -X utf8 dataset/scripts/refine_v1moe_sft64k.py
-python -X utf8 dataset/scripts/build_v1moe_sft64k.py verify
-python -X utf8 dataset/scripts/package_v1moe_sft64k.py
+python -X utf8 scripts/data_builder/build_v1moe_sft64k.py prepare
+python -X utf8 scripts/data_builder/filter_anomaly_candidates.py dataset/v1moe_sft64k/candidates.jsonl --profile identity --output dataset/v1moe_sft64k/triage.jsonl
+python -X utf8 scripts/data_builder/build_v1moe_sft64k.py finalize
+python -X utf8 scripts/data_builder/refine_v1moe_sft64k.py
+python -X utf8 scripts/data_builder/build_v1moe_sft64k.py verify
+python -X utf8 scripts/data_builder/package_v1moe_sft64k.py
 ```
 
 `sources.json` 固定输入 SHA-256，记录源仓库、已知 revision 和完整扫描计数。已有本地文件缺失的上游 revision 明确标为未知，不能用上游当前 HEAD 冒充下载版本。下载的 LongAlign 原始文件保存在 `dataset/v1moe_sft64k_sources/longalign/`。

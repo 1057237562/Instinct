@@ -48,7 +48,7 @@ cd dataset_compiler && cargo build --release
 - 编译输出旁边会生成 `<output>.report.json`，记录源文件摘要、行数、列类型、
   压缩方式、吞吐与告警，便于审计。
 
-Schema 约定（由 `dataset/source_format.py` 与各 Dataset 类读取）：
+Schema 约定（由 `scripts/data_loader/source_format.py` 与各 Dataset 类读取）：
 - 预训练：`text` 为字符串，其余标量键（`token_count`、`license`、`source` 等）
   原样保留。
 - 对话：`conversations` / `chosen` / `rejected` 为 `list<struct<...>>`，字段
@@ -87,10 +87,10 @@ CC BY、CC BY-SA、CC0 / Public Domain 论文。构建器按全部时间分片�
 ID、URL、作者和许可证元数据。
 
 ```bash
-python dataset/scripts/collect_arxiv_pretrain.py
+python scripts/data_builder/collect_arxiv_pretrain.py
 
 # 例如扩充为约 2 GB
-python dataset/scripts/collect_arxiv_pretrain.py \
+python scripts/data_builder/collect_arxiv_pretrain.py \
   --target-bytes 2000000000 \
   --output dataset/pretrain_arxiv_open_2gb.jsonl \
   --report dataset/pretrain_arxiv_open_2gb.report.json
@@ -114,14 +114,14 @@ python dataset/scripts/collect_arxiv_pretrain.py \
 真实仓库组件可复现为：
 
 ```bash
-python dataset/scripts/collect_stackv2_code_4096.py
-python dataset/scripts/collect_arxiv_abstracts_4096.py
+python scripts/data_builder/collect_stackv2_code_4096.py
+python scripts/data_builder/collect_arxiv_abstracts_4096.py
 ```
 
 完整混合先构建为 `codespecialist_4096.next.jsonl`，校验后再替换正式文件：
 
 ```bash
-python dataset/scripts/build_codespecialist_4096.py
+python scripts/data_builder/build_codespecialist_4096.py
 ```
 
 实际组成、许可证来源、行数、正文比例和 SHA-256 见
@@ -143,13 +143,13 @@ python dataset/scripts/build_codespecialist_4096.py
 收集器按上游分片原子保存，可以安全中断后重跑：
 
 ```bash
-python dataset/scripts/collect_coder_pretrain_12b.py --component all
+python scripts/data_builder/collect_coder_pretrain_12b.py --component all
 ```
 
 四个补充组件收齐后生成最终全局打乱语料：
 
 ```bash
-python dataset/scripts/build_coder_pretrain_12b.py
+python scripts/data_builder/build_coder_pretrain_12b.py
 ```
 
 最终构建会按正文 SHA-256 全局精确去重，并用 13-word n-gram 筛除与 HumanEval、
@@ -169,16 +169,16 @@ sanitized MBPP test 和 GSM8K test 重叠的记录。所有样本均由项目 to
 
 ```bash
 # 使用已下载到 dataset/codealpaca/ 的 CodeAlpaca 20K
-python dataset/scripts/prepare_sft_data.py codealpaca-local
+python scripts/data_builder/prepare_sft_data.py codealpaca-local
 
 # 适合小于 1B 模型的通用指令数据（可先抽样 100K）
-python dataset/scripts/prepare_sft_data.py smol-smoltalk --max-samples 100000
+python scripts/data_builder/prepare_sft_data.py smol-smoltalk --max-samples 100000
 
 # 执行过滤的 Coding 指令数据
-python dataset/scripts/prepare_sft_data.py bigcode-exec-50k
+python scripts/data_builder/prepare_sft_data.py bigcode-exec-50k
 
 # 可选 Coding 补充
-python dataset/scripts/prepare_sft_data.py magicoder-75k
+python scripts/data_builder/prepare_sft_data.py magicoder-75k
 ```
 
 转换结果统一为 Instinct 所需的 `conversations` 格式，并使用 `sft_` 文件名前缀。
@@ -186,7 +186,7 @@ python dataset/scripts/prepare_sft_data.py magicoder-75k
 ### 混合 Magicoder 110K、MathInstruct 与原始 T2T replay
 
 ```bash
-python dataset/scripts/mix_sft_datasets.py
+python scripts/data_builder/mix_sft_datasets.py
 ```
 
 默认读取：

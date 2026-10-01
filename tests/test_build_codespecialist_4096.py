@@ -1,4 +1,4 @@
-from dataset.scripts.build_codespecialist_4096 import CODE_COMPONENTS, MAX_TOKENS, MIX_PLAN
+from scripts.data_builder.build_codespecialist_4096 import CODE_COMPONENTS, MAX_TOKENS, MIX_PLAN
 
 
 def test_token_plan_is_1_6b_and_sixty_percent_code():

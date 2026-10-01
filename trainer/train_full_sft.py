@@ -20,7 +20,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
-from dataset.lm_dataset import SFTDataset
+from scripts.data_loader.lm_dataset import SFTDataset
 from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
     init_model, config_from_args, build_optimizer,

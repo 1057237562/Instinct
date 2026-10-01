@@ -17,11 +17,10 @@ checkpoints/
 *.bin
 
 # ===== 数据集（大文件，从 ModelScope / HuggingFace 单独下载）=====
-# dataset/ 只入库 README / 准备脚本等小文件，数据本体全部忽略（黑名单改为白名单）
+# dataset/ 只入库 README 等说明文件（Python 代码放在 scripts/data_loader/ 和 scripts/data_builder/），数据本体全部忽略（黑名单改为白名单）
 dataset/**
 !dataset/**/
 !dataset/**/*.md
-!dataset/**/*.py
 !dataset/**/.gitattributes
 # HF 原始下载缓存整体忽略（含自动生成的 dataset card README，须置于白名单之后）
 dataset/**/_hf_raw/

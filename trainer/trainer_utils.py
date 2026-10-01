@@ -750,7 +750,7 @@ def configure_bucket_memory_budget(
         and str(getattr(args, 'sequence_packing_mode', 'fixed')) == 'bucket'
     ):
         return None
-    from dataset.sequence_bucket import bucket_token_budget
+    from scripts.data_loader.sequence_bucket import bucket_token_budget
 
     explicit_budget = int(getattr(args, 'bucket_token_budget', 0) or 0)
     persistent_bytes = estimate_training_persistent_bytes(

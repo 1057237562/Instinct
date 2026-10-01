@@ -98,7 +98,7 @@ def test_undefined_names_check_catches_a_stale_rename(tmp_path):
     """The guard has to fail on the bug it exists for."""
     sample = tmp_path / "script.py"
     sample.write_text(
-        "from dataset.streaming_chunks import build_chunk_plan\n"
+        "from scripts.data_loader.streaming_chunks import build_chunk_plan\n"
         "def main():\n"
         "    return build_jsonl_chunk_plan('x')\n",
         encoding="utf-8",
@@ -108,7 +108,7 @@ def test_undefined_names_check_catches_a_stale_rename(tmp_path):
 
 def test_streaming_entry_points_exist_where_the_trainer_imports_them():
     """The names the pretrain script uses must resolve on the module."""
-    from dataset import streaming_chunks
+    from scripts.data_loader import streaming_chunks
     from trainer import train_pretrain
 
     assert train_pretrain.build_chunk_plan is streaming_chunks.build_chunk_plan

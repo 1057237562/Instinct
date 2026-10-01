@@ -88,5 +88,5 @@ from scripts.web_demo_utils import render_markdown_stream
 render_markdown_stream(st.empty(), "<think>```python\\nx = 1\\n```", streaming=True)
 ''').run()
     assert not app.exception
-    assert app.expander[0].label == '思考中…'
+    assert app.expander[0].label == '💭 思考过程 · 思考中…'
     assert app.markdown[0].value == '```python\nx = 1\n```'

@@ -56,4 +56,4 @@ python scripts/run_reasoning_sft.py --pilot --learning_rate 5e-6
 
 现有 trainer 不会自动使用本 validation.jsonl 计算功能正确率或早停。训练前后应在固定推理设置下检查：严格格式率、对照指令双正确率、数字答案、重复率以及日常对话保留能力。HumanEval 的提取与辅助函数问题应先修复，GSM8K 要区分格式失败和数值错误。
 
-重建：`python dataset/scripts/build_strict_reasoning_sft.py`。文件SHA-256及生成统计见 `report.json`。
+重建：`python scripts/data_builder/build_strict_reasoning_sft.py`。文件SHA-256及生成统计见 `report.json`。

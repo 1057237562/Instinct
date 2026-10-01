@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from dataset import cache_budget
+from scripts.data_loader import cache_budget
 
 
 def _file(path: Path, size: int, mtime_ns: int):
@@ -124,8 +124,8 @@ def test_nested_worker_counts_against_parent_budget(tmp_path, monkeypatch):
 def test_managed_worker_does_not_require_hf_datasets_cache(tmp_path, monkeypatch):
     """Regression: WebUI commonly sets HF_HOME without exporting the cache leaf."""
     import datasets
-    from dataset import lm_dataset
-    from dataset.managed_cache import _worker
+    from scripts.data_loader import lm_dataset
+    from scripts.data_loader.managed_cache import _worker
 
     # _worker normally exits with its process. Restore this module-global in
     # the direct unit test so the temporary cache path cannot leak downstream.
@@ -161,8 +161,8 @@ def test_managed_worker_does_not_require_hf_datasets_cache(tmp_path, monkeypatch
 
 def test_managed_worker_materializes_only_requested_jsonl_range(tmp_path, monkeypatch):
     import datasets
-    from dataset import lm_dataset
-    from dataset.managed_cache import _worker
+    from scripts.data_loader import lm_dataset
+    from scripts.data_loader.managed_cache import _worker
 
     monkeypatch.setattr(
         datasets.config, "HF_DATASETS_CACHE", datasets.config.HF_DATASETS_CACHE
@@ -210,7 +210,7 @@ def test_trainer_cli_defaults_to_five_gibibytes(monkeypatch):
 
 
 def test_source_digest_memo_invalidates_from_head_tail_signature(tmp_path):
-    from dataset.managed_cache import _source_digest
+    from scripts.data_loader.managed_cache import _source_digest
 
     source = tmp_path / "source.jsonl"
     source.write_bytes(b"a" * (128 * 1024) + b"b")

@@ -3,7 +3,7 @@
 import json
 import random
 
-from dataset.scripts.mix_sft_datasets import (
+from scripts.data_builder.mix_sft_datasets import (
     ExternalRandomShuffler,
     iter_json_array,
     mix_datasets,

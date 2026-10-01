@@ -23,8 +23,8 @@
 完整重建与审计：
 
 ```powershell
-python dataset/scripts/build_sft_continue.py
-python dataset/scripts/audit_sft_continue.py
+python scripts/data_builder/build_sft_continue.py
+python scripts/data_builder/audit_sft_continue.py
 ```
 
 最终审计结果见 `sft_continue.audit.json`；逐行来源和原始行号见 `sft_continue.provenance.jsonl.gz`。思维链审计见 `verified_cot_sft/full_audit.json`、`luna_math_full_audit.json`、`luna_language_rules_full_audit.json` 和 `luna_generator_full_audit.json`。

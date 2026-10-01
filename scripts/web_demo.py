@@ -19,9 +19,15 @@ from types import SimpleNamespace
 import torch
 import numpy as np
 import streamlit as st
-from transformers import AutoTokenizer, TextIteratorStreamer
+from transformers import AutoTokenizer
 from scripts.stream_metrics import TokenRateStreamer, speed_caption, render_updates
 from scripts.chat_generation import GenerationTask, stop_generation
+from scripts.chat_tools import (
+    ChatTextIteratorStreamer, split_tool_calls, tool_request_message, run_tool_calls,
+    calculate_expression,
+    ordered_response_parts,
+    restore_thinking_prefix,
+)
 from model.model_instinct import InstinctConfig, InstinctForCausalLM
 from scripts.web_demo_utils import (
     clear_conversation_state,
@@ -113,6 +119,13 @@ LANG_TEXTS = {
         'load_failed': '加载失败',
         'generation_failed': '生成失败',
         'generation_stopping': '正在停止上一轮生成，请稍后重试。',
+        'tool_completed': '完成',
+        'tool_failed': '失败',
+        'tool_parameters': '调用参数',
+        'tool_result': '工具结果',
+        'tool_invalid': '无法识别的工具调用',
+        'tool_limit': '已达到本轮工具调用次数上限。',
+        'tool_no_answer': '本轮没有生成最终回答，可展开查看工具详情。',
         'matched_config': '所选权重匹配的配置',
         'loaded_config': '已加载模型实际使用的配置',
         'config_details': '配置详情',
@@ -161,6 +174,13 @@ LANG_TEXTS = {
         'load_failed': 'Load failed',
         'generation_failed': 'Generation failed',
         'generation_stopping': 'Stopping the previous generation; please try again shortly.',
+        'tool_completed': 'Completed',
+        'tool_failed': 'Failed',
+        'tool_parameters': 'Arguments',
+        'tool_result': 'Result',
+        'tool_invalid': 'Invalid tool call',
+        'tool_limit': 'Tool call limit reached for this reply.',
+        'tool_no_answer': 'No final answer was generated. Expand the tool details to inspect results.',
         'matched_config': 'Config matched to selected weight',
         'loaded_config': 'Config used by loaded model',
         'config_details': 'Config details',
@@ -203,7 +223,7 @@ def execute_tool(tool_name, args):
     import datetime
     try:
         if tool_name == 'calculate_math':
-            return {"result": eval(args.get('expression', '0'))}
+            return {"result": calculate_expression(args.get('expression', '0'))}
         elif tool_name == 'get_current_time':
             tz = args.get('timezone', 'Asia/Shanghai')
             return {"result": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -228,7 +248,7 @@ def _escape_html(s):
     return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
 
 
-class LogitLensStreamer(TextIteratorStreamer):
+class LogitLensStreamer(ChatTextIteratorStreamer):
     """TextIteratorStreamer 的增强版：额外把实际生成的 token id 记录进共享列表。
 
     generate() 开头 put 的是完整 prompt（skip_prompt=True 时被丢弃，且不记录）；
@@ -863,8 +883,45 @@ def setup_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
+def render_tool_events(events):
+    for event in events:
+        failed = 'error' in event
+        name = event.get('name') or get_text('tool_invalid')
+        if st.session_state.get('lang', 'en') == 'zh':
+            name = TOOL_SHORT_NAMES.get(name, name)
+        status = get_text('tool_failed' if failed else 'tool_completed')
+        with st.expander(f"{'❌' if failed else '🔧'} {name} · {status}", expanded=False):
+            st.caption(get_text('tool_parameters'))
+            st.json(event.get('arguments', {}))
+            if failed:
+                st.error(event['error'])
+                if event.get('raw'):
+                    st.code(event['raw'], language='json')
+            if 'result' in event:
+                st.caption(get_text('tool_result'))
+                st.json(event['result'])
+
+
+def render_chat_response(placeholder, content, events, previous='',
+                         thinking=False, streaming=False):
+    if not events:
+        render_markdown_stream(placeholder, content, previous=previous,
+                               thinking=thinking, streaming=streaming)
+        return
+    with placeholder.container():
+        for kind, value, offset in ordered_response_parts(content, events):
+            if kind == 'tool':
+                render_tool_events([value])
+            elif value.strip():
+                render_markdown_stream(
+                    st.empty(), value, previous=previous[offset:offset + len(value)],
+                    thinking=thinking, streaming=streaming,
+                )
+
+
 def render_chat_generation(model, generation_kwargs, placeholder, speed_slot,
-                           loading_slot, *, prefix='', lens=None):
+                           loading_slot, *, prefix='', lens=None, tool_events=(),
+                           initial_thinking=False):
     streamer = generation_kwargs['streamer']
     task = GenerationTask(model, generation_kwargs)
     st.session_state.generation_task = task
@@ -872,9 +929,12 @@ def render_chat_generation(model, generation_kwargs, placeholder, speed_slot,
     answer = ''
     try:
         for updated_answer, final_update in render_updates(streamer):
+            updated_answer = restore_thinking_prefix(updated_answer, initial_thinking)
             speed_slot.caption(speed_caption(streamer.snapshot()))
-            render_markdown_stream(
-                placeholder, prefix + updated_answer, previous=prefix + answer,
+            visible, _ = split_tool_calls(updated_answer, streaming=not final_update)
+            old_visible, _ = split_tool_calls(answer, streaming=True)
+            render_chat_response(
+                placeholder, prefix + visible, tool_events, previous=prefix + old_visible,
                 thinking=st.session_state.get('enable_thinking', False),
                 streaming=not final_update,
             )
@@ -916,8 +976,10 @@ def main():
 
     for i, message in enumerate(messages):
         if message["role"] == "assistant":
-            render_markdown_stream(st.empty(), message['content'],
-                                   thinking=message.get('thinking_enabled', False), streaming=False)
+            render_chat_response(
+                st.empty(), message['content'], message.get('tool_events', []),
+                thinking=message.get('thinking_enabled', False), streaming=False,
+            )
             if message.get('generation_stats'):
                 st.caption(speed_caption(message['generation_stats']))
             render_answer_actions(message["content"], i, i == len(messages) - 1)
@@ -971,7 +1033,7 @@ def main():
                                         repetition_penalty=st.session_state.get('repetition_penalty', 1.0),
                                         prompt_token_ids=inputs.input_ids[0].tolist())
 
-        streamer = lens.streamer if lens is not None else TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+        streamer = lens.streamer if lens is not None else ChatTextIteratorStreamer(tokenizer, skip_prompt=True)
         streamer = TokenRateStreamer(streamer)
         speed_slot = st.empty()
         generation_stats = []
@@ -995,7 +1057,8 @@ def main():
 
         render_markdown_stream(placeholder, '', thinking=st.session_state.get('enable_thinking', False))
         answer = render_chat_generation(
-            model, generation_kwargs, placeholder, speed_slot, loading_slot, lens=lens)
+            model, generation_kwargs, placeholder, speed_slot, loading_slot, lens=lens,
+            initial_thinking=new_prompt.rstrip().endswith('<think>'))
         if answer is None:
             return
         if lens is not None:
@@ -1003,28 +1066,36 @@ def main():
             # 工具调用多轮复用 generation_kwargs：摘掉钩子，避免后续轮次继续污染已冻结的逐层解释表
             generation_kwargs.pop("layer_callback", None)
 
-        full_answer = answer
+        full_answer = ''
+        tool_events = []
+        enabled_names = {tool['function']['name'] for tool in tools or []}
         generation_stats.append(streamer.snapshot())
         speed_slot.caption(speed_caption(generation_stats[-1]))
-        for _ in range(16):
-            tool_calls = re.findall(r'<tool_call>(.*?)</tool_call>', answer, re.DOTALL)
+        for round_index in range(17):
+            visible, tool_calls = split_tool_calls(answer)
+            separator = '\n\n' if full_answer and visible.strip() else ''
+            offset = len(full_answer) + len(separator)
+            for call in tool_calls:
+                call['position'] += offset
+            full_answer += separator + visible
             if not tool_calls:
                 break
-            st.session_state.chat_messages.append({"role": "assistant", "content": answer})
-            tool_results = []
-            for tc_str in tool_calls:
-                try:
-                    tc = json.loads(tc_str.strip())
-                    result = execute_tool(tc.get('name', ''), tc.get('arguments', {}))
-                    st.session_state.chat_messages.append({"role": "tool", "content": json.dumps(result, ensure_ascii=False)})
-                    tool_results.append(f"**ToolCalled · {tc.get('name', '')}**\n\n```json\n{json.dumps(result, ensure_ascii=False, indent=2)}\n```")
-                except:
-                    pass
-            full_answer += "\n" + "\n".join(tool_results) + "\n"
-            render_markdown_stream(placeholder, full_answer, streaming=False)
+            if round_index == 16:
+                tool_events.extend(dict(call, error=get_text('tool_limit')) for call in tool_calls)
+                render_chat_response(placeholder, full_answer, tool_events)
+                st.warning(get_text('tool_limit'))
+                break
+            st.session_state.chat_messages.append(tool_request_message(visible, tool_calls))
+            events = run_tool_calls(tool_calls, enabled_names, execute_tool)
+            tool_events.extend(events)
+            for event in events:
+                st.session_state.chat_messages.append({
+                    'role': 'tool', 'content': json.dumps(event['result'], ensure_ascii=False),
+                })
+            render_chat_response(placeholder, full_answer, tool_events)
             new_prompt = tokenizer.apply_chat_template(st.session_state.chat_messages, **template_kwargs)
             inputs = tokenizer(new_prompt, return_tensors="pt", truncation=True).to(device)
-            streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+            streamer = ChatTextIteratorStreamer(tokenizer, skip_prompt=True)
             streamer = TokenRateStreamer(streamer)
             generation_kwargs["input_ids"] = inputs.input_ids
             generation_kwargs["attention_mask"] = inputs.attention_mask
@@ -1032,12 +1103,20 @@ def main():
             generation_kwargs["streamer"] = streamer
             answer = render_chat_generation(
                 model, generation_kwargs, placeholder, speed_slot, loading_slot,
-                prefix=full_answer)
+                prefix=full_answer + ('\n\n' if full_answer.strip() else ''),
+                tool_events=tool_events,
+                initial_thinking=new_prompt.rstrip().endswith('<think>'))
             if answer is None:
                 return
-            full_answer += answer
             generation_stats.append(streamer.snapshot())
         answer = full_answer
+        render_chat_response(
+            placeholder, answer, tool_events,
+            thinking=st.session_state.get('enable_thinking', False),
+            streaming=False,
+        )
+        if not answer.strip() and tool_events:
+            st.caption(get_text('tool_no_answer'))
         loading_slot.empty()
         total_tokens = sum(item['tokens'] for item in generation_stats)
         total_seconds = sum(item['seconds'] for item in generation_stats)
@@ -1046,8 +1125,11 @@ def main():
         speed_slot.caption(speed_caption(stats))
 
         messages.append({"role": "assistant", "content": answer, "generation_stats": stats,
+                         "tool_events": tool_events,
                          "thinking_enabled": st.session_state.get('enable_thinking', False)})
-        st.session_state.chat_messages.append({"role": "assistant", "content": answer})
+        # Previous assistant/tool turns are already in protocol history. Only
+        # the final model reply belongs here; never feed UI cards back to it.
+        st.session_state.chat_messages.append({"role": "assistant", "content": visible})
         render_answer_actions(answer, len(messages) - 1, True)
 
     with toolbar_slot.container():

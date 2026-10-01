@@ -35,7 +35,7 @@ types, compression, throughput and any warnings.
   JSON reader; parquet is read straight into Arrow.
 * **`token_count` survives.** Instinct corpora carry it, and the compiler keeps
   it, so bounded streaming can plan chunks by token totals without tokenizing
-  anything (`dataset/streaming_chunks.py`).
+  anything (`scripts/data_loader/streaming_chunks.py`).
 * **Bounded cache.** A parquet source is read from row groups, and streaming
   materializes a chunk by re-encoding whole row groups instead of copying bytes
   from an arbitrary offset.
@@ -93,7 +93,7 @@ so **one row group is one streaming chunk**:
 ```
 
 The boundaries are recorded in the footer (`instinct.aligned_chunk_rows`,
-`instinct.aligned_chunk_bytes`) and `dataset/streaming_chunks.py` uses them
+`instinct.aligned_chunk_bytes`) and `scripts/data_loader/streaming_chunks.py` uses them
 verbatim, so the JSONL plan and the parquet plan describe exactly the same row
 ranges and a checkpoint's cursor keeps pointing at the same rows. `inspect`
 shows the alignment, and the sidecar report records it.

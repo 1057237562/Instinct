@@ -70,7 +70,7 @@ P0应先完成。P1的结果用于发现系统性问题和决定是否扩大某�
 结果可以分批回填。在仓库根目录执行下列只读检查；去掉 `--allow-partial` 后，缺少任何结果也会返回失败：
 
 ```powershell
-python -X utf8 dataset/scripts/validate_final_sft_review_results.py --allow-partial
+python -X utf8 scripts/data_builder/validate_final_sft_review_results.py --allow-partial
 ```
 
 本交接包已经通过完整性检查：677个唯一ID、116个批次及其原文哈希一致。校验器不会自动应用补丁，也不会把 `uncertain` 当作通过。

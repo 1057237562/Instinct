@@ -7,10 +7,10 @@ import torch
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
-from dataset.lm_dataset import (
+from scripts.data_loader.lm_dataset import (
     PretrainDataset, SFTDataset, _best_fit_pack, _tokenize_pretrain_batch,
 )
-from dataset.sequence_bucket import (
+from scripts.data_loader.sequence_bucket import (
     bucket_token_budget,
     optimal_sequence_buckets,
     packing_preprocess_workers,

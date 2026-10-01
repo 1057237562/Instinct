@@ -7,8 +7,8 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import ConcatDataset, DistributedSampler
 
-from dataset.source_format import canonical_source_key
-from dataset.sequence_bucket import (
+from scripts.data_loader.source_format import canonical_source_key
+from scripts.data_loader.sequence_bucket import (
     BUCKET_CALIBRATION_BATCH_SIZE,
     BUCKET_CALIBRATION_MEMORY_GB,
     BUCKET_CALIBRATION_SEQ_LEN,

@@ -109,22 +109,33 @@ def _markdown_parser():
     return MarkdownIt('commonmark', {'html': False}).enable('table')
 
 
+def _thinking_label(closed, streaming):
+    state = '已结束' if closed else ('思考中…' if streaming else '未完成')
+    return f'💭 思考过程 · {state}'
+
+
 @lru_cache(maxsize=8)
-def _render_markdown_body(text, thinking, streaming):
+def _render_markdown_body(text, thinking, streaming, section_labels=True):
     output = []
     for is_think, body, closed in _thinking_parts(text, implicit=thinking):
         rendered = _markdown_parser().render(body)
         if is_think:
-            label = '思考中…' if streaming and not closed else '思考过程'
-            rendered = ('<details open class="instinct-think"><summary>' + label
+            if closed and not body.strip():
+                continue
+            label = _thinking_label(closed, streaming)
+            opened = ' open' if streaming and not closed else ''
+            rendered = ('<details' + opened + ' class="instinct-think"><summary>' + label
                         + '</summary>' + (rendered or '<p>等待思考内容…</p>') + '</details>')
+        elif section_labels and body.strip():
+            rendered = '<div class="instinct-section-label">正文</div>' + rendered
         output.append(rendered)
     return ''.join(output)
 
 
-def markdown_stream_html(content, previous='', thinking=False, streaming=True):
+def markdown_stream_html(content, previous='', thinking=False, streaming=True,
+                         section_labels=True):
     def render(text):
-        return _render_markdown_body(text, thinking, streaming)
+        return _render_markdown_body(text, thinking, streaming, section_labels)
     rendered = render(content)
     # Compare visible text; animate text nodes after Markdown parsing, never
     # insert animation HTML into a Markdown code fence.
@@ -144,8 +155,10 @@ def markdown_stream_html(content, previous='', thinking=False, streaming=True):
             '.instinct-new{animation:instinct-reveal 60ms linear both;}'
             '.instinct-markdown pre{overflow-x:auto;padding:12px;background:rgba(128,128,128,.12);border-radius:8px;}'
             '.instinct-markdown pre code{white-space:pre;}'
-            '.instinct-think{border-left:2px solid #888;padding-left:12px;margin:8px 0;}'
-            '.instinct-think summary{color:#888;cursor:pointer;}'
+            '.instinct-think{border-left:3px solid #888;padding:10px 12px;margin:8px 0;'
+            'background:rgba(128,128,128,.08);border-radius:6px;}'
+            '.instinct-think summary{font-weight:600;cursor:pointer;}'
+            '.instinct-section-label{font-size:13px;font-weight:600;opacity:.7;margin:8px 0;}'
             '@media(prefers-reduced-motion:reduce){.instinct-new{animation:none;}}'
             '</style><div class="instinct-markdown">' + ''.join(animated.output) + '</div>')
 
@@ -195,13 +208,12 @@ def render_markdown_stream(placeholder, content, previous='', thinking=False, st
     import streamlit as st
     parts = _thinking_parts(content)
     with placeholder.container():
-        if not any(_contains_code_block(body) for _, body, _ in parts):
-            st.html(markdown_stream_html(content, previous, thinking, streaming))
-            return
         # Native Markdown owns code rendering, syntax highlighting and clipboard
         # controls. Never inject animated spans into its Markdown input.
         old_parts = _thinking_parts(previous)
         for index, (is_think, body, closed) in enumerate(parts):
+            if not body.strip() and not (is_think and not closed):
+                continue
             def render_body():
                 old = old_parts[index][1] if index < len(old_parts) and old_parts[index][0] == is_think else ''
                 if _contains_code_block(body):
@@ -209,13 +221,21 @@ def render_markdown_stream(placeholder, content, previous='', thinking=False, st
                         if kind == 'code':
                             st.markdown(text)
                         elif text.strip():
-                            st.html(markdown_stream_html(text, old[start:start + len(text)], streaming=streaming))
+                            st.html(markdown_stream_html(
+                                text, old[start:start + len(text)], streaming=streaming,
+                                section_labels=False,
+                            ))
                 else:
-                    st.html(markdown_stream_html(body, old, streaming=streaming))
+                    st.html(markdown_stream_html(body, old, streaming=streaming,
+                                                 section_labels=False))
             if is_think:
-                with st.expander('思考中…' if streaming and not closed else '思考过程', expanded=True):
-                    render_body()
+                with st.expander(_thinking_label(closed, streaming), expanded=streaming and not closed):
+                    if body.strip():
+                        render_body()
+                    else:
+                        st.caption('等待思考内容…')
             else:
+                st.caption('正文')
                 render_body()
 
 

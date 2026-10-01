@@ -7,7 +7,7 @@ import datasets  # noqa: F401  # Windows: pyarrow must load before torch.
 import pytest
 import torch
 
-from dataset.streaming_chunks import build_jsonl_chunk_plan, materialize_jsonl_range
+from scripts.data_loader.streaming_chunks import build_jsonl_chunk_plan, materialize_jsonl_range
 from trainer.streaming_pretrain import (
     ChunkedPackedEpochLoader,
     should_stream_pretrain,

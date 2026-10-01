@@ -7,8 +7,8 @@ import pytest
 import datasets  # Windows spawn imports this module without conftest; keep before torch.
 import torch
 
-from dataset.compact_cache import encode, decode, token_dtype
-from dataset.lm_dataset import PretrainDataset, _best_fit_pack
+from scripts.data_loader.compact_cache import encode, decode, token_dtype
+from scripts.data_loader.lm_dataset import PretrainDataset, _best_fit_pack
 
 
 class TinyTokenizer:
@@ -61,8 +61,8 @@ def test_managed_cache_reuses_final_files_and_removes_intermediates(tmp_path, mo
     # Never start a real Windows ``spawn`` child from pytest. Inline mode is the
     # production-safe path and still exercises the complete worker, publish,
     # cleanup, mmap and reuse flow.
-    from dataset import managed_cache
-    from dataset.cache_budget import release_cache_use
+    from scripts.data_loader import managed_cache
+    from scripts.data_loader.cache_budget import release_cache_use
 
     starts = []
     run_inline = managed_cache._run_worker_inline

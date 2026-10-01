@@ -21,7 +21,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
-from dataset.lm_dataset import PretrainDataset
+from scripts.data_loader.lm_dataset import PretrainDataset
 from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint,
     init_model, config_from_args, build_optimizer,
@@ -44,9 +44,9 @@ from trainer.streaming_pretrain import (
     validate_streaming_budget,
     streaming_token_progress,
 )
-from dataset.streaming_chunks import build_chunk_plan
-from dataset.sequence_bucket import packing_preprocess_workers
-from dataset.source_format import canonical_source_key
+from scripts.data_loader.streaming_chunks import build_chunk_plan
+from scripts.data_loader.sequence_bucket import packing_preprocess_workers
+from scripts.data_loader.source_format import canonical_source_key
 
 warnings.filterwarnings('ignore')
 

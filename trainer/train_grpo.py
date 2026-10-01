@@ -25,7 +25,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from dataset.lm_dataset import RLAIFDataset
+from scripts.data_loader.lm_dataset import RLAIFDataset
 from trainer.trainer_utils import (Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
                                    setup_seed, SkipBatchSampler, init_model, LMForRewardModel,
                                    config_from_args, build_optimizer, restore_config_from_checkpoint,

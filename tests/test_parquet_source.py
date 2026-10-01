@@ -17,11 +17,11 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
-from dataset import source_format
-from dataset.lm_dataset import (
+from scripts.data_loader import source_format
+from scripts.data_loader.lm_dataset import (
     AgentRLDataset, DPODataset, PretrainDataset, SFTDataset,
 )
-from dataset.streaming_chunks import (
+from scripts.data_loader.streaming_chunks import (
     build_chunk_plan, materialize_parquet_range, materialize_range,
 )
 
