@@ -373,6 +373,20 @@ def queue_last_response_regeneration(state):
     return True
 
 
+def normalize_chat_context(chat_messages, sys_prompt, history_chat_num):
+    """Rebuild the model-facing history for one send: one system prompt + trim.
+
+    The system prompt is owned by the send path. A previous send can leave its
+    copy inside the ``history_chat_num`` window (young conversation), and a
+    regenerate rewind keeps the one it deleted after; without stripping, every
+    send -- every regenerate click in particular -- would stack another copy
+    and drift the context the model sees.
+    """
+    while chat_messages and chat_messages[0].get("role") == "system":
+        chat_messages = chat_messages[1:]
+    return sys_prompt + chat_messages[-(history_chat_num + 1):]
+
+
 def resolve_model_config_path(weight_path: str, repo_root: str) -> str:
     """Resolve the config matching a raw weight file.
 

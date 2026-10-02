@@ -34,6 +34,7 @@ from scripts.web_demo_utils import (
     clear_conversation_state,
     detach_model_state,
     encode_clipboard_text,
+    normalize_chat_context,
     queue_last_response_regeneration,
     resolve_model_config_path,
     render_markdown_stream,
@@ -1009,7 +1010,8 @@ def main():
 
         tools = [t for t in TOOLS if t['function']['name'] in st.session_state.get('selected_tools', [])] or None
         sys_prompt = [] if tools else [{"role": "system", "content": "你是Instinct，一个乐于助人、知识渊博的AI助手。请用完整且友好的方式回答用户问题。"}]
-        st.session_state.chat_messages = sys_prompt + st.session_state.chat_messages[-(st.session_state.history_chat_num + 1):]
+        st.session_state.chat_messages = normalize_chat_context(
+            st.session_state.chat_messages, sys_prompt, st.session_state.history_chat_num)
         template_kwargs = {"tokenize": False, "add_generation_prompt": True}
         if st.session_state.get('enable_thinking', False):
             template_kwargs["open_thinking"] = True
