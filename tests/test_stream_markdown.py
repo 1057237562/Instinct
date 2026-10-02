@@ -40,6 +40,17 @@ def test_code_tags_and_partial_control_tokens():
     assert _thinking_parts('分析</think>答案') == [(False, '分析', True), (False, '答案', False)]
 
 
+def test_mid_sentence_backticks_in_thinking_still_close_the_section():
+    from scripts.chat_tools import split_tool_calls
+    reply = ('<think>You must use ```python for final code.</think>\n\n'
+             '```python\nprint(1)\n```<|im_end|>')
+    parts = _thinking_parts(split_tool_calls(reply)[0])
+    assert parts == [
+        (True, 'You must use ```python for final code.', True),
+        (False, '\n\n```python\nprint(1)\n```', False),
+    ]
+
+
 def test_model_html_stays_escaped():
     output = without_animation(markdown_stream_html('<script>alert(1)</script>'))
     assert '<script>' not in output

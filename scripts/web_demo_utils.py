@@ -7,6 +7,7 @@ from functools import lru_cache
 from html.parser import HTMLParser
 from pathlib import Path
 from scripts.chat_icons import svg_icon, svg_label
+from scripts.chat_tools import has_matching_backtick_run
 
 
 def animated_stream_html(previous, chunk):
@@ -44,12 +45,17 @@ def _thinking_parts(content, implicit=False):
         if fence:
             if is_fence and token[0] == fence[0] and len(token) >= len(fence):
                 fence = None
+                inline = 0
             continue
         if is_fence:
             fence = token
+            inline = 0
             continue
         if token[0] == '`':
-            inline = 0 if inline == len(token) else (len(token) if not inline else inline)
+            if inline == len(token):
+                inline = 0
+            elif not inline and has_matching_backtick_run(content, match.end(), len(token)):
+                inline = len(token)
             continue
         if inline or token[0] != '<':
             continue

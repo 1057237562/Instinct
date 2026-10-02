@@ -75,6 +75,26 @@ def test_thinking_prefix_comes_from_prompt_state_and_is_not_duplicated():
     assert restore_thinking_prefix('<think>' + content, True) == '<think>' + content
 
 
+def test_unmatched_backtick_run_is_literal_and_hides_nothing():
+    body, _ = split_tool_calls('a ``` b\n\n后续<|im_end|>')
+    assert body == 'a ``` b\n\n后续'
+
+
+def test_mid_sentence_backticks_in_thinking_do_not_leak_eos_marker():
+    # A model quoting ```python mid-sentence used to wedge the inline-span
+    # state, so the trailing <|im_end|> survived into the visible answer.
+    reply = ('<think>Use ```python for the final code.</think>\n\n'
+             '```python\nprint(1)\n```<|im_end|>')
+    body, _ = split_tool_calls(reply)
+    assert '<|im_end|>' not in body
+    assert '```python\nprint(1)\n```' in body
+
+
+def test_marker_inside_inline_code_stays_protected():
+    body, _ = split_tool_calls('以 `<|im_end|>` 结束。')
+    assert body == '以 `<|im_end|>` 结束。'
+
+
 @pytest.mark.parametrize('raw', [
     '{"name":"calculate_math","arguments":{"expression":"123 \\* 321"}}',
     '[1, 2]', '{"name":12}', '{"name":"calculate_math","arguments":[]}',

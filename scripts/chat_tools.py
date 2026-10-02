@@ -22,6 +22,30 @@ _TOKENS = re.compile(
 _MARKERS = ('<|im_start|>', '<|im_end|>', '<|endoftext|>')
 
 
+def has_matching_backtick_run(content, start, length):
+    """An inline span opens only if an equal-length run follows on the same line.
+
+    A backtick string with no closer on its own line (``` quoted mid-sentence)
+    is literal text; letting it open a span would wedge the state until a much
+    later fence swallowed the </think>/<|im_end|> handling after it.
+    """
+    line_end = content.find('\n', start)
+    if line_end < 0:
+        line_end = len(content)
+    pos = start
+    while pos < line_end:
+        if content[pos] == '`':
+            end = pos + 1
+            while end < line_end and content[end] == '`':
+                end += 1
+            if end - pos == length:
+                return True
+            pos = end
+        else:
+            pos += 1
+    return False
+
+
 def restore_thinking_prefix(content, initial_thinking=False):
     """Persist the opening tag supplied by the prompt rather than generated."""
     if initial_thinking and not content.lstrip().startswith('<think>'):
@@ -90,12 +114,17 @@ def split_tool_calls(content, *, streaming=False):
         if fence:
             if is_fence and token[0] == fence[0] and len(token) >= len(fence):
                 fence = None
+                inline = 0
             continue
         if is_fence:
             fence = token
+            inline = 0
             continue
         if token[0] == '`':
-            inline = 0 if inline == len(token) else (len(token) if not inline else inline)
+            if inline == len(token):
+                inline = 0
+            elif not inline and has_matching_backtick_run(content, match.end(), len(token)):
+                inline = len(token)
             continue
         if inline:
             continue
