@@ -10,11 +10,12 @@ ngrok==1.4.0
 nltk==3.8
 numpy==1.26.4
 openai==1.59.6
-orjson==3.11.8
+orjson==3.12.0
 # peft==0.7.1
 psutil==5.9.8
 pydantic==2.11.5
 rich==13.7.1
+markdown-it-py>=3.0,<5
 scikit_learn==1.5.1
 simhash==2.1.2
 tiktoken==0.10.0
@@ -24,10 +25,12 @@ jinja2==3.1.2
 jsonlines==4.0.0
 ujson==5.1.0
 wandb==0.18.3
-streamlit==1.50.0
+streamlit>=1.56.0  # web_demo.py uses st.iframe (added in 1.56); validated on 1.64.0
 einops==0.8.1
 swanlab==0.7.11
 modelscope==1.37.0
 # torch==2.6.0
 # torchvision==0.21.0
-pytest==8.3.4
+# triton-windows 3.8.0.post29 validated with torch 2.11.0+cu130 on RTX 5060 Ti (sm_120)
+triton-windows>=3.8,<4 ; sys_platform == 'win32'  # enables the MoE grouped-GEMM 'auto' backend; without it decode falls back to the host-sync 'cached' path (~8 tok/s)
+pytest==9.1.1

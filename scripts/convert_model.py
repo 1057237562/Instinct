@@ -31,7 +31,9 @@ def convert_torch2transformers_instinct(torch_path, transformers_path, dtype=tor
         tokenizer_config_path, config_path = os.path.join(transformers_path, "tokenizer_config.json"), os.path.join(transformers_path, "config.json")
         json.dump({**json.load(open(tokenizer_config_path, 'r', encoding='utf-8')), "tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": {}}, open(tokenizer_config_path, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
         config = json.load(open(config_path, 'r', encoding='utf-8'))
-        config['rope_theta'] = lm_config.rope_theta; config['rope_scaling'] = None; config.pop('rope_parameters', None)
+        config['rope_theta'] = lm_config.rope_theta
+        if lm_config.rope_scaling is not None:
+            config['rope_scaling'] = lm_config.rope_scaling
         json.dump(config, open(config_path, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
     print(f"模型已保存为 Transformers-Instinct 格式: {transformers_path}")
 
@@ -53,6 +55,34 @@ def convert_torch2transformers(torch_path, transformers_path, dtype=torch.float1
         "rope_theta": lm_config.rope_theta,
         "tie_word_embeddings": lm_config.tie_word_embeddings
     }
+    if lm_config.rope_scaling is not None:
+        export_rope_scaling = dict(lm_config.rope_scaling)
+        if export_rope_scaling.get("type") == "longrope":
+            retained = max(
+                int(export_rope_scaling.get("retained_start_tokens", 0)),
+                int(export_rope_scaling.get("short_retained_start_tokens", 0)),
+                int(export_rope_scaling.get("long_retained_start_tokens", 0)),
+            )
+            if retained:
+                raise ValueError(
+                    "Qwen3's LongRoPE runtime does not implement the paper's retained "
+                    "start-token threshold; use convert_torch2transformers_instinct "
+                    "to preserve exact LongRoPE semantics"
+                )
+            short_attention = export_rope_scaling.get("short_attention_factor")
+            long_attention = export_rope_scaling.get("long_attention_factor")
+            if short_attention is not None or long_attention is not None:
+                raise ValueError(
+                    "Qwen3's LongRoPE runtime supports only one attention factor; "
+                    "use convert_torch2transformers_instinct to preserve separate "
+                    "short/long attention scaling"
+                )
+            export_rope_scaling.pop("retained_start_tokens", None)
+            export_rope_scaling.pop("short_retained_start_tokens", None)
+            export_rope_scaling.pop("long_retained_start_tokens", None)
+            export_rope_scaling.pop("short_attention_factor", None)
+            export_rope_scaling.pop("long_attention_factor", None)
+        common_config["rope_scaling"] = export_rope_scaling
     if not lm_config.use_moe:
         qwen_config = Qwen3Config(
             **common_config, 
@@ -91,7 +121,9 @@ def convert_torch2transformers(torch_path, transformers_path, dtype=torch.float1
         tokenizer_config_path, config_path = os.path.join(transformers_path, "tokenizer_config.json"), os.path.join(transformers_path, "config.json")
         json.dump({**json.load(open(tokenizer_config_path, 'r', encoding='utf-8')), "tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": {}}, open(tokenizer_config_path, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
         config = json.load(open(config_path, 'r', encoding='utf-8'))
-        config['rope_theta'] = lm_config.rope_theta; config['rope_scaling'] = None; config.pop('rope_parameters', None)
+        config['rope_theta'] = lm_config.rope_theta
+        if lm_config.rope_scaling is not None:
+            config['rope_scaling'] = lm_config.rope_scaling
         json.dump(config, open(config_path, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
     print(f"模型已保存为 Transformers 格式: {transformers_path}")
 

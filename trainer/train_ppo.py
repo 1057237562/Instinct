@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from model.model_instinct import InstinctForCausalLM
-from dataset.lm_dataset import RLAIFDataset
+from scripts.data_loader.lm_dataset import RLAIFDataset
 from trainer.trainer_utils import (Logger, is_main_process, lm_checkpoint,
                                    pause_save_checkpoint, setup_seed, SkipBatchSampler, init_model,
                                    LMForRewardModel, config_from_args, build_optimizer,

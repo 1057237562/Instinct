@@ -4,6 +4,13 @@ Import order matters: ``datasets`` MUST be imported before ``torch`` to work
 around the Windows pyarrow/torch DLL conflict (see AGENTS.md). Do NOT reorder.
 """
 
+from pathlib import Path
+import sys
+
+REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 import datasets  # noqa: F401  # must stay before torch (Windows pyarrow/torch DLL conflict)
 import torch  # noqa: F401
 import pytest
@@ -16,18 +23,29 @@ def pytest_addoption(parser):
         default=False,
         help="Force-skip all tests marked with @pytest.mark.gpu",
     )
+    parser.addoption(
+        "--run-slow",
+        action="store_true",
+        default=False,
+        help="Run expensive subprocess/integration tests",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    """Auto-skip @pytest.mark.gpu tests when CUDA is unavailable (or --skip-gpu)."""
-    if not config.getoption("--skip-gpu") and torch.cuda.is_available():
-        return
-    skip_gpu = pytest.mark.skip(
-        reason="CUDA skipped via --skip-gpu" if config.getoption("--skip-gpu") else "no CUDA available"
+    """Skip unavailable GPU and opt-in expensive integration tests."""
+    skip_gpu = None
+    if config.getoption("--skip-gpu") or not torch.cuda.is_available():
+        skip_gpu = pytest.mark.skip(
+            reason="CUDA skipped via --skip-gpu" if config.getoption("--skip-gpu") else "no CUDA available"
+        )
+    skip_slow = None if config.getoption("--run-slow") else pytest.mark.skip(
+        reason="expensive integration test; pass --run-slow to enable"
     )
     for item in items:
-        if "gpu" in item.keywords:
+        if skip_gpu is not None and "gpu" in item.keywords:
             item.add_marker(skip_gpu)
+        if skip_slow is not None and "slow" in item.keywords:
+            item.add_marker(skip_slow)
 
 
 def pytest_sessionfinish(session, exitstatus):

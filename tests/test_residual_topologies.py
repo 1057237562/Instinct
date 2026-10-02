@@ -86,7 +86,8 @@ def tiny_model(architecture, residual_type, **extra):
         )
         return LinearInstinctForCausalLM(config)
     config = LoopedInstinctConfig(
-        **common, prelude_layers=1, loop_iters=2, coda_layers=1, **extra
+        **common, prelude_layers=1, recurrent_layers=1, loop_iters=2,
+        coda_layers=1, state_init_std=0.0, recurrence_sampling="fixed", **extra
     )
     return LoopedInstinctForCausalLM(config)
 

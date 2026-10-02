@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CACHE = REPO_ROOT / ".cache" / "torch_compile"
@@ -49,3 +51,16 @@ def test_compile_cache_respects_explicit_override(tmp_path):
     config = _read_cache_config(env)
     assert Path(config["path"]) == override
     assert config["exists"] is True
+
+
+@pytest.mark.parametrize('value,expected', [('auto', '1'), ('0', '1'), ('8', '8'), ('4,2', '4,2')])
+def test_openmp_threads_validated_before_torch_import(value, expected):
+    env = os.environ.copy()
+    env['OMP_NUM_THREADS'] = value
+    result = subprocess.run(
+        [sys.executable, '-c',
+         'import os, sys; import trainer.compile_cache; '
+         'assert "torch" not in sys.modules; print(os.environ["OMP_NUM_THREADS"])'],
+        cwd=REPO_ROOT, env=env, check=True, capture_output=True, text=True,
+    )
+    assert result.stdout.strip() == expected

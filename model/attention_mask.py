@@ -1,6 +1,52 @@
 """Attention-mask helpers shared by inference and training backbones."""
 
+from typing import NamedTuple
+
 import torch
+
+
+class PreparedAttentionBias(NamedTuple):
+    """Internal SDPA-only additive bias, already including causal constraints.
+
+    The explicit wrapper avoids confusing public floating-point 0/1 masks with
+    additive 0/-inf masks. It is a pytree understood by checkpoint and compile.
+    """
+
+    tensor: torch.Tensor
+
+
+def prepare_sdpa_attention_bias(
+    attention_mask: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    query_length: int,
+    is_causal: bool = True,
+) -> PreparedAttentionBias:
+    """Build one read-only, aligned attention bias for all layers in a forward.
+
+    Use the attention compute dtype, not necessarily the embedding/master-weight
+    dtype. Pad storage (not logical token length) to avoid per-layer SDPA bias
+    alignment copies. This is per-forward data, never a persistent model cache.
+    """
+    allowed = normalize_attention_mask(attention_mask)
+    key_length = allowed.size(-1)
+    if is_causal:
+        causal = torch.ones(
+            (query_length, key_length), device=allowed.device, dtype=torch.bool
+        ).tril(diagonal=key_length - query_length)
+        allowed = allowed & causal
+    device_type = reference.device.type
+    dtype = (torch.get_autocast_dtype(device_type)
+             if torch.is_autocast_enabled(device_type) else reference.dtype)
+    # Match Inductor's padded attention-bias layout. Keep heads broadcastable.
+    padded_length = ((key_length + 63) // 64) * 64
+    storage = torch.full(
+        (*allowed.shape[:-1], padded_length), float('-inf'),
+        dtype=dtype, device=allowed.device,
+    )
+    bias = storage[..., :key_length]
+    bias.masked_fill_(allowed, 0.0)
+    return PreparedAttentionBias(bias)
 
 
 def normalize_attention_mask(attention_mask: torch.Tensor) -> torch.Tensor:

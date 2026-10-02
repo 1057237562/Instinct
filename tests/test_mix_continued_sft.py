@@ -1,7 +1,7 @@
 """Checks for the continued-SFT sampler and local-template length accounting."""
 import unittest
 
-from scripts.mix_continued_sft import LengthChecker, ROOT, Sample
+from scripts.data_builder.mix_continued_sft import LengthChecker, ROOT, Sample
 
 
 def row(text):

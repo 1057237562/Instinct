@@ -24,6 +24,11 @@ from model.kv_cache_quant import parse_cache, make_cache
 from model.checkpointing import recompute_attention, checkpoint_ffn
 from model.attention_mask import apply_attention_mask
 from model.model_instinct import AttentionResidual, ManifoldHyperConnection, ManifoldHyperHead
+from model.rope import (
+    build_rope_caches, precompute_freqs_cis, select_rope_cache,
+    validate_rope_scaling,
+)
+from model.moe_dispatch import routed_moe_forward
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +102,11 @@ class InstinctConfig(PretrainedConfig):
             "attention_factor": 1.0,
             "type": "yarn"
         } if self.inference_rope_scaling else None
-        self.rope_scaling = saved_rope_scaling or saved_rope_parameters or default_rope_scaling
+        self.rope_scaling = validate_rope_scaling(
+            saved_rope_scaling or saved_rope_parameters or default_rope_scaling,
+            self.head_dim,
+            self.max_position_embeddings,
+        )
         # Early Exit configs (LayerSkip-style: shared LM head, no auxiliary classifiers)
         self.early_exit_layers = kwargs.get("early_exit_layers", [4, 5, 6, 7])
         self.early_exit_loss_weight = kwargs.get("early_exit_loss_weight", 0.3)
@@ -158,6 +167,8 @@ class RMSNorm(torch.nn.Module):
 
     def forward(self, x):
         """前向:归一化后乘权重,并恢复输入 dtype。"""
+        if not self.training and getattr(self, '_inference_norm', None) is not None:
+            return self._inference_norm(x, self.weight, self.eps)
         return (self.weight * self.norm(x.float())).type_as(x)
 
 class RMSNormGated(nn.Module):
@@ -331,24 +342,6 @@ class GatedDeltaNet(nn.Module):
         if out.dtype != input_dtype: out = out.to(input_dtype)
         return out, (conv_state, recurrent_state) if use_cache else None
 
-def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float = 1e6, rope_scaling: dict = None):
-    freqs, attn_factor = 1.0 / (rope_base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)), 1.0
-    if rope_scaling is not None: # YaRN: f'(i) = f(i)((1-γ) + γ/s), where γ∈[0,1] is linear ramp
-        orig_max, factor, beta_fast, beta_slow, attn_factor = (
-            rope_scaling.get("original_max_position_embeddings", 2048), rope_scaling.get("factor", 16),
-            rope_scaling.get("beta_fast", 32.0), rope_scaling.get("beta_slow", 1.0), rope_scaling.get("attention_factor", 1.0)
-        )
-        if end / orig_max > 1.0:
-            inv_dim = lambda b: (dim * math.log(orig_max / (b * 2 * math.pi))) / (2 * math.log(rope_base))
-            low, high = max(math.floor(inv_dim(beta_fast)), 0), min(math.ceil(inv_dim(beta_slow)), dim // 2 - 1)
-            ramp = torch.clamp((torch.arange(dim // 2, device=freqs.device).float() - low) / max(high - low, 0.001), 0, 1)
-            freqs = freqs * (1 - ramp + ramp / factor)
-    t = torch.arange(end, device=freqs.device)
-    freqs = torch.outer(t, freqs).float()
-    freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1) * attn_factor
-    freqs_sin = torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1) * attn_factor
-    return freqs_cos, freqs_sin
-
 def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, unsqueeze_dim: int = 1):
     """对 q/k 施加旋转位置编码（rotate_half 拼接实现）。"""
     def rotate_half(x): return torch.cat((-x[..., x.shape[-1] // 2:], x[..., : x.shape[-1] // 2]), dim=-1)
@@ -410,7 +403,11 @@ class Attention(nn.Module):
             xk = torch.cat([k_past, xk], dim=1)
             xv = torch.cat([v_past, xv], dim=1)
         past_kv = make_cache(xk, xv, self.kv_cache_dtype) if use_cache else None
-        if self.flash and (seq_len > 1) and (past_key_value is None):
+        if self.flash and not self.training and seq_len == 1:
+            output = flash_attention(xq, xk, xv, dropout_p=0.0,
+                                     is_causal=False, attention_mask=attention_mask)
+            output = output.reshape(bsz, seq_len, -1)
+        elif self.flash and (seq_len > 1) and (past_key_value is None):
             # Keep packed attention fused; mode 1 checkpoints the FFN only.
             output = flash_attention(
                 xq, xk, xv, dropout_p=self.dropout if self.training else 0.0,
@@ -447,7 +444,10 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         """前向:SwiGLU 门控激活（act(gate(x)) * up(x)）→ down 投影。"""
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        gate, up = self.gate_proj(x), self.up_proj(x)
+        if not self.training and getattr(self, '_inference_gate', None) is not None:
+            return self.down_proj(self._inference_gate(gate, up))
+        return self.down_proj(self.act_fn(gate) * up)
 
 class MOEFeedForward(nn.Module):
     """Top-k 路由 MoE FFN:softmax 门控选 top-k 专家,按权重聚合专家输出。
@@ -464,29 +464,26 @@ class MOEFeedForward(nn.Module):
             for _ in range(config.num_experts)
         ])
         self.act_fn = ACT2FN[config.hidden_act]
+        self.router_load = None
 
     def forward(self, x):
-        """前向:门控打分 → top-k 选择 → 逐专家 index_add 聚合;附带 aux_loss 计算。"""
-        batch_size, seq_len, hidden_dim = x.shape
-        x_flat = x.view(-1, hidden_dim)
-        scores = F.softmax(self.gate(x_flat), dim=-1)
-        topk_weight, topk_idx = torch.topk(scores, k=self.config.num_experts_per_tok, dim=-1, sorted=False)
-        if self.config.norm_topk_prob: topk_weight = topk_weight / (topk_weight.sum(dim=-1, keepdim=True) + 1e-20)
-        y = torch.zeros_like(x_flat)
-        for i, expert in enumerate(self.experts):
-            mask = (topk_idx == i)
-            if mask.any():
-                token_idx = mask.any(dim=-1).nonzero().flatten()
-                weight = topk_weight[mask].view(-1, 1)
-                y.index_add_(0, token_idx, (expert(x_flat[token_idx]) * weight).to(y.dtype))
-            elif self.training:
-                y[0, 0] += 0 * sum(p.sum() for p in expert.parameters())
-        if self.training and self.config.router_aux_loss_coef > 0:
+        """前向:门控打分 → top-k 选择 → grouped GEMM 聚合;附带 aux_loss 计算。"""
+        y, scores, topk_idx = routed_moe_forward(
+            x, self.gate, self.experts,
+            num_experts_per_tok=self.config.num_experts_per_tok,
+            norm_topk_prob=self.config.norm_topk_prob,
+            act_fn=self.act_fn,
+        )
+        if self.training:
             load = F.one_hot(topk_idx, self.config.num_experts).float().mean(0)
-            self.aux_loss = (load * scores.mean(0)).sum() * self.config.num_experts * self.config.router_aux_loss_coef
+            self.router_load = load.mean(dim=0).detach()
+            if self.config.router_aux_loss_coef > 0:
+                self.aux_loss = (load * scores.mean(0)).sum() * self.config.num_experts * self.config.router_aux_loss_coef
+            else:
+                self.aux_loss = scores.new_zeros(1).squeeze()
         else:
             self.aux_loss = scores.new_zeros(1).squeeze()
-        return y.view(batch_size, seq_len, hidden_dim)
+        return y
 
 class InstinctBlock(nn.Module):
     """混合注意力块:按 config.layer_types 分派——linear_attention 层走 GatedDeltaNet,
@@ -615,12 +612,14 @@ class InstinctModel(nn.Module):
             self.hc_head = ManifoldHyperHead(config)
         elif self.residual_type == "attnres":
             self.output_residual = AttentionResidual(config)
-        freqs_cos, freqs_sin = precompute_freqs_cis(
-            dim=config.head_dim, end=config.max_position_embeddings,
-            rope_base=config.rope_theta, rope_scaling=config.rope_scaling,
+        freqs_cos, freqs_sin, short_cos, short_sin = build_rope_caches(
+            config.head_dim, config.max_position_embeddings,
+            config.rope_theta, config.rope_scaling,
         )
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+        self.register_buffer("freqs_cos_short", short_cos, persistent=False)
+        self.register_buffer("freqs_sin_short", short_sin, persistent=False)
 
     @staticmethod
     def _restore_packed_tensor(tensor, mappings, batch_size, seq_length):
@@ -711,9 +710,12 @@ class InstinctModel(nn.Module):
                 hidden_states = hidden_states.unsqueeze(0)
             else:
                 hidden_states = torch.stack((hidden_states, torch.zeros_like(hidden_states)), dim=0)
-        position_embeddings = (
-            self.freqs_cos[start_pos:start_pos + seq_length],
-            self.freqs_sin[start_pos:start_pos + seq_length]
+        position_embeddings = select_rope_cache(
+            self.freqs_cos, self.freqs_sin,
+            self.freqs_cos_short, self.freqs_sin_short,
+            self.config.rope_scaling,
+            start_pos=start_pos, seq_length=seq_length,
+            position_ids=position_ids,
         )
         presents, intermediates = [], []
         aux_loss = hidden_states.new_zeros(1).squeeze()
@@ -892,36 +894,54 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         streamer、early exit 与 KV cache 复用;return_kv=True 时额外返回 past_kv。"""
         input_ids = kwargs.pop("input_ids", inputs).repeat(num_return_sequences, 1)
         attention_mask = attention_mask.repeat(num_return_sequences, 1) if attention_mask is not None else None
+        initial_length = input_ids.shape[1]
+        input_storage = input_ids.new_empty((input_ids.shape[0], initial_length + max_new_tokens))
+        input_storage[:, :initial_length].copy_(input_ids)
+        input_ids = input_storage[:, :initial_length]
+        attention_storage = None
+        if attention_mask is not None:
+            attention_storage = attention_mask.new_ones((attention_mask.shape[0], initial_length + max_new_tokens))
+            attention_storage[:, :initial_length].copy_(attention_mask)
+            attention_mask = attention_storage[:, :initial_length]
         past_key_values = kwargs.pop("past_key_values", None)
         early_exit = kwargs.pop("early_exit", False)
         exit_threshold = kwargs.pop("exit_threshold", 0.9)
+        from model.generation_stream import TokenChunkBuffer
+        chunk_size = int(kwargs.pop('stream_chunk_size', 16))
+        # Cache-returning callers need the cache aligned to the exact stop token.
+        if kwargs.get('return_kv'):
+            chunk_size = 1
+        chunks = TokenChunkBuffer(streamer, chunk_size, eos_token_id)
         finished = torch.zeros(input_ids.shape[0], dtype=torch.bool, device=input_ids.device)
         if streamer: streamer.put(input_ids.cpu())
-        for _ in range(max_new_tokens):
+        forward_kwargs = dict(kwargs)
+        forward_kwargs.setdefault('logits_to_keep', 1)
+        if early_exit:
+            forward_kwargs['early_exit'] = True
+            forward_kwargs['exit_threshold'] = exit_threshold
+        for step in range(max_new_tokens):
             past_len = 0
             if past_key_values:
                 for i, lt in enumerate(self.model.config.layer_types):
                     if lt == "full_attention" and past_key_values[i] is not None:
                         past_len = past_key_values[i][0].shape[1]
                         break
-            forward_kwargs = dict(kwargs)
-            if early_exit:
-                forward_kwargs['early_exit'] = True
-                forward_kwargs['exit_threshold'] = exit_threshold
             outputs = self.forward(input_ids[:, past_len:], attention_mask, past_key_values, use_cache=use_cache, **forward_kwargs)
-            attention_mask = torch.cat(
-                [attention_mask, attention_mask.new_ones(attention_mask.shape[0], 1)], -1
-            ) if attention_mask is not None else None
-            logits = outputs.logits[:, -1, :] / temperature
+            attention_mask = attention_storage[:, :initial_length + step + 1] if attention_storage is not None else None
+            logits = outputs.logits[:, -1, :]
+            if do_sample:
+                logits = logits / temperature
             if repetition_penalty != 1.0:
-                for i in range(input_ids.shape[0]): logits[i, torch.unique(input_ids[i])] /= repetition_penalty
-            if top_k > 0: 
-                logits[logits < torch.topk(logits, top_k)[0][..., -1, None]] = -float('inf')
-            if top_p < 1.0:
+                seen = torch.zeros_like(logits, dtype=torch.bool).scatter_(1, input_ids, True)
+                penalized = logits / repetition_penalty
+                logits = torch.where(seen, penalized, logits)
+            if do_sample and top_k > 0:
+                logits.masked_fill_(logits < torch.topk(logits, top_k)[0][..., -1, None], -float('inf'))
+            if do_sample and top_p < 1.0:
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True)
                 mask = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1) > top_p
                 mask[..., 1:], mask[..., 0] = mask[..., :-1].clone(), 0
-                logits[mask.scatter(1, sorted_indices, mask)] = -float('inf')
+                logits.masked_fill_(mask.scatter(1, sorted_indices, mask), -float('inf'))
             next_token = torch.multinomial(torch.softmax(logits, dim=-1), num_samples=1) if do_sample else torch.argmax(logits, dim=-1, keepdim=True)
             if eos_token_id is not None:
                 next_token = torch.where(
@@ -929,12 +949,15 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                     next_token.new_full((next_token.shape[0], 1), eos_token_id),
                     next_token,
                 )
-            input_ids = torch.cat([input_ids, next_token], dim=-1)
+            input_storage[:, initial_length + step:initial_length + step + 1].copy_(next_token)
+            input_ids = input_storage[:, :initial_length + step + 1]
             past_key_values = outputs.past_key_values if use_cache else None
-            if streamer: streamer.put(next_token.cpu())
             if eos_token_id is not None:
                 finished |= next_token.squeeze(-1).eq(eos_token_id)
-                if finished.all(): break
+            if chunks.push(next_token, finished, final=step + 1 == max_new_tokens):
+                break
+        if chunks.overshoot:
+            input_ids = input_ids[:, :-chunks.overshoot]
         if streamer: streamer.end()
         if kwargs.get("return_kv"): return {'generated_ids': input_ids, 'past_kv': past_key_values}
         return input_ids

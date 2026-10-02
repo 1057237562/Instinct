@@ -5,7 +5,11 @@ import pytest
 import torch
 
 from trainer.trainer_cli import build_trainer_parser
-from trainer.trainer_utils import _fp8_linear_is_eligible, apply_torchao_fp8_training
+from trainer.trainer_utils import (
+    _fp8_linear_is_eligible,
+    _torchao_fp8_config,
+    apply_torchao_fp8_training,
+)
 from model.model_instinct import InstinctConfig, InstinctForCausalLM
 
 
@@ -32,6 +36,21 @@ def test_fp8_off_is_identity():
     model = torch.nn.Sequential(torch.nn.Linear(16, 16))
     args = SimpleNamespace(fp8_training="off")
     assert apply_torchao_fp8_training(model, args) is model
+
+
+def test_fp8_config_pads_ragged_moe_expert_rows():
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True)
+    class FakeConfig:
+        pad_inner_dim: bool = False
+
+        @classmethod
+        def from_recipe_name(cls, _recipe):
+            return cls()
+
+    config = _torchao_fp8_config("tensorwise", FakeConfig)
+    assert config.pad_inner_dim is True
 
 
 @pytest.mark.skipif(

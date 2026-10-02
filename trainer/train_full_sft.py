@@ -20,17 +20,19 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
-from dataset.lm_dataset import SFTDataset
+from scripts.data_loader.lm_dataset import SFTDataset
 from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
     init_model, config_from_args, build_optimizer,
     restore_config_from_checkpoint, apply_torchao_fp8_training,
+    configure_bucket_memory_budget,
     prepare_lm_batch, release_compiled_cuda_memory,
 )
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx,
     init_wandb_logger, set_cosine_lr, step_with_scaler, flush_remaining_grad,
     PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
+    add_moe_router_migration_arg, validate_moe_router_migration,
 )
 from trainer.packing_transition import packing_data_config, SequencePackingPlan
 from trainer.training_profiler import TrainingProfiler
@@ -146,7 +148,9 @@ if __name__ == "__main__":
         },
     )
     parser.add_argument("--data_path", type=str, default="./dataset/sft_t2t_mini.jsonl", help="训练数据路径")
+    add_moe_router_migration_arg(parser)
     args = parser.parse_args()
+    validate_moe_router_migration(args)
 
     # 1. 初始化环境和随机种子
     local_rank = setup_dist_and_seed(args)
@@ -164,7 +168,13 @@ if __name__ == "__main__":
 
     # 5. 定义模型、数据、优化器
     # Resume 检查点已包含完整模型状态，无需再加载 --from_weight 基础权重
-    model, tokenizer = init_model(lm_config, 'none' if ckp_data else args.from_weight, device=args.device)
+    model, tokenizer = init_model(
+        lm_config, 'none' if ckp_data else args.from_weight, device=args.device,
+        router_norm_topk_prob=args.moe_router_norm_topk_prob,
+        router_top_k=args.moe_router_top_k,
+    )
+    configure_bucket_memory_budget(model, args, checkpoint_data=ckp_data)
+    data_config = packing_data_config(args)
     packing_plan = SequencePackingPlan(
         args, ckp_data,
         lambda packing, sample_indices=None: SFTDataset(
@@ -179,6 +189,7 @@ if __name__ == "__main__":
             seq_bucket=args.seq_bucket,
             packing_num_proc=args.packing_num_proc,
             bucket_gpu_memory_gb=args.bucket_gpu_memory_gb,
+            bucket_token_budget_override=getattr(args, 'bucket_token_budget', None),
             sample_indices=sample_indices,
         ),
     )

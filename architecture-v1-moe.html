@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Instinct V1 MoE 678.7M deep-thin 8-expert architecture for 16GB GPUs with Muon">
+  <title>Instinct V1 MoE — 678.7M · 8 Experts</title>
+  <style>
+    :root {
+      --bg:#090d1b; --panel:#11182a; --panel2:#171f35; --line:#313b59;
+      --text:#f4f1ff; --muted:#a29bb9; --violet:#a855f7; --purple:#7c3aed;
+      --blue:#3b82f6; --cyan:#22d3ee; --green:#34d399; --amber:#fbbf24;
+      --max:1160px; color-scheme:dark;
+    }
+    *{box-sizing:border-box} html{scroll-behavior:smooth}
+    body{margin:0;color:var(--text);background:radial-gradient(circle at 85% 0,rgba(126,34,206,.25),transparent 34rem),radial-gradient(circle at 0 35%,rgba(37,99,235,.13),transparent 28rem),var(--bg);font:15px/1.65 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+    a{color:#c4b5fd;text-decoration:none} a:hover{text-decoration:underline}
+    code,.mono{font-family:"Cascadia Code",Consolas,monospace}.container{width:min(var(--max),calc(100% - 40px));margin:auto}
+    nav{position:sticky;top:0;z-index:20;border-bottom:1px solid rgba(83,69,119,.52);background:rgba(9,13,27,.84);backdrop-filter:blur(16px)}
+    .nav-inner{min-height:64px;display:flex;align-items:center;justify-content:space-between;gap:20px}.brand{display:flex;align-items:center;gap:10px;font-weight:800}
+    .brand-mark{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:linear-gradient(135deg,#2563eb,#9333ea);box-shadow:0 0 22px rgba(168,85,247,.28)}
+    .nav-links{display:flex;gap:20px;font-size:13px;color:var(--muted)}
+    .hero{padding:90px 0 62px;text-align:center}.eyebrow{display:inline-flex;align-items:center;gap:8px;padding:6px 11px;border:1px solid #564277;border-radius:999px;background:rgba(27,20,48,.72);color:#dacaf2;font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
+    .dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green)}
+    h1{margin:22px 0 18px;font-size:clamp(40px,7vw,74px);line-height:1;letter-spacing:-.055em}.gradient{color:transparent;background:linear-gradient(90deg,#f7f4ff 8%,#bf8cff 50%,#6fa8ff 92%);background-clip:text;-webkit-background-clip:text}
+    .hero p{max-width:790px;margin:auto;color:var(--muted);font-size:clamp(16px,2vw,20px)}.actions{margin-top:28px;display:flex;justify-content:center;gap:12px;flex-wrap:wrap}
+    .button{display:inline-flex;align-items:center;min-height:44px;padding:0 17px;border:1px solid #554471;border-radius:10px;color:var(--text);background:rgba(24,18,43,.78);font-weight:750}.button.primary{border-color:transparent;background:linear-gradient(135deg,#7c3aed,#2563eb)}.button:hover{text-decoration:none;transform:translateY(-1px)}
+    .stats{max-width:920px;margin:42px auto 0;display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.stat{padding:18px 10px;border:1px solid var(--line);border-radius:14px;background:rgba(17,24,42,.9)}.stat strong{display:block;font:800 clamp(19px,3vw,26px)/1.1 "Cascadia Code",monospace}.stat span{display:block;margin-top:6px;color:var(--muted);font-size:10px;letter-spacing:.08em;text-transform:uppercase}
+    section{padding:66px 0}.section-head{margin-bottom:30px}.section-head small{color:#d8b4fe;font-weight:800;letter-spacing:.09em;text-transform:uppercase}.section-head h2{margin:8px 0;font-size:clamp(28px,4vw,44px);line-height:1.12;letter-spacing:-.035em}.section-head p{margin:0;max-width:800px;color:var(--muted)}
+    .arch-card{padding:28px;border:1px solid var(--line);border-radius:22px;background:linear-gradient(155deg,rgba(24,31,53,.95),rgba(11,15,29,.97));box-shadow:0 28px 80px rgba(0,0,0,.25)}
+    .flow{max-width:760px;margin:auto;display:flex;flex-direction:column;align-items:center}.node{width:min(100%,540px);padding:15px 18px;border:1px solid #49628a;border-radius:13px;text-align:center;background:linear-gradient(135deg,#173c68,#1d5fa0)}.node strong{display:block;font:760 15px "Cascadia Code",monospace}.node span{display:block;margin-top:4px;color:#c9d8ed;font-size:11px}.node.head{background:linear-gradient(135deg,#4c1d95,#7e22ce);border-color:#a855f7}.arrow{height:28px;display:grid;place-items:center;color:#76688f;font-size:17px}
+    .moe-shell{width:min(100%,700px);padding:18px;border:1px solid #a855f7;border-radius:18px;background:linear-gradient(145deg,rgba(88,28,135,.45),rgba(24,24,45,.88));box-shadow:0 0 34px rgba(168,85,247,.1)}
+    .shell-title{text-align:center;color:#eadcff;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.attention{margin:13px 0;padding:12px;border:1px solid #3d5d86;border-radius:11px;background:#101c31;text-align:center}.attention strong{font:750 13px "Cascadia Code",monospace}.attention span{display:block;margin-top:3px;color:var(--muted);font-size:10px}
+    .residual{height:25px;display:grid;place-items:center;color:#9a8ead;font-weight:800}.router{padding:12px;border:1px solid #c084fc;border-radius:11px;background:linear-gradient(135deg,#581c87,#7e22ce);text-align:center}.router strong{font:800 14px "Cascadia Code",monospace}.router span{display:block;margin-top:3px;color:#eadcff;font-size:10px}
+    .route-lines{height:28px;position:relative}.route-lines:before{content:"top-1 route per token";position:absolute;inset:4px 0 auto;text-align:center;color:#c4b5fd;font:700 10px "Cascadia Code",monospace}
+    .experts{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.expert{padding:13px 7px;border:1px solid #675383;border-radius:10px;background:#171329;text-align:center}.expert strong{display:block;color:#f1e8ff;font:750 12px "Cascadia Code",monospace}.expert span{display:block;margin-top:3px;color:var(--muted);font-size:9px}.expert.active{border-color:var(--green);box-shadow:0 0 15px rgba(52,211,153,.14)}.expert.active:after{content:"example active";display:block;margin-top:5px;color:var(--green);font-size:8px;text-transform:uppercase;letter-spacing:.06em}
+    .merge{margin-top:9px;text-align:center;color:#d8b4fe;font:700 11px "Cascadia Code",monospace}.stack-note{margin-top:13px;padding:9px;text-align:center;border-top:1px solid rgba(192,132,252,.3);color:#c5b8d5;font-size:11px}
+    .legend{margin-top:23px;display:flex;justify-content:center;flex-wrap:wrap;gap:8px}.chip{padding:6px 10px;border:1px solid #453b62;border-radius:999px;color:#c7bdd5;background:#0d1222;font-size:11px}
+    .grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}.panel{padding:22px;border:1px solid var(--line);border-radius:17px;background:rgba(17,24,42,.84)}.panel h3{margin:0 0 8px;font-size:18px}.panel p{margin:0;color:var(--muted)}
+    .spec-list{margin:15px 0 0;padding:0;list-style:none}.spec-list li{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid rgba(69,59,98,.56)}.spec-list li:last-child{border:0}.spec-list span:first-child{color:var(--muted)}.spec-list span:last-child{text-align:right;font-family:"Cascadia Code",monospace}
+    table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:11px 10px;border-bottom:1px solid #34304b;text-align:left}th{color:var(--muted);font-size:10px;letter-spacing:.07em;text-transform:uppercase}td:last-child,th:last-child{text-align:right;font-family:"Cascadia Code",monospace}
+    .bar-row{margin:15px 0}.bar-label{display:flex;justify-content:space-between;gap:10px;margin-bottom:6px;font-size:12px}.bar-label span:last-child{color:var(--muted);font-family:"Cascadia Code",monospace}.bar-track{height:8px;border-radius:999px;overflow:hidden;background:#211b34}.bar-fill{height:100%;border-radius:inherit;background:linear-gradient(90deg,#7c3aed,#c084fc);min-width:2px}
+    .notice{margin-top:15px;padding:12px 14px;border-left:3px solid var(--amber);background:rgba(251,191,36,.07);color:#d6cfdf;font-size:12px}.compare{overflow-x:auto}.compare table{min-width:720px}.dense{color:#7dd3fc;font-weight:800}.moe{color:#d8b4fe;font-weight:800}
+    pre{margin:0;padding:20px;overflow:auto;border:1px solid var(--line);border-radius:15px;background:#060916;color:#d9d0ea;font:12px/1.7 "Cascadia Code",monospace}.key{color:#c4b5fd}.num{color:#93c5fd}.bool{color:#6ee7b7}
+    footer{padding:38px 0 54px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.footer-inner{display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap}
+    @media(max-width:780px){.nav-links{display:none}.hero{padding-top:68px}.stats{grid-template-columns:repeat(2,1fr)}.grid-2,.grid-3{grid-template-columns:1fr}.arch-card{padding:18px 12px}.experts{grid-template-columns:repeat(2,1fr)}}
+  </style>
+</head>
+<body>
+  <nav><div class="container nav-inner"><div class="brand"><span class="brand-mark">M¹</span><span>Instinct V1 MoE</span></div><div class="nav-links"><a href="architecture-v1.html">V1 Dense</a><a href="architecture.html">V2</a><a href="#architecture">架构</a><a href="#specs">参数</a><a href="#config">配置</a></div></div></nav>
+
+  <header class="hero"><div class="container">
+    <span class="eyebrow"><span class="dot"></span> 8 full-width experts · top-1 · Muon</span>
+    <h1><span class="gradient">Instinct V1 MoE · 678.7M</span></h1>
+    <p>面向 16GB 显存的深窄型 Transformer：hidden 512、32 层、16Q/4KV GQA，每层使用 8 个完整 1664 维专家，每个 token 只激活一个专家。</p>
+    <div class="actions"><a class="button primary" href="#architecture">查看 MoE 架构</a><a class="button" href="architecture-v1.html">V1 Dense</a><a class="button" href="architecture.html">Instinct V2</a></div>
+    <div class="stats"><div class="stat"><strong>678,726,144</strong><span>Total parameters</span></div><div class="stat"><strong>106,203,648</strong><span>Active parameters</span></div><div class="stat"><strong>8 / top-1</strong><span>Experts per token</span></div><div class="stat"><strong>32</strong><span>MoE layers</span></div></div>
+  </div></header>
+
+  <main>
+    <section id="architecture"><div class="container">
+      <div class="section-head"><small>Architecture graph</small><h2>32 层深窄型 GQA + 8E MoE</h2><p>16 个 query heads 与 4 个 KV heads组成 GQA；每层 Router 为每个 token 选择一个专家。八个专家权重全部常驻并参与优化，但单 token 仅执行被选中的专家。</p></div>
+      <div class="arch-card"><div class="flow">
+        <div class="node"><strong>Input Tokens → Tied Embedding</strong><span>vocab 6,400 · hidden 512</span></div><div class="arrow">▼</div>
+        <div class="moe-shell">
+          <div class="shell-title">Decoder Block × 32 · independent weights</div>
+          <div class="attention"><strong>RMSNorm → GQA → Residual</strong><span>16 query heads · 4 KV heads · head dim 32 · Q/K RMSNorm</span></div>
+          <div class="residual">＋</div>
+          <div class="router"><strong>RMSNorm → Router Linear(512, 4)</strong><span>softmax routing · normalized top-1 probability · load-balancing auxiliary loss</span></div>
+          <div class="route-lines"></div>
+          <div class="experts">
+            <div class="expert active"><strong>Expert 1</strong><span>SwiGLU<br>512→1664→512</span></div>
+            <div class="expert"><strong>Expert 2</strong><span>SwiGLU<br>512→1664→512</span></div>
+            <div class="expert"><strong>Expert 3</strong><span>SwiGLU<br>512→1664→512</span></div>
+            <div class="expert"><strong>Expert 4</strong><span>SwiGLU<br>512→1664→512</span></div>
+            <div class="expert"><strong>Expert 5</strong><span>SwiGLU<br>512→1664→512</span></div>
+            <div class="expert"><strong>Expert 6</strong><span>SwiGLU<br>512→1664→512</span></div>
+            <div class="expert"><strong>Expert 7</strong><span>SwiGLU<br>512→1664→512</span></div>
+            <div class="expert"><strong>Expert 8</strong><span>SwiGLU<br>512→1664→512</span></div>
+          </div>
+          <div class="merge">selected expert output × route weight → residual stream</div>
+          <div class="stack-note">The complete Attention + Router + Experts block is repeated with independent weights for Layers 1–32.</div>
+        </div>
+        <div class="arrow">▼</div><div class="node head"><strong>Final RMSNorm → Tied LM Head</strong><span>512 → vocab 6,400 · next-token logits</span></div>
+      </div><div class="legend"><span class="chip">RoPE θ = 1,000,000</span><span class="chip">LongRoPE 4K → 32K (8× PI seed)</span><span class="chip">RMSNorm ε = 1e-6</span><span class="chip">Router aux coefficient = 5e-4</span><span class="chip">Gradient checkpoint mode 1</span></div></div>
+    </div></section>
+
+    <section id="specs"><div class="container">
+      <div class="section-head"><small>Model sizing</small><h2>深层、窄宽、8 专家、Muon 优化</h2><p>参考小模型的 deep-thin 设计，hidden=512 与 32 层提供更长的特征处理链；FFN=1664 与每个专家完全一致。Muon 对二维矩阵仅保存一份 momentum，固定训练张量约 7.6GiB，使 8 专家能在 16GB 上留出激活空间。</p></div>
+      <div class="grid-3">
+        <article class="panel"><h3>Attention</h3><p>所有 token 都执行的 GQA 路径。</p><ul class="spec-list"><li><span>Q / KV heads</span><span>16 / 4</span></li><li><span>Head dim</span><span>32</span></li><li><span>Params / layer</span><span>655,424</span></li></ul></article>
+        <article class="panel"><h3>Router</h3><p>为每个 token 选择得分最高的专家。</p><ul class="spec-list"><li><span>Projection</span><span>512 × 8</span></li><li><span>Top-k</span><span>1</span></li><li><span>Params / layer</span><span>4,096</span></li></ul></article>
+        <article class="panel"><h3>Experts</h3><p>八套完整宽度 SwiGLU 参数，单 token 激活一套。</p><ul class="spec-list"><li><span>Experts</span><span>8</span></li><li><span>Expert FFN</span><span>1,664</span></li><li><span>One expert</span><span>2,555,904</span></li><li><span>All experts</span><span>20,447,232</span></li></ul></article>
+      </div>
+      <div class="grid-2" style="margin-top:18px">
+        <article class="panel"><h3>Parameter Breakdown</h3>
+          <div class="bar-row"><div class="bar-label"><span>32 MoE Transformer layers</span><span>675,448,832 · 99.52%</span></div><div class="bar-track"><div class="bar-fill" style="width:99.52%"></div></div></div>
+          <div class="bar-row"><div class="bar-label"><span>Tied embedding</span><span>3,276,800 · 0.48%</span></div><div class="bar-track"><div class="bar-fill" style="width:.48%"></div></div></div>
+          <div class="bar-row"><div class="bar-label"><span>Final RMSNorm</span><span>512</span></div><div class="bar-track"><div class="bar-fill" style="width:.001%"></div></div></div>
+        </article>
+        <article class="panel"><h3>Per-Layer Compute Path</h3><table><thead><tr><th>Component</th><th>Parameters</th></tr></thead><tbody><tr><td>GQA + Q/K norm</td><td>655,424</td></tr><tr><td>Router</td><td>4,096</td></tr><tr><td>8 stored experts</td><td>20,447,232</td></tr><tr><td>2 × RMSNorm</td><td>1,024</td></tr><tr><td><strong>Total / layer</strong></td><td><strong>21,107,776</strong></td></tr><tr><td><strong>Active / token / layer</strong></td><td><strong>3,216,448</strong></td></tr></tbody></table></article>
+      </div>
+      <div class="notice">“106.20M active”描述单 token 的计算路径，不代表训练只需保存 106.20M 参数。八个专家的权重、梯度和 Muon momentum 都常驻；显存规划必须按 678.73M 总参数计算。建议从 micro-batch 1、seq 768、梯度累积 16 开始。</div>
+    </div></section>
+
+    <section id="compare"><div class="container"><div class="section-head"><small>Dense vs MoE</small><h2>V1 Dense 与 16GB 8E Deep-Thin MoE</h2><p>MoE 把参数分配到更多层和八套专家；总容量约为 Dense V1 的 4.45 倍，而 top-1 使单-token 激活规模约为 69.7%。</p></div><div class="panel compare"><table><thead><tr><th>Property</th><th>V1 Dense</th><th>V1 MoE 16GB</th></tr></thead><tbody><tr><td>Total parameters</td><td class="dense">152,406,528</td><td class="moe">678,726,144</td></tr><tr><td>Active parameters</td><td>152,406,528</td><td>106,203,648</td></tr><tr><td>FFN type</td><td>Dense SwiGLU 2432</td><td>8 × SwiGLU 1664, top-1</td></tr><tr><td>Layers / hidden</td><td>20 / 768</td><td>32 / 512</td></tr><tr><td>Attention</td><td>8Q / 4KV GQA</td><td>16Q / 4KV GQA</td></tr><tr><td>Optimizer</td><td>AdamW / Muon</td><td>Muon</td></tr></tbody></table></div></div></section>
+
+    <section id="config"><div class="container"><div class="section-head"><small>Exact config</small><h2>训练配置</h2><p>对应 <span class="mono">trainer/config_instinct_v1_moe.json</span> 和 WebUI 的 Instinct V1 MoE preset。</p></div><pre><span class="key">"hidden_size"</span>: <span class="num">512</span>,
+<span class="key">"intermediate_size"</span>: <span class="num">1664</span>,
+<span class="key">"num_hidden_layers"</span>: <span class="num">32</span>,
+<span class="key">"num_attention_heads"</span>: <span class="num">16</span>,
+<span class="key">"num_key_value_heads"</span>: <span class="num">4</span>,
+<span class="key">"use_moe"</span>: <span class="bool">true</span>,
+<span class="key">"num_experts"</span>: <span class="num">8</span>,
+<span class="key">"num_experts_per_tok"</span>: <span class="num">1</span>,
+<span class="key">"moe_intermediate_size"</span>: <span class="num">1664</span>,
+<span class="key">"router_aux_loss_coef"</span>: <span class="num">5e-4</span>,
+<span class="key">"model_architecture"</span>: "standard",
+<span class="key">"use_grad_checkpoint"</span>: <span class="num">1</span></pre></div></section>
+  </main>
+  <footer><div class="container footer-inner"><span>Instinct V1 MoE · 16GB Muon profile · 8 experts</span><span>678,726,144 total · 106,203,648 active</span></div></footer>
+</body>
+</html>

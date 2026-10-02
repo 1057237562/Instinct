@@ -1,4 +1,4 @@
-from scripts.build_codespecialist_mix import MIX_PLAN, render_messages, selected_by_hash
+from scripts.data_builder.build_codespecialist_mix import MIX_PLAN, render_messages, selected_by_hash
 
 
 def test_code_related_share_is_sixty_percent():

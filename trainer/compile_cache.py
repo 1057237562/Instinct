@@ -7,6 +7,18 @@ known pyarrow DLL conflict.
 """
 
 import os
+import re
+import warnings
+
+
+# libgomp reads this during native imports, before trainer setup. Preserve
+# valid nested-level lists; invalid launcher values use a cheap safe default.
+_omp_threads = os.environ.get('OMP_NUM_THREADS')
+if _omp_threads is not None and not re.fullmatch(
+    r'\s*[1-9]\d*(?:\s*,\s*[1-9]\d*)*\s*', _omp_threads,
+):
+    os.environ['OMP_NUM_THREADS'] = '1'
+    warnings.warn('Invalid OMP_NUM_THREADS; using 1 CPU thread. Set a positive integer to override.')
 
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))

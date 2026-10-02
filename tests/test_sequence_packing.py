@@ -7,8 +7,11 @@ import torch
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
-from dataset.lm_dataset import PretrainDataset, SFTDataset, _best_fit_pack
-from dataset.sequence_bucket import (
+from scripts.data_loader.lm_dataset import (
+    PretrainDataset, SFTDataset, _best_fit_pack, _tokenize_pretrain_batch,
+)
+from scripts.data_loader.sequence_bucket import (
+    bucket_token_budget,
     optimal_sequence_buckets,
     packing_preprocess_workers,
 )
@@ -20,9 +23,14 @@ from model.sequence_packing import (
     block_diagonal_attention_mask, positions_from_sequence_ids,
 )
 from trainer.packing_transition import (
-    packing_data_config, SequencePackingPlan, validate_packing_resume,
+    packing_data_config, SequencePackingPlan, validate_lr_schedule_resume,
+    validate_packing_resume,
 )
-from trainer.trainer_utils import release_compiled_cuda_memory
+from trainer.trainer_utils import (
+    configure_bucket_memory_budget,
+    estimate_training_persistent_bytes,
+    release_compiled_cuda_memory,
+)
 
 
 @pytest.fixture(scope="module")
@@ -51,6 +59,104 @@ def test_packing_preprocess_workers_keeps_linux_parallelism():
     ) == 8
 
 
+def test_bucket_budget_accounts_for_moe_persistent_memory_and_bucket_count():
+    legacy = bucket_token_budget(16.0)
+    two_buckets = bucket_token_budget(
+        16.0, persistent_memory_gb=7.5854, bucket_count=2,
+        compile_mode='max-autotune-no-cudagraphs',
+    )
+    five_buckets = bucket_token_budget(
+        16.0, persistent_memory_gb=7.5854, bucket_count=5,
+        compile_mode='max-autotune-no-cudagraphs',
+    )
+    cudagraphs = bucket_token_budget(
+        16.0, persistent_memory_gb=7.5854, bucket_count=2,
+        compile_mode='reduce-overhead',
+    )
+    assert legacy == 24576
+    assert two_buckets // 4096 == 3
+    assert five_buckets < two_buckets
+    assert cudagraphs < two_buckets
+
+
+def test_muon_persistent_memory_includes_parameter_gradient_and_state():
+    model = torch.nn.Linear(16, 16, bias=True)
+    args = SimpleNamespace(optimizer='muon')
+    # weight: param + grad + one Muon momentum; bias: param + grad + two
+    # AdamW moments. All tensors are fp32.
+    expected = 16 * 16 * 4 * 3 + 16 * 4 * 4
+    assert estimate_training_persistent_bytes(model, args) == expected
+
+
+def test_bucket_budget_resume_inherits_resolved_checkpoint_value():
+    model = torch.nn.Linear(16, 16, bias=True)
+    args = SimpleNamespace(
+        optimizer='muon', sequence_packing=1,
+        sequence_packing_mode='bucket', bucket_gpu_memory_gb=16.0,
+        bucket_token_budget=0, seq_bucket=2, use_compile=0,
+    )
+    checkpoint = {"data_config": {
+        "sequence_packing": True,
+        "active_sequence_packing": True,
+        "sequence_packing_mode": "bucket",
+        "bucket_token_budget": 18655,
+        "bucket_persistent_memory_gb": 3.798847,
+    }}
+
+    assert configure_bucket_memory_budget(
+        model, args, checkpoint_data=checkpoint,
+    ) == 18655
+    assert args.bucket_token_budget == 18655
+    assert args.bucket_persistent_memory_gb == 3.798847
+
+
+def test_bucket_budget_explicit_override_is_not_replaced_by_checkpoint():
+    model = torch.nn.Linear(16, 16, bias=True)
+    args = SimpleNamespace(
+        optimizer='muon', sequence_packing=1,
+        sequence_packing_mode='bucket', bucket_gpu_memory_gb=16.0,
+        bucket_token_budget=12000, seq_bucket=2, use_compile=0,
+    )
+    checkpoint = {"data_config": {
+        "sequence_packing": True,
+        "active_sequence_packing": True,
+        "sequence_packing_mode": "bucket",
+        "bucket_token_budget": 18655,
+        "bucket_persistent_memory_gb": 3.798847,
+    }}
+
+    assert configure_bucket_memory_budget(
+        model, args, checkpoint_data=checkpoint,
+    ) == 12000
+    assert args.bucket_token_budget == 12000
+
+
+def test_auto_budget_calibration_change_does_not_block_packed_resume(tmp_path):
+    model = torch.nn.Linear(16, 16, bias=True)
+    original = SimpleNamespace(
+        optimizer='muon', sequence_packing=1,
+        sequence_packing_mode='bucket', bucket_gpu_memory_gb=16.0,
+        bucket_token_budget=18655, bucket_persistent_memory_gb=3.798847,
+        seq_bucket=2, use_compile=0, packing_batch_size=1000,
+        packing_num_proc=1, bucket_max_seq_len=4096,
+        bucket_large_threshold=4096, batch_size=1, max_seq_len=4096,
+        data_path=str(tmp_path / 'pretrain.jsonl'), dataset_streaming='auto',
+        streaming_chunk_mb=1024, cache_build_mode='inline',
+    )
+    checkpoint = {"data_config": packing_data_config(original)}
+    resumed = SimpleNamespace(**vars(original))
+    # Zero is the CLI's automatic mode. Its newly computed value may differ
+    # after a calibration/code update, but the packed cursor must keep 18655.
+    resumed.bucket_token_budget = 0
+
+    configure_bucket_memory_budget(
+        model, resumed, checkpoint_data=checkpoint,
+    )
+
+    assert resumed.bucket_token_budget == 18655
+    assert validate_packing_resume(resumed, checkpoint) is False
+
+
 def test_best_fit_pack_keeps_examples_whole_and_labels_aligned():
     inputs = [[11] * 6, [22] * 4, [33] * 4]
     labels = [[11] * 6, [-100] * 2 + [22] * 2, [33] * 4]
@@ -72,6 +178,22 @@ def test_best_fit_pack_keeps_examples_whole_and_labels_aligned():
                    for row in flattened_rows for i in range(len(row) - length + 1))
 
 
+def test_pretrain_batch_tokenization_matches_individual_tokenization(tokenizer):
+    texts = ["hello world", "你好，世界", "def add(a, b):\n    return a + b"]
+    actual = _tokenize_pretrain_batch(
+        {"text": texts}, tokenizer=tokenizer, max_length=32,
+    )
+    expected = []
+    for text in texts:
+        tokens = tokenizer(
+            text, add_special_tokens=False, max_length=30, truncation=True,
+        ).input_ids
+        expected.append([tokenizer.bos_token_id, *tokens, tokenizer.eos_token_id])
+    assert actual["input_ids"] == expected
+    assert actual["length"] == [len(tokens) for tokens in expected]
+
+
+@pytest.mark.slow
 def test_pretrain_packing_preserves_tokens_reuses_cache_and_logs_buckets(
         tmp_path, tokenizer, capsys):
     path = tmp_path / "pretrain.jsonl"
@@ -81,11 +203,11 @@ def test_pretrain_packing_preserves_tokens_reuses_cache_and_logs_buckets(
     plain = PretrainDataset(str(path), tokenizer, max_length=32)
     packed = PretrainDataset(
         str(path), tokenizer, max_length=32, packing=True, packing_mode="bucket",
-        packing_batch_size=100, packing_num_proc=2,
+        packing_batch_size=100, packing_num_proc=1,
     )
     packed_again = PretrainDataset(
         str(path), tokenizer, max_length=32, packing=True, packing_mode="bucket",
-        packing_batch_size=100, packing_num_proc=2,
+        packing_batch_size=100, packing_num_proc=1,
     )
     fixed = PretrainDataset(
         str(path), tokenizer, max_length=32, packing=True,
@@ -124,6 +246,7 @@ def test_pretrain_packing_preserves_tokens_reuses_cache_and_logs_buckets(
         assert torch.all(labels[1:][boundaries] == -100)
 
 
+@pytest.mark.slow
 def test_sft_packing_preserves_loss_mask_and_bucket_shapes(tmp_path, tokenizer):
     path = tmp_path / "sft.jsonl"
     rows = []
@@ -140,7 +263,7 @@ def test_sft_packing_preserves_loss_mask_and_bucket_shapes(tmp_path, tokenizer):
     packed = SFTDataset(
         str(path), tokenizer, max_length=96, packing=True,
         packing_batch_size=100, packing_seed=7, packing_mode="bucket",
-        packing_num_proc=2,
+        packing_num_proc=1,
     )
     assert len(packed) <= len(rows)
     assert sum(packed.samples["valid_tokens"]) <= sum(packed.samples["block_length"])
@@ -320,8 +443,8 @@ def test_packed_batch_sampler_never_mixes_bucket_lengths_and_scales_memory(
     assert max(len(batch) for batch in batches if dataset.lengths[batch[0]] == 2048) == 12
     assert max(len(batch) for batch in batches if dataset.lengths[batch[0]] == 4096) == 6
     log = capsys.readouterr().out
-    assert 'memory_model=B*L' in log
-    assert 'gpu_memory=16GB, token_budget=24576' in log
+    assert 'memory_model=model+optimizer+B*L' in log
+    assert 'gpu_memory=16GB, persistent=0.00GB, buckets=2, token_budget=24576' in log
     assert '[Packing Batch] 1/2: max_seq_len=2048, batch_size=12' in log
     assert '[Packing Batch] 2/2: max_seq_len=4096, batch_size=6' in log
     assert plan.batch_sampler(
@@ -521,7 +644,8 @@ def test_looped_packed_segment_matches_standalone_forward():
     config = LoopConfig(
         vocab_size=64, hidden_size=32, num_hidden_layers=4,
         num_attention_heads=4, num_key_value_heads=2,
-        prelude_layers=1, loop_iters=2, coda_layers=1,
+        prelude_layers=1, recurrent_layers=2, loop_iters=2, coda_layers=1,
+        state_init_std=0.0, recurrence_sampling="fixed",
         max_position_embeddings=32, dropout=0.0, flash_attn=False,
         tie_word_embeddings=False,
     )
@@ -585,6 +709,22 @@ class _SizedDataset(Dataset):
 
     def __getitem__(self, index):
         return index
+
+
+def test_resume_preserves_rewarm_schedule(tmp_path):
+    args = SimpleNamespace(
+        sequence_packing=1, packing_batch_size=10,
+        max_seq_len=1024, batch_size=4,
+        data_path=str(tmp_path / "data.jsonl"),
+        epochs=1, learning_rate=5e-5, warmup_ratio=0.01,
+        warmup_steps=0, min_lr_ratio=0.1,
+    )
+    checkpoint = {"data_config": packing_data_config(args)}
+    validate_lr_schedule_resume(args, checkpoint)
+    changed = SimpleNamespace(**vars(args))
+    changed.warmup_ratio = 0.02
+    with pytest.raises(ValueError, match="changed LR schedule"):
+        validate_lr_schedule_resume(changed, checkpoint)
 
 
 def test_resume_aligns_then_packs_inside_same_epoch(tmp_path):
@@ -666,3 +806,28 @@ def test_raw_checkpoint_can_enable_experimental_bucket_mode(tmp_path):
     assert validate_packing_resume(
         requested, {"data_config": packing_data_config(saved_args)}
     ) is True
+
+
+def test_resume_accepts_the_same_corpus_recompiled_into_parquet(tmp_path):
+    args = SimpleNamespace(
+        sequence_packing=1, packing_batch_size=10, max_seq_len=1024,
+        batch_size=4, data_path=str(tmp_path / "corpus.jsonl"),
+    )
+    checkpoint = {"data_config": packing_data_config(args)}
+
+    assert validate_packing_resume(args, checkpoint) is False
+
+    # The compiled container of the same corpus is the same dataset.
+    compiled = SimpleNamespace(**vars(args))
+    compiled.data_path = str(tmp_path / "corpus.parquet")
+    assert validate_packing_resume(compiled, checkpoint) is False
+
+    # A different stem, or the same name elsewhere, is still a different corpus.
+    other = SimpleNamespace(**vars(args))
+    other.data_path = str(tmp_path / "other.parquet")
+    with pytest.raises(ValueError, match="different dataset"):
+        validate_packing_resume(other, checkpoint)
+    moved = SimpleNamespace(**vars(args))
+    moved.data_path = str(tmp_path / "sub" / "corpus.parquet")
+    with pytest.raises(ValueError, match="different dataset"):
+        validate_packing_resume(moved, checkpoint)

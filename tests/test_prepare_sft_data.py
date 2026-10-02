@@ -1,6 +1,6 @@
 """Tests for instruction-dataset normalization."""
 
-from scripts.prepare_sft_data import normalize_row
+from scripts.data_builder.prepare_sft_data import normalize_row
 
 
 def test_normalize_codealpaca_prompt_completion():

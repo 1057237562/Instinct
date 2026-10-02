@@ -9,11 +9,11 @@
 
 ## 特性
 
-- **单卡可训**: 当前 Dense 模型 122.9M 参数(vocab 6400, 16 层, dim 768),适配单张 5070 Ti 16GB
+- **单卡可训**: V1 MoE 16GB + Muon 配置为 678.7M 总参数 / 106.2M 激活参数（hidden 512, 32 层）
 - **纯原生实现**: 无第三方训练框架抽象,从零手写 Transformer、LoRA、RL 算法
 - **完整训练链路**: 预训练 → SFT → LoRA → DPO → PPO / GRPO / CISPO → Agentic RL → 蒸馏
-- **双架构**: Dense 与 MoE(当前 16 层配置为 391.9M 总量 / 约 123.0M 激活,4 experts top-1 routing)
-- **可扩展结构**: 支持循环深度架构(LoopUS)、Early Exit 动态推理、自蒸馏训练
+- **多架构**: Dense、MoE 与 Instinct V2 recurrent depth；MoE 默认 4 experts / top-1 routing
+- **Instinct V2 循环深度**: Prelude / latent recurrent core / Coda，在测试时用 `num_steps` 扩展隐空间推理计算
 - **自适应 Sequence Buckets**: 实验性按长度分桶 packing，使用 wall-time DP、显存感知 batch、确定性混排与持久化编译缓存降低 padding 和训练耗时
 - **现代运行时兼容**: 已适配 Transformers 5 / huggingface-hub 1，支持配置、tokenizer 与 Safetensors 往返保存
 - **低内存数据流水线**: 支持 SFT 数据标准化、流式 replay 抽样、磁盘分块混洗和 WebUI 自动发现数据集
@@ -70,19 +70,19 @@ PyTorch。无 GPU 也可进行 CPU smoke test，但完整训练建议使用 NVID
 
 ### 准备与混合 SFT 数据
 
-`scripts/prepare_sft_data.py` 可将 CodeAlpaca、SmolTalk、BigCode Exec、Magicoder
+`scripts/data_builder/prepare_sft_data.py` 可将 CodeAlpaca、SmolTalk、BigCode Exec、Magicoder
 和 No Robots 等数据统一转换为 Instinct 的 `conversations` JSONL：
 
 ```bash
-python scripts/prepare_sft_data.py codealpaca-local
-python scripts/prepare_sft_data.py smol-smoltalk --max-samples 100000
-python scripts/prepare_sft_data.py bigcode-exec-50k
+python scripts/data_builder/prepare_sft_data.py codealpaca-local
+python scripts/data_builder/prepare_sft_data.py smol-smoltalk --max-samples 100000
+python scripts/data_builder/prepare_sft_data.py bigcode-exec-50k
 ```
 
 混合大规模 Coding、Math 与原始 T2T replay 时可运行：
 
 ```bash
-python scripts/mix_sft_datasets.py
+python scripts/data_builder/mix_sft_datasets.py
 ```
 
 该脚本用 reservoir sampling 流式抽取大型 T2T 数据，并通过磁盘分块外部混洗限制峰值
@@ -109,6 +109,13 @@ python eval_llm.py --load_from ./instinct-3 --open_thinking 1
 python eval_llm.py --weight full_sft --early_exit 1
 ```
 
+### 统一评测 WebUI
+
+现已支持 [GSM8K 数学评测](docs/gsm8k.md)：官方 test 集、批量生成、accuracy / pass@K、严格数值答案评分与压缩分析报告。
+
+运行 `python -m streamlit run scripts/eval_webui.py --server.address 127.0.0.1 --server.port 8503`，或在 Windows 双击 `start_eval_webui.bat`。
+浏览器打开 `http://localhost:8503`，可配置 HumanEval、LiveCodeBench、推理自动测试和 ToolCall，启动/停止评测、查看日志并下载结果。详细说明见 [评测 WebUI 文档](docs/eval_webui.md)。
+
 ### LiveCodeBench 代码生成评测
 
 `eval_llm.py` 可直接读取官方 `code_generation_lite` 数据，按官方通用提示生成代码，
@@ -124,7 +131,7 @@ python eval_llm.py --benchmark livecodebench --weight full_sft \
 python eval_llm.py --benchmark livecodebench --weight full_sft \
   --lcb_release_version release_v6 --lcb_num_samples 10 \
   --temperature 0.2 --max_new_tokens 2048 \
-  --lcb_output out/livecodebench_release_v6.json
+  --lcb_output eval/livecodebench_release_v6.json
 ```
 
 输出会在每完成一题后原子保存，默认自动续跑。若 Hugging Face 不可用，可用
@@ -138,12 +145,12 @@ python eval_llm.py --benchmark livecodebench --weight full_sft \
 python eval_llm.py --benchmark livecodebench --weight full_sft \
   --lcb_release_version release_v6 --lcb_num_samples 10 \
   --temperature 0.2 --max_new_tokens 2048 \
-  --lcb_output out/livecodebench_release_v6.json \
+  --lcb_output eval/livecodebench_release_v6.json \
   --lcb_runner_path ../LiveCodeBench --lcb_evaluate
 
 # 已有生成文件时，只运行评分，不加载模型
 python eval_llm.py --lcb_evaluate_only \
-  --lcb_output out/livecodebench_release_v6.json \
+  --lcb_output eval/livecodebench_release_v6.json \
   --lcb_release_version release_v6 --lcb_runner_path ../LiveCodeBench
 ```
 
@@ -167,7 +174,17 @@ torchrun --nproc_per_node N trainer/train_pretrain.py
 
 输出权重:`out/pretrain_{hidden_size}.pth`(默认 768)。
 
-### 2. 指令微调(SFT,必须)
+### 2. 继续预训练(CPT,可选)
+
+Config WebUI 的 `cpt (continual pretraining)` 模式复用 `train_pretrain.py` 的
+next-token 目标，但要求加载已有 `pretrain_*` 或 `cpt_*` 权重。它自动发现
+`pretrain*.jsonl`，优先选择 `dataset/pretrain_continue.jsonl`，默认 1 epoch、
+`5e-5` 峰值学习率、前 1% micro-steps 线性 warmup、随后余弦降至 `5e-6`，
+以及 4096 token fixed packing，并将输出保存为独立的 `cpt_*` 权重。
+CPT 完成后再从 CPT 权重执行 SFT。
+该 re-warm/re-decay 形式参考 [Continual Pre-Training of Large Language Models: How to (re)warm your model?](https://arxiv.org/abs/2308.04014)。
+
+### 3. 指令微调(SFT,必须)
 
 ```bash
 python trainer/train_full_sft.py
@@ -187,7 +204,7 @@ SFT 的学习率较低，当前配置保留 FP32 master weights（`--param_dtype
 同时使用 BF16 activation 与 Tensorwise FP8 GEMM。首次 `max-autotune` 编译会明显较慢，
 后续运行复用 `./.cache/torch_compile/` 中的编译缓存。
 
-### 3. 进阶训练(可选)
+### 4. 进阶训练(可选)
 
 | 阶段 | 脚本 | 说明 |
 |------|------|------|
@@ -242,7 +259,8 @@ Config WebUI 可直接点击 **Pause Training**；页面刷新后会重新扫描
 | `--use_compile 0\|1` | 启用 `torch.compile`；编译产物默认持久化在 `./.cache/torch_compile/` |
 | `--compile_mode` | `default` / `reduce-overhead` / `max-autotune` / `max-autotune-no-cudagraphs` |
 | `--use_moe 1` | 启用 MoE 架构 |
-| `--use_looped 1` | 启用循环深度架构(LoopUS) |
+| `--use_looped 1` | 启用 Instinct V2 latent recurrent-depth 架构 |
+| `--loop_iters` / `--mean_backprop_depth` | 目标平均递归次数 / 保留梯度的最后递归次数 |
 | `--use_grad_checkpoint 0\|1\|2` | 梯度检查点(0=关闭, 1=选择性重算注意力QKᵀ/FFN, 2=整层checkpoint) |
 | `--hidden_size` / `--num_hidden_layers` | 模型宽度 / 深度 |
 | `--use_wandb` | 开启训练日志(默认 SwanLab,兼容 WandB 接口) |
@@ -284,10 +302,13 @@ eval_llm.py     # CLI 推理入口
 
 | 模型 | 参数量 | 说明 |
 |------|--------|------|
-| instinct-3 | 122.9M | 当前 Dense 主线(dim 768, 16 层, max_pos 32768) |
-| instinct-3-moe | 391.9M-A123.0M | 当前 16 层配置，4 experts / top-1 routing |
+| Instinct V1 | 152.4M | Dense，dim 768，20 层，8Q/4KV GQA；见 [architecture-v1.html](architecture-v1.html) |
+| Instinct V1 MoE | 678.7M-A106.2M | 16GB + Muon deep-thin：hidden 512、32 层、16Q/4KV、8 个 FFN=1664 专家，top-1；见 [architecture-v1-moe.html](architecture-v1-moe.html) |
+| Instinct V2 | 187.5M | latent recurrent depth，物理层 `(2,4,2)`，平均有效深度 132；见 [architecture.html](architecture.html) |
 
-循环深度架构(LoopUS)可在固定参数下增加有效深度,配合 Early Exit 在推理时按 token 动态选择退出层,以控制推理成本。
+Instinct V1 Dense 的总参数和每 token 激活参数均为 152,406,528（约 152.4M）；V1 MoE 为 678,726,144 总参数 / 106,203,648 激活参数。V1 Dense 使用 20 层、hidden=768、FFN=2432，不能与 `InstinctConfig` 默认的 8 层旧版 `instinct-3` 混淆；加载和评测应以权重对应的配置为准。按训练者提供的信息，V1 MoE 使用了 34GB 数据集，V1 Dense 则使用两个 mini 数据集分别进行预训练和 SFT；文件大小不等于实际训练 token 数或代码数据量。
+
+Instinct V2 参考 [Scaling up Test-Time Compute with Latent Reasoning](https://arxiv.org/abs/2502.05171)：Prelude 将 token 映射到隐空间，共享的多层 recurrent core 每轮通过 `Linear([state; input])` 重新注入输入，Coda 解码最终状态。训练时递归次数使用 log-normal Poisson 采样，并只对最后 `k` 轮反传；推理可用 `eval_llm.py --model_architecture looped --num_steps 32` 增加隐空间计算。200M 级 V2 默认为 187,521,984 参数：`hidden=1248`、13 个 96 维 MHA heads、`FFN=4224`、物理层 `(Prelude, Core, Coda)=(2,4,2)`，平均递归 32 次（平均有效深度 132），只对最后 8 次递归保留梯度。
 
 ---
 

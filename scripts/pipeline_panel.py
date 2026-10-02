@@ -15,7 +15,11 @@ def snapshot(state, model, trainer):
                     sequence_packing=False, sequence_packing_mode='fixed', seq_bucket=2,
                     bucket_gpu_memory_gb=16.0, bucket_max_seq_len=16384,
                     bucket_large_threshold=8192, packing_batch_size=1000,
-                    packing_num_proc=1, bucket_loader_workers=0, use_compile=True,
+                    packing_num_proc=1, bucket_loader_workers=0,
+                    data_cache_max_gb=5.0, use_compile=True,
+                    dataset_streaming='auto', streaming_chunk_mb=1024,
+                    streaming_prefetch_chunks=1,
+                    cache_build_mode='inline',
                     compile_mode='reduce-overhead', use_grad_checkpoint=0,
                     fp8_training='off', fp8_filter='auto', profile='off',
                     profile_warmup=10, profile_interval=100, profile_active_steps=5)
@@ -23,6 +27,8 @@ def snapshot(state, model, trainer):
     args.update(dtype=state.get('activation_dtype', 'bfloat16'),
                 epochs=state.get(f'epochs_{trainer}', 2),
                 learning_rate=state.get(f'learning_rate_{trainer}', 5e-4 if trainer == 'pretrain' else 1e-5),
+                warmup_ratio=state.get(f'warmup_ratio_{trainer}', 0.0),
+                warmup_steps=0, min_lr_ratio=0.1,
                 data_path=state.get(f'data_path_{trainer}', ''),
                 hidden_size=model['hidden_size'], num_hidden_layers=model['num_hidden_layers'],
                 use_moe=model['use_moe'],
@@ -30,6 +36,13 @@ def snapshot(state, model, trainer):
                 early_exit=bool(model.get('early_exit_layers') and state.get('early_exit_enabled')))
     if not args['data_path']:
         raise ValueError('请先选择该阶段的数据集')
+    try:
+        from scripts.moe_router_controls import migration_args
+    except ModuleNotFoundError:
+        from moe_router_controls import migration_args
+    args.update(migration_args(
+        state, model, trainer, from_resume=bool(state.get('from_resume', False)),
+    ))
     return json.loads(json.dumps(dict(name=trainer, trainer=trainer, model=model, args=args)))
 
 
@@ -57,6 +70,10 @@ def render(st, model, training_active):
         st.json(plan, expanded=False)
         st.download_button('导出流水线配置', json.dumps(plan, ensure_ascii=False, indent=2),
                            file_name='training_pipeline.json', mime='application/json')
+        # Recover sessions already poisoned by an older persistence restore.
+        # Keep actual UploadedFile objects so reruns preserve selected files.
+        if st.session_state.get('pipeline_upload') is None:
+            st.session_state.pop('pipeline_upload', None)
         uploaded = st.file_uploader('导入已保存的流水线配置', type=['json'], key='pipeline_upload')
         if st.button('应用导入配置', disabled=uploaded is None):
             try:

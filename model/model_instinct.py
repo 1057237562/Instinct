@@ -1,7 +1,7 @@
 """
 Instinct 模型定义:配置类(InstinctConfig)与 Dense Transformer 主干。
 
-包含 RMSNorm、RoPE(支持 YaRN 外推)、GQA 注意力(flash / math / 梯度检查点
+包含 RMSNorm、RoPE(支持 YaRN / LongRoPE 外推)、GQA 注意力(flash / math / 梯度检查点
 三路实现)、SwiGLU FFN、MoE 路由、mHC / Attention Residuals 可选残差拓扑、
 Early Exit / logit lens,以及带完整采样参数(temperature / top_k / top_p /
 repetition_penalty)的自定义 generate 循环。
@@ -14,12 +14,26 @@ from transformers.activations import ACT2FN
 from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from model.flash_attn_4 import flash_attention
-from model.kv_cache_quant import parse_cache, make_cache
+from model.kv_cache_quant import is_fp8, make_cache, parse_cache
+from model.static_cache import (
+    DecodeState,
+    StaticKVCache,
+    StaticKVCacheLayer,
+    STATIC_CACHE_INITIAL_DECODE_TOKENS,
+    bucket_capacity,
+    layer_specs,
+)
 from model.checkpointing import recompute_attention, checkpoint_ffn
-from model.attention_mask import apply_attention_mask
+from model.attention_mask import apply_attention_mask, prepare_sdpa_attention_bias
+from model.packed_attention import maybe_prepare_flex_mask
 from model.sequence_packing import (
     merge_packed_attention_mask, positions_from_sequence_ids,
 )
+from model.rope import (
+    build_rope_caches, precompute_freqs_cis, select_rope_cache,
+    validate_rope_scaling,
+)
+from model.moe_dispatch import refresh_inference_stacks, routed_moe_forward
 
 # ═══════════════════════════════════════════════════════════════
 # InstinctConfig
@@ -76,7 +90,11 @@ class InstinctConfig(PretrainedConfig):
             "attention_factor": 1.0,
             "type": "yarn"
         } if self.inference_rope_scaling else None
-        self.rope_scaling = saved_rope_scaling or saved_rope_parameters or default_rope_scaling
+        self.rope_scaling = validate_rope_scaling(
+            saved_rope_scaling or saved_rope_parameters or default_rope_scaling,
+            self.head_dim,
+            self.max_position_embeddings,
+        )
         # Early Exit configs (LayerSkip-style: shared LM head, no auxiliary classifiers)
         self.early_exit_layers = kwargs.get("early_exit_layers", [4, 5, 6, 7])
         self.early_exit_loss_weight = kwargs.get("early_exit_loss_weight", 0.3)
@@ -121,6 +139,8 @@ class RMSNorm(torch.nn.Module):
 
     def forward(self, x):
         """在 fp32 下归一化避免低精度下平方和溢出,再乘权重并恢复原 dtype。"""
+        if not self.training and getattr(self, '_inference_norm', None) is not None:
+            return self._inference_norm(x, self.weight, self.eps)
         return (self.weight * self.norm(x.float())).type_as(x)
 
 
@@ -211,24 +231,6 @@ class ManifoldHyperHead(nn.Module):
         pre = torch.sigmoid(logits * self.scale.float() + self.base.float()) + self.hc_eps
         return (pre.unsqueeze(-1) * hidden_streams).sum(dim=2).to(hidden_streams.dtype)
 
-def precompute_freqs_cis(dim: int, end: int = int(32 * 1024), rope_base: float = 1e6, rope_scaling: dict = None):
-    freqs, attn_factor = 1.0 / (rope_base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)), 1.0
-    if rope_scaling is not None: # YaRN: f'(i) = f(i)((1-γ) + γ/s), where γ∈[0,1] is linear ramp
-        orig_max, factor, beta_fast, beta_slow, attn_factor = (
-            rope_scaling.get("original_max_position_embeddings", 2048), rope_scaling.get("factor", 16),
-            rope_scaling.get("beta_fast", 32.0), rope_scaling.get("beta_slow", 1.0), rope_scaling.get("attention_factor", 1.0)
-        )
-        if end / orig_max > 1.0:
-            inv_dim = lambda b: (dim * math.log(orig_max / (b * 2 * math.pi))) / (2 * math.log(rope_base))
-            low, high = max(math.floor(inv_dim(beta_fast)), 0), min(math.ceil(inv_dim(beta_slow)), dim // 2 - 1)
-            ramp = torch.clamp((torch.arange(dim // 2, device=freqs.device).float() - low) / max(high - low, 0.001), 0, 1)
-            freqs = freqs * (1 - ramp + ramp / factor)
-    t = torch.arange(end, device=freqs.device)
-    freqs = torch.outer(t, freqs).float()
-    freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1) * attn_factor
-    freqs_sin = torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1) * attn_factor
-    return freqs_cos, freqs_sin
-
 def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     def rotate_half(x): return torch.cat((-x[..., x.shape[-1] // 2:], x[..., : x.shape[-1] // 2]), dim=-1)
     if cos.ndim == 3:
@@ -264,7 +266,8 @@ class Attention(nn.Module):
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention') and config.flash_attn
         self.use_grad_checkpoint = getattr(config, "use_grad_checkpoint", 0)
 
-    def forward(self, x, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
+    def forward(self, x, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None,
+                cache_positions=None):
         bsz, seq_len, _ = x.shape
         xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
         xq = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)
@@ -273,14 +276,33 @@ class Attention(nn.Module):
         xq, xk = self.q_norm(xq), self.k_norm(xk)
         cos, sin = position_embeddings
         xq, xk = apply_rotary_pos_emb(xq, xk, cos, sin)
-        if past_key_value is not None:
-            k_past, v_past = parse_cache(past_key_value)
-            k_past = k_past.to(xq.dtype)
-            v_past = v_past.to(xq.dtype)
-            xk = torch.cat([k_past, xk], dim=1)
-            xv = torch.cat([v_past, xv], dim=1)
-        past_kv = make_cache(xk, xv, self.kv_cache_dtype) if use_cache else None
-        if (self.flash and (seq_len > 1)
+        static = isinstance(past_key_value, StaticKVCacheLayer)
+        if static:
+            # Preallocated buffer: this step's slice is written in place and the
+            # whole buffer is attended through the mask the trunk built, so the
+            # shapes never change and the step stays capturable.
+            xk, xv = past_key_value.append(xk, xv, cache_positions)
+            past_kv = past_key_value if use_cache else None
+        else:
+            if past_key_value is not None:
+                k_past, v_past = parse_cache(past_key_value)
+                k_past = k_past.to(xq.dtype)
+                v_past = v_past.to(xq.dtype)
+                xk = torch.cat([k_past, xk], dim=1)
+                xv = torch.cat([v_past, xv], dim=1)
+            past_kv = make_cache(xk, xv, self.kv_cache_dtype) if use_cache else None
+        if self.flash and not self.training and static:
+            # The mask carries causality already (see StaticKVCache.mask_for).
+            output = flash_attention(xq, xk, xv, dropout_p=0.0,
+                                     is_causal=False, attention_mask=attention_mask)
+            output = output.reshape(bsz, seq_len, -1)
+        elif self.flash and not self.training and seq_len == 1:
+            # A decode query can attend to every cached key; a top-left causal
+            # mask would incorrectly restrict it to the first cached position.
+            output = flash_attention(xq, xk, xv, dropout_p=0.0,
+                                     is_causal=False, attention_mask=attention_mask)
+            output = output.reshape(bsz, seq_len, -1)
+        elif (self.flash and (seq_len > 1)
                 and (not self.is_causal or past_key_value is None)):
             # Packed masks stay on memory-efficient SDPA. Mode 1 checkpoints
             # the FFN only on this fast path; recomputing attention here was
@@ -314,7 +336,10 @@ class FeedForward(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        gate, up = self.gate_proj(x), self.up_proj(x)
+        if not self.training and getattr(self, '_inference_gate', None) is not None:
+            return self.down_proj(self._inference_gate(gate, up))
+        return self.down_proj(self.act_fn(gate) * up)
 
 class MOEFeedForward(nn.Module):
     def __init__(self, config: InstinctConfig):
@@ -323,28 +348,34 @@ class MOEFeedForward(nn.Module):
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
         self.experts = nn.ModuleList([FeedForward(config, intermediate_size=config.moe_intermediate_size) for _ in range(config.num_experts)])
         self.act_fn = ACT2FN[config.hidden_act]
+        # Detached, tiny [num_experts] snapshot consumed only at log intervals.
+        # It is deliberately not a buffer, so checkpoints remain unchanged.
+        self.router_load = None
+        # Grouped-GEMM backend and prebuilt weight stacks for the traceable
+        # inference dispatch, installed by optimize_inference. None keeps the
+        # training/autograd forward.
+        self._inference_backend = None
+        self._inference_stacked = None
 
     def forward(self, x):
-        batch_size, seq_len, hidden_dim = x.shape
-        x_flat = x.view(-1, hidden_dim)
-        scores = F.softmax(self.gate(x_flat), dim=-1)
-        topk_weight, topk_idx = torch.topk(scores, k=self.config.num_experts_per_tok, dim=-1, sorted=False)
-        if self.config.norm_topk_prob: topk_weight = topk_weight / (topk_weight.sum(dim=-1, keepdim=True) + 1e-20)
-        y = torch.zeros_like(x_flat)
-        for i, expert in enumerate(self.experts):
-            mask = (topk_idx == i)
-            if mask.any():
-                token_idx = mask.any(dim=-1).nonzero().flatten()
-                weight = topk_weight[mask].view(-1, 1)
-                y.index_add_(0, token_idx, (expert(x_flat[token_idx]) * weight).to(y.dtype))
-            elif self.training:
-                y[0, 0] += 0 * sum(p.sum() for p in expert.parameters())
-        if self.training and self.config.router_aux_loss_coef > 0:
+        y, scores, topk_idx = routed_moe_forward(
+            x, self.gate, self.experts,
+            num_experts_per_tok=self.config.num_experts_per_tok,
+            norm_topk_prob=self.config.norm_topk_prob,
+            act_fn=self.act_fn,
+            inference_backend=self._inference_backend,
+            inference_stacks=self._inference_stacked,
+        )
+        if self.training:
             load = F.one_hot(topk_idx, self.config.num_experts).float().mean(0)
-            self.aux_loss = (load * scores.mean(0)).sum() * self.config.num_experts * self.config.router_aux_loss_coef
+            self.router_load = load.mean(dim=0).detach()
+            if self.config.router_aux_loss_coef > 0:
+                self.aux_loss = (load * scores.mean(0)).sum() * self.config.num_experts * self.config.router_aux_loss_coef
+            else:
+                self.aux_loss = scores.new_zeros(1).squeeze()
         else:
             self.aux_loss = scores.new_zeros(1).squeeze()
-        return y.view(batch_size, seq_len, hidden_dim)
+        return y
 
 class InstinctBlock(nn.Module):
     def __init__(self, layer_id: int, config: InstinctConfig):
@@ -368,15 +399,17 @@ class InstinctBlock(nn.Module):
             # recompilation limit on models deeper than eight layers.
             self.attnres_partial_count = (2 * layer_id) % self.attnres_block_size
 
-    def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
+    def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False,
+                attention_mask=None, cache_positions=None):
         if self.residual_type == "mhc":
             return self._forward_mhc(
-                hidden_states, position_embeddings, past_key_value, use_cache, attention_mask
+                hidden_states, position_embeddings, past_key_value, use_cache, attention_mask,
+                cache_positions,
             )
         residual = hidden_states
         hidden_states, present_key_value = self.self_attn(
             self.input_layernorm(hidden_states), position_embeddings,
-            past_key_value, use_cache, attention_mask
+            past_key_value, use_cache, attention_mask, cache_positions
         )
         hidden_states = hidden_states + residual
         normed = self.post_attention_layernorm(hidden_states)
@@ -398,11 +431,11 @@ class InstinctBlock(nn.Module):
         return self.mlp(hidden_states)
 
     def _forward_mhc(self, hidden_states, position_embeddings, past_key_value=None,
-                     use_cache=False, attention_mask=None):
+                     use_cache=False, attention_mask=None, cache_positions=None):
         post, comb, collapsed = self.attn_hc(hidden_states)
         attn_output, present_key_value = self.self_attn(
             self.input_layernorm(collapsed), position_embeddings,
-            past_key_value, use_cache, attention_mask
+            past_key_value, use_cache, attention_mask, cache_positions
         )
         hidden_states = self.attn_hc.merge(hidden_states, attn_output, post, comb)
         post, comb, collapsed = self.ffn_hc(hidden_states)
@@ -411,11 +444,11 @@ class InstinctBlock(nn.Module):
         return hidden_states, present_key_value
 
     def forward_attnres_full(self, source_bank, position_embeddings, past_key_value=None,
-                             use_cache=False, attention_mask=None):
+                             use_cache=False, attention_mask=None, cache_positions=None):
         hidden_states = self.attn_residual(source_bank)
         attn_output, present_key_value = self.self_attn(
             self.input_layernorm(hidden_states), position_embeddings,
-            past_key_value, use_cache, attention_mask
+            past_key_value, use_cache, attention_mask, cache_positions
         )
         source_bank = torch.cat((source_bank, attn_output.unsqueeze(0)), dim=0)
         hidden_states = self.mlp_residual(source_bank)
@@ -434,12 +467,12 @@ class InstinctBlock(nn.Module):
         return source_bank[:-1] if partial_count == 0 else source_bank
 
     def forward_attnres_block(self, source_bank, position_embeddings, past_key_value=None,
-                              use_cache=False, attention_mask=None):
+                              use_cache=False, attention_mask=None, cache_positions=None):
         partial_count = self.attnres_partial_count
         hidden_states = self.attn_residual(self._block_sources(source_bank, partial_count))
         attn_output, present_key_value = self.self_attn(
             self.input_layernorm(hidden_states), position_embeddings,
-            past_key_value, use_cache, attention_mask
+            past_key_value, use_cache, attention_mask, cache_positions
         )
         source_bank = self._block_residual(source_bank, partial_count, attn_output)
         partial_count = (partial_count + 1) % self.attnres_block_size
@@ -462,19 +495,56 @@ class InstinctModel(nn.Module):
             self.hc_head = ManifoldHyperHead(config)
         elif self.residual_type == "attnres":
             self.output_residual = AttentionResidual(config)
-        freqs_cos, freqs_sin = precompute_freqs_cis(
-            dim=config.head_dim, end=config.max_position_embeddings,
-            rope_base=config.rope_theta, rope_scaling=config.rope_scaling,
+        freqs_cos, freqs_sin, short_cos, short_sin = build_rope_caches(
+            config.head_dim, config.max_position_embeddings,
+            config.rope_theta, config.rope_scaling,
         )
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+        self.register_buffer("freqs_cos_short", short_cos, persistent=False)
+        self.register_buffer("freqs_sin_short", short_sin, persistent=False)
+        self._rope_ready = True
+
+    def ensure_rope_caches(self, device=None) -> bool:
+        """Rebuild the RoPE caches if they were lost during meta-device init.
+
+        A Python flag rather than ``freqs_cos[0, 0] == 0``: a tensor comparison
+        used as a branch condition is a data-dependent jump, which costs one
+        graph break per compiled forward. Inference also calls this before
+        compiling (see ``optimize_inference``), so the check settles once.
+        """
+        if self._rope_ready and self.freqs_cos[0, 0] != 0:
+            return False
+        freqs_cos, freqs_sin, short_cos, short_sin = build_rope_caches(
+            self.config.head_dim, self.config.max_position_embeddings,
+            self.config.rope_theta, self.config.rope_scaling,
+        )
+        target = device if device is not None else self.freqs_cos.device
+        self.freqs_cos, self.freqs_sin = freqs_cos.to(target), freqs_sin.to(target)
+        if short_cos is not None:
+            self.freqs_cos_short = short_cos.to(target)
+            self.freqs_sin_short = short_sin.to(target)
+        self._rope_ready = True
+        return True
 
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False,
                 sequence_ids=None, position_ids=None, **kwargs):
         batch_size, seq_length = input_ids.shape
-        if hasattr(past_key_values, 'layers'): past_key_values = None
-        past_key_values = past_key_values or [None] * len(self.layers)
-        start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
+        if isinstance(past_key_values, StaticKVCache):
+            # Preallocated buffer: the slots to write are the logical positions,
+            # so they must come from the caller instead of from cache shapes.
+            if position_ids is None:
+                raise ValueError("a StaticKVCache needs explicit position_ids")
+            start_pos = 0
+            # The cache owns the mask: it hides the buffer tail and, on a
+            # prompt, everything after each query. Building it here keeps every
+            # layer's SDPA the same shape on every step.
+            attention_mask = past_key_values.mask_for(position_ids)
+        else:
+            if hasattr(past_key_values, 'layers'):
+                past_key_values = None  # legacy HF cache objects are not ours
+            past_key_values = past_key_values or [None] * len(self.layers)
+            start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
         hidden_states = self.dropout(self.embed_tokens(input_ids))
         if self.residual_type == "mhc":
             hidden_states = hidden_states.unsqueeze(2).expand(-1, -1, self.config.hc_mult, -1).contiguous()
@@ -485,25 +555,34 @@ class InstinctModel(nn.Module):
                 # [embedding, completed blocks..., current partial]
                 hidden_states = torch.stack((hidden_states, torch.zeros_like(hidden_states)), dim=0)
         # Recompute RoPE buffers lost during meta-device init (transformers>=5.x)
-        if self.freqs_cos[0, 0] == 0:
-            freqs_cos, freqs_sin = precompute_freqs_cis(
-                dim=self.config.head_dim, end=self.config.max_position_embeddings,
-                rope_base=self.config.rope_theta, rope_scaling=self.config.rope_scaling,
-            )
-            self.freqs_cos, self.freqs_sin = freqs_cos.to(hidden_states.device), freqs_sin.to(hidden_states.device)
+        if not self._rope_ready:
+            self.ensure_rope_caches(hidden_states.device)
         if sequence_ids is not None:
             if past_key_values[0] is not None:
                 raise ValueError("sequence_ids cannot be used together with a KV cache")
             if position_ids is None:
                 position_ids = positions_from_sequence_ids(sequence_ids)
-            attention_mask = merge_packed_attention_mask(sequence_ids, attention_mask)
-        if position_ids is None:
-            position_embeddings = (
-                self.freqs_cos[start_pos:start_pos + seq_length],
-                self.freqs_sin[start_pos:start_pos + seq_length],
+            flex_mask = maybe_prepare_flex_mask(
+                sequence_ids, hidden_states, attention_mask=attention_mask,
+                enabled=self.config.flash_attn,
+                dropout_p=self.config.dropout if self.training else 0.0,
+                head_dim=self.config.head_dim,
             )
-        else:
-            position_embeddings = (self.freqs_cos[position_ids], self.freqs_sin[position_ids])
+            if flex_mask is not None:
+                attention_mask = flex_mask
+            else:
+                attention_mask = merge_packed_attention_mask(sequence_ids, attention_mask)
+                if self.config.flash_attn and seq_length > 1:
+                    attention_mask = prepare_sdpa_attention_bias(
+                        attention_mask, hidden_states, query_length=seq_length,
+                    )
+        position_embeddings = select_rope_cache(
+            self.freqs_cos, self.freqs_sin,
+            self.freqs_cos_short, self.freqs_sin_short,
+            self.config.rope_scaling,
+            start_pos=start_pos, seq_length=seq_length,
+            position_ids=position_ids,
+        )
         presents, intermediates = [], []
         aux_loss = hidden_states.new_zeros(1).squeeze()
         return_intermediate = kwargs.pop("return_intermediate", False)
@@ -529,7 +608,8 @@ class InstinctModel(nn.Module):
                     position_embeddings,
                     past_key_value=past_key_value,
                     use_cache=use_cache,
-                    attention_mask=attention_mask
+                    attention_mask=attention_mask,
+                    cache_positions=position_ids
                 )
             presents.append(present)
             if isinstance(layer.mlp, MOEFeedForward):
@@ -587,6 +667,9 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         self.model = InstinctModel(self.config)
         self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
         if self.config.tie_word_embeddings: self.model.embed_tokens.weight = self.lm_head.weight
+        # Decode resources reused across generate() calls, keyed by capacity.
+        # Populated lazily by _decode_state_for once optimize_inference allowed it.
+        self._decode_states = {}
         self.post_init()
 
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False,
@@ -598,6 +681,13 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         def _compute_logits(hidden_states):
             slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
             return self.lm_head(hidden_states[:, slice_indices, :])
+
+        # Refresh the inference MoE weight stacks here, in eager Python: the
+        # version-counter checks that keep the stacks valid cannot run inside the
+        # compiled trunk (see moe_dispatch.refresh_inference_stacks).
+        stack_modules = getattr(self, '_inference_stack_modules', None)
+        if stack_modules is not None and not torch.compiler.is_compiling():
+            refresh_inference_stacks(stack_modules)
 
         # Logit lens: unembed each layer's normed hidden state via the shared LM head (inference-only probing, no training)
         if logit_lens:
@@ -662,40 +752,294 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                  num_return_sequences=1, do_sample=True, repetition_penalty=1.0, **kwargs):
         input_ids = kwargs.pop("input_ids", inputs).repeat(num_return_sequences, 1)
         attention_mask = attention_mask.repeat(num_return_sequences, 1) if attention_mask is not None else None
+        initial_length = input_ids.shape[1]
+        input_storage = input_ids.new_empty((input_ids.shape[0], initial_length + max_new_tokens))
+        input_storage[:, :initial_length].copy_(input_ids)
+        input_ids = input_storage[:, :initial_length]
+        attention_storage = None
+        if attention_mask is not None:
+            attention_storage = attention_mask.new_ones((attention_mask.shape[0], initial_length + max_new_tokens))
+            attention_storage[:, :initial_length].copy_(attention_mask)
+            attention_mask = attention_storage[:, :initial_length]
         past_key_values = kwargs.pop("past_key_values", None)
         early_exit = kwargs.pop("early_exit", False)
         exit_threshold = kwargs.pop("exit_threshold", 0.9)
+        # Generation metadata, not a Transformer input. The native loop uses
+        # EOS for finished rows; padding is represented by attention_mask.
+        # Leaving this in forward_kwargs silently disables CUDA graph replay
+        # for HF-compatible callers such as the Chat WebUI.
+        kwargs.pop("pad_token_id", None)
+        from model.generation_stream import TokenChunkBuffer
+        chunk_size = int(kwargs.pop('stream_chunk_size', 16))
+        # Cache-returning callers need the cache aligned to the exact stop token.
+        if kwargs.get('return_kv'):
+            chunk_size = 1
+        chunks = TokenChunkBuffer(streamer, chunk_size, eos_token_id)
         finished = torch.zeros(input_ids.shape[0], dtype=torch.bool, device=input_ids.device)
         if streamer: streamer.put(input_ids.cpu())
-        for _ in range(max_new_tokens):
-            past_len = past_key_values[0][0].shape[1] if past_key_values else 0
-            forward_kwargs = dict(kwargs)
-            if early_exit:
-                forward_kwargs['early_exit'] = True
-                forward_kwargs['exit_threshold'] = exit_threshold
-            outputs = self.forward(input_ids[:, past_len:], attention_mask, past_key_values, use_cache=use_cache, **forward_kwargs)
-            attention_mask = torch.cat([attention_mask, attention_mask.new_ones(attention_mask.shape[0], 1)], -1) if attention_mask is not None else None
-            logits = outputs.logits[:, -1, :] / temperature
-            if repetition_penalty != 1.0:
-                for i in range(input_ids.shape[0]):
-                    seen = torch.unique(input_ids[i])
-                    score = logits[i, seen]
-                    logits[i, seen] = torch.where(score > 0, score / repetition_penalty, score * repetition_penalty)
-            if top_k > 0:
-                logits[logits < torch.topk(logits, top_k)[0][..., -1, None]] = -float('inf')
-            if top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                mask = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1) > top_p
-                mask[..., 1:], mask[..., 0] = mask[..., :-1].clone(), 0
-                logits[mask.scatter(1, sorted_indices, mask)] = -float('inf')
-            next_token = torch.multinomial(torch.softmax(logits, dim=-1), num_samples=1) if do_sample else torch.argmax(logits, dim=-1, keepdim=True)
-            if eos_token_id is not None: next_token = torch.where(finished.unsqueeze(-1), next_token.new_full((next_token.shape[0], 1), eos_token_id), next_token)
-            input_ids = torch.cat([input_ids, next_token], dim=-1)
-            past_key_values = outputs.past_key_values if use_cache else None
-            if streamer: streamer.put(next_token.cpu())
-            if eos_token_id is not None:
-                finished |= next_token.squeeze(-1).eq(eos_token_id)
-                if finished.all(): break
+        forward_kwargs = dict(kwargs)
+        forward_kwargs.setdefault('logits_to_keep', 1)
+        if early_exit:
+            forward_kwargs['early_exit'] = True
+            forward_kwargs['exit_threshold'] = exit_threshold
+        sample = dict(temperature=temperature, top_p=top_p, top_k=top_k, do_sample=do_sample,
+                      repetition_penalty=repetition_penalty, eos_token_id=eos_token_id)
+        # max_new_tokens is an output limit, not a prediction that every answer
+        # will reach it.  Planning the static cache for the whole allowance
+        # makes every attention step scan thousands of untouched slots (the
+        # WebUI permits 16K).  Start small and grow at a bucket boundary while
+        # preserving the original output limit.
+        decode_headroom = max(1, int(getattr(
+            self, '_static_cache_decode_headroom', STATIC_CACHE_INITIAL_DECODE_TOKENS)))
+        planned_new_tokens = min(max_new_tokens, decode_headroom)
+        state = self._decode_state_for(input_ids, attention_mask, planned_new_tokens,
+                                      use_cache=use_cache, early_exit=early_exit, kwargs=kwargs)
+        if state is not None:
+            written = self._decode_with_static_cache(
+                state, input_storage, finished, max_new_tokens, chunks, sample, forward_kwargs)
+            input_ids = input_storage[:, :initial_length + written]
+        else:
+            for step in range(max_new_tokens):
+                past_len = past_key_values[0][0].shape[1] if past_key_values else 0
+                outputs = self.forward(input_ids[:, past_len:], attention_mask, past_key_values, use_cache=use_cache, **forward_kwargs)
+                if step == 0:
+                    chunks.start_decode()
+                attention_mask = attention_storage[:, :initial_length + step + 1] if attention_storage is not None else None
+                next_token = _sample_next_token(outputs.logits[:, -1, :], input_ids, finished, **sample)
+                input_storage[:, initial_length + step:initial_length + step + 1].copy_(next_token)
+                input_ids = input_storage[:, :initial_length + step + 1]
+                past_key_values = outputs.past_key_values if use_cache else None
+                if eos_token_id is not None:
+                    finished |= next_token.squeeze(-1).eq(eos_token_id)
+                final_step = step + 1 == max_new_tokens
+                if chunks.push(next_token, finished, final=final_step) or final_step:
+                    break
+        if chunks.overshoot:
+            input_ids = input_ids[:, :-chunks.overshoot]
         if streamer: streamer.end()
         if kwargs.get("return_kv"): return {'generated_ids': input_ids, 'past_kv': past_key_values}
         return input_ids
+
+    def _decode_state_for(self, input_ids, attention_mask, max_new_tokens, *, use_cache, early_exit, kwargs):
+        """A reusable decode state for this generation, or None for the growing cache.
+
+        Only single unpadded sequences qualify: the in-place append writes one
+        position per step, and padded rows would need per-row slots. The legacy
+        cache stays the default everywhere else.
+
+        States are kept between calls and picked smallest-first, so a chat turn
+        usually reuses the previous turn's buffers -- and with them the compiled
+        graph and the recorded CUDA graph, both of which are keyed on the buffer
+        addresses and shapes.
+        """
+        if not use_cache or not getattr(self, '_static_cache_ok', False):
+            return None
+        if input_ids.shape[0] != 1 or early_exit or kwargs.get('return_kv'):
+            return None
+        if attention_mask is not None and not bool(attention_mask.all()):
+            return None
+        needed = input_ids.shape[1] + max_new_tokens
+        states = self._decode_states
+        for state in sorted(states.values(), key=lambda item: item.capacity):
+            if state.accepts(needed):
+                return state
+        capacity = bucket_capacity(needed, self.config.max_position_embeddings)
+        if capacity is None:
+            print(f'[Inference] sequence of {needed} tokens exceeds the bucket ladder; '
+                  f'using the growing cache.', flush=True)
+            return None
+        if is_fp8(self.config.kv_cache_dtype) and not getattr(self, '_static_cache_fp8_noted', False):
+            self._static_cache_fp8_noted = True
+            print(f'[Inference] static KV cache stores keys/values in {next(self.parameters()).dtype} '
+                  f'rather than {self.config.kv_cache_dtype}: a quantized buffer would have to be '
+                  f'dequantized and re-quantized on every step.', flush=True)
+        parameters = next(self.parameters())
+        state = DecodeState(capacity, layer_specs(self), parameters.dtype, input_ids.device)
+        bytes_needed = sum(layer.key.numel() * layer.key.element_size() * 2 for layer in state.cache)
+        if input_ids.device.type == 'cuda':
+            free, _ = torch.cuda.mem_get_info(input_ids.device)
+            if bytes_needed > 0.25 * free:
+                print(f'[Inference] static KV cache needs {bytes_needed / 2 ** 20:.0f} MiB of '
+                      f'{free / 2 ** 20:.0f} MiB free for max_new_tokens={max_new_tokens}; '
+                      f'using the growing cache.', flush=True)
+                return None
+        # Keep the smallest state as the fast path for normal chat turns and one
+        # larger state for a response that crossed a capacity boundary.  When a
+        # response grows again, replace the larger state rather than evicting
+        # the small state and permanently slowing every later short answer.
+        while len(states) >= 2:
+            states.pop(max(states))
+        states[capacity] = state
+        return state
+
+    def _decode_with_static_cache(self, state, input_storage, finished, max_new_tokens,
+                                  chunks, sample, forward_kwargs):
+        """Decode into a fixed-shape cache; returns the number of tokens written.
+
+        Token/EOS bookkeeping matches the growing-cache loop exactly, so the two
+        paths emit identical sequences. Every decode step has identical shapes
+        and no host-derived offset, which is what lets this step be captured as
+        one CUDA graph. Prefill keeps the prompt's shape and is not captured.
+        """
+        initial_length = input_storage.shape[1] - max_new_tokens
+        device = input_storage.device
+        prompt = input_storage[:, :initial_length]
+        eos_token_id = sample['eos_token_id']
+        cache = state.cache
+        position_ids = torch.arange(initial_length, device=device).unsqueeze(0)
+        outputs = self.forward(prompt, None, cache, use_cache=True, position_ids=position_ids,
+                               **forward_kwargs)
+        chunks.start_decode()
+        next_token = _sample_next_token(outputs.logits[:, -1, :], prompt, finished, **sample)
+        written = 0
+        # The state owns these buffers, so the graph recorded on the first turn
+        # stays valid for every later turn that reuses the state.
+        step_ids, step_position = state.step_ids, state.step_position
+        graph_eligible = self._decode_kwargs_capturable(forward_kwargs)
+        for step in range(max_new_tokens):
+            position = initial_length + step
+            input_storage[:, position:position + 1].copy_(next_token)
+            written = step + 1
+            if eos_token_id is not None:
+                finished |= next_token.squeeze(-1).eq(eos_token_id)
+            final_step = step + 1 == max_new_tokens
+            if chunks.push(next_token, finished, final=final_step) or final_step:
+                break  # stop before the forward whose logits would be discarded
+            # The answer reached this cache's real capacity.  Allocate the next
+            # bucket and prefill it from the tokens already produced.  This is
+            # infrequent (at 512/1024/2048/...) and avoids paying the largest
+            # bucket's attention cost for every short answer.
+            if position >= state.capacity:
+                context = input_storage[:, :position + 1]
+                state = self._decode_state_for(
+                    context, None, 1, use_cache=True, early_exit=False, kwargs={})
+                if state is None:
+                    raise RuntimeError(
+                        'static KV cache could not grow at capacity boundary; '
+                        'reduce the context length or free GPU memory')
+                cache = state.cache
+                step_ids, step_position = state.step_ids, state.step_position
+                position_ids = torch.arange(position + 1, device=device).unsqueeze(0)
+                outputs = self.forward(
+                    context, None, cache, use_cache=True,
+                    position_ids=position_ids, **forward_kwargs)
+                next_token = _sample_next_token(
+                    outputs.logits[:, -1, :], context, finished, **sample)
+                continue
+
+            step_ids.copy_(next_token.view(1, 1))
+            step_position.fill_(position)
+            # A graph recorded for plain decoding must never serve a call with
+            # Python callbacks (logit lens / early-exit diagnostics).
+            if state.graph is not None and graph_eligible:
+                graph, outputs = state.graph
+                graph.replay()
+            elif state.capture_failed or not graph_eligible:
+                outputs = self.forward(step_ids, None, cache, use_cache=True,
+                                       position_ids=step_position, **forward_kwargs)
+            else:
+                recorded = self._capture_decode_step(cache, step_ids, step_position, forward_kwargs)
+                if recorded is None:
+                    state.capture_failed = True
+                    outputs = self.forward(step_ids, None, cache, use_cache=True,
+                                           position_ids=step_position, **forward_kwargs)
+                else:
+                    state.graph = recorded
+                    graph, outputs = recorded
+                    graph.replay()
+            next_token = _sample_next_token(outputs.logits[:, -1, :],
+                                            input_storage[:, :position + 1], finished, **sample)
+        return written
+
+    @staticmethod
+    def _decode_kwargs_capturable(forward_kwargs) -> bool:
+        """Whether a graph recorded for these kwargs stays faithful.
+
+        Anything that changes the trunk's behaviour per call (the logit-lens
+        callback, the early-exit hook) routes to the eager module and must not be
+        served from a graph recorded for a plain call.
+        """
+        if any(key in forward_kwargs for key in ('layer_callback', 'exit_check_fn', 'return_intermediate')):
+            return False
+        return set(forward_kwargs) <= {'logits_to_keep', 'use_cache'}
+
+    def _capture_decode_step(self, cache, step_ids, step_position, forward_kwargs):
+        """Record one decode step as a CUDA graph; None keeps decoding eagerly.
+
+        A single token costs ~1000 kernel launches and as many compiler guard
+        evaluations, and the decode loop is host-bound rather than GPU-bound, so
+        replaying one captured graph is a large win. Everything the step reads is
+        already fixed-shape: the trunk is compiled, the KV cache is preallocated
+        and the two inputs are the caller's buffers. Sampling stays outside the
+        graph, so an EOS check can still stop the loop mid-flight.
+        """
+        if not torch.cuda.is_available():
+            return None
+        if any(key in forward_kwargs for key in ('layer_callback', 'exit_check_fn', 'return_intermediate')):
+            return None  # those route to the eager trunk (logit lens et al.)
+        if not self._decode_is_capturable():
+            return None
+        try:
+            side_stream = torch.cuda.Stream()
+            side_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side_stream):
+                for _ in range(2):  # required before capture: warm every kernel
+                    self.forward(step_ids, None, cache, use_cache=True,
+                                 position_ids=step_position, **forward_kwargs)
+            torch.cuda.current_stream().wait_stream(side_stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                outputs = self.forward(step_ids, None, cache, use_cache=True,
+                                       position_ids=step_position, **forward_kwargs)
+            return graph, outputs
+        except Exception as exc:
+            # A failed capture invalidates its stream and leaves the error latched
+            # for the next launch; clear it so the eager fallback can proceed.
+            torch.cuda.synchronize()
+            self._capture_ok = False
+            print(f'[Inference] CUDA graph capture unavailable ({type(exc).__name__}: '
+                  f'{str(exc)[:140]}); decoding eagerly.', flush=True)
+            return None
+
+    def _decode_is_capturable(self) -> bool:
+        """Whether every expert dispatch in this model is free of host syncs.
+
+        ``cudaStreamCapture`` aborts on any synchronizing op, and two MoE paths
+        still synchronize: the per-expert loop (``nonzero`` per expert) and the
+        ``cached`` grouped backend (``offsets.cpu()``). Decided once from the
+        installed backends; models that never went through ``optimize_inference``
+        keep the proven eager loop.
+        """
+        cached = getattr(self, '_capture_ok', None)
+        if cached is None:
+            trunk = getattr(self.model, 'original', self.model)
+            cached = all(
+                getattr(layer.mlp, '_inference_backend', None) in ('native', 'triton')
+                for layer in trunk.layers
+                if isinstance(layer.mlp, MOEFeedForward)
+            )
+            self._capture_ok = cached
+        return cached
+
+
+def _sample_next_token(logits, input_ids, finished, *, temperature, top_p, top_k, do_sample,
+                       repetition_penalty, eos_token_id):
+    """Sample or take the argmax of ``logits``; shared by both decode loops."""
+    logits = logits[:, -1, :] if logits.dim() == 3 else logits
+    if do_sample:
+        logits = logits / temperature
+    if repetition_penalty != 1.0:
+        seen = torch.zeros_like(logits, dtype=torch.bool).scatter_(1, input_ids, True)
+        penalized = torch.where(logits > 0, logits / repetition_penalty, logits * repetition_penalty)
+        logits = torch.where(seen, penalized, logits)
+    if do_sample and top_k > 0:
+        logits.masked_fill_(logits < torch.topk(logits, top_k)[0][..., -1, None], -float('inf'))
+    if do_sample and top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        mask = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1) > top_p
+        mask[..., 1:], mask[..., 0] = mask[..., :-1].clone(), 0
+        logits.masked_fill_(mask.scatter(1, sorted_indices, mask), -float('inf'))
+    next_token = torch.multinomial(torch.softmax(logits, dim=-1), num_samples=1) if do_sample else torch.argmax(logits, dim=-1, keepdim=True)
+    if eos_token_id is not None:
+        next_token = torch.where(finished.unsqueeze(-1), next_token.new_full((next_token.shape[0], 1), eos_token_id), next_token)
+    return next_token

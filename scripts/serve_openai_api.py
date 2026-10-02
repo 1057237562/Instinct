@@ -28,15 +28,20 @@ app = FastAPI()
 def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
     if 'model' in args.load_from:
-        moe_suffix = '_moe' if args.use_moe else ''
-        ckp = f'../{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
-        model = InstinctForCausalLM(InstinctConfig(
-            hidden_size=args.hidden_size,
-            num_hidden_layers=args.num_hidden_layers,
-            max_seq_len=args.max_seq_len,
-            use_moe=bool(args.use_moe),
-            inference_rope_scaling=args.inference_rope_scaling
-        ))
+        if args.config_path:
+            with open(args.config_path, 'r', encoding='utf-8') as config_file:
+                config_kwargs = json.load(config_file)
+        else:
+            config_kwargs = {
+                'hidden_size': args.hidden_size,
+                'num_hidden_layers': args.num_hidden_layers,
+                'max_position_embeddings': args.max_seq_len,
+                'use_moe': bool(args.use_moe),
+                'inference_rope_scaling': args.inference_rope_scaling,
+            }
+        model = InstinctForCausalLM(InstinctConfig(**config_kwargs))
+        moe_suffix = '_moe' if model.config.use_moe else ''
+        ckp = f'../{args.save_dir}/{args.weight}_{model.config.hidden_size}{moe_suffix}.pth'
         model.load_state_dict(torch.load(ckp, map_location=device), strict=True)
         if args.lora_weight != 'None':
             apply_lora(model)
@@ -244,7 +249,8 @@ if __name__ == "__main__":
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
     parser.add_argument('--max_seq_len', default=8192, type=int, help="最大序列长度")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
-    parser.add_argument('--inference_rope_scaling', default=False, action='store_true', help="启用RoPE位置编码外推（4倍，仅解决位置编码问题）")
+    parser.add_argument('--config_path', default=None, type=str, help="原生权重对应的模型配置 JSON（LongRoPE 必须通过此项加载缩放向量）")
+    parser.add_argument('--inference_rope_scaling', default=False, action='store_true', help="启用默认 YaRN；LongRoPE 请使用 --config_path")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
     args = parser.parse_args()
     device = args.device

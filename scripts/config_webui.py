@@ -20,6 +20,15 @@ import sys
 import subprocess
 import time
 
+try:
+    from scripts.moe_router_controls import migration_args as moe_router_migration_args
+    from scripts.cpt_defaults import apply_cpt_defaults
+    from scripts.sft_profiles import track_sft_training_type, switch_sft_profile
+except ModuleNotFoundError:
+    from moe_router_controls import migration_args as moe_router_migration_args
+    from cpt_defaults import apply_cpt_defaults
+    from sft_profiles import track_sft_training_type, switch_sft_profile
+
 # ═══════════════════════════════════════════════════════════════
 # Page config
 # ═══════════════════════════════════════════════════════════════
@@ -60,6 +69,10 @@ def _text_input(*args, **kwargs):
     return _state_aware_widget(st.text_input, "value", *args, **kwargs)
 
 
+def _text_area(*args, **kwargs):
+    return _state_aware_widget(st.text_area, "value", *args, **kwargs)
+
+
 def _packing_preprocess_workers(value=None, *, platform_name=None, cpu_count=None):
     """Mirror the trainer's platform-aware packing worker safety limit."""
     platform_name = os.name if platform_name is None else str(platform_name)
@@ -74,23 +87,22 @@ def _packing_preprocess_workers(value=None, *, platform_name=None, cpu_count=Non
 # Preset definitions
 # ═══════════════════════════════════════════════════════════════
 PRESETS = {
-    "instinct-3": {
-        "hidden_size": 768,
+    "Instinct V2": {
+        # Largest paper-proportional width below the 200M parameter budget:
+        # 13 heads x the paper's 96-dimensional attention head.
+        "hidden_size": 1248,
+        "intermediate_size": 4224,
         "num_hidden_layers": 8,
         "vocab_size": 6400,
         "dropout": 0.0,
         "hidden_act": "silu",
         "tie_word_embeddings": True,
-        "num_attention_heads": 8,
-        "num_key_value_heads": 4,
+        "num_attention_heads": 13,
+        "num_key_value_heads": 13,
         "max_position_embeddings": 32768,
-        "rope_theta": 1e6,
+        "rope_theta": 50000.0,
         "inference_rope_scaling": False,
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "factor": 16,
-        "original_max_position_embeddings": 2048,
-        "attention_factor": 1.0,
+        "rope_scaling_type": "none",
         "use_moe": False,
         "num_experts": 4,
         "num_experts_per_tok": 1,
@@ -98,9 +110,23 @@ PRESETS = {
         "router_aux_loss_coef": 5e-4,
         "rms_norm_eps": 1e-6,
         "flash_attn": True,
-        "model_architecture": "standard",
+        "use_grad_checkpoint": 2,
+        "model_architecture": "looped",
+        "qk_bias": True,
+        "qk_norm": False,
+        "prelude_layers": 2,
+        "recurrent_layers": 4,
+        "coda_layers": 2,
+        "loop_iters": 32,
+        "mean_backprop_depth": 8,
+        "recurrence_sampling": "lognormal_poisson",
+        "recurrence_log_normal_sigma": 1.0,
+        "max_recurrence": 256,
+        "state_init_std": 0.6324555320336759,
+        "embedding_scale": 35.32704346531139,
+        "use_input_injection": True,
     },
-    "instinct-3-moe": {
+    "Instinct V2 MoE": {
         "hidden_size": 768,
         "num_hidden_layers": 8,
         "vocab_size": 6400,
@@ -112,6 +138,7 @@ PRESETS = {
         "max_position_embeddings": 32768,
         "rope_theta": 1e6,
         "inference_rope_scaling": False,
+        "rope_scaling_type": "none",
         "beta_fast": 32,
         "beta_slow": 1,
         "factor": 16,
@@ -120,13 +147,24 @@ PRESETS = {
         "use_moe": True,
         "num_experts": 4,
         "num_experts_per_tok": 1,
-        "norm_topk_prob": True,
+        "norm_topk_prob": False,
         "router_aux_loss_coef": 5e-4,
         "rms_norm_eps": 1e-6,
         "flash_attn": True,
-        "model_architecture": "standard",
+        "model_architecture": "looped",
+        "prelude_layers": 2,
+        "recurrent_layers": 4,
+        "coda_layers": 2,
+        "loop_iters": 8,
+        "mean_backprop_depth": 4,
+        "recurrence_sampling": "lognormal_poisson",
+        "recurrence_log_normal_sigma": 0.5,
+        "max_recurrence": 32,
+        "state_init_std": 0.6324555320336759,
+        "embedding_scale": 27.712812921102035,
+        "use_input_injection": True,
     },
-    "instinct2-small": {
+    "Instinct V2 Small": {
         "hidden_size": 512,
         "num_hidden_layers": 8,
         "vocab_size": 6400,
@@ -138,11 +176,50 @@ PRESETS = {
         "max_position_embeddings": 32768,
         "rope_theta": 1e6,
         "inference_rope_scaling": False,
+        "rope_scaling_type": "none",
         "beta_fast": 32,
         "beta_slow": 1,
         "factor": 16,
         "original_max_position_embeddings": 2048,
         "attention_factor": 1.0,
+        "use_moe": False,
+        "num_experts": 4,
+        "num_experts_per_tok": 1,
+        "norm_topk_prob": True,
+        "router_aux_loss_coef": 5e-4,
+        "rms_norm_eps": 1e-6,
+        "flash_attn": True,
+        "model_architecture": "looped",
+        "prelude_layers": 2,
+        "recurrent_layers": 4,
+        "coda_layers": 2,
+        "loop_iters": 8,
+        "mean_backprop_depth": 4,
+        "recurrence_sampling": "lognormal_poisson",
+        "recurrence_log_normal_sigma": 0.5,
+        "max_recurrence": 32,
+        "state_init_std": 0.6324555320336759,
+        "embedding_scale": 22.627416997969522,
+        "use_input_injection": True,
+    },
+    "Instinct V1": {
+        "hidden_size": 768,
+        "num_hidden_layers": 20,
+        "vocab_size": 6400,
+        "dropout": 0.0,
+        "hidden_act": "silu",
+        "tie_word_embeddings": True,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 4,
+        "max_position_embeddings": 32768,
+        "rope_theta": 1e6,
+        "inference_rope_scaling": True,
+        "rope_scaling_type": "yarn",
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "factor": 4.0,
+        "original_max_position_embeddings": 4096.0,
+        "attention_factor": 1.1385,
         "use_moe": False,
         "num_experts": 4,
         "num_experts_per_tok": 1,
@@ -152,30 +229,39 @@ PRESETS = {
         "flash_attn": True,
         "model_architecture": "standard",
     },
-    "instinct2": {
-        "hidden_size": 768,
-        "num_hidden_layers": 16,
+    "Instinct V1 MoE": {
+        # 16GB-friendly deep-thin V1 MoE.  MobileLLM-style depth/width sizing,
+        # 16 query heads with GQA, and full-width top-1 experts.
+        "hidden_size": 512,
+        "intermediate_size": 1664,
+        "num_hidden_layers": 32,
         "vocab_size": 6400,
         "dropout": 0.0,
         "hidden_act": "silu",
         "tie_word_embeddings": True,
-        "num_attention_heads": 8,
-        "num_key_value_heads": 2,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 4,
         "max_position_embeddings": 32768,
         "rope_theta": 1e6,
-        "inference_rope_scaling": False,
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "factor": 16,
-        "original_max_position_embeddings": 2048,
-        "attention_factor": 1.0,
-        "use_moe": False,
-        "num_experts": 4,
+        "inference_rope_scaling": True,
+        "rope_scaling_type": "longrope",
+        "factor": 8.0,
+        "original_max_position_embeddings": 4096.0,
+        "short_factor": [1.0] * 16,
+        # Paper PI seed only. Replace it with the checkpoint-specific search result.
+        "long_factor": [8.0] * 16,
+        "short_attention_factor": 1.0,
+        "short_retained_start_tokens": 0,
+        "long_retained_start_tokens": 0,
+        "use_moe": True,
+        "num_experts": 8,
         "num_experts_per_tok": 1,
-        "norm_topk_prob": True,
+        "moe_intermediate_size": 1664,
+        "norm_topk_prob": False,
         "router_aux_loss_coef": 5e-4,
         "rms_norm_eps": 1e-6,
         "flash_attn": True,
+        "use_grad_checkpoint": 1,
         "model_architecture": "standard",
     },
     "instinct-linear": {
@@ -190,6 +276,7 @@ PRESETS = {
         "max_position_embeddings": 32768,
         "rope_theta": 1e6,
         "inference_rope_scaling": False,
+        "rope_scaling_type": "none",
         "beta_fast": 32,
         "beta_slow": 1,
         "factor": 16,
@@ -244,6 +331,63 @@ st.markdown(
         font-size: 10px; opacity: 0.65; font-weight: 400;
         margin-top: 2px; font-family: -apple-system, sans-serif;
         letter-spacing: 0.3px;
+    }
+    .arch-summary {
+        width: 100%; max-width: 560px; display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px;
+        margin: 2px 0 10px 0;
+    }
+    .arch-stat {
+        background: #111c2e; border: 1px solid #26354b; border-radius: 8px;
+        padding: 8px 6px; text-align: center;
+    }
+    .arch-stat-value {
+        color: #f8fafc; font: 700 14px 'Courier New', monospace;
+    }
+    .arch-stat-label {
+        color: #7f8da3; font-size: 9px; margin-top: 2px;
+        text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .arch-split {
+        width: 100%; max-width: 500px; display: grid;
+        grid-template-columns: 1fr 1fr; gap: 8px; margin: 2px 0;
+    }
+    .arch-branch {
+        background: #162033; border: 1px solid #334155; border-radius: 9px;
+        padding: 8px 10px; text-align: center; color: #dbeafe;
+        font: 700 12px 'Courier New', monospace;
+    }
+    .arch-branch span {
+        display: block; color: #8291a8; font: 400 9px -apple-system, sans-serif;
+        margin-top: 3px;
+    }
+    .recurrent-shell {
+        width: 100%; max-width: 520px; box-sizing: border-box;
+        border: 1px solid #a855f7; border-radius: 14px; padding: 10px;
+        background: linear-gradient(145deg, rgba(88,28,135,.5), rgba(30,20,55,.88));
+        box-shadow: 0 0 20px rgba(168,85,247,.10);
+    }
+    .recurrent-title {
+        color: #e9d5ff; text-align: center; font-size: 11px;
+        font-weight: 700; letter-spacing: .8px; text-transform: uppercase;
+        margin-bottom: 7px;
+    }
+    .recurrent-core {
+        border-radius: 10px; padding: 11px; text-align: center;
+        background: linear-gradient(135deg, #4a1d5e, #8b2fc9);
+        color: white; font: 700 14px 'Courier New', monospace;
+    }
+    .recurrent-core span {
+        display: block; opacity: .75; font: 400 10px -apple-system, sans-serif;
+        margin-top: 4px;
+    }
+    .arch-loop-arrow {
+        color: #d8b4fe; text-align: center; font: 700 12px 'Courier New', monospace;
+        margin-top: 7px;
+    }
+    @media (max-width: 700px) {
+        .arch-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .arch-split { grid-template-columns: 1fr; }
     }
 
     /* Parameter cards */
@@ -339,6 +483,8 @@ def calc_params(config: dict) -> dict:
     moe_int_size = config.get("moe_intermediate_size", int_size)
     arch = config.get("model_architecture", "standard")
     residual_type = config.get("residual_type", "standard")
+    qk_bias_enabled = config.get("qk_bias", arch == "looped")
+    qk_norm_enabled = config.get("qk_norm", arch != "looped")
 
     # ---- Embedding ----
     embedding = vocab * h
@@ -348,9 +494,12 @@ def calc_params(config: dict) -> dict:
     k_proj = h * (kv_heads * head_dim)
     v_proj = h * (kv_heads * head_dim)
     o_proj = (q_heads * head_dim) * h
-    q_norm = head_dim
-    k_norm = head_dim
-    full_attn_per_layer = q_proj + k_proj + v_proj + o_proj + q_norm + k_norm
+    qk_bias = (
+        q_heads * head_dim + kv_heads * head_dim
+        if qk_bias_enabled else 0
+    )
+    qk_norm = 2 * head_dim if qk_norm_enabled else 0
+    full_attn_per_layer = q_proj + k_proj + v_proj + o_proj + qk_bias + qk_norm
 
     q_proj_str = f"{h} x ({q_heads} x {head_dim})"
     k_proj_str = f"{h} x ({kv_heads} x {head_dim})"
@@ -398,6 +547,12 @@ def calc_params(config: dict) -> dict:
         linear_attn_per_layer = 0
         lin_attn_formula = ""
         num_full = n_layers
+        if arch == "looped":
+            num_full = (
+                config.get("prelude_layers", 2)
+                + config.get("recurrent_layers", 4)
+                + config.get("coda_layers", 2)
+            )
         num_linear = 0
 
     # ---- Per-layer FFN ----
@@ -408,14 +563,14 @@ def calc_params(config: dict) -> dict:
         per_expert = gate_proj + up_proj + down_proj
         router = h * num_experts
         ffn_per_layer = router + num_experts * per_expert
-        active_ffn_per_layer = num_experts_per_tok * per_expert
+        active_ffn_per_layer = router + num_experts_per_tok * per_expert
         ffn_detail = (
             f"router={h}x{num_experts} + "
             f"{num_experts} experts x ({h}x{moe_int_size} + "
             f"{h}x{moe_int_size} + {moe_int_size}x{h})"
         )
         active_ffn_detail = (
-            f"{num_experts_per_tok} active x ({h}x{moe_int_size} + "
+            f"router={h}x{num_experts} + {num_experts_per_tok} active x ({h}x{moe_int_size} + "
             f"{h}x{moe_int_size} + {moe_int_size}x{h})"
         )
     else:
@@ -428,9 +583,8 @@ def calc_params(config: dict) -> dict:
         active_ffn_detail = ffn_detail
 
     # ---- Norms per layer ----
-    input_layernorm = h
-    post_attention_layernorm = h
-    norms_per_layer = input_layernorm + post_attention_layernorm
+    norm_count = 4 if arch == "looped" else 2
+    norms_per_layer = norm_count * h
 
     # ---- Layer totals (per type) ----
     full_layer_total = full_attn_per_layer + ffn_per_layer + norms_per_layer
@@ -443,18 +597,15 @@ def calc_params(config: dict) -> dict:
         linear_active_layer_total = 0
 
     # ---- Final norm ----
-    final_norm = h
+    final_norm = h * (2 if arch == "looped" else 1)
 
     # ---- LM Head ----
     lm_head = 0 if tie_word else vocab * h
 
-    # ---- Looped (LoopUS) modules: gate + q_head ----
-    looped_gate = 0
-    looped_q_head = 0
+    # ---- Instinct V2 recurrent input adapter [state || prelude] -> state ----
+    recurrent_adapter = 0
     if arch == "looped":
-        dt_rank = max(1, h // 16)
-        looped_gate = (h * dt_rank) + (dt_rank * h + h) + h  # dt_input_proj + delta_proj(+bias) + A_log
-        looped_q_head = 2 * h + (h * 1 + 1)  # LayerNorm + Linear(h,1)(+bias)
+        recurrent_adapter = 2 * h * h
 
     # ---- Residual topology ----
     residual_params = 0
@@ -462,9 +613,9 @@ def calc_params(config: dict) -> dict:
     residual_layers = n_layers
     if arch == "looped":
         residual_layers = (
-            config.get("prelude_layers", 1)
-            + (1 if config.get("loop_iters", 8) > 0 else 0)
-            + config.get("coda_layers", 1)
+            config.get("prelude_layers", 2)
+            + config.get("recurrent_layers", 4)
+            + config.get("coda_layers", 2)
         )
     if residual_type == "mhc":
         hc = config.get("hc_mult", 4)
@@ -487,7 +638,7 @@ def calc_params(config: dict) -> dict:
         + num_full * full_layer_total
         + num_linear * linear_layer_total
         + final_norm + lm_head
-        + looped_gate + looped_q_head
+        + recurrent_adapter
         + residual_params
     )
     total_active = (
@@ -495,7 +646,7 @@ def calc_params(config: dict) -> dict:
         + num_full * full_active_layer_total
         + num_linear * linear_active_layer_total
         + final_norm + lm_head
-        + looped_gate + looped_q_head
+        + recurrent_adapter
         + residual_params
     )
 
@@ -507,7 +658,7 @@ def calc_params(config: dict) -> dict:
                 "formula": (
                     f"q_proj={q_proj_str}, k_proj={k_proj_str}, "
                     f"v_proj={v_proj_str}, o_proj={o_proj_str}, "
-                    f"q_norm+k_norm=2x{head_dim}"
+                    f"qk_bias={qk_bias}, qk_norm={qk_norm}"
                 ),
             },
             "Linear Attention (per layer)": {
@@ -520,7 +671,7 @@ def calc_params(config: dict) -> dict:
             },
             "Per-Layer Norms": {
                 "value": norms_per_layer,
-                "formula": f"input_layernorm+post_attention_layernorm = 2x{h}",
+                "formula": f"sandwich RMSNorm = {norm_count}x{h}",
             },
             "Layer Distribution": {
                 "value": 0,
@@ -528,7 +679,7 @@ def calc_params(config: dict) -> dict:
             },
             "Final Norm": {
                 "value": final_norm,
-                "formula": f"RMSNorm({h})",
+                "formula": f"{2 if arch == 'looped' else 1}x RMSNorm({h})",
             },
             "LM Head": {
                 "value": lm_head,
@@ -548,7 +699,7 @@ def calc_params(config: dict) -> dict:
                 "formula": (
                     f"q_proj={q_proj_str}, k_proj={k_proj_str}, "
                     f"v_proj={v_proj_str}, o_proj={o_proj_str}, "
-                    f"q_norm+k_norm=2x{head_dim}"
+                    f"qk_bias={qk_bias}, qk_norm={qk_norm}"
                 ),
             },
             "Per-Layer FFN": {
@@ -557,15 +708,15 @@ def calc_params(config: dict) -> dict:
             },
             "Per-Layer Norms": {
                 "value": norms_per_layer,
-                "formula": f"input_layernorm+post_attention_layernorm = 2x{h}",
+                "formula": f"sandwich RMSNorm = {norm_count}x{h}",
             },
-            f"All {n_layers} Layers": {
-                "value": n_layers * full_layer_total,
-                "formula": f"{n_layers} x (attn + ffn + norms)",
+            f"All {num_full} Materialized Layers": {
+                "value": num_full * full_layer_total,
+                "formula": f"{num_full} x (attn + ffn + norms)",
             },
             "Final Norm": {
                 "value": final_norm,
-                "formula": f"RMSNorm({h})",
+                "formula": f"{2 if arch == 'looped' else 1}x RMSNorm({h})",
             },
             "LM Head": {
                 "value": lm_head,
@@ -586,16 +737,17 @@ def calc_params(config: dict) -> dict:
         breakdown["Total Params"] = total_row
 
     if arch == "looped":
-        breakdown["SelectiveGate"] = {
-            "value": looped_gate,
-            "formula": (
-                f"dt_input_proj={h}x{max(1, h // 16)}, "
-                f"delta_proj={max(1, h // 16)}x{h}+{h}, A_log={h}"
-            ),
+        breakdown["Recurrent Input Adapter"] = {
+            "value": recurrent_adapter,
+            "formula": f"Linear(2x{h}, {h}, bias=False)",
         }
-        breakdown["Q-Head"] = {
-            "value": looped_q_head,
-            "formula": f"LayerNorm(2x{h}) + Linear({h},1)+1",
+        breakdown["Mean Effective Depth"] = {
+            "value": 0,
+            "formula": (
+                f"{config.get('prelude_layers', 2)} + "
+                f"{config.get('loop_iters', 8)}x{config.get('recurrent_layers', 4)} + "
+                f"{config.get('coda_layers', 2)}"
+            ),
         }
 
     if use_moe:
@@ -617,6 +769,35 @@ def calc_params(config: dict) -> dict:
     return breakdown
 
 
+def estimate_bucket_vram_plan(
+    config: dict, *, target_gb: float, bucket_count: int,
+    optimizer: str, param_dtype: str, use_compile: bool, compile_mode: str,
+) -> dict:
+    """Mirror the trainer's conservative per-card bucket budget for the UI."""
+    total_params = calc_params(config)["Total Params"]["value"]
+    element_bytes = 4 if str(param_dtype) == "fp32" else 2
+    optimizer = str(optimizer).lower()
+    # parameter + gradient + optimizer state. Muon has one momentum tensor;
+    # AdamW has two moments. This intentionally uses total MoE parameters.
+    tensors_per_param = 3 if optimizer in {"muon", "adafactor", "adafactory"} else 4
+    persistent_gb = total_params * element_bytes * tensors_per_param / 1024 ** 3
+    bucket_count = max(1, int(bucket_count))
+    graph_per_extra = (
+        0.50
+        if use_compile and compile_mode in ("reduce-overhead", "max-autotune")
+        else 0.125
+    )
+    reserve_gb = 0.50 + graph_per_extra * (bucket_count - 1)
+    available_gb = float(target_gb) - persistent_gb - reserve_gb
+    token_budget = max(0, math.floor(24576 * available_gb / 15.25))
+    return {
+        "persistent_gb": persistent_gb,
+        "reserve_gb": reserve_gb,
+        "available_gb": available_gb,
+        "token_budget": token_budget,
+    }
+
+
 def fmt_table(breakdown: dict) -> list:
     """Convert breakdown dict to list-of-dicts for st.dataframe."""
     rows = []
@@ -629,6 +810,26 @@ def fmt_table(breakdown: dict) -> list:
             }
         )
     return rows
+
+
+def _parse_longrope_factors(value, count, default_value):
+    """Parse a JSON array or comma-separated LongRoPE factor vector."""
+    if isinstance(value, (list, tuple)):
+        factors = [float(item) for item in value]
+    else:
+        text = str(value or "").strip()
+        if text.startswith("["):
+            factors = [float(item) for item in json.loads(text)]
+        else:
+            factors = [float(item.strip()) for item in text.split(",") if item.strip()]
+    if not factors:
+        factors = [float(default_value)] * count
+    if len(factors) != count:
+        raise ValueError(
+            f"LongRoPE factor vector needs {count} values for head_dim={count * 2}; "
+            f"got {len(factors)}"
+        )
+    return factors
 
 
 def build_config_dict() -> dict:
@@ -649,7 +850,10 @@ def build_config_dict() -> dict:
         "use_grad_checkpoint": st.session_state.get("use_grad_checkpoint", 0),
         "rms_norm_eps": st.session_state.get("rms_norm_eps", 1e-6),
         "flash_attn": st.session_state.get("flash_attn", True),
-        "intermediate_size": compute_intermediate_size(st.session_state.get("hidden_size", 768)),
+        "intermediate_size": st.session_state.get(
+            "intermediate_size",
+            compute_intermediate_size(st.session_state.get("hidden_size", 768)),
+        ),
         "residual_type": st.session_state.get("residual_type", "standard"),
     }
 
@@ -658,8 +862,12 @@ def build_config_dict() -> dict:
     q_heads = d["num_attention_heads"]
     d["head_dim"] = compute_head_dim(h, q_heads)
 
-    # YaRN rope_scaling
-    if d.get("inference_rope_scaling"):
+    scaling_type = st.session_state.get("rope_scaling_type")
+    if scaling_type is None:
+        scaling_type = "yarn" if d.get("inference_rope_scaling") else "none"
+    d["inference_rope_scaling"] = scaling_type != "none"
+
+    if scaling_type == "yarn":
         d["rope_scaling"] = {
             "type": "yarn",
             "beta_fast": st.session_state.get("beta_fast", 32),
@@ -670,6 +878,42 @@ def build_config_dict() -> dict:
             ),
             "attention_factor": st.session_state.get("attention_factor", 1.0),
         }
+    elif scaling_type == "longrope":
+        half_dim = d["head_dim"] // 2
+        original_max = int(st.session_state.get(
+            "original_max_position_embeddings", 4096
+        ))
+        factor = float(st.session_state.get(
+            "factor", d["max_position_embeddings"] / original_max
+        ))
+        rope_scaling = {
+            "type": "longrope",
+            "factor": factor,
+            "original_max_position_embeddings": original_max,
+            "short_factor": _parse_longrope_factors(
+                st.session_state.get("longrope_short_factors"), half_dim, 1.0
+            ),
+            # PI is only a safe initialization. Replace this vector with the
+            # model-specific result from the paper's perplexity search.
+            "long_factor": _parse_longrope_factors(
+                st.session_state.get("longrope_long_factors"), half_dim, factor
+            ),
+            "short_attention_factor": float(st.session_state.get(
+                "longrope_short_attention_factor", 1.0
+            )),
+            "short_retained_start_tokens": int(st.session_state.get(
+                "longrope_short_retained_tokens", 0
+            )),
+            "long_retained_start_tokens": int(st.session_state.get(
+                "longrope_long_retained_tokens", 0
+            )),
+        }
+        long_attention_factor = float(st.session_state.get(
+            "longrope_long_attention_factor", 0.0
+        ))
+        if long_attention_factor > 0:
+            rope_scaling["long_attention_factor"] = long_attention_factor
+        d["rope_scaling"] = rope_scaling
 
     # Model architecture
     d["model_architecture"] = st.session_state.get("model_architecture", "standard")
@@ -688,21 +932,32 @@ def build_config_dict() -> dict:
         d["linear_num_key_heads"] = st.session_state.get("linear_num_key_heads", q_heads)
         d["linear_num_value_heads"] = st.session_state.get("linear_num_value_heads", q_heads)
 
-    # Looped (LoopUS) arch params
+    # Instinct V2 latent recurrent-depth params
     if d["model_architecture"] == "looped":
-        d["loop_max_steps"] = st.session_state.get("loop_max_steps", 32)
-        d["q_threshold"] = st.session_state.get("loop_q_threshold", 0.9)
-        d["n_supervision"] = st.session_state.get("loop_n_supervision", 6)
-        d["depth_reward"] = st.session_state.get("loop_depth_reward", 0.01)
-        d["exit_in_training"] = st.session_state.get("exit_in_training", True)
-        d["beta"] = st.session_state.get("loop_beta", 0.5)
-        d["distill_weight"] = st.session_state.get("loop_distill_weight", 0.0)
-        d["distill_temperature"] = st.session_state.get("loop_distill_temperature", 2.0)
-        d["teacher_stop_grad"] = st.session_state.get("teacher_stop_grad", True)
-        d["depth_gain_reward"] = st.session_state.get("loop_depth_gain_reward", 0.0)
-        d["loop_encoder_layers"] = st.session_state.get("loop_encoder_layers", [0, 1])
-        d["loop_body_layers"] = st.session_state.get("loop_body_layers", [2, 3, 4])
-        d["loop_output_layers"] = st.session_state.get("loop_output_layers", [5, 6, 7])
+        d["recurrent_architecture_version"] = 2
+        d["qk_bias"] = bool(st.session_state.get("qk_bias", True))
+        d["qk_norm"] = bool(st.session_state.get("qk_norm", False))
+        d["prelude_layers"] = int(st.session_state.get("prelude_layers", 2))
+        d["recurrent_layers"] = int(st.session_state.get("recurrent_layers", 4))
+        d["coda_layers"] = int(st.session_state.get("coda_layers", 2))
+        d["loop_iters"] = int(st.session_state.get("loop_iters", 8))
+        d["mean_backprop_depth"] = int(st.session_state.get("mean_backprop_depth", 4))
+        d["recurrence_sampling"] = st.session_state.get(
+            "recurrence_sampling", "lognormal_poisson"
+        )
+        d["recurrence_log_normal_sigma"] = float(st.session_state.get(
+            "recurrence_log_normal_sigma", 1.0
+        ))
+        d["max_recurrence"] = int(st.session_state.get("max_recurrence", 32))
+        d["state_init_std"] = float(st.session_state.get(
+            "state_init_std", math.sqrt(2 / 5)
+        ))
+        d["embedding_scale"] = float(st.session_state.get(
+            "embedding_scale", math.sqrt(h)
+        ))
+        d["use_input_injection"] = bool(st.session_state.get(
+            "use_input_injection", True
+        ))
 
     if d["residual_type"] == "mhc":
         d["hc_mult"] = st.session_state.get("hc_mult", 4)
@@ -777,6 +1032,7 @@ def gen_python_code(cfg: dict) -> str:
 
     if cfg["inference_rope_scaling"]:
         params.append(("inference_rope_scaling", "True"))
+        params.append(("rope_scaling", repr(cfg["rope_scaling"])))
 
     if cfg.get("model_architecture") == "linear":
         params.append(("full_attention_interval", cfg.get("full_attention_interval", 4)))
@@ -787,23 +1043,21 @@ def gen_python_code(cfg: dict) -> str:
         params.append(("linear_num_value_heads", cfg.get("linear_num_value_heads", cfg["num_attention_heads"])))
 
     if cfg.get("model_architecture") == "looped":
-        params.append(("loop_max_steps", cfg.get("loop_max_steps", 32)))
-        params.append(("q_threshold", cfg.get("q_threshold", 0.9)))
-        params.append(("n_supervision", cfg.get("n_supervision", 6)))
-        params.append(("depth_reward", cfg.get("depth_reward", 0.01)))
-        params.append(("exit_in_training", str(cfg.get("exit_in_training", True))))
-        params.append(("beta", cfg.get("beta", 0.5)))
-        if cfg.get("distill_weight"):
-            params.append(("distill_weight", cfg.get("distill_weight", 0.0)))
-        if cfg.get("distill_temperature") != 2.0:
-            params.append(("distill_temperature", cfg.get("distill_temperature", 2.0)))
-        if not cfg.get("teacher_stop_grad", True):
-            params.append(("teacher_stop_grad", str(cfg.get("teacher_stop_grad", True))))
-        if cfg.get("depth_gain_reward"):
-            params.append(("depth_gain_reward", cfg.get("depth_gain_reward", 0.0)))
-        params.append(("loop_encoder_layers", str(cfg.get("loop_encoder_layers", [0, 1]))))
-        params.append(("loop_body_layers", str(cfg.get("loop_body_layers", [2, 3, 4]))))
-        params.append(("loop_output_layers", str(cfg.get("loop_output_layers", [5, 6, 7]))))
+        params.extend([
+            ("qk_bias", str(cfg.get("qk_bias", True))),
+            ("qk_norm", str(cfg.get("qk_norm", False))),
+            ("prelude_layers", cfg.get("prelude_layers", 2)),
+            ("recurrent_layers", cfg.get("recurrent_layers", 4)),
+            ("coda_layers", cfg.get("coda_layers", 2)),
+            ("loop_iters", cfg.get("loop_iters", 8)),
+            ("mean_backprop_depth", cfg.get("mean_backprop_depth", 4)),
+            ("recurrence_sampling", f'"{cfg.get("recurrence_sampling", "lognormal_poisson")}"'),
+            ("recurrence_log_normal_sigma", cfg.get("recurrence_log_normal_sigma", 1.0)),
+            ("max_recurrence", cfg.get("max_recurrence", 32)),
+            ("state_init_std", cfg.get("state_init_std", math.sqrt(2 / 5))),
+            ("embedding_scale", cfg.get("embedding_scale", math.sqrt(cfg["hidden_size"]))),
+            ("use_input_injection", str(cfg.get("use_input_injection", True))),
+        ])
 
     if cfg.get("early_exit_layers") and cfg.get("early_exit_layers") != [4, 5, 6, 7]:
         params.append(("early_exit_layers", str(cfg["early_exit_layers"])))
@@ -873,11 +1127,11 @@ def gen_config_json(cfg: dict) -> str:
             out[k] = cfg.get(k)
 
     if cfg.get("model_architecture") == "looped":
-        for k in ["loop_max_steps", "q_threshold", "n_supervision",
-                   "depth_reward", "exit_in_training", "beta",
-                   "distill_weight", "distill_temperature", "teacher_stop_grad",
-                   "depth_gain_reward",
-                   "loop_encoder_layers", "loop_body_layers", "loop_output_layers"]:
+        for k in ["recurrent_architecture_version", "qk_bias", "qk_norm",
+                  "prelude_layers", "recurrent_layers", "coda_layers",
+                  "loop_iters", "mean_backprop_depth", "recurrence_sampling",
+                  "recurrence_log_normal_sigma", "max_recurrence",
+                  "state_init_std", "embedding_scale", "use_input_injection"]:
             out[k] = cfg.get(k)
 
     if cfg.get("early_exit_layers"):
@@ -888,6 +1142,43 @@ def gen_config_json(cfg: dict) -> str:
     return json.dumps(out, indent=2)
 
 
+_ROPE_PRESET_KEYS = {
+    "beta_fast", "beta_slow", "factor",
+    "original_max_position_embeddings", "attention_factor",
+    "short_factor", "long_factor", "short_retained_start_tokens",
+    "long_retained_start_tokens", "short_attention_factor",
+    "long_attention_factor",
+}
+
+_LEGACY_PRESET_NAMES = {
+    "instinct-3": "Instinct V2",
+    "instinct-3-moe": "Instinct V2 MoE",
+    "instinct2-small": "Instinct V2 Small",
+    "instinct2": "Instinct V1",
+}
+_OPTIONAL_PRESET_DEFAULTS = {
+    "num_experts": 4,
+    "num_experts_per_tok": 1,
+    "norm_topk_prob": True,
+    "router_aux_loss_coef": 5e-4,
+}
+
+
+def _config_preset_value(config_dict, key):
+    """Read flattened preset fields from serialized nested RoPE configs."""
+    if key == "rope_scaling_type":
+        if not config_dict.get("inference_rope_scaling", False):
+            return "none"
+        rope = config_dict.get("rope_scaling") or config_dict.get("rope_parameters") or {}
+        return rope.get("rope_type", rope.get("type", "yarn"))
+    if key in config_dict:
+        return config_dict[key]
+    if key in _ROPE_PRESET_KEYS:
+        rope = config_dict.get("rope_scaling") or config_dict.get("rope_parameters") or {}
+        return rope.get(key)
+    return _OPTIONAL_PRESET_DEFAULTS.get(key)
+
+
 def load_config_to_session(config_dict: dict):
     """Populate st.session_state from a config dict (reverse of build_config_dict).
     Detects matching preset name; falls back to 'Custom'."""
@@ -896,7 +1187,7 @@ def load_config_to_session(config_dict: dict):
     for name, preset in PRESETS.items():
         match = True
         for k, v in preset.items():
-            if config_dict.get(k) != v:
+            if _config_preset_value(config_dict, k) != v:
                 match = False
                 break
         if match:
@@ -910,6 +1201,9 @@ def load_config_to_session(config_dict: dict):
 
     # Manual populate for custom configs
     st.session_state.hidden_size = config_dict.get("hidden_size", 768)
+    st.session_state.intermediate_size = config_dict.get(
+        "intermediate_size", compute_intermediate_size(st.session_state.hidden_size)
+    )
     st.session_state.num_hidden_layers = config_dict.get("num_hidden_layers", 8)
     st.session_state.vocab_size = config_dict.get("vocab_size", 6400)
     st.session_state.dropout = config_dict.get("dropout", 0.0)
@@ -938,14 +1232,33 @@ def load_config_to_session(config_dict: dict):
     arch = config_dict.get("model_architecture", "standard")
     st.session_state.model_architecture = arch
 
-    # YaRN params
+    # RoPE scaling params (legacy configs without a type are YaRN).
     rs = config_dict.get("rope_scaling") or {}
     if config_dict.get("inference_rope_scaling") and rs:
+        rope_type = rs.get("rope_type", rs.get("type", "yarn"))
+        st.session_state.rope_scaling_type = rope_type
         st.session_state.beta_fast = rs.get("beta_fast", 32)
         st.session_state.beta_slow = rs.get("beta_slow", 1)
         st.session_state.factor = rs.get("factor", 16)
         st.session_state.original_max_position_embeddings = rs.get("original_max_position_embeddings", 2048)
         st.session_state.attention_factor = rs.get("attention_factor", 1.0)
+        if rope_type == "longrope":
+            st.session_state.longrope_short_attention_factor = rs.get(
+                "short_attention_factor", rs.get("attention_factor", 1.0)
+            )
+            st.session_state.longrope_long_attention_factor = rs.get(
+                "long_attention_factor", rs.get("attention_factor", 0.0)
+            )
+            st.session_state.longrope_short_factors = json.dumps(rs.get("short_factor", []))
+            st.session_state.longrope_long_factors = json.dumps(rs.get("long_factor", []))
+            st.session_state.longrope_short_retained_tokens = rs.get(
+                "short_retained_start_tokens", rs.get("retained_start_tokens", 0)
+            )
+            st.session_state.longrope_long_retained_tokens = rs.get(
+                "long_retained_start_tokens", rs.get("retained_start_tokens", 0)
+            )
+    else:
+        st.session_state.rope_scaling_type = "none"
 
     # MoE
     if config_dict.get("use_moe"):
@@ -973,21 +1286,33 @@ def load_config_to_session(config_dict: dict):
         st.session_state.linear_num_key_heads = config_dict.get("linear_num_key_heads", st.session_state.num_attention_heads)
         st.session_state.linear_num_value_heads = config_dict.get("linear_num_value_heads", st.session_state.num_attention_heads)
 
-    # Looped arch
+    # Instinct V2 recurrent-depth arch
     if arch == "looped":
-        st.session_state.loop_max_steps = config_dict.get("loop_max_steps", 32)
-        st.session_state.loop_q_threshold = config_dict.get("q_threshold", 0.9)
-        st.session_state.loop_n_supervision = config_dict.get("n_supervision", 6)
-        st.session_state.loop_depth_reward = config_dict.get("depth_reward", 0.01)
-        st.session_state.exit_in_training = config_dict.get("exit_in_training", True)
-        st.session_state.loop_beta = config_dict.get("beta", 0.5)
-        st.session_state.loop_distill_weight = config_dict.get("distill_weight", 0.0)
-        st.session_state.loop_distill_temperature = config_dict.get("distill_temperature", 2.0)
-        st.session_state.teacher_stop_grad = config_dict.get("teacher_stop_grad", True)
-        st.session_state.loop_depth_gain_reward = config_dict.get("depth_gain_reward", 0.0)
-        st.session_state.loop_encoder_layers = config_dict.get("loop_encoder_layers", [0, 1])
-        st.session_state.loop_body_layers = config_dict.get("loop_body_layers", [2, 3, 4])
-        st.session_state.loop_output_layers = config_dict.get("loop_output_layers", [5, 6, 7])
+        st.session_state.qk_bias = config_dict.get("qk_bias", True)
+        st.session_state.qk_norm = config_dict.get("qk_norm", False)
+        st.session_state.prelude_layers = config_dict.get("prelude_layers", 2)
+        st.session_state.recurrent_layers = config_dict.get("recurrent_layers", 4)
+        st.session_state.coda_layers = config_dict.get("coda_layers", 2)
+        st.session_state.loop_iters = config_dict.get(
+            "loop_iters", config_dict.get("mean_recurrence", 8)
+        )
+        st.session_state.mean_backprop_depth = config_dict.get("mean_backprop_depth", 4)
+        st.session_state.recurrence_sampling = config_dict.get(
+            "recurrence_sampling", "lognormal_poisson"
+        )
+        st.session_state.recurrence_log_normal_sigma = config_dict.get(
+            "recurrence_log_normal_sigma", 1.0
+        )
+        st.session_state.max_recurrence = config_dict.get("max_recurrence", 32)
+        st.session_state.state_init_std = config_dict.get(
+            "state_init_std", math.sqrt(2 / 5)
+        )
+        st.session_state.embedding_scale = config_dict.get(
+            "embedding_scale", math.sqrt(config_dict.get("hidden_size", 768))
+        )
+        st.session_state.use_input_injection = config_dict.get(
+            "use_input_injection", True
+        )
 
     # Early Exit
     ee_layers = config_dict.get("early_exit_layers")
@@ -1001,8 +1326,8 @@ def parse_training_metrics(log_text):
     """Extract training metrics from log for charting. Returns list of dicts."""
     rows = []
     for line in log_text.strip().split("\n"):
-        ep = re.search(r"Epoch:\[(\d+)/(\d+)\]\((\d+)/(\d+)\)", line)
-        if not ep:
+        ep = re.search(r"Epoch:\[(\d+)/(\d+)\]\((\d+)/~?(\d+)\)", line)
+        if not ep or 'loss:' not in line:
             continue
         epoch, _epochs, epoch_step, epoch_steps = map(int, ep.groups())
         row = {
@@ -1093,6 +1418,103 @@ def arch_diagram(cfg: dict) -> str:
     blocks.append(_block("Embedding", emb_detail, "#0f3b5e", "#1d6fa5"))
     blocks.append(_arrow())
 
+    # Instinct V2 is a recurrent graph, not an eight-layer sequential stack.
+    # Render the shared core once and make recurrence/input injection explicit.
+    if arch == "looped":
+        h = cfg["hidden_size"]
+        q_heads = cfg["num_attention_heads"]
+        kv_heads = cfg["num_key_value_heads"]
+        head_dim = cfg.get("head_dim", compute_head_dim(h, q_heads))
+        int_size = cfg.get("intermediate_size", compute_intermediate_size(h))
+        prelude = cfg.get("prelude_layers", 2)
+        recurrent = cfg.get("recurrent_layers", 4)
+        coda = cfg.get("coda_layers", 2)
+        recurrences = cfg.get("loop_iters", 32)
+        backprop = cfg.get("mean_backprop_depth", 8)
+        sigma = cfg.get("recurrence_log_normal_sigma", 1.0)
+        materialized = prelude + recurrent + coda
+        effective = prelude + recurrent * recurrences + coda
+        total_params = calc_params(cfg)["Total Params"]["value"]
+        attention = (
+            f"MHA {q_heads}x{head_dim}"
+            if q_heads == kv_heads
+            else f"GQA {q_heads}q/{kv_heads}kv x {head_dim}"
+        )
+        ffn = "MoE SwiGLU" if use_moe else "SwiGLU"
+
+        blocks.insert(
+            0,
+            '<div class="arch-summary">'
+            f'<div class="arch-stat"><div class="arch-stat-value">{total_params:,}</div>'
+            '<div class="arch-stat-label">Parameters</div></div>'
+            f'<div class="arch-stat"><div class="arch-stat-value">{materialized}</div>'
+            '<div class="arch-stat-label">Physical layers</div></div>'
+            f'<div class="arch-stat"><div class="arch-stat-value">{effective}</div>'
+            '<div class="arch-stat-label">Mean effective depth</div></div>'
+            f'<div class="arch-stat"><div class="arch-stat-value">{recurrences}</div>'
+            '<div class="arch-stat-label">Mean recurrences</div></div>'
+            '</div>',
+        )
+        blocks.append(
+            _block(
+                f"Prelude x{prelude}",
+                f"{attention} · {ffn} {h}->{int_size}->{h} · sandwich RMSNorm",
+                "#0f3b5e", "#1d6fa5",
+            )
+        )
+        blocks.append(_arrow())
+        blocks.append(
+            '<div class="arch-split">'
+            f'<div class="arch-branch">Input latent e<span>Prelude output, injected every recurrence</span></div>'
+            f'<div class="arch-branch">Initial state s0<span>TruncNormal, std={cfg.get("state_init_std", math.sqrt(2 / 5)):.4f}</span></div>'
+            '</div>'
+        )
+        blocks.append(_arrow())
+        blocks.append(
+            _block(
+                "Input Injection Adapter",
+                f"concat [state ; e] -> Linear({2 * h}, {h}, bias=False)",
+                "#3b1f6e", "#6d28a8",
+            )
+        )
+        blocks.append(_arrow())
+        blocks.append(
+            '<div class="recurrent-shell">'
+            f'<div class="recurrent-title">Shared recurrent operator R · target mean {recurrences}</div>'
+            '<div class="recurrent-core">'
+            f'Core Transformer x{recurrent}'
+            f'<span>{attention} · Q/K bias={cfg.get("qk_bias", True)} · '
+            f'QK norm={cfg.get("qk_norm", False)} · {ffn} {int_size}</span>'
+            '</div>'
+            f'<div class="arch-loop-arrow">↻ log-normal Poisson σ={sigma:g} · '
+            f'gradient through final {backprop} recurrences</div>'
+            '</div>'
+        )
+        blocks.append(_arrow())
+        blocks.append(
+            _block("Recurrent RMSNorm", f"RMSNorm({h})", "#4a1d5e", "#7e22ce")
+        )
+        blocks.append(_arrow())
+        blocks.append(
+            _block(
+                f"Coda x{coda}",
+                f"{attention} · {ffn} {h}->{int_size}->{h} · sandwich RMSNorm",
+                "#1b4332", "#2d8a4e",
+            )
+        )
+        blocks.append(_arrow())
+        blocks.append(
+            _block("Final Norm", f"RMSNorm({h})", "#1b4332", "#2d8a4e")
+        )
+        blocks.append(_arrow())
+        lm_detail = f"vocab={cfg['vocab_size']}, dim={h}"
+        if cfg.get("tie_word_embeddings"):
+            lm_detail += " (tied with embedding)"
+        blocks.append(_block("LM Head", lm_detail, "#4a1942", "#7c3aed"))
+        blocks.append(_arrow())
+        blocks.append(_block("Output", "next-token logits", "#3b0f2e", "#6b1d5e"))
+        return f'<div class="arch-wrap">{"".join(blocks)}</div>'
+
     # Layer stack
     layer_color_s = "#1a3a5c"
     layer_color_e = "#2d6a9f"
@@ -1140,14 +1562,16 @@ def arch_diagram(cfg: dict) -> str:
 
         if arch == "looped":
             loop_color_s, loop_color_e = "#4a1d5e", "#9d4edd"
-            if i in cfg.get("loop_body_layers", []):
-                layer_detail += " · LOOP"
+            p = cfg.get("prelude_layers", 2)
+            r = cfg.get("recurrent_layers", 4)
+            if p <= i < p + r:
+                layer_detail += f" · RECURRENT x{cfg.get('loop_iters', 8)}"
                 cs, ce = loop_color_s, loop_color_e
-            elif i in cfg.get("loop_encoder_layers", []):
-                layer_detail += " · ENC"
+            elif i < p:
+                layer_detail += " · PRELUDE"
                 cs, ce = "#0f3b5e", "#1d6fa5"
-            elif i in cfg.get("loop_output_layers", []):
-                layer_detail += " · DEC"
+            else:
+                layer_detail += " · CODA"
                 cs, ce = "#1b4332", "#2d8a4e"
 
         blocks.append(
@@ -1180,6 +1604,7 @@ def arch_diagram(cfg: dict) -> str:
 
 def init_from_preset(preset_name: str):
     """Load preset values into session_state."""
+    preset_name = _LEGACY_PRESET_NAMES.get(preset_name, preset_name)
     if preset_name == "Custom":
         return
     data = PRESETS.get(preset_name)
@@ -1189,16 +1614,61 @@ def init_from_preset(preset_name: str):
     # the exact historical Standard Transformer graph.
     st.session_state.residual_type = "standard"
     st.session_state.pop("_residual_radio", None)
+    st.session_state.pop("_arch_radio", None)
+    st.session_state._sync_arch_radio = True
+    st.session_state.intermediate_size = data.get(
+        "intermediate_size", compute_intermediate_size(data["hidden_size"])
+    )
+    st.session_state.qk_bias = data.get(
+        "qk_bias", data.get("model_architecture") == "looped"
+    )
+    st.session_state.qk_norm = data.get(
+        "qk_norm", data.get("model_architecture") != "looped"
+    )
+    auto_moe_size = compute_intermediate_size(data["hidden_size"])
+    st.session_state._override_moe_int = bool(
+        data.get("use_moe")
+        and data.get("moe_intermediate_size", auto_moe_size) != auto_moe_size
+    )
     for k, v in data.items():
         st.session_state[k] = v
+    if data.get("rope_scaling_type") == "longrope":
+        st.session_state.longrope_short_factors = json.dumps(data["short_factor"])
+        st.session_state.longrope_long_factors = json.dumps(data["long_factor"])
+        st.session_state.longrope_short_retained_tokens = data.get(
+            "short_retained_start_tokens", 0
+        )
+        st.session_state.longrope_long_retained_tokens = data.get(
+            "long_retained_start_tokens", 0
+        )
+        st.session_state.longrope_short_attention_factor = float(
+            data.get("short_attention_factor", data.get("attention_factor", 1.0))
+        )
+        st.session_state.longrope_long_attention_factor = float(
+            data.get("long_attention_factor", data.get("attention_factor", 0.0))
+        )
+    if preset_name == "Instinct V1 MoE":
+        # Keep optimizer steps one-to-one with micro-batches by default. Users
+        # can still opt into accumulation when a larger effective batch is needed.
+        st.session_state.batch_size = 1
+        st.session_state.accumulation_steps = 1
+        st.session_state.max_seq_len = 4096
+        st.session_state.optimizer = "muon"
+        st.session_state.use_compile = True
+        st.session_state.compile_mode = "max-autotune-no-cudagraphs"
 
 
 if "preset" not in st.session_state:
-    st.session_state.preset = "instinct-3"
-    init_from_preset("instinct-3")
+    st.session_state.preset = "Instinct V2"
+    init_from_preset("Instinct V2")
 
 if "model_architecture" not in st.session_state:
     st.session_state.model_architecture = "standard"
+
+def _panel_state_key_allowed(key):
+    """Buttons and upload widgets own their state; never restore saved values."""
+    return not (key.startswith('btn_') or key in ('clear_train_log', 'pipeline_upload'))
+
 
 # Auto-load config from file on first page load (before any user interaction)
 if not st.session_state.get("_config_auto_loaded"):
@@ -1208,16 +1678,24 @@ if not st.session_state.get("_config_auto_loaded"):
     if os.path.exists(state_file):
         with open(state_file, "r", encoding="utf-8") as f:
             for k, v in json.load(f).items():
-                if k.startswith("btn_") or k == "clear_train_log":
+                if not _panel_state_key_allowed(k):
                     continue  # 兼容旧 state 文件里已保存的按钮 key，赋值会报错
                 st.session_state[k] = v
+        # A named preset is canonical.  Reapply its current definition so a
+        # stale webui_state.json cannot pin dimensions from an older revision.
+        restored_preset = _LEGACY_PRESET_NAMES.get(
+            st.session_state.get("preset"), st.session_state.get("preset")
+        )
+        if restored_preset in PRESETS:
+            st.session_state.preset = restored_preset
+            init_from_preset(restored_preset)
         st.rerun()
     else:
         default_config = os.path.join(trainer_dir, "config_pretrain.json")
         if os.path.exists(default_config):
             with open(default_config, "r", encoding="utf-8") as f:
                 load_config_to_session(json.load(f))
-            if st.session_state.preset != "instinct-3":
+            if st.session_state.preset != "Instinct V2":
                 st.rerun()
 
 # Handle deferred config load from button click (must run before any widget with the same key)
@@ -1241,6 +1719,17 @@ def _training_script_from_argv(argv):
     return None
 
 
+def _training_mode_from_argv(argv):
+    """Return the UI mode, distinguishing CPT from ordinary pretraining."""
+    script = _training_script_from_argv(argv)
+    arguments = [str(argument).strip('"\'') for argument in (argv or ())]
+    if script == "train_pretrain":
+        for index, argument in enumerate(arguments[:-1]):
+            if argument == "--save_weight" and arguments[index + 1].lower().startswith("cpt_"):
+                return "train_cpt"
+    return script
+
+
 def _find_running_train_process():
     """Check if a train_*.py process is still alive. Returns (pid, script_name) or (None, None)."""
     import subprocess as _sp
@@ -1252,7 +1741,7 @@ def _find_running_train_process():
             name = (process.info.get('name') or '').lower()
             if name not in ('python', 'python.exe'):
                 continue
-            script = _training_script_from_argv(process.info.get('cmdline'))
+            script = _training_mode_from_argv(process.info.get('cmdline'))
             if script:
                 return int(process.info['pid']), script
     except (ImportError, OSError):
@@ -1273,14 +1762,20 @@ def _find_running_train_process():
                 if match:
                     parts = line.strip().rsplit(None, 1)
                     if len(parts) == 2 and parts[1].isdigit():
-                        return int(parts[1]), match.group(1)
+                        mode = match.group(1)
+                        if mode == "train_pretrain" and re.search(r'--save_weight\s+["\']?cpt_', line, re.I):
+                            mode = "train_cpt"
+                        return int(parts[1]), mode
         else:
             result = _sp.run(['pgrep', '-f', 'train_.*\\.py'], capture_output=True, text=True, timeout=5)
             pids = result.stdout.strip().split()
             if pids:
                 result2 = _sp.run(['ps', '-p', pids[0], '-o', 'command='], capture_output=True, text=True, timeout=5)
-                script = 'train_' + result2.stdout.split('train_')[1].split('.py')[0] if 'train_' in result2.stdout else '?'
-                return int(pids[0]), f"train_{script}"
+                command = result2.stdout
+                script = 'train_' + command.split('train_')[1].split('.py')[0] if 'train_' in command else '?'
+                if script == "train_pretrain" and re.search(r'--save_weight\s+["\']?cpt_', command, re.I):
+                    script = "train_cpt"
+                return int(pids[0]), script
     except Exception:
         pass
     return None, None
@@ -1301,6 +1796,7 @@ def _latest_train_log(trainer_dir):
 
 _DEFAULT_WEIGHT_PREFIX = {
     "pretrain": "pretrain",
+    "cpt": "cpt",
     "full_sft": "full_sft",
     "lora": "lora",
     "dpo": "dpo",
@@ -1312,6 +1808,7 @@ _DEFAULT_WEIGHT_PREFIX = {
 
 _DEFAULT_EPOCHS = {
     "pretrain": 2,
+    "cpt": 1,
     "full_sft": 2,
     "lora": 10,
     "dpo": 1,
@@ -1323,6 +1820,7 @@ _DEFAULT_EPOCHS = {
 
 _DEFAULT_LEARNING_RATES = {
     "pretrain": 5e-4,
+    "cpt": 3e-5,
     "full_sft": 1e-5,
     "lora": 1e-4,
     "dpo": 4e-8,
@@ -1334,6 +1832,7 @@ _DEFAULT_LEARNING_RATES = {
 
 _DATASET_KINDS_BY_TRAIN_TYPE = {
     "pretrain": {"pretrain"},
+    "cpt": {"pretrain"},
     "full_sft": {"sft"},
     "lora": {"sft", "lora"},
     "dpo": {"dpo"},
@@ -1345,6 +1844,7 @@ _DATASET_KINDS_BY_TRAIN_TYPE = {
 
 _DEFAULT_DATASET_NAMES = {
     "pretrain": "pretrain_t2t_mini.jsonl",
+    "cpt": "pretrain_continue.jsonl",
     "full_sft": "sft_t2t_mini.jsonl",
     "lora": "lora_identity.jsonl",
     "dpo": "dpo.jsonl",
@@ -1352,6 +1852,10 @@ _DEFAULT_DATASET_NAMES = {
     "grpo": "rlaif.jsonl",
     "agent": "agent_rl.jsonl",
     "distillation": "sft_t2t_mini.jsonl",
+}
+
+_TRAINER_NAME = {
+    "cpt": "pretrain",
 }
 
 # 暂停退出码：训练进程识别到 .pause_request 标记后保存检查点并以 42 退出，
@@ -1371,10 +1875,21 @@ def _default_learning_rate(train_type):
     return _DEFAULT_LEARNING_RATES.get(train_type, 5e-4)
 
 
+def _trainer_name(train_type):
+    """Map a UI training mode to its underlying trainer/config stem."""
+    return _TRAINER_NAME.get(train_type, train_type)
+
+
+# Trainers read JSONL sources and their compiled parquet equivalents.  Report
+# sidecars (``*.report.json``) deliberately do not match, so a compiled corpus
+# never contributes a second, unreadable entry to the picker.
+_DATASET_SUFFIXES = (".jsonl", ".jsonl.gz", ".parquet", ".pq")
+
+
 def _dataset_kind(filename):
-    """Classify top-level JSONL files by their filename prefix."""
+    """Classify top-level dataset files by their filename prefix."""
     name = os.path.basename(os.fspath(filename)).lower()
-    if not name.endswith(".jsonl"):
+    if not name.endswith(_DATASET_SUFFIXES):
         return None
     for prefix in ("pretrain", "sft", "lora", "dpo", "rlaif", "agent"):
         if name.startswith(prefix):
@@ -1383,7 +1898,7 @@ def _dataset_kind(filename):
 
 
 def _available_training_datasets(train_type, dataset_dir=None):
-    """Return JSONL datasets compatible with a trainer; ``sft*`` means SFT."""
+    """Return JSONL/parquet datasets for a trainer; ``sft*`` means SFT."""
     if dataset_dir is None:
         repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
         dataset_dir = os.path.join(repo_root, "dataset")
@@ -1451,7 +1966,7 @@ def _persist_panel_state(trainer_dir):
     state = {
         k: v for k, v in st.session_state.items()
         if not k.startswith("_")
-        and not k.startswith("btn_")  # 按钮状态只读，恢复赋值会抛 StreamlitValueAssignmentNotAllowedError
+        and _panel_state_key_allowed(k)
         and k not in ("train_proc", "train_status", "train_log_path", "clear_train_log")
         and not k.startswith("save_prefix_")
         and _serializable(v)
@@ -1536,22 +2051,84 @@ def _resume_checkpoint_exists(weight, hidden_size, use_moe):
     ))
 
 
+def _training_progress_from_log(log):
+    """Use tokens for streaming progress; estimated batch counts are not totals."""
+    # A resume appends to the same log. Ignore the previous launch's completion.
+    log = log.rsplit('# epochs:', 1)[-1]
+    matches = list(re.finditer(
+        r'Epoch:\[(\d+)/(\d+)\]\((\d+)/(~?)(\d+)\)([^\n]*)', log,
+    ))
+    if not matches:
+        return None
+    ep, epochs, step, estimated, steps, tail = matches[-1].groups()
+    ep, epochs, step, steps = map(int, (ep, epochs, step, steps))
+    tokens = re.search(r'tokens:\s*(\d+)/(\d+)', tail)
+    saved = bool(re.search(r'checkpoint_saved:\s*1\b', tail))
+    if tokens:
+        done, total = map(int, tokens.groups())
+        fraction = done / max(total, 1)
+        detail = f'Step {step:,} — Tokens {done:,}/{total:,}'
+    elif estimated:
+        return None
+    else:
+        fraction = step / max(steps, 1)
+        detail = f'Step {step:,}/{steps:,}'
+    complete = ep >= epochs and not estimated and step >= steps
+    if saved:
+        fraction = 1.0
+        detail = f'Completed — {step:,} steps; checkpoint saved'
+    pct = min(max(((ep - 1) + min(fraction, 1.0)) / max(epochs, 1), 0.0), 1.0)
+    return {'fraction': pct, 'caption': f'Epoch {ep}/{epochs} — {detail} ({pct * 100:.1f}%)',
+            'complete': complete, 'checkpoint_saved': saved}
+
+
 def _training_log_is_complete(log_path):
     """Whether the last logged epoch/step reached the declared end of training."""
     if not log_path or not os.path.exists(log_path):
         return False
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as log_file:
-            progress = re.findall(
-                r"Epoch:\[(\d+)/(\d+)\]\((\d+)/(\d+)\)",
-                log_file.read(),
-            )
+            progress = _training_progress_from_log(log_file.read())
     except OSError:
         return False
     if not progress:
         return False
-    epoch, epochs, step, steps = map(int, progress[-1])
-    return epoch >= epochs and step >= steps
+    return progress['complete']
+
+
+def _training_activity_from_log(log):
+    """Describe preprocessing/warmup before the first train-step record."""
+    if not log:
+        return "Initializing model and dataset..."
+    events = []
+    patterns = (
+        (r"Tokenizing pretrain for sequence buckets:\s+(\d+)%", "tokenizing {0}%"),
+        (r"Packing pretrain bucket at (\d+) tokens:\s+(\d+)%", "packing {0}-token bucket {1}%"),
+        (r"\[Packing DP\].*starting", "optimizing sequence buckets"),
+        (r"\[Streaming Build\] stage=materialize source_bytes=(\d+)MiB", "materializing {0}MiB source window"),
+        (r"\[Streaming Build\] stage=json-tokenize-pack starting", "loading JSON / tokenizing / packing"),
+    )
+    for pattern, template in patterns:
+        matches = list(re.finditer(pattern, log))
+        if matches:
+            match = matches[-1]
+            events.append((match.start(), template.format(*match.groups())))
+    if not events:
+        return "Initializing model or planning streaming chunks..."
+    position, activity = max(events, key=lambda item: item[0])
+    prefetches = list(re.finditer(
+        r"\[Streaming Prefetch\].*packing chunk=(\d+)/(\d+)", log,
+    ))
+    if prefetches and prefetches[-1].start() < position:
+        chunk, total = prefetches[-1].groups()
+        return f"Training warmup + background prefetch chunk {chunk}/{total}: {activity}"
+    chunks = list(re.finditer(
+        r"\[Streaming Chunk\].*chunk=(\d+)/(\d+)", log,
+    ))
+    if chunks:
+        chunk, total = chunks[-1].groups()
+        return f"Preparing streaming chunk {chunk}/{total}: {activity}"
+    return activity.capitalize() + "..."
 
 
 def _completed_checkpoint_exists(log_path):
@@ -1579,6 +2156,9 @@ def _completed_checkpoint_exists(log_path):
     try:
         log_mtime = os.path.getmtime(log_path)
         checkpoint_names = os.listdir(_checkpoints_dir())
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as log_file:
+            progress = _training_progress_from_log(log_file.read())
+        saved_marker = bool(progress and progress['complete'] and progress['checkpoint_saved'])
     except OSError:
         return False
 
@@ -1588,7 +2168,7 @@ def _completed_checkpoint_exists(log_path):
                 continue
             checkpoint_path = os.path.join(_checkpoints_dir(), name)
             try:
-                if os.path.getmtime(checkpoint_path) >= log_mtime:
+                if os.path.isfile(checkpoint_path) and (saved_marker or os.path.getmtime(checkpoint_path) >= log_mtime):
                     return True
             except OSError:
                 continue
@@ -1660,6 +2240,7 @@ def _read_paused_state():
 
 _BASE_WEIGHT_TYPE = {
     "pretrain": "pretrain",
+    "cpt": "pretrain",
     "full_sft": "pretrain",
     "lora": "full_sft",
     "dpo": "full_sft",
@@ -1679,6 +2260,16 @@ def _base_weight_type(train_type, continue_completed_sft=False):
 def _is_completed_sft_weight(path):
     name = os.path.basename(os.fspath(path)).lower()
     return name.startswith("full_sft_") and name.endswith(".pth") and "_resume.pth" not in name
+
+
+def _is_cpt_base_weight(path):
+    """CPT may continue a pretraining or an earlier completed CPT weight."""
+    name = os.path.basename(os.fspath(path)).lower()
+    return (
+        name.startswith(("pretrain_", "cpt_"))
+        and name.endswith(".pth")
+        and "_resume.pth" not in name
+    )
 
 
 def _available_weight_files():
@@ -1716,6 +2307,24 @@ def _latest_weight_file(base_type, hidden_size, use_moe, arch_tag=""):
         return None
     candidates.sort(reverse=True)
     return candidates[0][1]
+
+
+def _latest_base_weight_file(train_type, hidden_size, use_moe, arch_tag="",
+                             continue_completed_sft=False):
+    """Resolve the newest valid automatic base for a UI training mode."""
+    if train_type == "cpt" or (
+        train_type == "full_sft" and not continue_completed_sft
+    ):
+        base_types = ("cpt", "pretrain")
+    else:
+        base_types = (_base_weight_type(train_type, continue_completed_sft),)
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    candidates = []
+    for base_type in base_types:
+        path = _latest_weight_file(base_type, hidden_size, use_moe, arch_tag)
+        if path:
+            candidates.append((os.path.getmtime(os.path.join(repo_root, path)), path))
+    return max(candidates, default=(None, None))[1]
 
 
 def _try_recover_training_state():
@@ -1774,18 +2383,24 @@ with st.sidebar:
     # ── Model Preset ──
     with st.expander("Model Preset", expanded=True):
         preset_options = [
-            "instinct-3",
-            "instinct-3-moe",
-            "instinct2-small",
-            "instinct2",
+            "Instinct V2",
+            "Instinct V2 MoE",
+            "Instinct V2 Small",
+            "Instinct V1",
+            "Instinct V1 MoE",
             "instinct-linear",
             "Custom",
         ]
-        current_preset = st.session_state.preset
+        current_preset = _LEGACY_PRESET_NAMES.get(
+            st.session_state.preset, st.session_state.preset
+        )
+        if current_preset != st.session_state.preset:
+            st.session_state.preset = current_preset
+            init_from_preset(current_preset)
         default_idx = (
             preset_options.index(current_preset)
             if current_preset in preset_options
-            else 5
+            else len(preset_options) - 1
         )
         chosen = _radio(
             "Quick-select preset",
@@ -1803,9 +2418,14 @@ with st.sidebar:
 
     # ── Model Architecture ──
     with st.expander("Model Architecture", expanded=True):
-        arch_options = ["Standard Transformer", "MoE Transformer", "GatedDeltaNet (Linear)", "Looped Transformer"]
+        arch_options = ["Standard Transformer", "MoE Transformer", "GatedDeltaNet (Linear)", "Instinct V2 Recurrent Depth"]
         current_arch = st.session_state.get("model_architecture", "standard")
-        arch_index = {"standard": 0, "moe": 1, "linear": 2, "looped": 3}.get(current_arch, 0)
+        if current_arch == "standard":
+            arch_index = 1 if st.session_state.get("use_moe", False) else 0
+        else:
+            arch_index = {"linear": 2, "looped": 3}.get(current_arch, 0)
+        if st.session_state.pop("_sync_arch_radio", False):
+            st.session_state._arch_radio = arch_options[arch_index]
         chosen_arch = _radio(
             "Architecture type",
             arch_options,
@@ -1816,15 +2436,22 @@ with st.sidebar:
         )
         arch_map = {
             "Standard Transformer": "standard",
-            "MoE Transformer": "moe",
+            "MoE Transformer": "standard",
             "GatedDeltaNet (Linear)": "linear",
-            "Looped Transformer": "looped",
+            "Instinct V2 Recurrent Depth": "looped",
         }
         mapped = arch_map[chosen_arch]
-        if mapped != st.session_state.get("model_architecture", "standard"):
+        desired_moe = (
+            True if chosen_arch == "MoE Transformer"
+            else st.session_state.get("use_moe", False) if mapped == "looped"
+            else False
+        )
+        if (
+            mapped != st.session_state.get("model_architecture", "standard")
+            or desired_moe != st.session_state.get("use_moe", False)
+        ):
             st.session_state.model_architecture = mapped
-            if mapped == "moe":
-                st.session_state.use_moe = True
+            st.session_state.use_moe = desired_moe
             st.rerun()
 
     # ── Core Architecture ──
@@ -1834,8 +2461,20 @@ with st.sidebar:
             128,
             2048,
             st.session_state.get("hidden_size", 768),
-            step=64,
+            step=32,
             key="hidden_size",
+        )
+        _number_input(
+            "intermediate_size",
+            128,
+            32768,
+            st.session_state.get(
+                "intermediate_size",
+                compute_intermediate_size(st.session_state.get("hidden_size", 768)),
+            ),
+            step=64,
+            key="intermediate_size",
+            help="SwiGLU FFN width; the paper-scaled Instinct V2 preset uses 4224.",
         )
         _slider(
             "num_hidden_layers",
@@ -2046,117 +2685,90 @@ with st.sidebar:
                 step=1, key="linear_num_value_heads",
             )
 
-    # ── Looped (LoopUS) Config ──
+    # ── Instinct V2 latent recurrent-depth Config ──
     if st.session_state.get("model_architecture") == "looped":
-        with st.expander("Looped (LoopUS) Config", expanded=True):
+        with st.expander("Instinct V2 Recurrent Depth", expanded=True):
             _n_layers = st.session_state.get("num_hidden_layers", 8)
             _number_input(
-                "loop_max_steps (safety cap)",
-                min_value=1, max_value=128,
-                value=st.session_state.get("loop_max_steps", 32),
-                key="loop_max_steps",
-                help="Dynamic loop safety cap. The loop exits when q >= threshold; "
-                     "this only bounds worst-case (effectively infinite for trained models).",
-            )
-            _slider(
-                "loop_q_threshold",
-                0.1, 1.0,
-                st.session_state.get("loop_q_threshold", 0.9),
-                step=0.05,
-                key="loop_q_threshold",
-                help="Confidence threshold for early exit (q > threshold halts)",
+                "Prelude layers",
+                min_value=0, max_value=16,
+                value=st.session_state.get("prelude_layers", 2),
+                key="prelude_layers",
+                help="Non-recurrent layers that embed tokens into latent space.",
             )
             _number_input(
-                "loop_n_supervision",
+                "Recurrent core layers",
+                min_value=1, max_value=32,
+                value=st.session_state.get("recurrent_layers", 4),
+                key="recurrent_layers",
+                help="Number of shared Transformer layers applied in every recurrence.",
+            )
+            _number_input(
+                "Coda layers",
+                min_value=0, max_value=16,
+                value=st.session_state.get("coda_layers", 2),
+                key="coda_layers",
+                help="Non-recurrent layers that decode the final latent state.",
+            )
+            st.caption(
+                f"Materialized layers: "
+                f"{st.session_state.get('prelude_layers', 2) + st.session_state.get('recurrent_layers', 4) + st.session_state.get('coda_layers', 2)} "
+                f"/ configured V2 layer budget: {_n_layers}"
+            )
+            _number_input(
+                "Mean recurrence (r-bar)",
                 min_value=1, max_value=128,
-                value=st.session_state.get("loop_n_supervision", 6),
-                key="loop_n_supervision",
-                help="How many of the loop steps get gradients (random deep supervision)",
+                value=st.session_state.get("loop_iters", 8),
+                key="loop_iters",
+                help="Default test-time depth and center of the training depth distribution.",
             )
-            _slider(
-                "loop_depth_reward (λ)",
-                0.0, 0.5,
-                st.session_state.get("loop_depth_reward", 0.01),
-                step=0.005,
-                key="loop_depth_reward",
-                help="Reward weight on expected loop depth λ·E[steps]. "
-                     "Higher λ → stronger incentive to exit early. Anneal upward for faster exit.",
+            _number_input(
+                "Backprop recurrences (k)",
+                min_value=1, max_value=128,
+                value=st.session_state.get("mean_backprop_depth", 4),
+                key="mean_backprop_depth",
+                help="Only the final k recurrences retain activations and gradients.",
             )
-            _checkbox(
-                "exit_in_training",
-                value=st.session_state.get("exit_in_training", True),
-                key="exit_in_training",
-                help="Allow per-sample early exit during training (q > threshold stops the loop). "
-                     "Disable to always run the full cap and only reward via λ.",
+            _selectbox(
+                "Training depth sampling",
+                ["lognormal_poisson", "fixed"],
+                key="recurrence_sampling",
             )
-            _slider(
-                "loop_beta (monotonicity weight)",
-                0.0, 2.0,
-                st.session_state.get("loop_beta", 0.5),
-                step=0.05,
-                key="loop_beta",
+            _number_input(
+                "Log-normal sigma",
+                min_value=0.0, max_value=2.0,
+                value=float(st.session_state.get("recurrence_log_normal_sigma", 1.0)),
+                step=0.05, format="%.2f", key="recurrence_log_normal_sigma",
             )
-            st.markdown("#### Deep-Thinking Rewards")
-            st.caption("Self-distillation + depth-gain reward. Train with "
-                       "exit_in_training OFF so every loop state is visited.")
-            _slider(
-                "loop_distill_weight",
-                0.0, 2.0,
-                st.session_state.get("loop_distill_weight", 0.0),
-                step=0.05,
-                key="loop_distill_weight",
-                help="Self-distillation weight: shallower loop depths imitate the "
-                     "final depth's output distribution (KL), forcing deeper states "
-                     "to carry richer representation. 0 = off.",
+            _number_input(
+                "Maximum sampled recurrence",
+                min_value=1, max_value=512,
+                value=st.session_state.get("max_recurrence", 32),
+                key="max_recurrence",
+                help="Safety cap for the heavy tail of the log-normal Poisson sampler.",
             )
-            _slider(
-                "loop_distill_temperature",
-                0.5, 5.0,
-                st.session_state.get("loop_distill_temperature", 2.0),
-                step=0.1,
-                key="loop_distill_temperature",
-                help="Self-distillation temperature T (soften teacher/student "
-                     "distributions; KL scaled by T²)",
+            _number_input(
+                "Latent initial-state std",
+                min_value=0.0, max_value=2.0,
+                value=float(st.session_state.get("state_init_std", math.sqrt(2 / 5))),
+                step=0.01, format="%.4f", key="state_init_std",
+                help="Truncated Gaussian s0 standard deviation; paper default sqrt(2/5).",
+            )
+            _number_input(
+                "Embedding scale",
+                min_value=0.01, max_value=128.0,
+                value=float(st.session_state.get(
+                    "embedding_scale", math.sqrt(st.session_state.get("hidden_size", 768))
+                )),
+                step=0.1, format="%.4f", key="embedding_scale",
+                help="Paper default sqrt(hidden_size).",
             )
             _checkbox(
-                "teacher_stop_grad",
-                value=st.session_state.get("teacher_stop_grad", True),
-                key="teacher_stop_grad",
-                help="Stop gradient on teacher (final-depth) logits to avoid the "
-                     "trivial self-KL solution. 1 = recommended.",
+                "Concatenative input injection",
+                value=st.session_state.get("use_input_injection", True),
+                key="use_input_injection",
+                help="Inject Prelude output every recurrence through Linear([state; input]).",
             )
-            _slider(
-                "loop_depth_gain_reward",
-                0.0, 1.0,
-                st.session_state.get("loop_depth_gain_reward", 0.0),
-                step=0.01,
-                key="loop_depth_gain_reward",
-                help="Depth-gain reward: reward a deeper step only when it reduces "
-                     "LM loss vs the shallowest-supervised-depth baseline "
-                     "(L1 − Lb)_+. 0 = off.",
-            )
-            st.caption(f"Layer partition (total: {_n_layers})")
-            enc_s = _text_input(
-                "Encoder layers (comma-separated)",
-                value=",".join(str(x) for x in st.session_state.get("loop_encoder_layers", [0, 1])),
-                key="_loop_encoder_layers_str",
-            )
-            body_s = _text_input(
-                "Loop body layers (comma-separated)",
-                value=",".join(str(x) for x in st.session_state.get("loop_body_layers", [2, 3, 4])),
-                key="_loop_body_layers_str",
-            )
-            out_s = _text_input(
-                "Output layers (comma-separated)",
-                value=",".join(str(x) for x in st.session_state.get("loop_output_layers", [5, 6, 7])),
-                key="_loop_output_layers_str",
-            )
-            try:
-                st.session_state.loop_encoder_layers = [int(x.strip()) for x in enc_s.split(",") if x.strip()]
-                st.session_state.loop_body_layers = [int(x.strip()) for x in body_s.split(",") if x.strip()]
-                st.session_state.loop_output_layers = [int(x.strip()) for x in out_s.split(",") if x.strip()]
-            except ValueError:
-                pass
 
     # ── Position Encoding ──
     with st.expander("Position Encoding", expanded=True):
@@ -2175,12 +2787,24 @@ with st.sidebar:
             format="%.0e",
             key="rope_theta",
         )
-        _checkbox(
-            "YaRN (inference_rope_scaling)",
-            value=st.session_state.get("inference_rope_scaling", False),
-            key="inference_rope_scaling",
+        legacy_scaling = (
+            "yarn" if st.session_state.get("inference_rope_scaling", False) else "none"
         )
-        if st.session_state.get("inference_rope_scaling", False):
+        rope_scaling_type = _selectbox(
+            "RoPE scaling",
+            ["none", "yarn", "longrope"],
+            index=["none", "yarn", "longrope"].index(
+                st.session_state.get("rope_scaling_type", legacy_scaling)
+            ),
+            format_func=lambda value: {
+                "none": "RoPE (native)",
+                "yarn": "YaRN",
+                "longrope": "LongRoPE (ICML 2024)",
+            }[value],
+            key="rope_scaling_type",
+        )
+        st.session_state.inference_rope_scaling = rope_scaling_type != "none"
+        if rope_scaling_type == "yarn":
             c1, c2 = st.columns(2)
             with c1:
                 _number_input(
@@ -2213,6 +2837,83 @@ with st.sidebar:
                     key="attention_factor",
                     format="%.1f",
                 )
+        elif rope_scaling_type == "longrope":
+            c1, c2 = st.columns(2)
+            with c1:
+                _number_input(
+                    "original_max_pos",
+                    min_value=2,
+                    value=int(st.session_state.get(
+                        "original_max_position_embeddings", 4096
+                    )),
+                    key="original_max_position_embeddings",
+                )
+                _number_input(
+                    "target extension factor",
+                    min_value=1.0,
+                    value=float(st.session_state.get("factor", 8.0)),
+                    step=1.0,
+                    key="factor",
+                )
+                _number_input(
+                    "short retained tokens (n-hat)",
+                    min_value=0,
+                    value=int(st.session_state.get(
+                        "longrope_short_retained_tokens", 0
+                    )),
+                    key="longrope_short_retained_tokens",
+                )
+            with c2:
+                _number_input(
+                    "short attention factor",
+                    min_value=0.01,
+                    value=float(st.session_state.get(
+                        "longrope_short_attention_factor", 1.0
+                    )),
+                    step=0.01,
+                    key="longrope_short_attention_factor",
+                    format="%.4f",
+                )
+                _number_input(
+                    "long attention factor (0 = paper formula)",
+                    min_value=0.0,
+                    value=float(st.session_state.get(
+                        "longrope_long_attention_factor", 0.0
+                    )),
+                    step=0.01,
+                    key="longrope_long_attention_factor",
+                    format="%.4f",
+                )
+                _number_input(
+                    "long retained tokens (n-hat)",
+                    min_value=0,
+                    value=int(st.session_state.get(
+                        "longrope_long_retained_tokens", 0
+                    )),
+                    key="longrope_long_retained_tokens",
+                )
+
+            half_dim = compute_head_dim(
+                st.session_state.get("hidden_size", 768),
+                st.session_state.get("num_attention_heads", 8),
+            ) // 2
+            default_factor = float(st.session_state.get("factor", 8.0))
+            _text_area(
+                f"short_factor ({half_dim} values)",
+                value=", ".join(["1.0"] * half_dim),
+                key="longrope_short_factors",
+                help="Short-context recovery factors found by LongRoPE search; 1.0 preserves native RoPE.",
+            )
+            _text_area(
+                f"long_factor ({half_dim} values)",
+                value=", ".join([f"{default_factor:g}"] * half_dim),
+                key="longrope_long_factors",
+                help="Per-dimension lambda_i search result. The uniform PI vector is only an initialization.",
+            )
+            st.caption(
+                "LongRoPE factors are checkpoint-specific search results. The displayed uniform vector is "
+                "the paper's PI seed, not an optimized LongRoPE result."
+            )
 
     # ── MoE ──
     with st.expander("MoE (Experimental)", expanded=True):
@@ -2229,12 +2930,17 @@ with st.sidebar:
                 st.session_state.get("num_experts", 4),
                 key="num_experts",
             )
+            _experts = int(st.session_state.get("num_experts", 4))
+            st.session_state.num_experts_per_tok = max(
+                1, min(_experts, int(st.session_state.get("num_experts_per_tok", 1)))
+            )
             _slider(
                 "num_experts_per_tok",
                 1,
-                4,
+                _experts,
                 st.session_state.get("num_experts_per_tok", 1),
                 key="num_experts_per_tok",
+                help="每个 token 激活的专家数，可选 1 到 num_experts。迁移开关开启后将采用这里的设置。",
             )
             _moe_int = st.session_state.get(
                 "moe_intermediate_size", compute_intermediate_size(_h)
@@ -2271,6 +2977,13 @@ with st.sidebar:
                 value=st.session_state.get("norm_topk_prob", True),
                 key="norm_topk_prob",
             )
+            if (st.session_state.get("num_experts_per_tok", 1) == 1
+                    and st.session_state.get("norm_topk_prob", True)):
+                st.warning(
+                    "Top-1 归一化会让专家权重变成 1，阻断 router 的任务损失梯度。"
+                    "从头训练请取消勾选；旧权重会保留原配置。迁移旧权重请在训练设置的"
+                    "基础权重下方开启『显式迁移 MoE 路由』。"
+                )
             _number_input(
                 "router_aux_loss_coef",
                 0.0,
@@ -2325,9 +3038,62 @@ with st.sidebar:
     with st.expander("🚀 Training", expanded=(st.session_state.get("train_status") == "running")):
         train_type = _selectbox(
             "Training type",
-            ["pretrain", "full_sft", "lora", "dpo", "ppo", "grpo", "agent", "distillation"],
+            ["pretrain", "cpt", "full_sft", "lora", "dpo", "ppo", "grpo", "agent", "distillation"],
             key="train_type",
+            format_func=lambda value: "cpt (continual pretraining)" if value == "cpt" else value,
         )
+        _entering_sft = track_sft_training_type(st.session_state, train_type)
+        if train_type == "full_sft":
+            _sft_start_modes = ["base", "continue", "resume"]
+            _sft_start_labels = {
+                "base": "首次 SFT（从 pretrain/CPT 权重开始）",
+                "continue": "继续 SFT（从已完成 SFT 权重开始）",
+                "resume": "断点续训（恢复完整训练状态）",
+            }
+            if "sft_start_mode" not in st.session_state:
+                st.session_state.sft_start_mode = (
+                    "resume" if st.session_state.get("from_resume", False) else "base"
+                )
+            _sft_start_mode = _radio(
+                "SFT start mode", _sft_start_modes, key="sft_start_mode",
+                format_func=lambda mode: _sft_start_labels[mode],
+                disabled=st.session_state.get("train_status") == "running",
+                help="切换时保存并加载各模式独立配置。继续 SFT 新建 optimizer/scheduler/step；"
+                     "断点续训恢复原运行。",
+            )
+            switch_sft_profile(st.session_state, _sft_start_mode, entering=_entering_sft)
+            st.session_state.from_resume = _sft_start_mode == "resume"
+            _continue_completed_sft = _sft_start_mode == "continue"
+            if _sft_start_mode == "resume":
+                st.caption("断点续训不套用首次/继续 SFT 的默认配置，沿用当前运行设置并恢复 checkpoint。")
+            else:
+                st.caption(
+                    f"{'继续' if _continue_completed_sft else '首次'} SFT 独立配置："
+                    f"LR={st.session_state.get('learning_rate_full_sft', 1e-5):g}，"
+                    f"epochs={st.session_state.get('epochs_full_sft', 2)}，"
+                    f"warmup={st.session_state.get('warmup_ratio_full_sft', 0):.0%}。"
+                    "可手动调整，切换回来会恢复你的修改。"
+                )
+        else:
+            _continue_completed_sft = False
+        if train_type == "cpt":
+            apply_cpt_defaults(st.session_state)
+            if st.button(
+                "应用推荐 CPT 默认配置", key="btn_cpt_defaults",
+                disabled=bool(st.session_state.get("from_resume", False))
+                or st.session_state.get("train_status") in ("running", "paused"),
+            ):
+                apply_cpt_defaults(st.session_state, force=True)
+            st.info(
+                "CPT 使用 train_pretrain.py 的 next-token 预训练目标，从已有 pretrain/cpt 权重继续。"
+                "它不使用 reward、chosen/rejected 或 RL rollout。"
+            )
+            st.caption(
+                "低预算适应起点：LR=3e-5、3% warmup、余弦衰减至3e-6，1 epoch；"
+                "Muon、FP32主权重、BF16/FP8、4096分桶packing、20GB缓存、流式加载。"
+                "MoE 显式迁移采用模型面板当前的激活专家数（低预算推荐top-1）。显存预算保留你的设置；FP8需要torchao。"
+                "这不是实测最优，1 epoch仍会遍历所选全量数据，请先使用经过审核的小子集。"
+            )
         _dataset_options = _available_training_datasets(train_type)
         _dataset_key = f"data_path_{train_type}"
         if _dataset_options:
@@ -2338,46 +3104,29 @@ with st.sidebar:
                 _dataset_options,
                 key=_dataset_key,
                 format_func=_dataset_option_label,
-                help="自动扫描 dataset/ 顶层 JSONL；文件名以 sft 开头的文件会被判定为 SFT 数据集。",
+                help="自动扫描 dataset/ 顶层的 .jsonl / .parquet；文件名以 sft、pretrain 等前缀开头即被归类。",
             )
             _dataset_missing = False
         else:
-            st.error(f"No compatible JSONL dataset found for {train_type} in dataset/.")
+            st.error(f"No compatible JSONL/Parquet dataset found for {train_type} in dataset/.")
             _dataset_missing = True
         config_file = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "trainer", f"config_{train_type}.json"
+            os.path.dirname(os.path.abspath(__file__)), "..", "trainer",
+            f"config_{train_type}.json"
         )
+        if train_type == "cpt" and not os.path.exists(config_file):
+            config_file = os.path.join(
+                os.path.dirname(config_file), "config_pretrain.json"
+            )
         if os.path.exists(config_file):
             if st.button("📂 Load config from file", width="stretch", key="btn_load_config",
                          help=f"Load model architecture from {config_file}"):
                 with open(config_file, "r", encoding="utf-8") as f:
                     st.session_state._pending_config_load = json.load(f)
                 st.rerun()
-        if train_type == "full_sft":
-            _sft_start_modes = ["base", "continue", "resume"]
-            _sft_start_labels = {
-                "base": "Start from base weights",
-                "continue": "Continue a completed SFT on new data",
-                "resume": "Resume an interrupted run",
-            }
-            if "sft_start_mode" not in st.session_state:
-                st.session_state.sft_start_mode = (
-                    "resume" if st.session_state.get("from_resume", False) else "base"
-                )
-            _sft_start_mode = _radio(
-                "SFT start mode",
-                _sft_start_modes,
-                key="sft_start_mode",
-                format_func=lambda mode: _sft_start_labels[mode],
-                help="Continue 会加载已完成的 full_sft 普通权重，但重新创建 optimizer、scheduler 和 step；"
-                     "Resume 会恢复同一轮训练的完整 checkpoint。",
-            )
-            st.session_state.from_resume = _sft_start_mode == "resume"
-            _continue_completed_sft = _sft_start_mode == "continue"
-        else:
+        if train_type != "full_sft":
             _checkbox("Resume from checkpoint (--from_resume)", value=False, key="from_resume",
                       help="Auto-detect and resume from checkpoints/{weight}_{dim}{_moe}_resume.pth")
-            _continue_completed_sft = False
         _weight_files = _available_weight_files()
         _auto_label = "auto (newest matching base)"
         if _continue_completed_sft:
@@ -2386,6 +3135,18 @@ with st.sidebar:
             _continue_without_weight = not _completed_sft_weights
             if _continue_without_weight:
                 st.error("No completed full_sft weight was found in out/ or checkpoints/.")
+        elif train_type == "cpt":
+            _cpt_weights = [path for path in _weight_files if _is_cpt_base_weight(path)]
+            _base_options = [_auto_label] + _cpt_weights
+            _continue_without_weight = not _cpt_weights
+            if _continue_without_weight:
+                st.error("CPT requires a completed pretrain or CPT .pth weight in out/ or checkpoints/.")
+        elif train_type == "full_sft" and _sft_start_mode == "base":
+            _first_sft_weights = [path for path in _weight_files if _is_cpt_base_weight(path)]
+            _base_options = [_auto_label] + _first_sft_weights
+            _continue_without_weight = not _first_sft_weights
+            if _continue_without_weight:
+                st.error("首次 SFT 需要已完成的 pretrain/CPT 权重；继续 SFT 请切换对应模式。")
         else:
             _base_options = ["none (from scratch)", _auto_label] + _weight_files
             _continue_without_weight = False
@@ -2398,13 +3159,33 @@ with st.sidebar:
             _base_options,
             key="base_weight",
             disabled=st.session_state.get("from_resume", False),
-            help="SFT 基于 pretrain；Continue SFT 和 LoRA/DPO/PPO/GRPO/Agent/蒸馏基于 full_sft 启动。"
+            help="CPT 和 SFT 基于 pretrain；Continue SFT 和 LoRA/DPO/PPO/GRPO/Agent/蒸馏基于 full_sft 启动。"
                  "可选 out/ 与 checkpoints/ 下的 .pth（自动排除 _resume 检查点），"
                  "或 'auto' 自动选择最新匹配权重；'none' 从随机初始化开始。"
                  "选中 Resume 且检查点含完整状态时，基础权重会自动跳过。",
         )
+        if train_type in ("pretrain", "cpt", "full_sft") and st.session_state.get("use_moe", False):
+            _router_resume = bool(st.session_state.get("from_resume", False))
+            _checkbox(
+                "显式迁移 MoE 路由（新训练阶段）",
+                value=False, key="moe_router_migration", disabled=_router_resume,
+                help="覆盖所选基座保存的路由设置，启动时传入明确参数；不修改原权重。",
+            )
+            if _router_resume:
+                st.caption("断点续训沿用 checkpoint 的路由，迁移设置不会传入。")
+            elif st.session_state.get("moe_router_migration", False):
+                _router_args = moe_router_migration_args(
+                    st.session_state, build_config_dict(), train_type,
+                )
+                st.caption(
+                    f"迁移目标：top-{_router_args['moe_router_top_k']}，"
+                    "采用上方 MoE 面板的 num_experts_per_tok；top-1 自动关闭归一化，"
+                    "top-k>1 沿用 norm_topk_prob 选择。"
+                )
+                st.code(" ".join(f"--{key} {value}" for key, value in _router_args.items()), language="text")
+                st.caption("当前路由设置将覆盖基座的 top-k；专家总数仍取自基座。输出幅度/路由会改变，请先做短适应验证。")
         _bucket_auto_batch = (
-            train_type in ("pretrain", "full_sft", "lora", "distillation")
+            train_type in ("pretrain", "cpt", "full_sft", "lora", "distillation")
             and st.session_state.get("sequence_packing", False)
             and st.session_state.get("sequence_packing_mode", "fixed") == "bucket"
         )
@@ -2426,7 +3207,57 @@ with st.sidebar:
             step=1, key=epochs_key,
             help="完整遍历训练数据的次数。续训时表示目标总 Epoch 数，而不是额外增加的轮数。",
         )
-        _packing_supported = train_type in ("pretrain", "full_sft", "lora", "distillation")
+        _packing_supported = train_type in ("pretrain", "cpt", "full_sft", "lora", "distillation")
+        _number_input(
+            "Dataset cache budget (GB)",
+            min_value=0.0, max_value=1024.0,
+            value=float(st.session_state.get("data_cache_max_gb", 5.0)),
+            step=1.0, key="data_cache_max_gb",
+            help="Hugging Face/Arrow 可重建缓存的总上限。超限按 LRU 自动淘汰；"
+                 "正在训练使用的 mmap 文件受租约保护。0 表示不限制。",
+        )
+        _selectbox(
+            "Large dataset loading",
+            ["auto", "on", "off"],
+            index=["auto", "on", "off"].index(
+                st.session_state.get("dataset_streaming", "auto")
+            ),
+            key="dataset_streaming",
+            format_func=lambda value: {
+                "auto": "Auto — stream when cache is too small",
+                "on": "Streaming chunks — always",
+                "off": "Whole-dataset Arrow cache",
+            }[value],
+            help="Pretrain 把大型语料按块逐片展开、packing、训练和释放；不会生成整库 Arrow。"
+                 "JSONL 按字节范围切块，Parquet 按 row group 切块（token_count 直接取自列，无需分词）。",
+        )
+        _number_input(
+            "Streaming source chunk (MiB)",
+            min_value=64, max_value=16384,
+            value=int(st.session_state.get("streaming_chunk_mb", 1024)),
+            step=64, key="streaming_chunk_mb",
+            help="开启下一片预取时，5GB 缓存最多使用 1024 MiB；峰值按最多约 5× 源分片预留。",
+        )
+        _checkbox(
+            "Pack next chunk while training",
+            value=bool(st.session_state.get("streaming_prefetch_chunks", 1)),
+            key="streaming_prefetch_chunks",
+            help="双缓冲：GPU 训练当前分片时，rank 0 用后台线程展开并 packing 下一分片；"
+                 "配合 Inline 模式不启动 Python 子进程。",
+        )
+        _selectbox(
+            "Cache build process",
+            ["inline", "spawn"],
+            index=["inline", "spawn"].index(
+                st.session_state.get("cache_build_mode", "inline")
+            ),
+            key="cache_build_mode",
+            format_func=lambda value: {
+                "inline": "Inline — spawn-free and Windows-safe",
+                "spawn": "Spawn worker — faster isolation, higher risk",
+            }[value],
+            help="Inline 流式预训练会强制 packing_num_proc=1、DataLoader workers=0，避免任何 Python spawn。",
+        )
         _checkbox(
             "Sequence packing",
             value=st.session_state.get("sequence_packing", False),
@@ -2490,17 +3321,38 @@ with st.sidebar:
                      "销毁该阶段的 CUDA Graph 和静态 GPU 张量并释放显存。",
             )
             st.caption("默认 >8192 tokens 的桶先连续训练，结束后会记录实际释放的 GPU 显存。")
-            _number_input(
+            _bucket_gpu_memory = _number_input(
                 "GPU VRAM per card (GB)",
                 min_value=1.0, max_value=192.0,
                 value=float(st.session_state.get("bucket_gpu_memory_gb", 16.0)),
                 step=1.0, key="bucket_gpu_memory_gb",
-                help="填写每张训练 GPU 可用的显存。根据 16GB 下 2048 tokens 可运行 batch 12 的"
-                     "实测曲线，自动计算每个长度桶的 batch_size。",
+                help="填写每张训练 GPU 的显存硬预算。会先扣除全模型参数、梯度、"
+                     "Muon/AdamW 状态，并按 bucket 数量预留编译图与 allocator 空间，"
+                     "再计算每个长度桶的 batch_size。",
             )
-            st.caption(
-                "标定：16GB = 24576 tokens/step/GPU；按显存线性缩放预算，再除以桶 max_seq_len。"
+            _vram_plan = estimate_bucket_vram_plan(
+                build_config_dict(),
+                target_gb=float(_bucket_gpu_memory),
+                bucket_count=int(st.session_state.get("seq_bucket", 2)),
+                optimizer=st.session_state.get("optimizer", "adamw"),
+                param_dtype=st.session_state.get("param_dtype", "fp32"),
+                use_compile=bool(st.session_state.get("use_compile", True)),
+                compile_mode=st.session_state.get("compile_mode", "default"),
             )
+            if _vram_plan["token_budget"] > 0:
+                _batch_4096 = max(1, _vram_plan["token_budget"] // 4096)
+                st.caption(
+                    f"模型常驻约 {_vram_plan['persistent_gb']:.2f} GiB；"
+                    f"安全/桶预留 {_vram_plan['reserve_gb']:.2f} GiB；"
+                    f"activation token budget ≈ {_vram_plan['token_budget']:,}/card。"
+                    f"例如 4096-token 桶预计 batch={_batch_4096}。"
+                )
+            else:
+                st.error(
+                    f"模型常驻约 {_vram_plan['persistent_gb']:.2f} GiB，"
+                    f"再加 {_vram_plan['reserve_gb']:.2f} GiB 安全/桶预留后已超过"
+                    f" {_bucket_gpu_memory:g} GiB；需要减少参数/桶数或提高显存预算。"
+                )
             st.caption("上方手动 batch_size 在 Auto buckets 模式中不会参与每桶批量计算。")
         else:
             _number_input(
@@ -2593,6 +3445,17 @@ with st.sidebar:
             step=1e-6, format="%.2e", key=learning_rate_key,
             help="各训练阶段使用独立学习率。Muon 使用 match_rms_adamw 调整，"
                  "可直接沿用 AdamW 调好的学习率。",
+        )
+        warmup_ratio_key = f"warmup_ratio_{train_type}"
+        _number_input(
+            "LR warmup ratio",
+            min_value=0.0, max_value=0.2,
+            value=float(st.session_state.get(
+                warmup_ratio_key, 0.03 if train_type == "cpt" else 0.0
+            )),
+            step=0.005, format="%.3f", key=warmup_ratio_key,
+            help="线性 warmup 比例；CPT 默认 3%，流式模式按有效 token 计进度。warmup 后从 peak LR "
+                 "余弦衰减到 peak 的 10%。0 保持旧版纯余弦调度。",
         )
         _checkbox(
             "Use torch.compile (Triton)",
@@ -2747,14 +3610,12 @@ with st.sidebar:
             if log_path and os.path.exists(log_path):
                 with open(log_path, "r", encoding="utf-8") as f:
                     log = f.read()
-                pi = re.findall(r'Epoch:\[(\d+)/(\d+)\]\((\d+)/(\d+)\)', log)
-                if pi:
-                    ep, te, stp, tst = map(int, pi[-1])
-                    pct = min(((ep - 1) + stp / tst) / te, 1.0)
-                    st.progress(pct)
-                    st.caption(f"Epoch {ep}/{te} — Step {stp}/{tst} ({pct * 100:.1f}%)")
+                progress = _training_progress_from_log(log)
+                if progress:
+                    st.progress(progress['fraction'])
+                    st.caption(progress['caption'])
                 else:
-                    st.info("Training in progress...")
+                    st.info(_training_activity_from_log(log))
             else:
                 st.info("Training in progress...")
         elif st.session_state.get("train_status") == "success":
@@ -2805,7 +3666,8 @@ if st.session_state.get("train_triggered", False):
         try:
             trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
             train_type = st.session_state.get("train_type", "pretrain")
-            script_name = f"train_{train_type}.py"
+            trainer_name = _trainer_name(train_type)
+            script_name = f"train_{trainer_name}.py"
             script_path = os.path.join(trainer_dir, script_name)
             if not os.path.exists(script_path):
                 st.session_state.train_status = "failed"
@@ -2849,8 +3711,10 @@ if st.session_state.get("train_triggered", False):
                 elif from_weight == "auto (newest matching base)":
                     from_weight = "auto"
                 if from_weight == "auto":
-                    base_type = _base_weight_type(train_type, continue_completed_sft)
-                    auto_path = _latest_weight_file(base_type, cfg["hidden_size"], cfg["use_moe"], _arch_tag())
+                    auto_path = _latest_base_weight_file(
+                        train_type, cfg["hidden_size"], cfg["use_moe"],
+                        _arch_tag(), continue_completed_sft,
+                    )
                     from_weight = auto_path if auto_path else "none"
                 elif from_weight.startswith(("out/", "checkpoints/")):
                     from_weight = os.path.join(os.path.dirname(trainer_dir), from_weight)
@@ -2872,13 +3736,17 @@ if st.session_state.get("train_triggered", False):
                         cmd.extend(["--from_teacher_weight", from_weight])
                 else:
                     cmd.extend(["--from_weight", from_weight])
+                for key, value in moe_router_migration_args(
+                    st.session_state, cfg, train_type, from_resume=from_resume,
+                ).items():
+                    cmd.extend([f"--{key}", str(value)])
                 cmd.extend(["--batch_size", str(st.session_state.get("batch_size", 32))])
                 epochs = int(st.session_state.get(
                     f"epochs_{train_type}", _default_epochs(train_type)
                 ))
                 cmd.extend(["--epochs", str(epochs)])
                 packing_enabled = bool(
-                    train_type in ("pretrain", "full_sft", "lora", "distillation")
+                    train_type in ("pretrain", "cpt", "full_sft", "lora", "distillation")
                     and st.session_state.get("sequence_packing", False)
                 )
                 packing_mode = st.session_state.get("sequence_packing_mode", "fixed")
@@ -2898,6 +3766,21 @@ if st.session_state.get("train_triggered", False):
                     st.session_state.get("bucket_large_threshold", 8192)
                 )])
                 cmd.extend(["--packing_batch_size", str(st.session_state.get("packing_batch_size", 1000))])
+                cmd.extend(["--data_cache_max_gb", str(
+                    st.session_state.get("data_cache_max_gb", 5.0)
+                )])
+                cmd.extend(["--dataset_streaming", str(
+                    st.session_state.get("dataset_streaming", "auto")
+                )])
+                cmd.extend(["--streaming_chunk_mb", str(
+                    st.session_state.get("streaming_chunk_mb", 1024)
+                )])
+                cmd.extend(["--streaming_prefetch_chunks", str(int(bool(
+                    st.session_state.get("streaming_prefetch_chunks", 1)
+                )))])
+                cmd.extend(["--cache_build_mode", str(
+                    st.session_state.get("cache_build_mode", "inline")
+                )])
                 packing_workers = _packing_preprocess_workers(
                     st.session_state.get("packing_num_proc"),
                 )
@@ -2910,6 +3793,10 @@ if st.session_state.get("train_triggered", False):
                 cmd.extend(["--learning_rate", str(st.session_state.get(
                     f"learning_rate_{train_type}", _default_learning_rate(train_type)
                 ))])
+                cmd.extend(["--warmup_ratio", str(st.session_state.get(
+                    f"warmup_ratio_{train_type}", 0.03 if train_type == "cpt" else 0.0
+                ))])
+                cmd.extend(["--min_lr_ratio", "0.1"])
                 cmd.extend(["--dtype", st.session_state.get("activation_dtype", "bfloat16")])
                 cmd.extend(["--param_dtype", st.session_state.get("param_dtype", "fp32")])
                 cmd.extend(["--kv_cache_dtype", st.session_state.get("kv_cache_dtype", "fp32")])
@@ -2953,11 +3840,21 @@ if st.session_state.get("train_triggered", False):
                     log_file = open(log_path, "a" if from_resume else "w", encoding="utf-8")
                     log_file.write(f"# torch.compile (Triton): {'ON' if st.session_state.get('use_compile', True) else 'OFF'}\n")
                     log_file.write(f"# epochs: {epochs}\n")
+                    log_file.write(
+                        f"# LR schedule: linear warmup ratio="
+                        f"{st.session_state.get(f'warmup_ratio_{train_type}', 0.03 if train_type == 'cpt' else 0.0)} "
+                        f"then cosine decay to 0.1x peak\n"
+                    )
                     log_file.write(f"# gradient accumulation steps: {st.session_state.get('accumulation_steps', 1)}\n")
                     log_file.write(
                         f"# Sequence packing: {'ON' if packing_enabled else 'OFF'} "
                         f"(mode={packing_mode}, buckets={st.session_state.get('seq_bucket', 2)}, "
                         f"cache_batch={st.session_state.get('packing_batch_size', 1000)}, "
+                        f"disk_budget={st.session_state.get('data_cache_max_gb', 5.0)}GB, "
+                        f"streaming={st.session_state.get('dataset_streaming', 'auto')}, "
+                        f"stream_chunk={st.session_state.get('streaming_chunk_mb', 1024)}MiB, "
+                        f"prefetch={int(bool(st.session_state.get('streaming_prefetch_chunks', 1)))}, "
+                        f"cache_build={st.session_state.get('cache_build_mode', 'inline')}, "
                         f"gpu_memory={st.session_state.get('bucket_gpu_memory_gb', 16.0)}GB, "
                         f"max_context={st.session_state.get('bucket_max_seq_len', 16384)}, "
                         f"large_threshold={st.session_state.get('bucket_large_threshold', 8192)}, "
@@ -2981,7 +3878,7 @@ if st.session_state.get("train_triggered", False):
                         cwd=os.path.dirname(trainer_dir),
                         stdout=log_file,
                         stderr=subprocess.STDOUT,
-                        env={**os.environ, "PYTHONUTF8": "1"},  # Windows: torch.compile 需 UTF-8 模式，否则 gbk 解码崩溃
+                        env={**os.environ, "PYTHONUTF8": "1", "INSTINCT_MANAGED_DATA_CACHE": "1"},
                     )
                     st.session_state.train_status = "running"
         except Exception:
@@ -3009,7 +3906,10 @@ if st.session_state.get("train_status") == "running":
         )
 
 cfg = build_config_dict()
-from pipeline_panel import render as render_pipeline_panel
+try:
+    from scripts.pipeline_panel import render as render_pipeline_panel
+except ModuleNotFoundError:  # running from scripts/ as documented
+    from pipeline_panel import render as render_pipeline_panel
 render_pipeline_panel(st, cfg, st.session_state.get('train_status') == 'running')
 breakdown = calc_params(cfg)
 total_params = breakdown["Total Params"]["value"]
@@ -3037,7 +3937,10 @@ if cfg.get("residual_type", "standard") == "mhc":
 elif cfg.get("residual_type", "standard") == "attnres":
     _attnres_label = f"{cfg.get('attnres_variant', 'block').title()} AttnRes"
     suffix = f"{suffix} + {_attnres_label}" if suffix else f" ({_attnres_label})"
-name_label = f"{name} &nbsp;{suffix}" if suffix else name
+name_label = (
+    name if cfg["use_moe"] and "MoE" in name
+    else f"{name} &nbsp;{suffix}" if suffix else name
+)
 
 col_title, col_badges = st.columns([1.2, 2])
 with col_title:
@@ -3084,13 +3987,11 @@ if st.session_state.get("train_status") == "running":
     if log_path and os.path.exists(log_path):
         with open(log_path, "r", encoding="utf-8") as f:
             log = f.read()
-        pi = re.findall(r'Epoch:\[(\d+)/(\d+)\]\((\d+)/(\d+)\)', log)
-        if pi:
-            ep, te, stp, tst = map(int, pi[-1])
-            pct = min(((ep - 1) + stp / tst) / te, 1.0)
-            st.progress(pct, text=f"⏳ Training — Epoch {ep}/{te}, Step {stp}/{tst} ({pct*100:.1f}%)")
+        progress = _training_progress_from_log(log)
+        if progress:
+            st.progress(progress['fraction'], text=f"⏳ Training — {progress['caption']}")
         else:
-            st.info("⏳ Training in progress... (waiting for first epoch output)")
+            st.info("⏳ " + _training_activity_from_log(log))
     else:
         st.info("⏳ Training started...")
 elif st.session_state.get("train_status") == "paused":
@@ -3102,10 +4003,15 @@ elif st.session_state.get("train_status") == "paused":
 # ── Main content (single column) ──
 
 # ═══ Architecture diagram ──
+architecture_title = (
+    "Instinct V2 Recurrent Architecture"
+    if cfg.get("model_architecture") == "looped"
+    else "Architecture"
+)
 st.markdown(
     '<div style="font-size: 13px; font-weight: 600; letter-spacing: 0.8px; '
     'color: #94a3b8; text-transform: uppercase; margin-bottom: 8px;">'
-    "Architecture</div>",
+    f"{architecture_title}</div>",
     unsafe_allow_html=True,
 )
 
@@ -3113,6 +4019,24 @@ st.markdown(arch_diagram(cfg), unsafe_allow_html=True)
 
 # Additional architecture info
 int_size = cfg.get("intermediate_size", compute_intermediate_size(cfg["hidden_size"]))
+loop_badges = ""
+if cfg.get("model_architecture") == "looped":
+    physical_depth = (
+        cfg.get("prelude_layers", 2)
+        + cfg.get("recurrent_layers", 4)
+        + cfg.get("coda_layers", 2)
+    )
+    effective_depth = (
+        cfg.get("prelude_layers", 2)
+        + cfg.get("loop_iters", 32) * cfg.get("recurrent_layers", 4)
+        + cfg.get("coda_layers", 2)
+    )
+    loop_badges = (
+        f'<span class="badge" style="background:#3b1f6e;">physical: {physical_depth}</span>'
+        f'<span class="badge" style="background:#4a1d5e;">effective: {effective_depth}</span>'
+        f'<span class="badge" style="background:#581c87;">'
+        f'recurrence: {cfg.get("loop_iters", 32)} / BPTT: {cfg.get("mean_backprop_depth", 8)}</span>'
+    )
 st.markdown(
     f'<div style="margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px;">'
     f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
@@ -3127,6 +4051,10 @@ st.markdown(
     f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
     f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
     f"rope_theta: {cfg['rope_theta']:.0e}</span>"
+    f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
+    f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
+    f"rope: {(cfg.get('rope_scaling') or {}).get('type', 'native')}</span>"
+    f"{loop_badges}"
     f"</div>",
     unsafe_allow_html=True,
 )

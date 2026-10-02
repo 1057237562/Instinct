@@ -3,7 +3,8 @@
 import json
 import random
 
-from scripts.mix_sft_datasets import (
+from scripts.data_builder.mix_sft_datasets import (
+    ExternalRandomShuffler,
     iter_json_array,
     mix_datasets,
     replay_rows_for_fraction,
@@ -50,6 +51,23 @@ def test_reservoir_returns_all_rows_when_request_is_larger(tmp_path):
 
 def test_replay_fraction_is_fraction_of_final_mix():
     assert replay_rows_for_fraction(300, 0.20) == 75
+
+
+def test_external_shuffler_can_preserve_raw_jsonl_without_dedup_memory(tmp_path):
+    output = tmp_path / "raw.jsonl"
+    records = [f'{{"id":{index},"text":"中文 {index}"}}'.encode() for index in range(50)]
+    shuffler = ExternalRandomShuffler(
+        output, seed=91, chunk_rows=7, deduplicate=False, chunk_bytes=256,
+    )
+    for record in records:
+        assert shuffler.add_serialized(record + b"\n")
+    result = shuffler.finish()
+
+    shuffled = output.read_bytes().splitlines()
+    assert result["rows"] == len(records)
+    assert result["bytes"] == output.stat().st_size
+    assert sorted(shuffled) == sorted(records)
+    assert shuffled != records
 
 
 def test_end_to_end_mix_normalizes_and_preserves_original_metadata(tmp_path):

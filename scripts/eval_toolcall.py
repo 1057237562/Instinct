@@ -7,6 +7,7 @@ import time
 import random
 import argparse
 import warnings
+from datasets import load_dataset  # Windows pyarrow/torch DLL import order
 import torch
 from datetime import datetime
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
@@ -55,16 +56,10 @@ TEST_CASES = [
 
 
 def init_model(args):
-    tokenizer = AutoTokenizer.from_pretrained(args.load_from)
-    if 'model' in args.load_from:
-        model = InstinctForCausalLM(InstinctConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers, use_moe=bool(args.use_moe)))
-        moe_suffix = '_moe' if args.use_moe else ''
-        ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
-        model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
-    else:
-        model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
-    get_model_params(model, model.config)
-    return model.half().eval().to(args.device), tokenizer
+    from eval_llm import build_parser, init_model as load_model
+    shared_args = build_parser().parse_args([])
+    vars(shared_args).update(vars(args))
+    return load_model(shared_args)
 
 
 def parse_tool_calls(text):
@@ -204,6 +199,9 @@ def main():
     parser.add_argument('--backend', default='local', choices=['local', 'api'], type=str, help="推理后端（local=本地模型，api=OpenAI兼容接口）")
     parser.add_argument('--load_from', default='../model', type=str, help="模型加载路径（model=原生torch权重，其他路径=transformers格式）")
     parser.add_argument('--save_dir', default='../out', type=str, help="模型权重目录")
+    parser.add_argument('--checkpoint_path', default=None, help='直接指定原生 .pth 权重文件')
+    parser.add_argument('--config_path', default=None, help='原生权重的模型配置 JSON')
+    parser.add_argument('--inference_compile', choices=['auto', 'off'], default='auto')
     parser.add_argument('--weight', default='full_sft', type=str, help="权重名称前缀（pretrain, full_sft, rlhf, reason, ppo_actor, grpo, spo）")
     parser.add_argument('--hidden_size', default=768, type=int, help="隐藏层维度")
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")

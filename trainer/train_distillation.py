@@ -21,7 +21,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
-from dataset.lm_dataset import SFTDataset
+from scripts.data_loader.lm_dataset import SFTDataset
 from trainer.trainer_cli import (
     PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
     build_autocast_ctx, build_trainer_parser, flush_remaining_grad,
@@ -32,6 +32,7 @@ from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint, init_model,
     config_from_args, build_optimizer, pause_save_checkpoint,
     restore_config_from_checkpoint, apply_torchao_fp8_training,
+    configure_bucket_memory_budget,
     prepare_lm_batch, release_compiled_cuda_memory,
 )
 from trainer.training_profiler import TrainingProfiler
@@ -256,6 +257,10 @@ if __name__ == "__main__":
     teacher_model.eval()
     teacher_model.requires_grad_(False)
     Logger(f'教师模型总参数量：{sum(p.numel() for p in teacher_model.parameters()) / 1e6:.3f} M')
+    configure_bucket_memory_budget(
+        model, args, extra_models=(teacher_model,), checkpoint_data=ckp_data,
+    )
+    data_config = packing_data_config(args)
     packing_plan = SequencePackingPlan(
         args, ckp_data,
         lambda packing, sample_indices=None: SFTDataset(
@@ -270,6 +275,7 @@ if __name__ == "__main__":
             seq_bucket=args.seq_bucket,
             packing_num_proc=args.packing_num_proc,
             bucket_gpu_memory_gb=args.bucket_gpu_memory_gb,
+            bucket_token_budget_override=getattr(args, 'bucket_token_budget', None),
             sample_indices=sample_indices,
         ),
     )

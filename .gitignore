@@ -16,10 +16,27 @@ checkpoints/
 *.onnx
 *.bin
 
-# ===== 数据集（大文件，从 ModelScope / HuggingFace 单独下载） =====
-dataset/*.jsonl
-dataset/*.csv
-dataset/*.zip
+# ===== 数据集（大文件，从 ModelScope / HuggingFace 单独下载）=====
+# dataset/ 只入库 README 等说明文件（Python 代码放在 scripts/data_loader/ 和 scripts/data_builder/），数据本体全部忽略（黑名单改为白名单）
+dataset/**
+!dataset/**/
+!dataset/**/*.md
+!dataset/**/.gitattributes
+# HF 原始下载缓存整体忽略（含自动生成的 dataset card README，须置于白名单之后）
+dataset/**/_hf_raw/
+dataset/**/_hf_parquet/
+dataset/**/_hf_cache/
+
+# ===== 评测输出（eval_*.py 重新生成即可） =====
+eval/
+
+# ===== 临时目录 / 日志 / 进程文件 =====
+tmp/
+*.log
+*.pid
+.pytest_cache/
+.ipynb_checkpoints/
+.env
 
 # ===== 工具 / IDE / 缓存目录 =====
 .omo/
@@ -35,6 +52,12 @@ nul
 experiments/data/
 experiments/results/
 trainer/logs/
+
+# ===== Rust 编译产物（dataset_compiler 的 Cargo.lock 仍然入库） =====
+dataset_compiler/target/
+
+# ===== Profiler trace 产物（单文件可达 GB 级） =====
+profiler_traces/
 
 # ===== 系统文件 =====
 .DS_Store

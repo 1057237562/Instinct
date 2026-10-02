@@ -21,7 +21,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
-from dataset.lm_dataset import DPODataset
+from scripts.data_loader.lm_dataset import DPODataset
 from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
     setup_seed, init_model, SkipBatchSampler, config_from_args, build_optimizer,

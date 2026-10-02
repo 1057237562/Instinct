@@ -11,6 +11,7 @@ import math
 import gc
 import inspect
 import importlib.metadata
+from dataclasses import replace
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -84,6 +85,18 @@ def _fp8_linear_is_eligible(module: torch.nn.Module, fqn: str) -> bool:
     return module.in_features % 16 == 0 and module.out_features % 16 == 0
 
 
+def _torchao_fp8_config(recipe: str, config_cls):
+    """Enable TorchAO's bounded padding for ragged-token FP8 GEMMs.
+
+    Model feature dimensions are filtered to multiples of 16, but the GEMM K
+    dimension in ``grad_weight`` is the number of input rows.  That row count
+    is inherently irregular for a routed MoE expert (and can also be irregular
+    in a final partial batch).  TorchAO pads only the affected matrix inner
+    dimension to the next supported boundary and crops the mathematical output.
+    """
+    return replace(config_cls.from_recipe_name(recipe), pad_inner_dim=True)
+
+
 def _probe_torchao_fp8_recipe(recipe: str, device: torch.device, config_cls, convert_fn):
     """Exercise one real FP8 forward/backward before converting the full model."""
     cache_key = (recipe, device.type, device.index)
@@ -98,8 +111,10 @@ def _probe_torchao_fp8_recipe(recipe: str, device: torch.device, config_cls, con
             probe = torch.nn.Sequential(
                 torch.nn.Linear(64, 64, bias=False, device=device, dtype=torch.bfloat16)
             )
-            convert_fn(probe, config=config_cls.from_recipe_name(recipe))
-            x = torch.randn(32, 64, device=device, dtype=torch.bfloat16, requires_grad=True)
+            convert_fn(probe, config=_torchao_fp8_config(recipe, config_cls))
+            # Deliberately ragged: routed MoE experts rarely receive a row
+            # count divisible by 16. This exercises grad_weight as well as fwd.
+            x = torch.randn(17, 64, device=device, dtype=torch.bfloat16, requires_grad=True)
             probe(x).float().square().mean().backward()
             torch.cuda.synchronize(device)
             del probe, x
@@ -196,7 +211,7 @@ def apply_torchao_fp8_training(model: torch.nn.Module, args, *, label: str = "mo
             "use --fp8_filter eligible or disable FP8"
         )
 
-    config = Float8LinearConfig.from_recipe_name(active_recipe)
+    config = _torchao_fp8_config(active_recipe, Float8LinearConfig)
     convert_to_float8_training(model, module_filter_fn=module_filter_fn, config=config)
     version = getattr(torchao, "__version__", importlib.metadata.version("torchao"))
     if getattr(args, "use_compile", 0) != 1:
@@ -204,7 +219,7 @@ def apply_torchao_fp8_training(model: torch.nn.Module, args, *, label: str = "mo
     Logger(
         f"[TorchAO FP8] enabled for {label}: requested={requested_recipe}, "
         f"active={active_recipe}, filter={filter_mode}, linear_layers={len(converted_names)}, "
-        f"torchao={version}"
+        f"ragged_inner_padding=on, torchao={version}"
     )
     setattr(args, "fp8_training_active", active_recipe)
     return model
@@ -231,9 +246,15 @@ def config_from_args(args, **overrides):
     for field in (
         "residual_type", "hc_mult", "hc_sinkhorn_iters", "hc_eps",
         "attnres_variant", "attnres_block_size",
+        "loop_iters", "recurrent_layers", "prelude_layers", "coda_layers",
+        "mean_backprop_depth", "recurrence_sampling",
+        "recurrence_log_normal_sigma", "max_recurrence", "state_init_std",
+        "embedding_scale", "use_input_injection",
     ):
         value = getattr(args, field, None)
         if value is not None:
+            if field == "use_input_injection":
+                value = bool(value)
             overrides.setdefault(field, value)
     hidden_size = overrides.pop('hidden_size', getattr(args, 'hidden_size', 768))
     num_hidden_layers = overrides.pop('num_hidden_layers', getattr(args, 'num_hidden_layers', 8))
@@ -256,6 +277,10 @@ def config_from_args(args, **overrides):
         return cfg_cls(**cfg_dict)
     architecture = architecture or 'standard'
     cfg_cls, _ = _architecture_classes(architecture)
+    # Fresh CLI models need a differentiable top-1 gate. Saved configs retain
+    # their historical behavior; changing an existing gate requires opt-in.
+    if use_moe:
+        overrides.setdefault('norm_topk_prob', False)
     return cfg_cls(
         hidden_size=hidden_size,
         num_hidden_layers=num_hidden_layers,
@@ -272,7 +297,13 @@ _TOPOLOGY_CONFIG_FIELDS = (
     "full_attention_interval", "linear_conv_kernel_dim",
     "linear_key_head_dim", "linear_value_head_dim",
     "linear_num_key_heads", "linear_num_value_heads",
-    "loop_iters", "prelude_layers", "coda_layers", "use_input_injection",
+    "loop_iters", "mean_recurrence", "recurrent_layers",
+    "recurrent_block_layers", "prelude_layers", "coda_layers",
+    "recurrent_architecture_version",
+    "qk_bias", "qk_norm",
+    "mean_backprop_depth", "recurrence_sampling",
+    "recurrence_log_normal_sigma", "max_recurrence", "state_init_std",
+    "embedding_scale", "use_input_injection",
 )
 
 
@@ -404,8 +435,31 @@ def release_compiled_cuda_memory(reason: str) -> None:
     )
 
 
-def get_lr(current_step: int, total_steps: int, lr: float) -> float:
-    return lr*(0.1 + 0.45*(1 + math.cos(math.pi * current_step / total_steps)))
+def get_lr(current_step: int, total_steps: int, lr: float, *,
+           warmup_steps: int = 0, min_lr_ratio: float = 0.1) -> float:
+    """Linear re-warm followed by cosine re-decay.
+
+    ``warmup_steps=0`` preserves the historical cosine-only schedule. During
+    warmup, LR rises linearly from zero to ``lr``; the remaining steps decay
+    from ``lr`` to ``lr * min_lr_ratio``. Steps are micro-steps, matching the
+    token-proportional schedule used by the training loops.
+    """
+    total_steps = int(total_steps)
+    warmup_steps = int(warmup_steps)
+    if total_steps <= 0:
+        raise ValueError("total_steps must be positive")
+    if warmup_steps < 0 or warmup_steps >= total_steps:
+        raise ValueError("warmup_steps must be in [0, total_steps)")
+    if not 0.0 <= min_lr_ratio <= 1.0:
+        raise ValueError("min_lr_ratio must be in [0, 1]")
+    step = max(0, min(int(current_step), total_steps))
+    if warmup_steps and step <= warmup_steps:
+        return lr * step / warmup_steps
+    decay_steps = total_steps - warmup_steps
+    decay_step = step - warmup_steps
+    progress = decay_step / decay_steps
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return lr * (min_lr_ratio + (1.0 - min_lr_ratio) * cosine)
 
 
 def init_distributed_mode() -> int:
@@ -636,6 +690,119 @@ def _is_muon_hidden_matrix(name: str, param: torch.nn.Parameter) -> bool:
     return not any(part in lowered for part in ("embed", "embedding", "lm_head", "output_head"))
 
 
+def estimate_training_persistent_bytes(model: torch.nn.Module, args, *, extra_models=()) -> int:
+    """Estimate per-card tensors resident independently of batch/sequence size.
+
+    Unlike active-parameter FLOPs, memory must include every routed expert.
+    Optimizer state is estimated before its lazy first-step allocation so the
+    initial bucket cannot fit and then OOM when Muon/AdamW creates state.
+    """
+    parameter_bytes = sum(
+        param.numel() * param.element_size() for param in model.parameters()
+    )
+    parameter_bytes += sum(
+        param.numel() * param.element_size()
+        for extra in extra_models for param in extra.parameters()
+    )
+    named_trainable = [
+        (name, param) for name, param in model.named_parameters()
+        if param.requires_grad
+    ]
+    gradient_bytes = sum(
+        param.numel() * param.element_size() for _, param in named_trainable
+    )
+    optimizer = str(getattr(args, 'optimizer', 'adamw')).strip().lower()
+    if optimizer == 'muon':
+        optimizer_bytes = 0
+        for name, param in named_trainable:
+            one_state = param.numel() * param.element_size()
+            # Muon keeps one momentum matrix. Parameters excluded from Muon
+            # (embedding/head/norm/bias) use AdamW and keep two moments.
+            optimizer_bytes += one_state * (
+                1 if _is_muon_hidden_matrix(name, param) else 2
+            )
+    elif optimizer in {'adafactor', 'adafactory'}:
+        # Factorized states are smaller for matrices, but one full-parameter
+        # equivalent is a conservative model-independent upper bound.
+        optimizer_bytes = gradient_bytes
+    else:
+        optimizer_bytes = 2 * gradient_bytes
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        # Default DDP may transiently own gradient buckets in addition to .grad.
+        optimizer_bytes += gradient_bytes
+    return int(parameter_bytes + gradient_bytes + optimizer_bytes)
+
+
+def configure_bucket_memory_budget(
+    model: torch.nn.Module, args, *, extra_models=(), checkpoint_data=None,
+) -> int | None:
+    """Resolve and attach the bucket token budget used by this training run.
+
+    Packed checkpoints store a batch cursor.  Recomputing an automatic budget
+    with newer calibration code can change batch boundaries even when the user
+    changed no setting, making that cursor unsafe.  A packed resume therefore
+    inherits its resolved budget and persistent-memory value.  A positive
+    ``--bucket_token_budget`` remains an explicit override and is validated by
+    the normal resume compatibility checks.
+    """
+    if not (
+        bool(getattr(args, 'sequence_packing', 0))
+        and str(getattr(args, 'sequence_packing_mode', 'fixed')) == 'bucket'
+    ):
+        return None
+    from scripts.data_loader.sequence_bucket import bucket_token_budget
+
+    explicit_budget = int(getattr(args, 'bucket_token_budget', 0) or 0)
+    persistent_bytes = estimate_training_persistent_bytes(
+        model, args, extra_models=extra_models,
+    )
+    gib = 1024 ** 3
+    persistent_gb = persistent_bytes / gib
+    compile_mode = (
+        str(getattr(args, 'compile_mode', 'default'))
+        if int(getattr(args, 'use_compile', 0)) else 'off'
+    )
+    bucket_count = int(getattr(args, 'seq_bucket', 1))
+    target_gb = float(getattr(args, 'bucket_gpu_memory_gb', 16.0))
+    automatic_budget = bucket_token_budget(
+        target_gb,
+        persistent_memory_gb=persistent_gb,
+        bucket_count=bucket_count,
+        compile_mode=compile_mode,
+    )
+    token_budget = explicit_budget if explicit_budget > 0 else automatic_budget
+    source = 'explicit' if explicit_budget > 0 else 'automatic'
+
+    saved = (checkpoint_data or {}).get('data_config') or {}
+    saved_active = bool(saved.get(
+        'active_sequence_packing', saved.get('sequence_packing', False),
+    ))
+    saved_mode = str(saved.get('sequence_packing_mode', 'fixed'))
+    saved_budget = int(saved.get('bucket_token_budget', 0) or 0)
+    if (
+        explicit_budget <= 0 and saved_active and saved_mode == 'bucket'
+        and saved_budget > 0
+    ):
+        token_budget = saved_budget
+        persistent_gb = float(saved.get(
+            'bucket_persistent_memory_gb', persistent_gb,
+        ))
+        source = 'checkpoint'
+    setattr(args, 'bucket_persistent_memory_gb', persistent_gb)
+    setattr(args, 'bucket_token_budget', token_budget)
+    Logger(
+        '[Packing VRAM Budget] '
+        f'target={target_gb:g}GiB, persistent={persistent_gb:.2f}GiB, '
+        f'buckets={bucket_count}, compile_mode={compile_mode}, '
+        f'token_budget={token_budget}, source={source}'
+        + (
+            f', current_auto_estimate={automatic_budget}'
+            if source == 'checkpoint' and automatic_budget != token_budget else ''
+        )
+    )
+    return token_budget
+
+
 def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> torch.optim.Optimizer:
     """按名称统一构建优化器：AdamW / Adafactor / Muon。
 
@@ -648,8 +815,8 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
     说明:
         - AdamW    -> torch.optim.AdamW（保持原有默认行为）
         - Adafactor-> torch.optim.Adafactor（显式 lr，关闭自动相对步长）
-        - Muon     -> 2D 参数交给 Muon（优先 torch.optim.Muon，torch>=2.10 内置；
-                      否则回退到原生 MuonOptimizer）；1D 参数（RMSNorm 权重/bias 等）
+        - Muon     -> 隐藏层 2D 参数交给按形状分批的 BatchedMuon；
+                      INSTINCT_MUON_BACKEND=native 可切回原实现。1D 参数等
                       交给 AdamW。两类都存在时组合为 CombinedOptimizer 返回。
     """
     named_params = _materialize_named_params(params)
@@ -677,7 +844,21 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
         other_params = [param for param in trainable_params if id(param) not in matrix_ids]
         if not matrix_params:
             return torch.optim.AdamW(other_params, lr=lr)
-        if hasattr(torch.optim, 'Muon'):
+        muon_backend = os.environ.get('INSTINCT_MUON_BACKEND', 'batched').strip().lower()
+        if muon_backend not in ('batched', 'native'):
+            raise ValueError('INSTINCT_MUON_BACKEND must be batched or native')
+        if muon_backend == 'batched':
+            from trainer.batched_muon import BatchedMuon
+            muon_kwargs = dict(kwargs)
+            muon_kwargs.setdefault('adjust_lr_fn', 'match_rms_adamw')
+            muon_kwargs.setdefault('batch_size', int(os.environ.get('INSTINCT_MUON_BATCH_SIZE', '16')))
+            muon_kwargs.setdefault('workspace_mb', float(os.environ.get('INSTINCT_MUON_WORKSPACE_MB', '64')))
+            muon_opt = BatchedMuon(matrix_params, lr=lr, **muon_kwargs)
+            Logger(
+                f'[Muon] shape-batched BF16 updates: batch_size<={muon_opt.batch_size}, '
+                f'temporary workspace target={muon_opt.workspace_bytes / 2**20:g}MiB'
+            )
+        elif hasattr(torch.optim, 'Muon'):
             muon_kwargs = dict(kwargs)
             if 'adjust_lr_fn' in inspect.signature(torch.optim.Muon.__init__).parameters:
                 muon_kwargs.setdefault('adjust_lr_fn', 'match_rms_adamw')
@@ -813,7 +994,37 @@ def pause_save_checkpoint(args, lm_config, *, weight, model, optimizer, epoch, s
     model.train()
 
 
-def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = './model', save_dir: str = './out', device: str = 'cuda') -> tuple:
+def configure_moe_training_router(config, *, norm_topk_prob=None, top_k=None):
+    """Apply an explicit new-stage migration after restoring the base config."""
+    if norm_topk_prob is not None or top_k is not None:
+        if not config.use_moe:
+            raise ValueError('Router migration requires a MoE model')
+        if top_k is not None and not 1 <= top_k <= config.num_experts:
+            raise ValueError('Router top-k must be between 1 and the saved number of experts')
+    if top_k is not None:
+        previous_k = config.num_experts_per_tok
+        config.num_experts_per_tok = top_k
+        Logger(f'[MoE Router] explicit migration: top-k={previous_k} -> {top_k}')
+    if norm_topk_prob is not None:
+        previous = config.norm_topk_prob
+        config.norm_topk_prob = bool(norm_topk_prob)
+        Logger(
+            f'[MoE Router] explicit migration: norm_topk_prob={previous}'
+            f' -> {config.norm_topk_prob}; expert output scaling changes. '
+            'Validate this new training stage before extending its budget.'
+        )
+    if (config.use_moe and config.num_experts_per_tok == 1
+            and config.norm_topk_prob):
+        Logger(
+            '[MoE Router] WARNING: normalized top-1 weights are constant (p/p). '
+            'The router receives effectively no language-model loss gradient. '
+            'Keeping legacy checkpoint behavior. For a new pretrain/CPT/SFT '
+            'stage, use --moe_router_norm_topk_prob 0 with --from_resume 0; '
+            'use a new --save_weight and validate adaptation first.'
+        )
+
+
+def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = './model', save_dir: str = './out', device: str = 'cuda', *, router_norm_topk_prob=None, router_top_k=None) -> tuple:
     restored_config = restore_config_from_weight(lm_config, from_weight, save_dir=save_dir)
     if restored_config is not lm_config:
         if type(restored_config) is not type(lm_config):
@@ -825,6 +1036,7 @@ def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = '
         # for checkpoint naming/saving after ``init_model`` returns.
         lm_config.__dict__.clear()
         lm_config.__dict__.update(restored_config.__dict__)
+    configure_moe_training_router(lm_config, norm_topk_prob=router_norm_topk_prob, top_k=router_top_k)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     architecture = getattr(lm_config, 'model_architecture', 'standard')
     _, model_cls = _architecture_classes(architecture)
