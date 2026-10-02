@@ -25,10 +25,12 @@ jinja2==3.1.2
 jsonlines==4.0.0
 ujson==5.1.0
 wandb==0.18.3
-streamlit==1.50.0
+streamlit>=1.56.0  # web_demo.py uses st.iframe (added in 1.56); validated on 1.64.0
 einops==0.8.1
 swanlab==0.7.11
 modelscope==1.37.0
 # torch==2.6.0
 # torchvision==0.21.0
+# triton-windows 3.8.0.post29 validated with torch 2.11.0+cu130 on RTX 5060 Ti (sm_120)
+triton-windows>=3.8,<4 ; sys_platform == 'win32'  # enables the MoE grouped-GEMM 'auto' backend; without it decode falls back to the host-sync 'cached' path (~8 tok/s)
 pytest==8.3.4
