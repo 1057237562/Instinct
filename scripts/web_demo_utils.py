@@ -167,6 +167,38 @@ def markdown_stream_html(content, previous='', thinking=False, streaming=True,
             '</style><div class="instinct-markdown">' + ''.join(animated.output) + '</div>')
 
 
+_USER_BUBBLE_CSS = (
+    '<style>'
+    '.instinct-user-row{display:flex;justify-content:flex-end;}'
+    '.instinct-user-bubble{display:inline-block;max-width:100%;margin:10px 0;'
+    'padding:8px 12px;background-color:#3d4450;border-radius:22px;color:white;'
+    'overflow-wrap:anywhere;}'
+    '.instinct-user-bubble p{margin:0 0 .5em;}'
+    '.instinct-user-bubble>:last-child{margin-bottom:0;}'
+    '.instinct-user-bubble pre{background:rgba(255,255,255,.12);padding:8px;'
+    'border-radius:6px;overflow-x:auto;}'
+    '.instinct-user-bubble pre code{white-space:pre;}'
+    '</style>'
+)
+
+
+@lru_cache(maxsize=64)
+def user_message_html(content):
+    """Render a user message as a self-contained right-aligned bubble.
+
+    Markdown is parsed BEFORE the bubble wrapper is added: raw user text must
+    never sit next to the wrapper's closing tags, or an unclosed code fence
+    would swallow them and display `</div></div>` at the end of the message.
+    The parser keeps html disabled, so pasted markup shows as text, and the
+    result goes out through st.html so nothing re-parses the final HTML.
+    """
+    rendered = _markdown_parser().render(content)
+    return (_USER_BUBBLE_CSS
+            + '<div class="instinct-user-row"><div class="instinct-user-bubble">'
+            + rendered
+            + '</div></div>')
+
+
 @lru_cache(maxsize=8)
 def _contains_code_block(body):
     return any(token.type in ('fence', 'code_block') for token in _markdown_parser().parse(body))

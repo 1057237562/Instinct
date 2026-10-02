@@ -38,6 +38,7 @@ from scripts.web_demo_utils import (
     resolve_model_config_path,
     render_markdown_stream,
     generation_loading_html,
+    user_message_html,
 )
 
 _REPO_LOGO = os.path.abspath(os.path.join(
@@ -538,9 +539,7 @@ def init_chat_messages():
             if message["role"] == "assistant":
                 render_markdown_stream(st.empty(), message['content'], streaming=False)
             else:
-                st.markdown(
-                    f'<div style="display: flex; justify-content: flex-end;"><div style="display: inline-block; margin: 10px 0; padding: 8px 12px 8px 12px; background-color: #3d4450; border-radius: 22px; color: white;">{message["content"]}</div></div>',
-                    unsafe_allow_html=True)
+                st.html(user_message_html(message["content"]))
 
     else:
         st.session_state.messages = []
@@ -984,9 +983,7 @@ def main():
                 st.caption(speed_caption(message['generation_stats']))
             render_answer_actions(message["content"], i, i == len(messages) - 1)
         else:
-            st.markdown(
-                f'<div style="display: flex; justify-content: flex-end;"><div style="display: inline-block; margin: 10px 0; padding: 8px 12px 8px 12px; background-color: #3d4450; border-radius: 22px; color: white;">{message["content"]}</div></div>',
-                unsafe_allow_html=True)
+            st.html(user_message_html(message["content"]))
 
     prompt = st.chat_input(key="input", placeholder=get_text('send'))
 
@@ -997,9 +994,7 @@ def main():
     if prompt:
         # 用户直接发消息：放弃未完成的清空确认
         st.session_state.pop('confirm_clear_chat', None)
-        st.markdown(
-            f'<div style="display: flex; justify-content: flex-end;"><div style="display: inline-block; margin: 10px 0; padding: 8px 12px 8px 12px; background-color: #3d4450; border-radius: 22px; color: white;">{prompt}</div></div>',
-            unsafe_allow_html=True)
+        st.html(user_message_html(prompt))
         logit_lens_slot = st.container() if st.session_state.get('enable_logit_lens', False) else None
         messages.append({"role": "user", "content": prompt})
         st.session_state.chat_messages.append({"role": "user", "content": prompt})

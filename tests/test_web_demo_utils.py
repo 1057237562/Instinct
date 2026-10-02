@@ -7,6 +7,7 @@ from scripts.web_demo_utils import (
     encode_clipboard_text,
     queue_last_response_regeneration,
     resolve_model_config_path,
+    user_message_html,
 )
 
 
@@ -127,3 +128,35 @@ def test_queue_last_response_regeneration_requires_completed_answer():
     assert state["messages"] == [
         {"role": "user", "content": "not answered yet"},
     ]
+
+
+def test_user_message_html_closes_unclosed_code_fence():
+    html_out = user_message_html("看看这段代码:\n\n```python\nprint(1)")
+
+    # The wrapper's closing tags must stay outside the parsed content.
+    assert html_out.count("</div>") == 2
+    assert html_out.endswith("</div></div>")
+    assert '<pre><code class="language-python">print(1)</code></pre>' in html_out
+
+
+def test_user_message_html_keeps_blank_lines_inside_code_verbatim():
+    # A blank line inside a fence would end st.markdown's raw-HTML block and
+    # mangle the rest, so the bubble ships parsed HTML untouched via st.html.
+    html_out = user_message_html("```\na\n\nb\n```")
+
+    assert "<pre><code>a\n\nb\n</code></pre>" in html_out
+
+
+def test_user_message_html_escapes_pasted_markup():
+    html_out = user_message_html("<b>bold</b> <script>alert(1)</script>")
+
+    assert "&lt;b&gt;bold&lt;/b&gt;" in html_out
+    assert "&lt;script&gt;" in html_out
+    assert "<script>" not in html_out
+
+
+def test_user_message_html_wraps_plain_text_in_bubble():
+    html_out = user_message_html("你好")
+
+    assert '<div class="instinct-user-row"><div class="instinct-user-bubble"><p>你好</p>' in html_out
+    assert html_out.endswith("</div></div>")
