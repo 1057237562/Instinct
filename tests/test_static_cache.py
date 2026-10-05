@@ -25,9 +25,20 @@ def _tiny_model(**overrides):
     return model
 
 
-def _generate(model, ids, **kwargs):
+def _generate(model, ids, attention_mask=None, **kwargs):
     with torch.inference_mode():
-        return model.generate(input_ids=ids, do_sample=False, attention_mask=None, **kwargs)
+        return model.generate(input_ids=ids, do_sample=False, attention_mask=attention_mask, **kwargs)
+
+
+def _left_padded_batch(rows):
+    """Stack variable-length rows into a left-padded (ids, mask) pair."""
+    width = max(len(row) for row in rows)
+    ids = torch.zeros(len(rows), width, dtype=torch.long)
+    mask = torch.zeros(len(rows), width, dtype=torch.long)
+    for i, row in enumerate(rows):
+        ids[i, width - len(row):] = row
+        mask[i, width - len(row):] = 1
+    return ids, mask
 
 
 @pytest.mark.gpu
@@ -164,23 +175,276 @@ def test_static_cache_write_and_mask():
     ]
 
 
-def test_static_cache_rejects_batched_or_padded_generation():
-    """Eligibility: the in-place append writes one slot per step."""
+def test_static_cache_admits_single_and_left_padded_batches():
+    """Eligibility: one uniform append slot per step, so left padding folds in."""
     model = _tiny_model()
     model._static_cache_ok = True
-    ids = torch.randint(3, 200, (2, 5))
 
-    assert model._decode_state_for(ids, torch.ones_like(ids), 4, use_cache=True,
-                                   early_exit=False, kwargs={}) is None
-    padded = torch.ones(1, 5, dtype=torch.long)
-    padded[0, 0] = 0
-    assert model._decode_state_for(torch.randint(3, 200, (1, 5)), padded, 4, use_cache=True,
-                                   early_exit=False, kwargs={}) is None
     eligible = torch.randint(3, 200, (1, 5))
     state = model._decode_state_for(eligible, torch.ones_like(eligible), 4, use_cache=True,
                                     early_exit=False, kwargs={})
     assert state is not None and len(state.cache) == model.config.num_hidden_layers
     assert state.capacity == 512  # rounded up to the first reusable bucket
+
+    ids, mask = _left_padded_batch([torch.randint(3, 200, (5,)), torch.randint(3, 200, (8,))])
+    batched = model._decode_state_for(ids, mask, 4, use_cache=True, early_exit=False, kwargs={})
+    assert batched is not None and batched.batch_size == 2
+    assert batched.cache.pad_starts.flatten().tolist() == [3, 0]
+
+    # A single left-padded row qualifies through the same scan.
+    single = model._decode_state_for(ids[:1], mask[:1], 4, use_cache=True,
+                                     early_exit=False, kwargs={})
+    assert single is not None and single.cache.pad_starts.flatten().tolist() == [3]
+
+    # Interior holes, right padding and all-pad rows must not reach the fast path.
+    holed = mask.clone()
+    holed[0, 5] = 0
+    right_padded = torch.ones(1, 8, dtype=torch.long)
+    right_padded[0, 6:] = 0
+    for bad in (holed, right_padded, torch.zeros(1, 8, dtype=torch.long)):
+        assert model._decode_state_for(torch.randint(3, 200, bad.shape), bad, 4,
+                                       use_cache=True, early_exit=False, kwargs={}) is None
+    # A mask whose width disagrees with the prompt is a caller bug: fall back.
+    assert model._decode_state_for(torch.randint(3, 200, (1, 5)),
+                                   torch.ones(1, 7, dtype=torch.long), 4, use_cache=True,
+                                   early_exit=False, kwargs={}) is None
+
+
+def test_batched_static_path_has_a_kill_switch(monkeypatch):
+    """INSTINCT_BATCH_STATIC_DECODE=0 restores the old batch>1 rejection alone."""
+    model = _tiny_model()
+    model._static_cache_ok = True
+    ids, mask = _left_padded_batch([torch.randint(3, 200, (5,)), torch.randint(3, 200, (8,))])
+
+    assert model._decode_state_for(ids, mask, 4, use_cache=True, early_exit=False,
+                                   kwargs={}) is not None
+    monkeypatch.setenv('INSTINCT_BATCH_STATIC_DECODE', '0')
+    assert model._decode_state_for(ids, mask, 4, use_cache=True, early_exit=False,
+                                   kwargs={}) is None
+    assert model._decode_state_for(torch.randint(3, 200, (1, 5)), None, 4, use_cache=True,
+                                   early_exit=False, kwargs={}) is not None
+
+
+def test_left_pad_starts_flags_only_left_padding():
+    """The admission scan accepts zeros-then-ones rows and nothing looser."""
+    from model.static_cache import left_pad_starts
+
+    starts, ok = left_pad_starts(torch.ones(2, 6, dtype=torch.long))
+    assert ok and starts.flatten().tolist() == [0, 0]
+
+    starts, ok = left_pad_starts(torch.tensor([[0, 0, 1, 1, 1], [1, 1, 1, 1, 1]]))
+    assert ok and starts.flatten().tolist() == [2, 0]
+
+    holed = torch.tensor([[0, 0, 1, 1, 1]])
+    holed[0, 3] = 0
+    assert left_pad_starts(holed)[1] is False
+    assert left_pad_starts(torch.tensor([[1, 1, 1, 0, 0]]))[1] is False
+    assert left_pad_starts(torch.zeros(1, 4, dtype=torch.long))[1] is False
+
+
+def test_batched_mask_hides_pad_prefix():
+    """The mask drops each row's pad prefix on top of the position cutoff."""
+    cache = StaticKVCache(8, [(2, 4)], torch.float32, torch.device('cpu'), batch_size=2)
+    cache.pad_starts.copy_(torch.tensor([[3], [1]]))
+
+    # One decode query per row at slot 5: row 0 sees slots 3..5, row 1 sees 1..5.
+    mask = cache.mask_for(torch.full((2, 1), 5, dtype=torch.long))
+    assert mask.shape == (2, 1, 1, 8)
+    assert mask[0, 0, 0].tolist() == [False] * 3 + [True] * 3 + [False] * 2
+    assert mask[1, 0, 0].tolist() == [False] + [True] * 5 + [False] * 2
+
+    # Pad slots stay hidden during a prompt-width prefill as well.
+    prompt_mask = cache.mask_for(torch.arange(6).unsqueeze(0).expand(2, -1))
+    assert prompt_mask[0, 0, 4].tolist() == [False] * 3 + [True] * 2 + [False] * 3
+    assert prompt_mask[1, 0, 4].tolist() == [False] + [True] * 4 + [False] * 3
+
+
+def test_batched_append_scatters_per_row():
+    """Writes land at each row's own slot; untouched slots stay zero."""
+    cache = StaticKVCache(8, [(2, 4)], torch.float32, torch.device('cpu'), batch_size=2)
+    layer = cache[0]
+    assert layer.key.shape == (2, 8, 2, 4)
+
+    keys = torch.arange(2 * 1 * 2 * 4, dtype=torch.float32).reshape(2, 1, 2, 4)
+    layer.append(keys, keys + 100, torch.tensor([[5], [2]]))
+    torch.testing.assert_close(layer.key[0, 5], keys[0, 0])
+    torch.testing.assert_close(layer.key[1, 2], keys[1, 0])
+    torch.testing.assert_close(layer.key[0, 2], torch.zeros(2, 4))
+
+    # Prompt-width writes land per row as well.
+    block = torch.arange(2 * 3 * 2 * 4, dtype=torch.float32).reshape(2, 3, 2, 4)
+    layer.append(block, block + 100, torch.tensor([[0, 1, 2], [5, 6, 7]]))
+    torch.testing.assert_close(layer.key[1, 7], block[1, 2])
+    torch.testing.assert_close(layer.key[0, 0], block[0, 0])
+
+
+def test_batched_state_pool_is_keyed_per_batch_size():
+    """Batches of different sizes never share buffers, single-seq is untouched."""
+    model = _tiny_model()
+    model._static_cache_ok = True
+    ids2, mask2 = _left_padded_batch([torch.randint(3, 200, (6,))] * 2)
+    ids3, mask3 = _left_padded_batch([torch.randint(3, 200, (6,))] * 3)
+
+    state2 = model._decode_state_for(ids2, mask2, 4, use_cache=True, early_exit=False, kwargs={})
+    state3 = model._decode_state_for(ids3, mask3, 4, use_cache=True, early_exit=False, kwargs={})
+    assert state2 is not state3
+    assert state2.batch_size == 2 and state3.batch_size == 3
+    assert set(model._decode_states_batched) == {2, 3}
+
+    again = model._decode_state_for(ids2, mask2, 4, use_cache=True, early_exit=False, kwargs={})
+    assert again is state2
+    assert model._decode_states == {}
+
+
+def test_batched_static_matches_growing_cache_on_cpu():
+    """No CUDA needed for the batched bookkeeping to agree with the legacy loop."""
+    model = _tiny_model()
+    torch.manual_seed(17)
+    ids, mask = _left_padded_batch([torch.randint(3, 200, (5,)), torch.randint(3, 200, (8,)),
+                                    torch.randint(3, 200, (6,))])
+    with torch.inference_mode():
+        model._static_cache_ok = False
+        expected = model.generate(input_ids=ids, attention_mask=mask, max_new_tokens=8,
+                                  do_sample=False, eos_token_id=None)
+        model._static_cache_ok = True
+        actual = model.generate(input_ids=ids, attention_mask=mask, max_new_tokens=8,
+                                do_sample=False, eos_token_id=None)
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.gpu
+def test_batched_static_matches_growing_cache():
+    """Greedy output for a left-padded batch is identical on both paths."""
+    model = _tiny_model().cuda()
+    torch.manual_seed(11)
+    ids, mask = _left_padded_batch([torch.randint(3, 200, (5,), device='cuda'),
+                                    torch.randint(3, 200, (9,), device='cuda'),
+                                    torch.randint(3, 200, (7,), device='cuda')])
+    ids, mask = ids.cuda(), mask.cuda()
+
+    model._static_cache_ok = False
+    expected = _generate(model, ids, attention_mask=mask, max_new_tokens=12, eos_token_id=None)
+    model._static_cache_ok = True
+    actual = _generate(model, ids, attention_mask=mask, max_new_tokens=12, eos_token_id=None)
+
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.gpu
+def test_batched_static_matches_row_by_row_single_sequence():
+    """With no padding a batch must equal the rows run one at a time."""
+    model = _tiny_model().cuda()
+    torch.manual_seed(12)
+    rows = [torch.randint(3, 200, (6,), device='cuda') for _ in range(3)]
+    ids = torch.stack(rows)
+
+    model._static_cache_ok = True
+    batched = _generate(model, ids, max_new_tokens=10, eos_token_id=None)
+    for row, out in zip(rows, batched):
+        single = _generate(model, row.unsqueeze(0), max_new_tokens=10, eos_token_id=None)
+        torch.testing.assert_close(out.unsqueeze(0), single)
+
+
+@pytest.mark.gpu
+def test_batched_mixed_eos_matches_growing_cache():
+    """Rows that stop early must not disturb the rows still decoding."""
+    model = _tiny_model().cuda()
+    torch.manual_seed(16)
+    ids, mask = _left_padded_batch([torch.randint(3, 200, (5,), device='cuda'),
+                                    torch.randint(3, 200, (7,), device='cuda')])
+    ids, mask = ids.cuda(), mask.cuda()
+    eos = 7
+
+    model._static_cache_ok = False
+    expected = _generate(model, ids, attention_mask=mask, max_new_tokens=24, eos_token_id=eos)
+    model._static_cache_ok = True
+    actual = _generate(model, ids, attention_mask=mask, max_new_tokens=24, eos_token_id=eos)
+
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.gpu
+def test_batched_growth_matches_growing_cache():
+    """Crossing a bucket mid-batch reparses every row and preserves the output."""
+    model = _tiny_model(max_position_embeddings=2048).cuda()
+    torch.manual_seed(13)
+    ids, mask = _left_padded_batch([torch.randint(3, 200, (508,), device='cuda'),
+                                    torch.randint(3, 200, (509,), device='cuda')])
+    ids, mask = ids.cuda(), mask.cuda()
+
+    model._static_cache_ok = False
+    expected = _generate(model, ids, attention_mask=mask, max_new_tokens=6, eos_token_id=None)
+
+    model._static_cache_ok = True
+    model._static_cache_decode_headroom = 1
+    actual = _generate(model, ids, attention_mask=mask, max_new_tokens=6, eos_token_id=None)
+
+    torch.testing.assert_close(actual, expected)
+    assert set(model._decode_states_batched[2]) == {512, 1024}
+
+
+@pytest.mark.gpu
+def test_batched_spill_matches_growing_cache():
+    """A bucket that fails the memory guard spills the generation to eager."""
+    model = _tiny_model(max_position_embeddings=2048).cuda()
+    torch.manual_seed(14)
+    ids, mask = _left_padded_batch([torch.randint(3, 200, (508,), device='cuda'),
+                                    torch.randint(3, 200, (509,), device='cuda')])
+    ids, mask = ids.cuda(), mask.cuda()
+
+    model._static_cache_ok = False
+    expected = _generate(model, ids, attention_mask=mask, max_new_tokens=6, eos_token_id=None)
+
+    calls = {'n': 0}
+    real_mem_get_info = torch.cuda.mem_get_info
+
+    def guarded(*args, **kwargs):
+        calls['n'] += 1
+        if calls['n'] > 1:
+            return 0, 1 << 34  # growth: nothing free
+        return real_mem_get_info(*args, **kwargs)
+
+    torch.cuda.mem_get_info = guarded
+    try:
+        model._static_cache_ok = True
+        model._static_cache_decode_headroom = 1
+        actual = _generate(model, ids, attention_mask=mask, max_new_tokens=6, eos_token_id=None)
+    finally:
+        torch.cuda.mem_get_info = real_mem_get_info
+
+    torch.testing.assert_close(actual, expected)
+    assert calls['n'] > 1  # the guard rejected the growth
+    assert set(model._decode_states_batched[2]) == {512}  # no second bucket was kept
+
+
+@pytest.mark.gpu
+def test_batched_captured_graph_matches_eager():
+    """Capturing the decode step at batch>1 must not change the tokens."""
+    from model.inference_runtime import optimize_inference
+
+    model = _tiny_model().cuda().to(torch.bfloat16)
+    optimize_inference(model, 'auto')
+    torch.manual_seed(15)
+    ids, mask = _left_padded_batch([torch.randint(3, 200, (5,), device='cuda'),
+                                    torch.randint(3, 200, (7,), device='cuda')])
+    ids, mask = ids.cuda(), mask.cuda()
+
+    captured_calls = []
+    original = model._capture_decode_step
+
+    def recording(*args, **kwargs):
+        result = original(*args, **kwargs)
+        captured_calls.append(result is not None)
+        return result
+
+    model._capture_decode_step = recording
+    captured = _generate(model, ids, attention_mask=mask, max_new_tokens=12, eos_token_id=None)
+    assert captured_calls == [True], 'capture was skipped, so this proves nothing'
+
+    model._capture_decode_step = lambda *args, **kwargs: None  # force the eager step
+    eager = _generate(model, ids, attention_mask=mask, max_new_tokens=12, eos_token_id=None)
+
+    torch.testing.assert_close(captured, eager)
 
 
 def test_decode_state_is_reused_across_turns():
@@ -196,21 +460,24 @@ def test_decode_state_is_reused_across_turns():
 
     # A longer turn that still fits reuses the same capacity, and therefore the
     # same compiled graph and recorded CUDA graph.
-    longer = model._decode_state_for(torch.randint(3, 200, (1, 300)), mask, 64,
+    longer = model._decode_state_for(torch.randint(3, 200, (1, 300)),
+                                     torch.ones(1, 300, dtype=torch.long), 64,
                                      use_cache=True, early_exit=False, kwargs={})
     assert longer is first
     assert max(model._decode_states) == 512  # ladder covers it, nothing bigger queued
 
     # Outgrowing it allocates one bigger state and drops the smaller one; two
     # capacities is the cap, so memory and graph pools stay bounded.
-    bigger = model._decode_state_for(torch.randint(3, 200, (1, 400)), mask, 2000,
+    bigger = model._decode_state_for(torch.randint(3, 200, (1, 400)),
+                                     torch.ones(1, 400, dtype=torch.long), 2000,
                                      use_cache=True, early_exit=False, kwargs={})
     assert bigger is not first and bigger.capacity == 4096
     assert set(model._decode_states) <= {512, 4096}
     assert len(model._decode_states) == 2
 
     # Past the ladder there is no bucket: the growing cache takes over.
-    assert model._decode_state_for(torch.randint(3, 200, (1, 5)), mask, 40000,
+    assert model._decode_state_for(torch.randint(3, 200, (1, 5)),
+                                   torch.ones(1, 5, dtype=torch.long), 40000,
                                    use_cache=True, early_exit=False, kwargs={}) is None
 
 

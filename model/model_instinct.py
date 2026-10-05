@@ -20,8 +20,11 @@ from model.static_cache import (
     StaticKVCache,
     StaticKVCacheLayer,
     STATIC_CACHE_INITIAL_DECODE_TOKENS,
+    batch_capacity_guard,
+    batched_static_decode_enabled,
     bucket_capacity,
     layer_specs,
+    left_pad_starts,
 )
 from model.checkpointing import recompute_attention, checkpoint_ffn
 from model.attention_mask import apply_attention_mask, prepare_sdpa_attention_bias
@@ -643,6 +646,14 @@ class InstinctModel(nn.Module):
             hidden_states = hidden_states[:-1] if partial_count == 0 else hidden_states
         return self.output_residual(hidden_states)
 
+class _StaticCacheMemoryFull(RuntimeError):
+    """The next static KV-cache bucket exceeds the free-memory guard.
+
+    Raised only while growing mid-generation, where the caller can still spill
+    the already-written context into the eager growing cache and finish there.
+    """
+
+
 class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
     config_class = InstinctConfig
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
@@ -667,9 +678,11 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         self.model = InstinctModel(self.config)
         self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
         if self.config.tie_word_embeddings: self.model.embed_tokens.weight = self.lm_head.weight
-        # Decode resources reused across generate() calls, keyed by capacity.
-        # Populated lazily by _decode_state_for once optimize_inference allowed it.
+        # Decode resources reused across generate() calls, keyed by capacity
+        # (single sequence) and per batch size (batched). Populated lazily by
+        # _decode_state_for once optimize_inference allowed it.
         self._decode_states = {}
+        self._decode_states_batched = {}
         self.post_init()
 
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False,
@@ -796,55 +809,72 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                                       use_cache=use_cache, early_exit=early_exit, kwargs=kwargs)
         if state is not None:
             written = self._decode_with_static_cache(
-                state, input_storage, finished, max_new_tokens, chunks, sample, forward_kwargs)
-            input_ids = input_storage[:, :initial_length + written]
+                state, input_storage, attention_storage, finished, max_new_tokens,
+                chunks, sample, forward_kwargs)
         else:
-            for step in range(max_new_tokens):
-                past_len = past_key_values[0][0].shape[1] if past_key_values else 0
-                outputs = self.forward(input_ids[:, past_len:], attention_mask, past_key_values, use_cache=use_cache, **forward_kwargs)
-                if step == 0:
-                    chunks.start_decode()
-                attention_mask = attention_storage[:, :initial_length + step + 1] if attention_storage is not None else None
-                next_token = _sample_next_token(outputs.logits[:, -1, :], input_ids, finished, **sample)
-                input_storage[:, initial_length + step:initial_length + step + 1].copy_(next_token)
-                input_ids = input_storage[:, :initial_length + step + 1]
-                past_key_values = outputs.past_key_values if use_cache else None
-                if eos_token_id is not None:
-                    finished |= next_token.squeeze(-1).eq(eos_token_id)
-                final_step = step + 1 == max_new_tokens
-                if chunks.push(next_token, finished, final=final_step) or final_step:
-                    break
+            written = self._decode_with_growing_cache(
+                input_storage, initial_length, attention_storage, finished, chunks,
+                max_new_tokens, sample, forward_kwargs, use_cache=use_cache,
+                past_key_values=past_key_values)
+        input_ids = input_storage[:, :initial_length + written]
         if chunks.overshoot:
             input_ids = input_ids[:, :-chunks.overshoot]
         if streamer: streamer.end()
         if kwargs.get("return_kv"): return {'generated_ids': input_ids, 'past_kv': past_key_values}
         return input_ids
 
-    def _decode_state_for(self, input_ids, attention_mask, max_new_tokens, *, use_cache, early_exit, kwargs):
+    def _decode_state_for(self, input_ids, attention_mask, max_new_tokens, *, use_cache,
+                          early_exit, kwargs, pad_starts=None, raise_on_memory=False):
         """A reusable decode state for this generation, or None for the growing cache.
 
-        Only single unpadded sequences qualify: the in-place append writes one
-        position per step, and padded rows would need per-row slots. The legacy
-        cache stays the default everywhere else.
+        Single unpadded sequences and left-padded batches qualify: the in-place
+        append writes one uniform slot per step (a left-padded prompt ends at the
+        same storage column for every row), and the mask drops each row's pad
+        prefix through the cache's ``pad_starts``. Right padding, interior mask
+        holes, early exit and cache-returning callers keep the legacy cache.
 
         States are kept between calls and picked smallest-first, so a chat turn
         usually reuses the previous turn's buffers -- and with them the compiled
         graph and the recorded CUDA graph, both of which are keyed on the buffer
-        addresses and shapes.
+        addresses and shapes. ``pad_starts`` is rewritten per admission.
+
+        ``raise_on_memory`` turns the free-memory guard into
+        ``_StaticCacheMemoryFull``: only a mid-generation growth can still spill
+        into the eager cache; an initial admission should fall back to it.
         """
         if not use_cache or not getattr(self, '_static_cache_ok', False):
             return None
-        if input_ids.shape[0] != 1 or early_exit or kwargs.get('return_kv'):
+        if early_exit or kwargs.get('return_kv'):
             return None
-        if attention_mask is not None and not bool(attention_mask.all()):
+        batch, width = input_ids.shape
+        if batch != 1 and not batched_static_decode_enabled():
             return None
-        needed = input_ids.shape[1] + max_new_tokens
-        states = self._decode_states
+        if pad_starts is None:
+            if attention_mask is not None and attention_mask.shape[-1] == width:
+                # One device-to-host read per generate(), same cost as the old
+                # all-ones check: valid left padding folds into pad_starts,
+                # anything else (holes, right padding, an all-pad row) falls
+                # back to the growing cache.
+                pad_starts, left_pad_only = left_pad_starts(attention_mask)
+                if not left_pad_only:
+                    return None
+            elif attention_mask is None:
+                pad_starts = torch.zeros(batch, 1, dtype=torch.long, device=input_ids.device)
+            else:
+                return None  # a mask narrower/wider than the prompt is a caller bug
+        needed = width + max_new_tokens
+        states = (self._decode_states if batch == 1
+                  else self._decode_states_batched.setdefault(batch, {}))
         for state in sorted(states.values(), key=lambda item: item.capacity):
             if state.accepts(needed):
+                state.cache.pad_starts.copy_(pad_starts)
                 return state
         capacity = bucket_capacity(needed, self.config.max_position_embeddings)
         if capacity is None:
+            if raise_on_memory:
+                raise RuntimeError(
+                    'static KV cache could not grow past the bucket ladder; '
+                    'reduce the context length or max_new_tokens')
             print(f'[Inference] sequence of {needed} tokens exceeds the bucket ladder; '
                   f'using the growing cache.', flush=True)
             return None
@@ -854,14 +884,17 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                   f'rather than {self.config.kv_cache_dtype}: a quantized buffer would have to be '
                   f'dequantized and re-quantized on every step.', flush=True)
         parameters = next(self.parameters())
-        state = DecodeState(capacity, layer_specs(self), parameters.dtype, input_ids.device)
+        state = DecodeState(capacity, layer_specs(self), parameters.dtype, input_ids.device, batch)
         bytes_needed = sum(layer.key.numel() * layer.key.element_size() * 2 for layer in state.cache)
         if input_ids.device.type == 'cuda':
             free, _ = torch.cuda.mem_get_info(input_ids.device)
-            if bytes_needed > 0.25 * free:
+            if bytes_needed > batch_capacity_guard(batch) * free:
+                del state
                 print(f'[Inference] static KV cache needs {bytes_needed / 2 ** 20:.0f} MiB of '
                       f'{free / 2 ** 20:.0f} MiB free for max_new_tokens={max_new_tokens}; '
                       f'using the growing cache.', flush=True)
+                if raise_on_memory:
+                    raise _StaticCacheMemoryFull()
                 return None
         # Keep the smallest state as the fast path for normal chat turns and one
         # larger state for a response that crossed a capacity boundary.  When a
@@ -870,23 +903,31 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         while len(states) >= 2:
             states.pop(max(states))
         states[capacity] = state
+        state.cache.pad_starts.copy_(pad_starts)
         return state
 
-    def _decode_with_static_cache(self, state, input_storage, finished, max_new_tokens,
-                                  chunks, sample, forward_kwargs):
+    def _decode_with_static_cache(self, state, input_storage, attention_storage, finished,
+                                  max_new_tokens, chunks, sample, forward_kwargs):
         """Decode into a fixed-shape cache; returns the number of tokens written.
 
         Token/EOS bookkeeping matches the growing-cache loop exactly, so the two
         paths emit identical sequences. Every decode step has identical shapes
         and no host-derived offset, which is what lets this step be captured as
         one CUDA graph. Prefill keeps the prompt's shape and is not captured.
+
+        A left-padded batch shares one physical cursor: every row's prompt ends
+        at the same storage column, the step's slot is ``initial_length + step``
+        for the whole batch, and each row's pad prefix is dropped by the mask.
+        Finished rows keep stepping -- their forced-EOS tokens land in their own
+        slots, which no other row attends -- exactly like the growing loop.
         """
         initial_length = input_storage.shape[1] - max_new_tokens
         device = input_storage.device
+        batch = input_storage.shape[0]
         prompt = input_storage[:, :initial_length]
         eos_token_id = sample['eos_token_id']
         cache = state.cache
-        position_ids = torch.arange(initial_length, device=device).unsqueeze(0)
+        position_ids = torch.arange(initial_length, device=device).unsqueeze(0).expand(batch, -1)
         outputs = self.forward(prompt, None, cache, use_cache=True, position_ids=position_ids,
                                **forward_kwargs)
         chunks.start_decode()
@@ -911,15 +952,24 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
             # bucket's attention cost for every short answer.
             if position >= state.capacity:
                 context = input_storage[:, :position + 1]
-                state = self._decode_state_for(
-                    context, None, 1, use_cache=True, early_exit=False, kwargs={})
+                try:
+                    state = self._decode_state_for(
+                        context, None, 1, use_cache=True, early_exit=False, kwargs={},
+                        pad_starts=cache.pad_starts, raise_on_memory=True)
+                except _StaticCacheMemoryFull:
+                    # The next bucket does not fit the memory guard: hand the
+                    # used range to the eager growing cache rather than losing
+                    # the generation.
+                    return self._spill_to_growing_cache(
+                        state, input_storage, attention_storage, initial_length,
+                        position, finished, chunks, max_new_tokens, sample, forward_kwargs)
                 if state is None:
                     raise RuntimeError(
                         'static KV cache could not grow at capacity boundary; '
                         'reduce the context length or free GPU memory')
                 cache = state.cache
                 step_ids, step_position = state.step_ids, state.step_position
-                position_ids = torch.arange(position + 1, device=device).unsqueeze(0)
+                position_ids = torch.arange(position + 1, device=device).unsqueeze(0).expand(batch, -1)
                 outputs = self.forward(
                     context, None, cache, use_cache=True,
                     position_ids=position_ids, **forward_kwargs)
@@ -927,7 +977,7 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                     outputs.logits[:, -1, :], context, finished, **sample)
                 continue
 
-            step_ids.copy_(next_token.view(1, 1))
+            step_ids.copy_(next_token.view(batch, 1))
             step_position.fill_(position)
             # A graph recorded for plain decoding must never serve a call with
             # Python callbacks (logit lens / early-exit diagnostics).
@@ -950,6 +1000,59 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
             next_token = _sample_next_token(outputs.logits[:, -1, :],
                                             input_storage[:, :position + 1], finished, **sample)
         return written
+
+    def _decode_with_growing_cache(self, input_storage, initial_length, attention_storage,
+                                   finished, chunks, max_new_tokens, sample, forward_kwargs,
+                                   use_cache=True, start_step=0, past_key_values=None):
+        """The legacy growing-cache decode loop; returns the tokens written.
+
+        Extracted from generate() so the static path can spill into it: pass
+        ``start_step`` and a cache holding ``input_storage[:, :initial_length +
+        start_step - 1]`` to resume mid-generation. The loop forwards the token
+        at column ``initial_length + step - 1`` (the whole prompt on step 0) and
+        writes the sampled token at column ``initial_length + step``.
+        """
+        input_ids = input_storage[:, :initial_length + start_step]
+        attention_mask = (attention_storage[:, :initial_length + start_step]
+                          if attention_storage is not None else None)
+        eos_token_id = sample['eos_token_id']
+        for step in range(start_step, max_new_tokens):
+            past_len = past_key_values[0][0].shape[1] if past_key_values else 0
+            outputs = self.forward(input_ids[:, past_len:], attention_mask, past_key_values,
+                                   use_cache=use_cache, **forward_kwargs)
+            if step == 0:
+                chunks.start_decode()
+            attention_mask = (attention_storage[:, :initial_length + step + 1]
+                              if attention_storage is not None else None)
+            next_token = _sample_next_token(outputs.logits[:, -1, :], input_ids, finished, **sample)
+            input_storage[:, initial_length + step:initial_length + step + 1].copy_(next_token)
+            input_ids = input_storage[:, :initial_length + step + 1]
+            past_key_values = outputs.past_key_values if use_cache else None
+            if eos_token_id is not None:
+                finished |= next_token.squeeze(-1).eq(eos_token_id)
+            final_step = step + 1 == max_new_tokens
+            if chunks.push(next_token, finished, final=final_step) or final_step:
+                return step + 1
+        return max_new_tokens
+
+    def _spill_to_growing_cache(self, state, input_storage, attention_storage, initial_length,
+                                cache_len, finished, chunks, max_new_tokens, sample,
+                                forward_kwargs):
+        """Finish a generation eagerly after the next bucket failed the guard.
+
+        The static buffers hold exactly the columns the growing cache would:
+        prompt plus produced tokens, positions numbered by storage column, pad
+        prefix dropped by the 2D mask. The token at column ``cache_len`` is
+        already in ``input_storage`` but not in the cache, which is precisely
+        the growing loop's resume invariant at ``start_step = cache_len -
+        initial_length + 1``.
+        """
+        past_key_values = [(layer.key[:, :cache_len], layer.value[:, :cache_len])
+                           for layer in state.cache]
+        return self._decode_with_growing_cache(
+            input_storage, initial_length, attention_storage, finished, chunks,
+            max_new_tokens, sample, forward_kwargs, use_cache=True,
+            start_step=cache_len - initial_length + 1, past_key_values=past_key_values)
 
     @staticmethod
     def _decode_kwargs_capturable(forward_kwargs) -> bool:
