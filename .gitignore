@@ -65,3 +65,12 @@ Thumbs.db
 
 # ===== WebUI 本地面板状态（用户参数持久化，不入库） =====
 trainer/webui_state.json
+
+# ===== WebUI 本地 HTTPS 自签名证书（start_chat_webui.bat --https 自动生成） =====
+certs/
+
+# ===== data_relay（数据下载中继：config 含密钥，relay_data 为任务工作区） =====
+data_relay/target/
+data_relay/config.toml
+data_relay/relay_data/
+data_relay/known_hosts.json
