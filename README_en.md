@@ -575,6 +575,15 @@ On Windows, launch all three from the repo root:
 .\start_eval_webui.bat
 ```
 
+The Chat WebUI can also be served over HTTPS: `.\start_chat_webui.bat --https`.
+On first use a self-signed certificate is generated into `certs/`
+(`scripts/https_cert.py` — prefers `cryptography`, falls back to openssl; SANs
+cover localhost / machine hostname / 127.0.0.1 / ::1, valid 10 years,
+gitignored). Then open https://localhost:8502 and accept the browser's
+self-signed warning. To use your own certificate, replace
+`certs/chat_webui.crt` and `certs/chat_webui.key`. Note that Streamlit's SSL
+options are not audited for production; local or trusted-intranet use only.
+
 The Chat WebUI auto-scans native `.pth` weights in `out/` and `checkpoints/`
 (excluding `_resume`) and resolves the architecture from the weight's
 sibling JSON → the matching JSON in `checkpoints/` → the default config; the

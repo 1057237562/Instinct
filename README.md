@@ -468,6 +468,13 @@ Windows 可从仓库根目录直接启动三个界面：
 .\start_eval_webui.bat
 ```
 
+Chat WebUI 支持以 HTTPS 启动:`.\start_chat_webui.bat --https`。首次使用会在 `certs/` 下
+自动生成自签名证书(`scripts/https_cert.py`,优先用 `cryptography`,否则回退到 openssl;
+SAN 覆盖 localhost / 主机名 / 127.0.0.1 / ::1,有效期 10 年,已加入 gitignore),之后通过
+https://localhost:8502 访问,浏览器提示证书不受信任时选择继续即可;要用自己的证书,直接
+替换 `certs/chat_webui.crt` 与 `certs/chat_webui.key`。注意 Streamlit 的 SSL 选项未做
+生产级安全审计,仅建议本地或可信内网使用。
+
 Chat WebUI 会自动扫描 `out/` 和 `checkpoints/` 下的原生 `.pth` 权重(排除 `_resume`),
 并按 权重同名 JSON → `checkpoints/` 同名 JSON → 默认配置 的顺序解析架构;侧栏实时显示
 Dense/MoE · 层数 · hidden · 头数 · 专家数摘要与解码吞吐(tokens/s,不含预填充)。界面提供
