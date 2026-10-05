@@ -24,7 +24,7 @@ from scripts.data_builder.coder_pretrain_common import (
     benchmark_ngrams, classify_base, classify_continued,
     has_benchmark_overlap,
 )
-from scripts.data_builder.collect_coder_pretrain_12b import OUT as COLLECTED
+from scripts.data_builder.collect_coder_pretrain_12b import OUT as COLLECTED, segment_out_root
 from scripts.data_builder.mix_sft_datasets import ExternalRandomShuffler
 
 
@@ -59,6 +59,19 @@ def parse_args():
     )
     parser.add_argument("--audit-windows", type=int, default=64)
     parser.add_argument("--audit-window-rows", type=int, default=1024)
+    parser.add_argument("--segment", type=int, default=1,
+                        help=(
+                            "Assemble the collected shards of this segment "
+                            "(1 = dataset/coder_pretrain_12b, the default; N>1 = "
+                            "dataset/coder_pretrain_12b_seg{N}, with outputs named "
+                            "pretrain_coder_12b_seg{N}.jsonl/.report.json)."
+                        ))
+    parser.add_argument("--collected-dir", type=str, default=None,
+                        help="Explicit collected-shards root (overrides --segment).")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Explicit output JSONL path (overrides --segment).")
+    parser.add_argument("--report", type=str, default=None,
+                        help="Explicit report path (overrides --segment).")
     return parser.parse_args()
 
 
@@ -322,6 +335,8 @@ def build(args):
     total_tokens = sum(value["tokens"] for value in stats.values())
     report = {
         "name": "instinct_coder_pretrain_12b",
+        "segment": args.segment,
+        "collected_dir": str(COLLECTED),
         "created_for": "Instinct V1 MoE: 678,726,144 total / 106,203,648 active parameters",
         "reference": {
             "paper": "DeepSeek-Coder-V2: Breaking the Barrier of Closed-Source Models in Code Intelligence",
@@ -381,6 +396,21 @@ def build(args):
 
 def main():
     args = parse_args()
+    global OUTPUT, REPORT, COLLECTED
+    if args.segment < 1:
+        raise ValueError("--segment must be >= 1")
+    if args.segment > 1 or args.collected_dir:
+        COLLECTED = (Path(args.collected_dir).resolve() if args.collected_dir
+                     else segment_out_root(args.segment))
+    if args.segment > 1:
+        if not args.output:
+            OUTPUT = ROOT / f"dataset/pretrain_coder_12b_seg{args.segment}.jsonl"
+        if not args.report:
+            REPORT = ROOT / f"dataset/pretrain_coder_12b_seg{args.segment}.report.json"
+    if args.output:
+        OUTPUT = Path(args.output).resolve()
+    if args.report:
+        REPORT = Path(args.report).resolve()
     if args.shuffle_chunk_rows < 1 or args.shuffle_chunk_mb < 1:
         raise ValueError("shuffle chunk rows/MB must both be positive")
     if args.audit_windows < 1 or args.audit_window_rows < 1:
