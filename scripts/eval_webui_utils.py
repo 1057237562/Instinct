@@ -33,9 +33,9 @@ def build_command(config):
     c = config
     kind = c['benchmark']
     mode = c.get('mode', 'generate')
-    if kind not in ('HumanEval', 'LiveCodeBench', 'GSM8K', '推理自动测试', 'ToolCall'):
+    if kind not in ('HumanEval', 'HumanEval-OJ', 'LiveCodeBench', 'GSM8K', '推理自动测试', 'ToolCall'):
         raise ValueError('未知评测类型')
-    if kind in ('HumanEval', 'LiveCodeBench', 'GSM8K') and c.get('k'):
+    if kind in ('HumanEval', 'HumanEval-OJ', 'LiveCodeBench', 'GSM8K') and c.get('k'):
         ks = [int(k) for k in c['k'].replace(',', ' ').split()]
         if not ks or min(ks) < 1:
             raise ValueError('K 必须是正整数列表')
@@ -43,6 +43,7 @@ def build_command(config):
             raise ValueError(f'计算 pass@{max(ks)} 需要每题至少 {max(ks)} 个样本，请增加每题样本数')
     command = [sys.executable, '-u', str(ROOT / (
         'eval_humaneval.py' if kind == 'HumanEval' else
+        'eval_humaneval_oj.py' if kind == 'HumanEval-OJ' else
         'eval_gsm8k.py' if kind == 'GSM8K' else
         'scripts/eval_toolcall.py' if kind == 'ToolCall' else 'eval_llm.py'))]
 
@@ -73,7 +74,7 @@ def build_command(config):
             raise ValueError('多样本生成需要 temperature > 0')
         if kind == 'ToolCall' and c.get('temperature', 0) <= 0:
             raise ValueError('ToolCall 当前采样接口需要 temperature > 0')
-    if kind in ('HumanEval', 'GSM8K'):
+    if kind in ('HumanEval', 'HumanEval-OJ', 'GSM8K'):
         for key in ('mode', 'output', 'problem_file', 'limit', 'num_samples', 'batch_size', 'prompt_style',
                     'seed', 'workers', 'timeout'):
             if kind != 'GSM8K' or key not in ('workers', 'timeout'):
@@ -101,7 +102,7 @@ def build_command(config):
             add('lcb_' + flag, c.get(key))
         if mode != 'generate':
             command.append('--lcb_evaluate_only' if mode == 'evaluate' else '--lcb_evaluate')
-    if kind in ('HumanEval', 'LiveCodeBench', 'GSM8K'):
+    if kind in ('HumanEval', 'HumanEval-OJ', 'LiveCodeBench', 'GSM8K'):
         output = Path(c['output'])
         if not output.is_absolute():
             output = ROOT / output

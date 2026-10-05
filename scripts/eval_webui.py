@@ -141,13 +141,14 @@ def artifacts(run):
 st.title('Instinct 评测工作台')
 st.caption('统一配置模型与评测任务，查看执行日志和结果。所有相对路径以仓库根目录为基准。')
 with st.sidebar:
-    benchmark = st.selectbox('评测类型', ['HumanEval', 'LiveCodeBench', 'GSM8K', '推理自动测试', 'ToolCall'])
-    st.caption('HumanEval / LiveCodeBench：代码功能评分。GSM8K：数学答案评分。\n\n推理 / ToolCall：内置用例的定性测试。')
+    benchmark = st.selectbox('评测类型', ['HumanEval', 'HumanEval-OJ', 'LiveCodeBench', 'GSM8K', '推理自动测试', 'ToolCall'])
+    st.caption('HumanEval / HumanEval-OJ / LiveCodeBench：代码功能评分。HumanEval-OJ 用 OJ 题面（stdin/stdout 逐字节比对）'
+               '评测 dataset/humaneval_oj 的题目。GSM8K：数学答案评分。\n\n推理 / ToolCall：内置用例的定性测试。')
 
 configure, monitor, pass_k_tab = st.tabs(['配置评测', '任务与结果', '计算 pass@K'])
 with configure:
     config = {'benchmark': benchmark}
-    coded = benchmark in ('HumanEval', 'LiveCodeBench', 'GSM8K')
+    coded = benchmark in ('HumanEval', 'HumanEval-OJ', 'LiveCodeBench', 'GSM8K')
     config['mode'] = st.radio('运行方式', ['generate', 'evaluate', 'all'], horizontal=True,
                                format_func=lambda x: {'generate': '仅生成', 'evaluate': '仅评分', 'all': '生成并评分'}[x]) if coded else 'generate'
     if not coded:
@@ -164,10 +165,12 @@ with configure:
             samples = max(parse_k(config['k']))
         except ValueError:
             samples = 1
+        max_tokens_default = {'HumanEval-OJ': 4096}.get(benchmark, 512)
         config.update(num_samples=samples, temperature=0.8 if samples > 1 else 0.0,
                       top_p=0.95, seed=42, limit=0, prompt_style='auto',
-                      workers=min(4, os.cpu_count() or 1), timeout=3 if benchmark == 'HumanEval' else 6,
-                      max_new_tokens=512, resume=False, problem_file='')
+                      workers=min(4, os.cpu_count() or 1),
+                      timeout={'HumanEval': 3, 'HumanEval-OJ': 10}.get(benchmark, 6),
+                      max_new_tokens=max_tokens_default, resume=False, problem_file='')
         if config['mode'] != 'evaluate':
             config['batch_size'] = choose('生成 Batch size', [1, 2, 4, 8, 16, 32], 4, minimum=1)
             st.caption(f'自动设置每题 {samples} 个样本；' + ('随机采样，Temperature 0.8。' if samples > 1 else '贪心生成。'))
@@ -193,7 +196,8 @@ with configure:
                 config['resume'] = st.checkbox('从答案文件续跑')
                 config['num_samples'] = choose('每题样本数', [samples, 1, 5, 10, 20, 50, 100, 200], samples, minimum=1, key=f'samples_{samples}')
                 config['temperature'] = choose('Temperature', [0.0, 0.2, 0.8, 1.0], 0.8 if config['num_samples'] > 1 else 0.0, minimum=0.0, key=f'temp_{config["num_samples"] > 1}')
-                config['max_new_tokens'] = choose('最大生成 tokens', [256, 512, 1024, 2048, 4096, 8192], 512, minimum=1)
+                config['max_new_tokens'] = choose('最大生成 tokens', [256, 512, 1024, 2048, 4096, 8192],
+                                                  max_tokens_default, minimum=1, key=f'max_tokens_{benchmark}')
                 config['eval_kv_cache_dtype'] = st.selectbox(
                     '批量 KV Cache 精度', ['auto', 'configured'],
                     help='auto 在显存充足时临时使用 BF16/FP16 提速；configured 沿用模型配置，便于严格比较旧结果。')
@@ -216,7 +220,10 @@ with configure:
             st.caption('GSM8K：提取最终 #### 数值，与参考答案比较；无需执行代码。报告 accuracy 和 pass@K。')
         else:
             st.caption('评分会执行生成代码，请在隔离评测环境运行。')
-            if config['mode'] == 'all':
+            if benchmark == 'HumanEval-OJ':
+                st.caption('HumanEval-OJ：模型需返回完整 Python 程序，每个测试用例独立运行，stdout 单行 JSON 逐字节比对；'
+                           '全部用例通过该题才算通过。')
+            elif config['mode'] == 'all':
                 st.caption('HumanEval：每批答案生成后立即并行评分，结束时统一计算 pass@K。' if benchmark == 'HumanEval'
                            else 'LiveCodeBench：官方评分入口要求完整答案文件，生成完成后评分。')
     else:
@@ -259,13 +266,24 @@ with monitor:
                     st.caption(f'该批耗时 {rates[-1][1]}s；为整批总吞吐，含首轮处理，不是单条回答速度。')
                 st.code(log or '等待日志…', language='text', height=400)
             output = current['config'].get('output')
-            if output and current['config']['benchmark'] == 'HumanEval' and current['config']['mode'] == 'all':
+            if output and current['config']['benchmark'] in ('HumanEval', 'HumanEval-OJ') and current['config']['mode'] == 'all':
                 progress_path = Path(str(output) + '_progress.json')
                 if not progress_path.is_absolute():
                     progress_path = ROOT / progress_path
                 try:
                     progress = json.loads(progress_path.read_text(encoding='utf-8'))
                     st.caption(f"已送评 {progress['submitted']} · 已评分 {progress['completed']} · 等待中 {progress['pending']}")
+                except (OSError, ValueError, KeyError):
+                    pass
+                stats_path = Path(str(output) + '_oj_stats.json')
+                if not stats_path.is_absolute():
+                    stats_path = ROOT / stats_path
+                try:
+                    stats = json.loads(stats_path.read_text(encoding='utf-8'))
+                    types = ' · '.join(f'{k} {v}' for k, v in stats['failure_types'].items()) or '无'
+                    st.metric('OJ 实时通过', f"{stats['passed']} / {stats['passed'] + stats['failed']}",
+                              help='RE=运行时错误 WA=输出不匹配 TLE=超时。失败明细见下方日志。')
+                    st.caption('失败类型：' + types)
                 except (OSError, ValueError, KeyError):
                     pass
         else:
@@ -289,7 +307,7 @@ with monitor:
 
 with pass_k_tab:
     st.subheader('从已有评分结果计算 pass@K')
-    st.caption('无需加载模型或重新执行测试。HumanEval / GSM8K 使用 *_results.jsonl；LiveCodeBench 使用官方 *_eval_all.json。指标仅覆盖文件中的题目。')
+    st.caption('无需加载模型或重新执行测试。HumanEval / HumanEval-OJ / GSM8K 使用 *_results.jsonl；LiveCodeBench 使用官方 *_eval_all.json。指标仅覆盖文件中的题目。')
     result_files = discover(ROOT / 'eval', ['*_results.jsonl', '*_results.jsonl.gz', '*_eval_all.json', '*/*_results.jsonl', '*/*_eval_all.json'])
     result_path = choose('已评分结果文件', result_files, key='pass_k_source')
     requested_k = choose('需要计算的 K', ['1', '1,5', '1,5,10', '1,2,10', '1,10,100'], '1,5,10', key='pass_k_values')

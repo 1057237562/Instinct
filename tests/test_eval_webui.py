@@ -43,6 +43,19 @@ def test_batch_size_forwarding(tmp_path, benchmark, flag):
     assert command[command.index(flag) + 1] == '8'
 
 
+def test_humaneval_oj_command(tmp_path):
+    c = config(tmp_path, 'HumanEval-OJ', load_from='model', batch_size=8)
+    command = build_command(c)
+    assert command[2].endswith('eval_humaneval_oj.py')
+    assert command[command.index('--batch_size') + 1] == '8'
+    c.update(mode='evaluate', k='1, 10', problem_file='dataset/humaneval_oj/humaneval_oj_problems.jsonl')
+    Path(c['output']).write_text('')
+    command = build_command(c)
+    assert '--load_from' not in command
+    assert command[command.index('--problem_file') + 1] == 'dataset/humaneval_oj/humaneval_oj_problems.jsonl'
+    assert command[command.index('--k') + 1:] == ['1', '10']
+
+
 def test_eval_kv_cache_policy_forwarding(tmp_path):
     command = build_command(config(tmp_path, 'HumanEval', eval_kv_cache_dtype='configured'))
     assert command[command.index('--eval_kv_cache_dtype') + 1] == 'configured'
@@ -80,13 +93,13 @@ def test_automatic_input(tmp_path):
     assert 'mode=0' in tail_log(Path(manager.status()['directory']) / 'run.log')
 
 
-@pytest.mark.parametrize('benchmark', ['HumanEval', 'LiveCodeBench', '推理自动测试', 'ToolCall'])
+@pytest.mark.parametrize('benchmark', ['HumanEval', 'HumanEval-OJ', 'LiveCodeBench', '推理自动测试', 'ToolCall'])
 def test_ui_renders_each_benchmark(benchmark):
     app = AppTest.from_file(str(ROOT / 'scripts' / 'eval_webui.py'), default_timeout=15).run()
     app.sidebar.selectbox[0].select(benchmark).run()
     assert not app.exception
     assert app.title[0].value == 'Instinct 评测工作台'
-    if benchmark in ('HumanEval', 'LiveCodeBench'):
+    if benchmark in ('HumanEval', 'HumanEval-OJ', 'LiveCodeBench'):
         app.radio[0].set_value('evaluate').run()
         assert not app.exception
         assert not any(widget.label == '模型路径' for widget in app.text_input)
