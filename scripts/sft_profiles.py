@@ -39,6 +39,21 @@ def track_sft_training_type(state, train_type):
     return train_type == 'full_sft' and previous != train_type
 
 
+def _apply_state_value(state, key, value):
+    """赋值一个可能是 widget 键的 session 项。
+
+    普通 dict（测试/流水线快照）直接赋值。Streamlit session 中，若该键的
+    widget 已在本轮实例化（例如迁移控件在 MoE 面板先于 SFT 模式切换渲染），
+    直接赋值会抛 StreamlitWidgetAlreadyInstantiatedError；此时降级为延迟
+    标记，由控件渲染处在下一轮实例化之前应用，并请求一次额外 rerun。
+    """
+    try:
+        state[key] = value
+    except Exception:
+        state['_pending_widget_' + key] = value
+        state['_rerun_after_sft_switch'] = True
+
+
 def switch_sft_profile(state, mode, *, entering=False):
     """Call before dataset/weight/training widgets render on the radio rerun."""
     if mode not in ('base', 'continue', 'resume'):
@@ -53,15 +68,18 @@ def switch_sft_profile(state, mode, *, entering=False):
     if mode != 'resume':
         profiles = state.get('sft_mode_profiles', {})
         if mode in profiles:
-            state.update({key: value for key, value in profiles[mode].items() if key in PROFILE_KEYS})
+            for key, value in profiles[mode].items():
+                if key in PROFILE_KEYS:
+                    _apply_state_value(state, key, value)
         else:
             # Retain runtime/VRAM choices, while establishing stage-specific
             # optimization defaults and a fresh base-weight selection.
-            state.update(SFT_DEFAULTS[mode])
+            for key, value in SFT_DEFAULTS[mode].items():
+                _apply_state_value(state, key, value)
             state['base_weight'] = 'auto (newest matching base)'
             state['param_dtype'] = 'fp32'
             state['activation_dtype'] = 'bfloat16'
-            state['moe_router_migration'] = False
+            _apply_state_value(state, 'moe_router_migration', False)
             for key, value in {
                 'max_seq_len': 4096, 'bucket_max_seq_len': 4096,
                 'sequence_packing': True, 'sequence_packing_mode': 'bucket',

@@ -333,7 +333,12 @@ python trainer/train_pretrain.py --from_resume 1
 Config WebUI 可直接点击 **Pause Training**；页面刷新后会重新扫描训练进程、日志、暂停状态
 与最终 checkpoint，从而区分 running / paused / success / failed。另有
 `scripts/monitor_training_shutdown.ps1` 可在训练正常退出(退出码 0)后自动关机,
-暂停(42)或失败时保持开机。
+暂停(42)或失败时保持开机。训练面板的 **训练结束后自动关机** 开关会在启动训练/流水线时
+按 PID 自动布防该看门狗（独立进程，关闭浏览器仍生效），完成后按设定的倒计时关机，
+页面内可一键取消；训练结束前取消勾选即可撤防（看门狗触发前会读取
+`trainer/webui_state.json` 的最新开关状态）。面板参数会在每次交互后自动保存到
+`trainer/webui_state.json` 并在下次打开时恢复；预设指纹一致时，用户在预设基础上
+手动修改过的值（batch_size、max_seq_len、optimizer 等）不会被预设默认值覆盖。
 
 ### 常用训练参数
 

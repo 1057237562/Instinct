@@ -59,8 +59,10 @@ python trainer/train_pretrain.py --from_resume 1
 ```
 
 ### Pause / resume (暂停/续训)
-- While training is running, the WebUI config has a "⏸ Pause Training" button: the trainer finishes its current step, saves `out/{weight}_{dim}{_moe}.pth` plus full resume state `checkpoints/{weight}_{dim}{_moe}_resume.pth`, and exits. To resume, tick "Resume from checkpoint" in the WebUI and press Start Training (or run with `--from_resume 1`).
+- While training is running, the WebUI config has a "Pause Training" button: the trainer finishes its current step, saves `out/{weight}_{dim}{_moe}.pth` plus full resume state `checkpoints/{weight}_{dim}{_moe}_resume.pth`, and exits. To resume, tick "Resume from checkpoint" in the WebUI and press Start Training (or run with `--from_resume 1`).
 - CLI equivalent: `touch checkpoints/.pause_request` pauses any running trainer at the next step boundary (same save + exit code 42); `--from_resume 1` resumes.
+- The WebUI Training panel has a "训练结束后自动关机" toggle: ticking it arms `scripts/monitor_training_shutdown.ps1` (via `-ProcessId`) whenever a training run or the pipeline starts — a detached watchdog, so shutdown still fires with the browser closed. Only exit code 0 shuts down; pause (42) and failure keep the machine on. Un-tick before the run ends to disarm (the watchdog re-reads `trainer/webui_state.json` right before scheduling). The in-page countdown can be cancelled with one click (`shutdown /a`).
+- Panel state auto-saves to `trainer/webui_state.json` on every interaction and is restored on the next open. Restores only re-apply a named preset when its definition fingerprint (`preset_fingerprint`) changed, so manual tweaks on top of a preset survive reloads.
 
 ### Inference
 ```bash

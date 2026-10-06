@@ -15,7 +15,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from eval_webui_utils import ROOT, JobManager, build_command, history, tail_log, checkpoint_config
 from eval_pass_k import calculate, parse_k
 
-st.set_page_config(page_title='Instinct Eval', page_icon='🧪', layout='wide')
+st.set_page_config(page_title='Instinct Eval', page_icon=':material/science:', layout='wide')
 
 
 @st.cache_resource
