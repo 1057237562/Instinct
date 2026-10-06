@@ -72,6 +72,12 @@ def parse_args():
                         help="Explicit output JSONL path (overrides --segment).")
     parser.add_argument("--report", type=str, default=None,
                         help="Explicit report path (overrides --segment).")
+    parser.add_argument("--delete-consumed-inputs", action="store_true",
+                        help=(
+                            "Delete each collected shard file right after it is "
+                            "consumed, to cap peak disk during the external shuffle "
+                            "(shards are re-derivable from collector reports)."
+                        ))
     return parser.parse_args()
 
 
@@ -304,6 +310,18 @@ def build(args):
                 name: stats[name]["tokens"] - before[name] for name in TARGETS
             },
         }
+        if args.delete_consumed_inputs:
+            # disk headroom: collected shards are re-derivable from the
+            # per-shard collector reports, so free them as soon as they are
+            # consumed instead of holding both inputs and shuffle chunks.
+            # BASE/CONTINUED are preserved.
+            try:
+                collected_root = Path(COLLECTED).resolve()
+                if Path(path).resolve().is_relative_to(collected_root):
+                    Path(path).unlink()
+                    input_stats[input_name]["deleted_after_consume"] = True
+            except (OSError, AttributeError) as error:
+                input_stats[input_name]["deleted_after_consume"] = f"failed: {error}"
         print(f"{input_name}: accepted={accepted:,}; "
               + ", ".join(f"{name}={stats[name]['tokens']:,}" for name in TARGETS),
               flush=True)
