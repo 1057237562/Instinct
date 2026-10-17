@@ -41,6 +41,12 @@ class CountingReader:
     def close(self) -> None:
         self.raw.close()
 
+    def __enter__(self) -> "CountingReader":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -125,12 +131,18 @@ def discover_shards(repo: str, revision: str, timeout: int) -> list[dict]:
     return shards
 
 
+def hf_endpoint() -> str:
+    # Same convention as huggingface_hub: HF_ENDPOINT overrides the Hub host
+    # (e.g. https://hf-mirror.com where the primary site is unreachable).
+    return os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+
+
 def shard_url(repo: str, revision: str, path: str) -> str:
     encoded_repo = "/".join(quote(part, safe="") for part in repo.split("/"))
     encoded_revision = quote(revision, safe="")
     encoded_path = "/".join(quote(part, safe="") for part in path.split("/"))
     return (
-        f"https://huggingface.co/datasets/{encoded_repo}/resolve/"
+        f"{hf_endpoint()}/datasets/{encoded_repo}/resolve/"
         f"{encoded_revision}/{encoded_path}"
     )
 

@@ -1,6 +1,8 @@
 import ast
+import hashlib
 import json
 import math
+import re
 from pathlib import Path
 
 import pytest
@@ -23,9 +25,10 @@ def _preset_helpers():
         elif isinstance(node, ast.FunctionDef) and node.name in {
             "compute_intermediate_size", "compute_head_dim", "calc_params",
             "_config_preset_value", "arch_diagram", "estimate_bucket_vram_plan",
+            "_preset_fingerprint",
         }:
             selected.append(node)
-    namespace = {"math": math}
+    namespace = {"math": math, "json": json, "hashlib": hashlib}
     exec(
         compile(ast.Module(body=selected, type_ignores=[]), str(SOURCE), "exec"),
         namespace,
@@ -185,3 +188,50 @@ def test_training_defaults_use_single_step_gradient_accumulation():
     source = SOURCE.read_text(encoding="utf-8")
     assert "st.session_state.accumulation_steps = 16" not in source
     assert "st.session_state.accumulation_steps = 4" not in source
+
+
+def test_preset_fingerprint_tracks_definition_changes():
+    helpers = _preset_helpers()
+    fingerprint = helpers["_preset_fingerprint"]
+    # 同一定义的指纹稳定；旧版预设名映射到现名后指纹一致。
+    assert fingerprint("Instinct V2") == fingerprint("instinct-3")
+    assert fingerprint("Instinct V2") != fingerprint("Instinct V2 MoE")
+    # 非预设名（Custom / 未知）没有指纹，恢复时总会重新套用默认值。
+    assert fingerprint("Custom") == ""
+    assert fingerprint("missing-preset") == ""
+    assert fingerprint(None) == ""
+
+
+def test_webui_state_restore_keeps_tweaks_for_unchanged_presets():
+    """指纹一致时不得重新套用预设，否则用户手动修改每次刷新都被冲掉。"""
+    source = SOURCE.read_text(encoding="utf-8")
+    assert 'saved_state.get("preset_fingerprint") != _preset_fingerprint(restored_preset)' in source
+    assert 'init_from_preset(restored_preset)' in source
+
+
+def test_training_metrics_parse_only_latest_resume_segment():
+    """续训向同一日志追加新一轮（各自 `# epochs:` 开头），两轮的 global step
+    都从 1 重新计数；图表若混用整份日志会画成锯齿，必须只解析最后一轮。"""
+    module = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    fn = [node for node in module.body
+          if isinstance(node, ast.FunctionDef) and node.name == "parse_training_metrics"]
+    namespace = {"re": re}
+    exec(compile(ast.Module(body=fn, type_ignores=[]), str(SOURCE), "exec"), namespace)
+    parse = namespace["parse_training_metrics"]
+
+    resumed_log = (
+        "# torch.compile (Triton): ON\n# epochs: 1\n"
+        "Epoch:[1/1](1/2) loss: 3.5 lr: 0.0005\n"
+        "Epoch:[1/1](2/2) loss: 3.4 lr: 0.0004 checkpoint_saved: 1\n"
+        "# torch.compile (Triton): ON\n# epochs: 2\n"
+        "Epoch:[1/2](1/2) loss: 3.0 lr: 0.0003\n"
+        "Epoch:[2/2](2/2) loss: 2.8 lr: 0.0001 checkpoint_saved: 1\n"
+    )
+    rows = parse(resumed_log)
+    # 续训前的一段不再混入；global step 跨 epoch 连续（ep2 的第 2 步 = 全局第 4 步）。
+    assert [row["_global_step"] for row in rows] == [1, 4]
+    assert [row["loss"] for row in rows] == [3.0, 2.8]
+
+    # 没有 run 分段头的旧日志仍按整份解析。
+    assert len(parse("Epoch:[1/1](1/1) loss: 1.0 lr: 0.1\n")) == 1
+    assert parse("no metrics here\n") == []

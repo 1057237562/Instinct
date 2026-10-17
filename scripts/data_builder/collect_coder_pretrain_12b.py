@@ -34,6 +34,9 @@ from scripts.data_builder.collect_arxiv_pretrain import USER_AGENT
 
 
 OUT = ROOT / "dataset/coder_pretrain_12b"
+ACTIVE_OUT = OUT  # overridable via --out-dir so a follow-up 12B batch can
+                  # collect the NEXT upstream shards without colliding with
+                  # the first batch's reports
 TOKENIZER = ROOT / "model"
 MAX_TOKENS = 4096
 TARGETS = {
@@ -94,7 +97,27 @@ def parse_args():
     parser.add_argument("--worker-index", type=int, default=0)
     parser.add_argument("--max-shards", type=int, default=0,
                         help="Per-component debug limit; 0 means no limit.")
+    parser.add_argument("--segment", type=int, default=1,
+                        help=(
+                            "Which consecutive batch of upstream shards to collect "
+                            "(1 = the default batch from the start; N>1 = skip every "
+                            "shard consumed by segments 1..N-1 and continue after them). "
+                            "Segment N>1 defaults its output root to "
+                            "dataset/coder_pretrain_12b_seg{N}."
+                        ))
+    parser.add_argument("--out-dir", type=str, default=None,
+                        help="Output root override (default is segment-derived).")
+    parser.add_argument("--skip-reports-from", action="append", default=None,
+                        help=(
+                            "Additional completed run directory whose per-shard "
+                            "reports mark upstream shards to skip (repeatable)."
+                        ))
     return parser.parse_args()
+
+
+def segment_out_root(segment):
+    """Segment 1 keeps the historical path; later segments get suffixed dirs."""
+    return OUT if segment == 1 else ROOT / f"dataset/coder_pretrain_12b_seg{segment}"
 
 
 def clean_text(text, minimum=200, maximum=200_000):
@@ -142,7 +165,7 @@ def list_source_files(component):
 
 
 def completed_state(component):
-    reports_dir = OUT / component / "reports"
+    reports_dir = ACTIVE_OUT / component / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     completed, tokens = set(), 0
     for path in reports_dir.glob("*.json"):
@@ -257,17 +280,37 @@ def parquet_rows(path):
 
 
 def direct_dataset_download(repo, revision, upstream_file, raw_dir, timeout):
-    """Download a Hub file with an atomic, HTTP-Range-resumable partial file."""
+    """Download a Hub file with an atomic, HTTP-Range-resumable partial file.
+
+    Endpoints are tried in order: HF_ENDPOINT (primary) then
+    HF_FALLBACK_ENDPOINT (default hf-mirror), sharing one resumable partial.
+    """
     destination = raw_dir / upstream_file
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_file():
         return destination
     partial = destination.with_suffix(destination.suffix + ".part")
-    existing = partial.stat().st_size if partial.exists() else 0
-    url = (
-        f"https://huggingface.co/datasets/{repo}/resolve/{revision}/"
-        f"{quote(upstream_file, safe='/')}?download=true"
-    )
+    endpoints = [os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")]
+    fallback = os.environ.get("HF_FALLBACK_ENDPOINT", "").rstrip("/")
+    if fallback and fallback not in endpoints:
+        endpoints.append(fallback)
+    last_error = None
+    for endpoint in endpoints:
+        # re-read the partial size: a failed attempt may have extended it
+        existing = partial.stat().st_size if partial.exists() else 0
+        url = (
+            f"{endpoint}/datasets/{repo}/resolve/{revision}/"
+            f"{quote(upstream_file, safe='/')}?download=true"
+        )
+        try:
+            return _download_to(url, partial, existing, timeout, upstream_file, destination)
+        except (EOFError, OSError, ConnectionError, TimeoutError) as error:
+            last_error = error
+            continue
+    raise last_error if last_error else RuntimeError("no endpoint attempted")
+
+
+def _download_to(url, partial, existing, timeout, upstream_file, destination):
     headers = {"User-Agent": USER_AGENT}
     if existing:
         headers["Range"] = f"bytes={existing}-"
@@ -307,7 +350,7 @@ def direct_dataset_download(repo, revision, upstream_file, raw_dir, timeout):
 
 def collect_shard(component, upstream_file, tokenizer, remaining, timeout):
     source = SOURCES[component]
-    component_dir = OUT / component
+    component_dir = ACTIVE_OUT / component
     shards_dir = component_dir / "shards"
     reports_dir = component_dir / "reports"
     raw_dir = component_dir / "raw"
@@ -367,9 +410,71 @@ def collect_shard(component, upstream_file, tokenizer, remaining, timeout):
     return report
 
 
+def skip_roots(args):
+    """Directories whose per-shard reports define earlier-consumed shards."""
+    roots = []
+    if args.segment > 1:
+        for prior in range(1, args.segment):
+            prior_dir = segment_out_root(prior)
+            if not prior_dir.is_dir():
+                raise FileNotFoundError(
+                    f"segment {args.segment} requires prior segment directory {prior_dir}"
+                )
+            roots.append(prior_dir)
+    for extra in args.skip_reports_from or []:
+        path = Path(extra)
+        if not path.is_dir():
+            raise FileNotFoundError(f"--skip-reports-from {path} is not a directory")
+        roots.append(path)
+    return roots
+
+
+def skipped_upstream_files(component, args):
+    skip = set()
+    for root in skip_roots(args):
+        reports_dir = root / component / "reports"
+        if not reports_dir.is_dir():
+            continue
+        for path in reports_dir.glob("*.json"):
+            report = json.loads(path.read_text(encoding="utf-8"))
+            skip.add(report["upstream_file"])
+    return skip
+
+
+def verify_prior_segments_complete(component, args):
+    """Chained prior segments must have reached the component target.
+
+    Skipping the shards of an unfinished segment would let this run consume
+    shards a prior segment still intends to process, so a short prior segment
+    is a hard error; explicit --skip-reports-from dirs are exempt.
+    """
+    if args.segment <= 1:
+        return
+    for prior in range(1, args.segment):
+        reports_dir = segment_out_root(prior) / component / "reports"
+        tokens = 0
+        if reports_dir.is_dir():
+            for path in reports_dir.glob("*.json"):
+                tokens += int(json.loads(path.read_text(encoding="utf-8"))["tokens"])
+        if tokens < TARGETS[component] - MAX_TOKENS:
+            raise RuntimeError(
+                f"segment {args.segment} requires segment {prior} to be complete for "
+                f"{component}: {tokens:,}/{TARGETS[component]:,} tokens collected"
+            )
+
+
 def collect_component(component, args, tokenizer):
     completed, total_tokens = completed_state(component)
+    verify_prior_segments_complete(component, args)
     files = list_source_files(component)
+    skip = skipped_upstream_files(component, args)
+    if skip:
+        before = len(files)
+        files = [name for name in files if name not in skip]
+        print(
+            f"[{component}] segment {args.segment}: skipping {before - len(files)} "
+            f"upstream shards already consumed by earlier segments", flush=True,
+        )
     files = files[args.worker_index::args.shard_workers]
     processed_now = 0
     print(f"[{component}] worker={args.worker_index}/{args.shard_workers} "
@@ -420,13 +525,22 @@ def collect_component(component, args, tokenizer):
 def main():
     args = parse_args()
     if (args.timeout < 1 or args.max_shards < 0 or args.retries < 1
-            or args.shard_workers < 1
+            or args.shard_workers < 1 or args.segment < 1
             or not 0 <= args.worker_index < args.shard_workers):
         raise ValueError(
             "timeout/retries/shard-workers must be positive, max-shards >= 0, "
-            "and worker-index must be within shard-workers"
+            "segment >= 1, and worker-index must be within shard-workers"
         )
-    OUT.mkdir(parents=True, exist_ok=True)
+    global ACTIVE_OUT
+    ACTIVE_OUT = (Path(args.out_dir).resolve() if args.out_dir
+                  else segment_out_root(args.segment))
+    roots = skip_roots(args)  # validated eagerly so a bad chain fails fast
+    print(
+        f"[segment {args.segment}] output root {ACTIVE_OUT}; "
+        f"skipping shards from {len(roots)} prior run(s)",
+        flush=True,
+    )
+    ACTIVE_OUT.mkdir(parents=True, exist_ok=True)
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER, local_files_only=True).backend_tokenizer
     components = list(TARGETS) if args.component == "all" else [args.component]
     summary = {}

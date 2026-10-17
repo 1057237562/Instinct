@@ -1,0 +1,67 @@
+# data_relay 配置。首次部署：复制为 config.toml 后填写 console_token。
+
+[server]
+# 监听地址；公网部署建议只绑定内网或在防火墙限制来源
+listen = "0.0.0.0:7800"
+# 所有 /api 请求必须携带的令牌（WebUI 首页填入同一令牌）
+api_token = "change-me-please"
+# 任务工作区（脚本、日志、下载数据）
+data_dir = "relay_data"
+
+[runner]
+# .py 脚本使用的解释器（部署服务器上建议 python3；Windows 开发机可改 python）
+python = "python3"
+# 注入脚本进程的额外环境变量，例如 HF 镜像
+[runner.env]
+HF_ENDPOINT = "https://hf-mirror.com"
+
+[autodl]
+# console  = www.autodl.com 控制台内部 API，支持无卡模式开机（推荐）
+# pro      = api.autodl.com 官方开发者 API（不支持无卡开机，只能查状态/关机/传数据）
+api_mode = "console"
+
+# console 模式：浏览器登录 autodl.com 控制台 -> F12 -> Application ->
+# Local Storage -> https://www.autodl.com -> 键 `token` 的值（整串复制到这里）
+console_token = ""
+
+# pro 模式：控制台 -> 设置 -> 开发者Token
+dev_token = ""
+
+# 实例 ID（如 p1-xxxxxxxx / pro-xxxxxxxx）。一般留空：在 WebUI 实例面板下拉选择即可（选择后自动写回此处）；
+# 单实例账号留空会自动选择
+instance_uuid = ""
+
+# SSH 密码覆盖（留空则用实例快照返回的 root_password）
+ssh_password = ""
+ssh_user = "root"
+
+# 新任务的默认上传通道：sftp（大文件/断点续传）或 jupyter（小文件备用）
+upload_mode = "pull"
+# pull 通道基础地址：本机对外可达地址（实例经它多连接拉取数据），如 http://1.2.3.4:7800
+pull_base_url = ""
+
+# 实例上的托管目录：本工具上传与清理都只发生在它下面，不会碰其他数据
+remote_root = "/root/autodl-tmp/relay_uploads"
+
+# 下载完成后自动无卡模式开机
+boot_no_gpu = true
+# 上传完成后自动关机（无卡模式约 0.1 元/时）
+power_off_after_upload = true
+# 仅 pro 模式有意义：允许用有卡模式开机（会产生 GPU 费用）
+allow_gpu_boot = false
+# 等待实例进入 running 的超时（秒）
+boot_timeout_secs = 900
+# 首次连接记录主机指纹；之后校验。公网环境建议 true
+strict_host_key = false
+
+[disk]
+# 数据盘用量超过 total*ratio 时拒绝继续上传
+max_used_ratio = 0.92
+# 限额线以下再保留的空间（GiB）
+reserved_gb = 2.0
+# 预检超限时自动删除最旧的托管任务目录腾挪空间
+auto_clean = true
+# 永远保留最新的 N 个托管任务目录（自动清理不会碰它们）
+keep_last_uploads = 3
+# jupyter 上传模式的单文件上限（MB）
+jupyter_max_file_mb = 64

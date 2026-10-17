@@ -1,0 +1,29 @@
+[package]
+name = "data_relay"
+version = "0.1.0"
+edition = "2021"
+description = "AutoDL data relay: run uploaded download scripts, boot AutoDL instance in no-GPU mode, upload results, and police the data disk quota"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "sync", "time", "signal", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-webpki-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+walkdir = "2"
+percent-encoding = "2"
+russh = "0.45"
+async-trait = "0.1"
+russh-sftp = "2"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs"] }
+
+[profile.release]
+strip = true
+lto = "thin"

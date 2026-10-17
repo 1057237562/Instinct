@@ -46,7 +46,7 @@ def snapshot(state, model, trainer):
     return json.loads(json.dumps(dict(name=trainer, trainer=trainer, model=model, args=args)))
 
 
-def render(st, model, training_active):
+def render(st, model, training_active, arm_shutdown_monitor=None):
     sys.path.insert(0, str(ROOT)) if str(ROOT) not in sys.path else None
     from trainer.training_pipeline import validate
 
@@ -63,7 +63,8 @@ def render(st, model, training_active):
                 st.error(str(exc))
         for name in ('pretrain', 'full_sft'):
             if name in stages:
-                st.write(f"✓ {name} · {stages[name]['args']['epochs']} epochs · {stages[name]['args']['data_path']}")
+                st.write(f":material/check_circle: {name} · {stages[name]['args']['epochs']} epochs · "
+                     f"{stages[name]['args']['data_path']}")
         plan = {'stages': [dict(stages[name]) for name in ('pretrain', 'full_sft') if name in stages]}
         if 'full_sft' in stages:
             plan['stages'][-1]['input_stage'] = 'pretrain'
@@ -100,6 +101,8 @@ def render(st, model, training_active):
                          '--plan', str(plan_path), '--run-dir', str(run_dir)], cwd=ROOT,
                         env=dict(os.environ, PYTHONUTF8='1'), stdout=log, stderr=subprocess.STDOUT,
                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                if arm_shutdown_monitor is not None:
+                    arm_shutdown_monitor(st.session_state['_pipeline_proc'].pid)
                 st.session_state['pipeline_run_dir'] = str(run_dir)
                 st.rerun()
             except (ValueError, OSError) as exc:

@@ -1,0 +1,9 @@
+# Instinct WebUI（config_webui / web_demo / eval_webui）均为深色视觉设计。
+# 不固定 base=dark 时，Streamlit 会跟随系统 prefers-color-scheme：
+# 浅色系统下会出现白侧边栏 + 深主区的割裂样式。
+[theme]
+base = "dark"
+primaryColor = "#3b82f6"
+backgroundColor = "#0f172a"
+secondaryBackgroundColor = "#1a2332"
+textColor = "#e2e8f0"

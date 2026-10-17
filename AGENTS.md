@@ -14,6 +14,8 @@ dataset/        # Dataset corpora, data files, provenance, and audit reports
 scripts/data_loader/ # Training dataset loaders, source resolution, packing, and caching
 scripts/data_builder/ # Offline dataset collection, generation, cleaning, and audit utilities
 dataset_compiler/  # Rust tool: compile JSONL corpora into Parquet (see its README.md)
+data_relay/        # Rust relay server: run uploaded download scripts, auto-boot AutoDL in
+                   # no-GPU mode, upload data (SFTP/Jupyter), police data-disk quota (see its README.md)
 scripts/        # Inference, API server, WebUI, model conversion, training launchers
 eval_llm.py     # CLI inference script
 eval_*.py       # Benchmark harnesses (gsm8k, humaneval, pass_k, batch, report); artifacts land in eval/
@@ -57,8 +59,10 @@ python trainer/train_pretrain.py --from_resume 1
 ```
 
 ### Pause / resume (暂停/续训)
-- While training is running, the WebUI config has a "⏸ Pause Training" button: the trainer finishes its current step, saves `out/{weight}_{dim}{_moe}.pth` plus full resume state `checkpoints/{weight}_{dim}{_moe}_resume.pth`, and exits. To resume, tick "Resume from checkpoint" in the WebUI and press Start Training (or run with `--from_resume 1`).
+- While training is running, the WebUI config has a "Pause Training" button: the trainer finishes its current step, saves `out/{weight}_{dim}{_moe}.pth` plus full resume state `checkpoints/{weight}_{dim}{_moe}_resume.pth`, and exits. To resume, tick "Resume from checkpoint" in the WebUI and press Start Training (or run with `--from_resume 1`).
 - CLI equivalent: `touch checkpoints/.pause_request` pauses any running trainer at the next step boundary (same save + exit code 42); `--from_resume 1` resumes.
+- The WebUI Training panel has a "训练结束后自动关机" toggle: ticking it arms `scripts/monitor_training_shutdown.ps1` (via `-ProcessId`) whenever a training run or the pipeline starts — a detached watchdog, so shutdown still fires with the browser closed. Only exit code 0 shuts down; pause (42) and failure keep the machine on. Un-tick before the run ends to disarm (the watchdog re-reads `trainer/webui_state.json` right before scheduling). The in-page countdown can be cancelled with one click (`shutdown /a`).
+- Panel state auto-saves to `trainer/webui_state.json` on every interaction and is restored on the next open. Restores only re-apply a named preset when its definition fingerprint (`preset_fingerprint`) changed, so manual tweaks on top of a preset survive reloads.
 
 ### Inference
 ```bash
@@ -117,6 +121,13 @@ cd scripts && python serve_openai_api.py
 # ⚠️ Must copy model folder into ./scripts/ first (e.g. cp -r instinct-3 ./scripts/instinct-3)
 cd scripts && streamlit run web_demo.py
 ```
+
+HTTPS (Chat WebUI): `start_chat_webui.bat --https` from the repo root serves
+over TLS using a self-signed pair auto-generated at `certs/chat_webui.crt|.key`
+by `scripts/https_cert.py` (`cryptography` backend, openssl fallback). The same
+effect manually: add `--server.sslCertFile <cert> --server.sslKeyFile <key>` to
+any `streamlit run`. Self-signed = browser warning; local/trusted-intranet use
+only (Streamlit's SSL option is not production-audited).
 
 ### Datasets: JSONL or Parquet
 Every trainer accepts either format on `--data_path`; `scripts/data_loader/source_format.py`

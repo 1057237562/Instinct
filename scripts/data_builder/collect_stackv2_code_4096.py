@@ -71,9 +71,19 @@ def main() -> None:
                     cumulative = target * (shard_index + 1) // len(shard_numbers)
                     path = f"stack-edu-{shard_number:04d}.json.gz"
                     scanned = 0
-                    request = Request(shard_url(REPO, REVISION, path), headers={"User-Agent": USER_AGENT})
-                    with urlopen(request, timeout=args.timeout) as response:
-                        counted = CountingReader(response)
+                    # Reuse an already-downloaded upstream shard when available
+                    # (the 12B supplement collector keeps raws under its raw/),
+                    # and only stream when no local copy exists.
+                    raw_dir = Path(os.environ.get("INSTINCT_STACKV2_RAW_DIR")
+                                   or Path(__file__).resolve().parents[2] / "dataset/coder_pretrain_12b/code/raw")
+                    local_raw = raw_dir / path
+                    if local_raw.is_file():
+                        source = CountingReader(local_raw.open("rb"))
+                    else:
+                        request = Request(shard_url(REPO, REVISION, path), headers={"User-Agent": USER_AGENT})
+                        source = CountingReader(urlopen(request, timeout=args.timeout))
+                    with source as response:
+                        counted = response
                         with gzip.GzipFile(fileobj=counted, mode="rb") as archive:
                             for raw_line in archive:
                                 scanned += 1

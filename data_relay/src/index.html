@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>data_relay · 数据下载中继</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #171d24; --panel2: #1d252e; --line: #2a3441;
+    --text: #dbe4ee; --dim: #7d8b9c; --acc: #4da3ff; --ok: #3fb96f;
+    --warn: #e8a13c; --err: #e05b5b; --mono: ui-monospace, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.6 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 20px 16px 60px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          padding: 16px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .row > * { flex-shrink: 0; }
+  label.f { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); }
+  input, select, button { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+         border-radius: 6px; padding: 7px 10px; font-size: 13px; outline: none; }
+  input:focus, select:focus { border-color: var(--acc); }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--acc); color: var(--acc); }
+  button.pri { background: var(--acc); color: #06121f; border-color: var(--acc); font-weight: 600; }
+  button.danger:hover { border-color: var(--err); color: var(--err); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  td.id, .mono { font-family: var(--mono); font-size: 12px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px;
+           border: 1px solid var(--line); }
+  .b-queued { color: var(--dim); } .b-running, .b-uploading { color: var(--acc); border-color: var(--acc); }
+  .b-download_done, .b-uploaded { color: var(--warn); } .b-done { color: var(--ok); border-color: var(--ok); }
+  .b-failed { color: var(--err); border-color: var(--err); } .b-cancelled { color: var(--dim); }
+  .bar { height: 6px; background: var(--panel2); border-radius: 4px; overflow: hidden; min-width: 110px; }
+  .bar > i { display: block; height: 100%; background: var(--acc); }
+  pre#log { background: #0b0f14; border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+            max-height: 380px; overflow: auto; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+  .diskbar { height: 14px; border-radius: 7px; background: var(--panel2); overflow: hidden; margin: 8px 0 4px; }
+  .diskbar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--ok), var(--warn)); }
+  .muted { color: var(--dim); }
+  .ok-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--err); display: inline-block; }
+  .ok-dot.on { background: var(--ok); }
+  a { color: var(--acc); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 860px) { .grid2 { grid-template-columns: 1fr; } }
+  .acts button { padding: 3px 8px; font-size: 12px; margin-right: 4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>⇄ data_relay · 数据下载中继</h1>
+  <div class="sub">上传下载脚本 → 自动执行 → AutoDL 无卡开机 → 数据上传（SFTP/Jupyter）→ 数据盘配额管理 → 自动关机</div>
+
+  <div class="card">
+    <div class="row">
+      <label class="f">访问令牌<input id="token" type="password" style="width:260px" placeholder="config.toml 里的 api_token"></label>
+      <button class="pri" onclick="saveToken()">保存令牌</button>
+      <span id="connState" class="muted"><span class="ok-dot"></span> 未连接</span>
+      <span style="flex:1"></span>
+      <button onclick="refreshAll()">刷新全部</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>AutoDL 控制台 Token</h2>
+    <div id="tokenStatus" class="muted" style="font-size:12px">加载中…</div>
+    <div class="muted" style="font-size:12px;margin-top:10px;margin-bottom:4px">方式一：微信扫码（推荐 · 免密码 · 无验证码）</div>
+    <div class="row">
+      <button class="pri" onclick="wxLoginStart()">微信扫码登录</button>
+      <span id="wxHint" class="muted" style="font-size:12px">扫码确认后自动保存 token 并切换 console 模式</span>
+    </div>
+    <div id="wxBox" style="display:none;text-align:center;margin-top:8px">
+      <img id="wxQr" alt="微信二维码" style="width:200px;border:6px solid #fff;border-radius:8px">
+      <div id="wxState" class="muted" style="font-size:12px;margin-top:6px">等待扫码…</div>
+    </div>
+    <div class="muted" style="font-size:12px;margin-top:14px;margin-bottom:4px">方式二：手动粘贴 token（浏览器 Local Storage 的 token 值）</div>
+    <div class="row">
+      <label class="f">整串 token<input id="newToken" style="width:420px" placeholder="eyJ..."></label>
+      <button onclick="saveConsoleToken()">保存并生效</button>
+    </div>
+    <details style="margin-top:14px">
+      <summary class="muted" style="font-size:12px;cursor:pointer">自动续期（Tampermonkey 用户脚本 / 书签）</summary>
+      <div class="muted" style="font-size:12px;margin-top:8px">
+        装 <a href="https://www.tampermonkey.net/" target="_blank">Tampermonkey</a> → 新建脚本 → 粘贴以下内容保存。
+        之后每次登录/打开 AutoDL 控制台都会自动把新 token 推送到本中继：
+        <pre id="userscript" style="white-space:pre-wrap;background:#0b0f14;border:1px solid var(--line);border-radius:6px;padding:8px;margin:6px 0;font-family:var(--mono);font-size:11px"></pre>
+        <button onclick="copyText('#userscript')">复制用户脚本</button>
+        <span style="margin-left:8px">无扩展就用书签（登录 autodl.com 后点一次）：</span>
+        <pre id="bookmarklet" style="white-space:pre-wrap;background:#0b0f14;border:1px solid var(--line);border-radius:6px;padding:8px;margin:6px 0;font-family:var(--mono);font-size:11px;word-break:break-all"></pre>
+        <button onclick="copyText('#bookmarklet')">复制书签地址</button>
+      </div>
+    </details>
+  </div>
+
+  <div class="grid2">
+    <div>
+      <div class="card">
+        <h2>① 上传下载脚本</h2>
+        <form id="taskForm" onsubmit="return submitTask(event)">
+          <div class="row" style="margin-bottom:10px">
+            <label class="f">脚本 (.py / .sh)<input type="file" id="script" required accept=".py,.sh"></label>
+            <label class="f">任务名<input id="name" style="width:140px" placeholder="可选"></label>
+          </div>
+          <div class="row" style="margin-bottom:10px">
+            <label class="f">输出目录（相对脚本）<input id="outputDir" style="width:120px" value="out"></label>
+            <label class="f">上传通道
+              <select id="uploadMode">
+                <option value="pull">pull 高速通道（实例多连接拉取，推荐）</option>
+                <option value="sftp">sftp（备用：SSH 代理直传）</option>
+                <option value="jupyter">jupyter（小文件）</option>
+              </select></label>
+          </div>
+          <div class="row">
+            <label><input type="checkbox" id="autoUpload" checked> 完成后自动无卡开机并上传</label>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <button class="pri" type="submit">提交并开始下载</button>
+            <span class="muted">脚本在中继服务器执行（下载+清洗），产物写 out/；或写 upload_paths.txt（每行一个相对路径）精确声明上传哪些清洗产物</span>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>AutoDL 实例</h2>
+        <div class="row" style="margin-bottom:8px">
+          <label class="f">选择实例
+            <select id="instSelect" style="width:240px" onchange="selectInstance(this.value)">
+              <option value="">加载中…</option>
+            </select>
+          </label>
+          <button onclick="loadInstances()">刷新列表</button>
+        </div>
+        <div id="instBox" class="muted">加载中…</div>
+        <div id="diskBox"></div>
+        <div class="row" style="margin-top:12px">
+          <button onclick="act('/api/autodl/boot_no_gpu')">无卡模式开机</button>
+          <button class="danger" onclick="act('/api/autodl/power_off')">关机</button>
+          <button onclick="loadRemote()">查看托管目录</button>
+        </div>
+        <div id="remoteBox" style="margin-top:10px"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card" style="min-height:200px">
+        <h2>任务日志 <span id="logTitle" class="muted" style="font-weight:400"></span>
+          <span style="flex:1"></span>
+          <label class="muted" style="font-size:12px"><input type="checkbox" id="autoLog" checked> 自动刷新</label>
+        </h2>
+        <pre id="log">(选择任务后显示日志)</pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>② 下载任务</h2>
+    <table>
+      <thead><tr><th>任务</th><th>状态</th><th>上传进度</th><th>远端路径</th><th>创建时间</th><th>操作</th></tr></thead>
+      <tbody id="taskRows"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmtB = n => n==null ? '—' : (n<1024?n+' B':n<1048576?(n/1024).toFixed(1)+' KB'
+  : n<1073741824?(n/1048576).toFixed(1)+' MB':(n/1073741824).toFixed(2)+' GB');
+const fmtT = s => s ? new Date(s*1000).toLocaleString() : '—';
+
+function getToken(){ return localStorage.getItem('relay_token') || ''; }
+function saveToken(){ localStorage.setItem('relay_token', $('#token').value.trim()); refreshAll(); }
+$('#token').value = getToken();
+
+async function api(path, opts={}) {
+  const headers = Object.assign({'Authorization': getToken()}, opts.headers||{});
+  const resp = await fetch(path, Object.assign({}, opts, {headers}));
+  if (resp.status === 401) { setConn(false, '令牌无效'); throw new Error('401'); }
+  const ct = resp.headers.get('content-type') || '';
+  const body = ct.includes('json') ? await resp.json() : await resp.text();
+  if (!resp.ok) throw new Error((body && body.error) || resp.status);
+  return body;
+}
+function setConn(on, text){
+  $('#connState').innerHTML = `<span class="ok-dot${on?' on':''}"></span> ${text}`;
+}
+
+let curLogTask = null;
+
+async function refreshAll(){
+  try {
+    await Promise.all([loadTasks(), loadInst(), loadTokenStatus(), loadInstances()]);
+    setConn(true, '已连接');
+  } catch(e) {
+    setConn(false, e.message==='401' ? '令牌无效' : '连接失败');
+  }
+}
+
+async function loadTasks(){
+  const data = await api('/api/tasks');
+  const rows = data.tasks.map(t => {
+    const pct = t.upload_total_bytes ? Math.min(100, Math.round(t.upload_done_bytes/t.upload_total_bytes*100)) : 0;
+    const err = t.error ? `<div class="muted" style="font-size:12px">${t.error}</div>` : '';
+    return `<tr>
+      <td><span class="mono">${t.id}</span><br>${t.name}${err}</td>
+      <td><span class="badge b-${t.status}">${t.status}</span>${t.exit_code!=null?`<br><span class="muted">exit ${t.exit_code}</span>`:''}</td>
+      <td>${t.upload_mode}<div class="bar"><i style="width:${pct}%"></i></div>
+          <span class="muted" style="font-size:11px">${fmtB(t.upload_done_bytes)} / ${fmtB(t.upload_total_bytes)}</span></td>
+      <td class="mono" style="font-size:11px">${t.remote_path||'—'}</td>
+      <td class="muted" style="font-size:12px">${fmtT(t.created_at)}</td>
+      <td class="acts">
+        <button onclick="showLog('${t.id}')">日志</button>
+        <button onclick="run('${t.id}','start')">重跑</button>
+        <button onclick="run('${t.id}','upload')">上传</button>
+        <button class="danger" onclick="run('${t.id}','cancel')">取消</button>
+        <button class="danger" onclick="del('${t.id}')">删除</button>
+      </td></tr>`;
+  });
+  $('#taskRows').innerHTML = rows.join('') || '<tr><td colspan="6" class="muted">暂无任务</td></tr>';
+}
+
+async function submitTask(ev){
+  ev.preventDefault();
+  const fd = new FormData();
+  const f = $('#script').files[0];
+  if (!f) return false;
+  fd.append('script', f, f.name);
+  fd.append('name', $('#name').value);
+  fd.append('output_dir', $('#outputDir').value || 'out');
+  fd.append('auto_upload', $('#autoUpload').checked ? 'true' : 'false');
+  fd.append('upload_mode', $('#uploadMode').value);
+  fd.append('autostart', 'true');
+  try {
+    await api('/api/tasks', {method:'POST', body: fd});
+    $('#script').value = ''; $('#name').value = '';
+    loadTasks();
+  } catch(e) { alert('提交失败: ' + e.message); }
+  return false;
+}
+
+async function showLog(id){
+  curLogTask = id;
+  $('#logTitle').textContent = '· ' + id;
+  try { $('#log').textContent = await api(`/api/tasks/${id}/log?bytes=131072`); }
+  catch(e) { $('#log').textContent = '(日志读取失败)'; }
+  $('#log').scrollTop = $('#log').scrollHeight;
+}
+setInterval(() => { if (curLogTask && $('#autoLog').checked) showLog(curLogTask); }, 3000);
+
+async function run(id, action){
+  try { await api(`/api/tasks/${id}/${action}`, {method:'POST'}); loadTasks(); }
+  catch(e) { alert(e.message); }
+}
+async function del(id){
+  if (!confirm('删除任务 ' + id + ' 及其本地数据？远端已上传内容不受影响。')) return;
+  try { await api(`/api/tasks/${id}`, {method:'DELETE'}); loadTasks(); }
+  catch(e) { alert(e.message); }
+}
+
+async function loadInstances(){
+  const sel = $('#instSelect');
+  try {
+    const d = await api('/api/autodl/instances');
+    if (!d.instances || !d.instances.length) {
+      sel.innerHTML = '<option value="">账号下无实例（api_mode=pro 时仅显示 Pro 实例）</option>';
+      return;
+    }
+    sel.innerHTML = d.instances.map(i => {
+      const auto = !d.selected && d.instances.length === 1;
+      const picked = i.selected || auto;
+      return `<option value="${i.uuid}" ${picked ? 'selected' : ''}>${i.name || i.uuid} · ${i.status}${auto ? '（自动）' : ''}</option>`;
+    }).join('');
+  } catch(e) {
+    sel.innerHTML = `<option value="">列表获取失败：${e.message}</option>`;
+  }
+}
+async function selectInstance(uuid){
+  if (!uuid) return;
+  try {
+    await api('/api/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({instance_uuid: uuid})});
+    loadInst();
+  } catch(e) { alert('切换实例失败: ' + e.message); }
+}
+async function loadInst(){
+  try {
+    const s = await api('/api/autodl/status');
+    const mode = s.start_mode==='gpu' ? '有卡' : (s.start_mode||'—');
+    $('#instBox').innerHTML =
+      `<b>${s.name||s.uuid}</b> <span class="badge b-${s.status==='running'?'done':'queued'}">${s.status}</span>
+       <div class="muted" style="font-size:12px">uuid: <span class="mono">${s.uuid}</span> · 开机模式: ${mode}
+       · 计费: ${s.charge_type||'—'} · Jupyter: ${s.jupyter_available?'✓':'—'}</div>`;
+    const used = s.data_disk_used, total = s.data_disk_total;
+    if (total) {
+      const pct = Math.round(used/total*100);
+      $('#diskBox').innerHTML =
+        `<div class="diskbar"><i style="width:${pct}%"></i></div>
+         <span class="muted" style="font-size:12px">数据盘(API) ${fmtB(used)} / ${fmtB(total)}（${pct}%）</span>`;
+    } else { $('#diskBox').innerHTML = '<span class="muted" style="font-size:12px">数据盘用量需开机后经 SFTP 获取</span>'; }
+  } catch(e) { $('#instBox').textContent = '获取实例状态失败: ' + e.message; $('#diskBox').innerHTML=''; }
+}
+
+async function loadRemote(){
+  const box = $('#remoteBox');
+  box.textContent = '加载中…';
+  try {
+    const d = await api('/api/autodl/remote');
+    const rows = (d.entries||[]).map(e =>
+      `<tr><td class="mono">${e.name}</td><td class="muted">${fmtB(e.bytes)}</td>
+       <td class="acts"><button class="danger" onclick="rmRemote('${e.name}')">删除</button></td></tr>`).join('');
+    box.innerHTML = rows
+      ? `<div class="muted" style="font-size:12px;margin-bottom:4px">托管根：${d.remote_root}</div>
+         <table><tbody>${rows}</tbody></table>`
+      : `托管根 ${d.remote_root} 为空`;
+  } catch(e) { box.textContent = e.message; }
+}
+async function rmRemote(name){
+  if (!confirm('删除远端托管目录 ' + name + '？不可恢复。')) return;
+  try { await api('/api/autodl/remote?path=' + encodeURIComponent(name), {method:'DELETE'}); loadRemote(); loadInst(); }
+  catch(e) { alert(e.message); }
+}
+
+async function act(path){
+  try {
+    const r = await api(path, {method:'POST'});
+    alert(r.message || 'OK');
+    setTimeout(refreshAll, 1500);
+  } catch(e) { alert(e.message); }
+}
+
+let wxPollTimer = null;
+async function wxLoginStart(){
+  try {
+    const d = await api('/api/autodl/wx_start', {method:'POST'});
+    if (!d || !d.uuid) { alert('获取二维码失败'); return; }
+    $('#wxQr').src = d.qrcode_url;
+    $('#wxBox').style.display = 'block';
+    $('#wxState').textContent = '请用微信扫码并在手机上确认';
+    clearInterval(wxPollTimer);
+    wxPollTimer = setInterval(() => wxPoll(d.uuid), 2000);
+  } catch(e) { alert('获取二维码失败: ' + e.message); }
+}
+async function wxPoll(uuid){
+  try {
+    const r = await api('/api/autodl/wx_poll', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({uuid})});
+    if (r.ok || r.status === 'confirmed') {
+      clearInterval(wxPollTimer);
+      $('#wxBox').style.display = 'none';
+      alert(r.message || '登录成功');
+      loadTokenStatus(); loadInst();
+      return;
+    }
+    if (r.status === 'scanned') $('#wxState').textContent = '已扫码，请在微信上确认';
+    if (r.status === 'error') {
+      clearInterval(wxPollTimer);
+      $('#wxBox').style.display = 'none';
+      alert('登录失败: ' + (r.message || '未知'));
+    }
+  } catch(e) { clearInterval(wxPollTimer); alert('轮询失败: ' + e.message); }
+}
+function fillTokenHelpers(){
+  const relay = location.origin;
+  const t = getToken() || 'REPLACE_WITH_RELAY_TOKEN';
+  const ep = `${relay}/api/config/console_token?t=${encodeURIComponent(t)}`;
+  $('#userscript').textContent =
+`// ==UserScript==
+// @name AutoDL token -> data_relay 自动续期
+// @match https://www.autodl.com/*
+// @grant none
+// ==/UserScript==
+(function(){
+  const tk = localStorage.getItem('token');
+  if (!tk) return;
+  fetch('${ep}', {method:'POST', headers:{'Content-Type':'text/plain'}, body: JSON.stringify({console_token: tk})})
+    .then(r => r.json()).then(j => console.log('[data_relay]', j.message || j.error))
+    .catch(e => console.warn('[data_relay] 推送失败', e));
+})();`;
+  $('#bookmarklet').textContent =
+    "javascript:(function(){fetch('" + ep + "',{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({console_token:localStorage.getItem('token')})}).then(r=>r.json()).then(j=>alert(j.message||j.error)).catch(e=>alert('推送失败:'+e))})();";
+}
+function copyText(sel){ navigator.clipboard.writeText($(sel).textContent).then(()=>alert('已复制到剪贴板')); }
+async function saveConsoleToken(){
+  const v = $('#newToken').value.trim();
+  if (!v) { alert('先粘贴 token'); return; }
+  try {
+    const r = await api('/api/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({console_token: v})});
+    $('#newToken').value = '';
+    alert('已保存并生效：' + (r.console_token || ''));
+    loadTokenStatus();
+  } catch(e) { alert('保存失败: ' + e.message); }
+}
+async function loadTokenStatus(){
+  try {
+    const c = await api('/api/config');
+    $('#tokenStatus').textContent = `console_token: ${c.console_token || '未设置'} · 更新于 ${c.console_token_updated_at ? new Date(c.console_token_updated_at*1000).toLocaleString() : '—'}`;
+  } catch(e) { $('#tokenStatus').textContent = '状态获取失败（先在顶部保存访问令牌）'; }
+}
+fillTokenHelpers();
+refreshAll();
+setInterval(() => { if (getToken()) { loadTasks().catch(()=>{}); loadInst().catch(()=>{}); } }, 8000);
+</script>
+</body>
+</html>
