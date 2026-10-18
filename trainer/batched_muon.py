@@ -2,6 +2,16 @@
 
 Only temporary updates are batched; model parameters and momentum buffers stay
 independent. This preserves parameter IDs/order in existing resume checkpoints.
+
+Mantissa mode (``use_mantissa=True``, env ``INSTINCT_MUON_MANTISSA=1`` through
+``build_optimizer``) lets bfloat16 parameters receive full fp32 updates: a bf16
+parameter holds the high 16 bits of its fp32 value and a parallel uint16 buffer
+holds the low 16 bits. The split is a truncating bit split, so split-then-
+reconstruct is a bitwise identity, and every optimizer update accumulates on the
+reconstructed fp32 value before being split back. This costs four fp32
+momentum bytes plus two uint16 mantissa bytes per element (the persistent-byte
+estimator is kept in sync). Mantissa mode is opt-in and never checkpointed: the
+caller must enable it again when resuming.
 """
 
 from __future__ import annotations
@@ -12,6 +22,25 @@ import torch
 
 
 _NS_COEFFICIENTS = (3.4445, -4.7750, 2.0315)
+
+
+# Shift/bitwise kernels are not implemented for unsigned 32-bit tensors on every
+# torch build, so the split works on the signed bitcast of the same layout.
+# Truncating the shifted result back to 16 bits keeps the raw bit pattern, so the
+# split/reconstruct pair is bit-exact (not a lossy cast).
+def _reconstruct_precise(param, mantissa):
+    """Recombine bfloat16 param + uint16 mantissa into the exact float32 value."""
+    bits = param.contiguous().view(torch.int16).to(torch.int32)
+    bits = torch.bitwise_left_shift(bits, 16) | mantissa.to(torch.int32)
+    return bits.view(torch.float32)
+
+
+def _split_precise(precise):
+    """Truncating split of float32 into (bfloat16 high 16 bits, uint16 low 16 bits)."""
+    bits = precise.contiguous().view(torch.int32)
+    high = torch.bitwise_right_shift(bits, 16).to(torch.int16).view(torch.bfloat16)
+    low = torch.bitwise_and(bits, 0xFFFF).to(torch.uint16)
+    return high, low
 
 
 def _batched_zeropower(update, *, ns_coefficients, ns_steps, eps):
@@ -44,6 +73,7 @@ class BatchedMuon(torch.optim.Optimizer):
         self, params, lr=1e-3, weight_decay=0.1, momentum=0.95,
         nesterov=True, ns_coefficients=_NS_COEFFICIENTS, ns_steps=5,
         eps=1e-7, adjust_lr_fn=None, *, batch_size=16, workspace_mb=64,
+        use_mantissa=False,
     ):
         if not 0 <= lr:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -65,6 +95,7 @@ class BatchedMuon(torch.optim.Optimizer):
             raise ValueError("workspace_mb must be finite and positive")
         self.batch_size = int(batch_size)
         self.workspace_bytes = int(workspace_mb * 2**20)
+        self.use_mantissa = bool(use_mantissa)
         super().__init__(params, dict(
             lr=lr, weight_decay=weight_decay, momentum=momentum,
             nesterov=nesterov, ns_coefficients=tuple(ns_coefficients),
@@ -73,12 +104,50 @@ class BatchedMuon(torch.optim.Optimizer):
         for group in self.param_groups:
             for p in group['params']:
                 self._validate_parameter(p)
+                # The mantissa bit layout is bf16-specific (fp32's high 16 bits).
+                if self.use_mantissa and p.dtype != torch.bfloat16:
+                    raise ValueError(
+                        "BatchedMuon(use_mantissa=True) requires bfloat16 parameters"
+                    )
 
     def __setstate__(self, state):
         super().__setstate__(state)
         for group in self.param_groups:
             # The older in-repo fallback did not serialize this native field.
             group.setdefault('ns_coefficients', _NS_COEFFICIENTS)
+
+    def load_state_dict(self, state_dict):
+        # The base loader casts every floating state tensor to the bf16 param
+        # dtype. In mantissa mode momentum must stay fp32 and the uint16 mantissa
+        # must keep its exact bit pattern, so restore both after the base load.
+        saved = {}
+        if self.use_mantissa:
+            for index, entry in state_dict.get('state', {}).items():
+                if not isinstance(entry, dict):
+                    continue
+                picked = {
+                    key: entry[key]
+                    for key in ('momentum_buffer', 'mantissa')
+                    if key in entry
+                }
+                if picked:
+                    saved[index] = picked
+        super().load_state_dict(state_dict)
+        if not saved:
+            return
+        saved_ids = [
+            pid for group in state_dict['param_groups'] for pid in group['params']
+        ]
+        current = [p for group in self.param_groups for p in group['params']]
+        index_map = dict(zip(saved_ids, current))
+        for index, entry in saved.items():
+            param = index_map.get(index)
+            if param is None or param not in self.state:
+                continue
+            state = self.state[param]
+            for key, tensor in entry.items():
+                # Keep the saved dtype (fp32 momentum / uint16 mantissa).
+                state[key] = tensor.to(device=param.device)
 
     @staticmethod
     def _validate_parameter(p):
@@ -90,17 +159,32 @@ class BatchedMuon(torch.optim.Optimizer):
         # and the BF16 Gram/polynomial matrices used by Newton-Schulz.
         elements = p.numel()
         short = min(p.shape)
-        per_matrix = (3 * p.element_size() + 4) * elements + 8 * short * short
+        # Mantissa mode adds fp32 promoted grads + reconstructed precises per matrix.
+        extra = 12 if self.use_mantissa else 4
+        per_matrix = (3 * p.element_size() + extra) * elements + 8 * short * short
         return max(1, min(self.batch_size, self.workspace_bytes // max(1, per_matrix)))
 
     def _step_chunk(self, params, group):
         grads = [p.grad for p in params]
+        if self.use_mantissa:
+            # Promote once so momentum and the update accumulate in fp32.
+            grads = [g.to(torch.float32) for g in grads]
         buffers = []
-        for p in params:
+        mantissas = []
+        for i, p in enumerate(params):
             state = self.state[p]
             if 'momentum_buffer' not in state:
-                state['momentum_buffer'] = torch.zeros_like(p.grad)
+                state['momentum_buffer'] = torch.zeros_like(grads[i])
+            if self.use_mantissa and state['momentum_buffer'].dtype != torch.float32:
+                # A legacy (non-mantissa) checkpoint stores bf16 momentum; promote
+                # it once so the fp32 lerp path stays uniform with promoted grads.
+                state['momentum_buffer'] = state['momentum_buffer'].to(torch.float32)
             buffers.append(state['momentum_buffer'])
+            if self.use_mantissa:
+                if 'mantissa' not in state:
+                    # Zero low bits == the legacy precise value on a fresh/old checkpoint.
+                    state['mantissa'] = torch.zeros_like(p, dtype=torch.uint16)
+                mantissas.append(state['mantissa'])
         momentum = group['momentum']
         torch._foreach_lerp_(buffers, grads, 1 - momentum)
         if group['nesterov']:
@@ -121,6 +205,18 @@ class BatchedMuon(torch.optim.Optimizer):
             adjusted_lr = lr * 0.2 * math.sqrt(max(rows, cols))
         else:
             adjusted_lr = lr * math.sqrt(max(1.0, rows / cols))
+        if self.use_mantissa:
+            # Reconstruct the exact fp32 value, apply decay/update there, then split
+            # back. p.copy_ preserves the Parameter identity for the model.
+            precises = [_reconstruct_precise(p, m) for p, m in zip(params, mantissas)]
+            torch._foreach_mul_(precises, 1 - lr * group['weight_decay'])
+            update = update.to(torch.float32, memory_format=torch.contiguous_format)
+            torch._foreach_add_(precises, list(update.unbind(0)), alpha=-adjusted_lr)
+            for p, m, precise in zip(params, mantissas, precises):
+                high, low = _split_precise(precise)
+                p.copy_(high)
+                m.copy_(low)
+            return
         torch._foreach_mul_(params, 1 - lr * group['weight_decay'])
         # Match dtypes so foreach can use its fused CUDA path, not a per-tensor
         # fallback for mixed FP32 parameters / BF16 updates.
@@ -142,6 +238,10 @@ class BatchedMuon(torch.optim.Optimizer):
                 if p.grad is None:
                     continue
                 self._validate_parameter(p)
+                if self.use_mantissa and p.dtype != torch.bfloat16:
+                    raise ValueError(
+                        "BatchedMuon(use_mantissa=True) requires bfloat16 parameters"
+                    )
                 if p.grad.is_sparse:
                     raise RuntimeError("Muon does not support sparse gradients")
                 key = (p.device, p.dtype, tuple(p.shape))
