@@ -1,0 +1,236 @@
+{
+  "device": "NVIDIA GeForce RTX 5060 Ti",
+  "torch": "2.11.0+cu130",
+  "cuda": "13.0",
+  "sweep": [
+    {
+      "name": "P1_fam_w768",
+      "elements": 4718592,
+      "A_median_ms": 4.765167951583862,
+      "B_median_ms": 2.7091039419174194,
+      "ratio": 1.7589461511067843,
+      "A_ns_per_elem": 1.0098707308417134,
+      "B_ns_per_elem": 0.5741339666403493
+    },
+    {
+      "name": "P2_fam_w1600",
+      "elements": 20480000,
+      "A_median_ms": 23.310096740722656,
+      "B_median_ms": 20.355728149414062,
+      "ratio": 1.1451369643779428,
+      "A_ns_per_elem": 1.1381883174180984,
+      "B_ns_per_elem": 0.9939320385456085
+    },
+    {
+      "name": "P3_fam_w2432",
+      "elements": 47316992,
+      "A_median_ms": 76.60211181640625,
+      "B_median_ms": 68.44169616699219,
+      "ratio": 1.1192316395768935,
+      "A_ns_per_elem": 1.6189133877404178,
+      "B_ns_per_elem": 1.4464506992961892
+    },
+    {
+      "name": "P4_fam_w3264",
+      "elements": 85229568,
+      "A_median_ms": 174.95731353759766,
+      "B_median_ms": 159.8582305908203,
+      "ratio": 1.0944529592938232,
+      "A_ns_per_elem": 2.0527771950879496,
+      "B_ns_per_elem": 1.8756193929179639
+    },
+    {
+      "name": "P5_sq4096_x4",
+      "elements": 67108864,
+      "A_median_ms": 195.785888671875,
+      "B_median_ms": 184.1671142578125,
+      "ratio": 1.0630882145321425,
+      "A_ns_per_elem": 2.917437086580321,
+      "B_ns_per_elem": 2.744303856161423
+    },
+    {
+      "name": "P6_sq8192_x1",
+      "elements": 67108864,
+      "A_median_ms": 366.2706756591797,
+      "B_median_ms": 354.63291931152344,
+      "ratio": 1.0328163453360437,
+      "A_ns_per_elem": 5.45785837857693,
+      "B_ns_per_elem": 5.28444229530578
+    }
+  ],
+  "profile": {
+    "point": "P3_fam_w2432",
+    "A": {
+      "n_kernels": 188,
+      "n_cuda_events": 188,
+      "total_cuda_us": 76595.83500000004,
+      "top": [
+        [
+          "_ZN7cutlass7Kernel2I66cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8EEvNT_6ParamsE",
+          40,
+          34935.45099999998
+        ],
+        [
+          "_ZN7cutlass7Kernel2I66cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8EEvNT_6ParamsE",
+          20,
+          22866.218999999994
+        ],
+        [
+          "Memcpy DtoD (Device -> Device)",
+          52,
+          4108.275000000038
+        ],
+        [
+          "_ZN2at6native29vectorized_elementwise_kernelILi4ENS0_13BinaryFunctorIiiiNS0_16BitwiseOrFunctorIiEEEESt5arrayIPcLy3EEEEviT0_T1_",
+          4,
+          1575.6470000000081
+        ],
+        [
+          "_ZN2at6native27unrolled_elementwise_kernelIZZZNS0_23direct_copy_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE1_clEvENKUlvE5_clEvEUlfE_St5arrayIPcLy2EELi4E23TrivialOffsetCalculatorILi1EjESB_NS0_6memory12LoadWithCastILi1EEENSC_13StoreWithCastILi1EEEEEviT_T0_T2_T3_T4_T5_",
+          8,
+          1466.7870000000069
+        ],
+        [
+          "_ZN2at6native52_GLOBAL__N__20b37f10_19_ForeachTernaryOp_cu_5285c63625multi_tensor_apply_kernelINS1_18TensorListMetadataILi3EEENS1_22TernaryOpScalarFunctorIfLi3ELi2ELi2EEEJNS0_11LerpFunctorIfEEfEEEvT_T0_DpT1_",
+          4,
+          1418.1160000000061
+        ],
+        [
+          "_ZN2at6native55_GLOBAL__N__3e70d511_22_ForeachBinaryOpList_cu_a911ec4325multi_tensor_apply_kernelINS1_18TensorListMetadataILi2EEENS1_24BinaryOpListAlphaFunctorIfLi2ELi2ELi0EEEJSt4plusIfEfEEEvT_T0_DpT1_",
+          4,
+          1411.7180000000026
+        ],
+        [
+          "_ZN2at6native52_GLOBAL__N__20b37f10_19_ForeachTernaryOp_cu_5285c63625multi_tensor_apply_kernelINS1_18TensorListMetadataILi2EEENS1_22TernaryOpScalarFunctorIfLi2ELi2ELi0EEEJNS0_11LerpFunctorIfEEfEEEvT_T0_DpT1_",
+          4,
+          1407.6850000000018
+        ],
+        [
+          "_ZN2at6native27unrolled_elementwise_kernelIZZZNS0_23direct_copy_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE1_clEvENKUlvE1_clEvEUliE_St5arrayIPcLy2EELi4E23TrivialOffsetCalculatorILi1EjESB_NS0_6memory12LoadWithCastILi1EEENSC_13StoreWithCastILi1EEEEEviT_T0_T2_T3_T4_T5_",
+          8,
+          1341.6420000000126
+        ],
+        [
+          "_ZN2at6native29vectorized_elementwise_kernelILi4ENS0_13BUnaryFunctorIiiiZZZNS0_18lshift_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE_clEvENKUlvE1_clEvEUliiE_EESt5arrayIPcLy2EEEEviT0_T1_",
+          4,
+          931.2580000000053
+        ],
+        [
+          "_ZN2at6native29vectorized_elementwise_kernelILi4ENS0_13AUnaryFunctorIiiiNS0_17BitwiseAndFunctorIiEEEESt5arrayIPcLy2EEEEviT0_T1_",
+          4,
+          923.769999999995
+        ],
+        [
+          "_ZN2at6native29vectorized_elementwise_kernelILi4ENS0_13BUnaryFunctorIiiiZZZNS0_18rshift_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE_clEvENKUlvE1_clEvEUliiE_EESt5arrayIPcLy2EEEEviT0_T1_",
+          4,
+          865.5320000000047
+        ]
+      ]
+    },
+    "B": {
+      "n_kernels": 144,
+      "n_cuda_events": 144,
+      "total_cuda_us": 68579.461,
+      "top": [
+        [
+          "_ZN7cutlass7Kernel2I66cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8EEvNT_6ParamsE",
+          40,
+          35096.837
+        ],
+        [
+          "_ZN7cutlass7Kernel2I66cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8EEvNT_6ParamsE",
+          20,
+          23232.11400000002
+        ],
+        [
+          "Memcpy DtoD (Device -> Device)",
+          44,
+          3224.4709999999586
+        ],
+        [
+          "_ZN2at6native55_GLOBAL__N__3e70d511_22_ForeachBinaryOpList_cu_a911ec4325multi_tensor_apply_kernelINS1_18TensorListMetadataILi2EEENS1_24BinaryOpListAlphaFunctorIfLi2ELi2ELi0EEEJSt4plusIfEfEEEvT_T0_DpT1_",
+          4,
+          1436.38800000001
+        ],
+        [
+          "_ZN2at6native52_GLOBAL__N__20b37f10_19_ForeachTernaryOp_cu_5285c63625multi_tensor_apply_kernelINS1_18TensorListMetadataILi3EEENS1_22TernaryOpScalarFunctorIfLi3ELi2ELi2EEEJNS0_11LerpFunctorIfEEfEEEvT_T0_DpT1_",
+          4,
+          1409.5080000000034
+        ],
+        [
+          "_ZN2at6native52_GLOBAL__N__20b37f10_19_ForeachTernaryOp_cu_5285c63625multi_tensor_apply_kernelINS1_18TensorListMetadataILi2EEENS1_22TernaryOpScalarFunctorIfLi2ELi2ELi0EEEJNS0_11LerpFunctorIfEEfEEEvT_T0_DpT1_",
+          4,
+          1371.559000000001
+        ],
+        [
+          "_ZN2at6native57_GLOBAL__N__25943659_24_ForeachBinaryOpScalar_cu_86b9896c25multi_tensor_apply_kernelINS1_18TensorListMetadataILi1EEENS1_21BinaryOpScalarFunctorIfLi1ELi1ELi0EEEJSt10multipliesIfEfEEEvT_T0_DpT1_",
+          4,
+          872.1540000000077
+        ],
+        [
+          "_ZN2at6native27unrolled_elementwise_kernelIZZZNS0_23direct_copy_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE1_clEvENKUlvE5_clEvEUlfE_St5arrayIPcLy2EELi4E23TrivialOffsetCalculatorILi1EjESB_NS0_6memory12LoadWithCastILi1EEENSC_13StoreWithCastILi1EEEEEviT_T0_T2_T3_T4_T5_",
+          4,
+          720.9300000000003
+        ],
+        [
+          "_ZN2at6native29vectorized_elementwise_kernelILi4EZNS0_25bfloat16_copy_kernel_cudaERNS_18TensorIteratorBaseEEUlfE_St5arrayIPcLy2EEEEviT0_T1_",
+          4,
+          617.1900000000041
+        ],
+        [
+          "_ZN2at6native18elementwise_kernelILi128ELi4EZNS0_22gpu_kernel_impl_nocastINS0_13BinaryFunctorIN3c108BFloat16ES5_S5_NS0_15binary_internal10DivFunctorIS5_EEEEEEvRNS_18TensorIteratorBaseERKT_EUliE_EEviT1_",
+          4,
+          420.49399999999787
+        ],
+        [
+          "_ZN2at6native13reduce_kernelILi512ELi1ENS0_8ReduceOpIN3c108BFloat16ENS0_10NormTwoOpsIS4_fS4_Lb1EEEjS4_Li4ELi4EEEEEvT1_",
+          4,
+          170.2649999999976
+        ],
+        [
+          "_ZN2at6native29vectorized_elementwise_kernelILi4EZZZNS0_49_GLOBAL__N__97375e57_16_TensorCompare_cu_71e06f4e19launch_clamp_scalarERNS_18TensorIteratorBaseEN3c106ScalarES6_NS0_6detail11ClampLimitsEENKUlvE_clEvENKUlvE7_clEvEUlNS5_8BFloat16EE_St5arrayIPcLy2EEEEviT0_T1_",
+          4,
+          5.536000000002787
+        ]
+      ]
+    }
+  },
+  "optimized": [
+    {
+      "name": "P1_fam_w768",
+      "A_prod": 5.5589280128479,
+      "A_opt": 5.164463996887207,
+      "B": 2.7164480686187744,
+      "ratio_prod": 2.046395834717516,
+      "ratio_opt": 1.9011826717943365,
+      "recovered_pct": 13.877459953993487
+    },
+    {
+      "name": "P2_fam_w1600",
+      "A_prod": 23.421728134155273,
+      "A_opt": 23.28105640411377,
+      "B": 20.507935523986816,
+      "ratio_prod": 1.1420812254241965,
+      "ratio_opt": 1.1352218450698468,
+      "recovered_pct": 4.827788002158851
+    },
+    {
+      "name": "P4_fam_w3264",
+      "A_prod": 176.2786102294922,
+      "A_opt": 174.73048400878906,
+      "B": 161.32099151611328,
+      "ratio_prod": 1.0927196056310184,
+      "ratio_opt": 1.0831230478231744,
+      "recovered_pct": 10.350084798714631
+    },
+    {
+      "name": "P6_sq8192_x1",
+      "A_prod": 367.19642639160156,
+      "A_opt": 366.11279296875,
+      "B": 355.33238220214844,
+      "ratio_prod": 1.0333885814625914,
+      "ratio_opt": 1.0303389482821428,
+      "recovered_pct": 9.13376084535229
+    }
+  ]
+}

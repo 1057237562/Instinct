@@ -657,6 +657,11 @@ _OPTIMIZER_ALIASES = {
 }
 
 
+def _muon_mantissa_enabled() -> bool:
+    """Opt-in uint16-mantissa Muon updates (off unless INSTINCT_MUON_MANTISSA=1)."""
+    return str(os.environ.get('INSTINCT_MUON_MANTISSA', '0')).strip().lower() in ('1', 'true', 'yes')
+
+
 _LOW_PRECISION_LR_FLOORS = {
     torch.bfloat16: 1e-4,
     torch.float16: 1e-5,
@@ -720,14 +725,20 @@ def estimate_training_persistent_bytes(model: torch.nn.Module, args, *, extra_mo
     )
     optimizer = str(getattr(args, 'optimizer', 'adamw')).strip().lower()
     if optimizer == 'muon':
+        mantissa = _muon_mantissa_enabled()
         optimizer_bytes = 0
         for name, param in named_trainable:
             one_state = param.numel() * param.element_size()
-            # Muon keeps one momentum matrix. Parameters excluded from Muon
-            # (embedding/head/norm/bias) use AdamW and keep two moments.
-            optimizer_bytes += one_state * (
-                1 if _is_muon_hidden_matrix(name, param) else 2
-            )
+            if _is_muon_hidden_matrix(name, param):
+                if mantissa and param.element_size() == 2:
+                    # fp32 momentum (4 B) + uint16 mantissa (2 B) replaces one_state.
+                    optimizer_bytes += param.numel() * 6
+                else:
+                    optimizer_bytes += one_state
+            else:
+                # Parameters excluded from Muon (embedding/head/norm/bias) use
+                # AdamW and keep two moments.
+                optimizer_bytes += 2 * one_state
     elif optimizer in {'adafactor', 'adafactory'}:
         # Factorized states are smaller for matrices, but one full-parameter
         # equivalent is a conservative model-independent upper bound.
@@ -955,9 +966,10 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
             muon_kwargs.setdefault('adjust_lr_fn', 'match_rms_adamw')
             muon_kwargs.setdefault('batch_size', int(os.environ.get('INSTINCT_MUON_BATCH_SIZE', '16')))
             from model.cuda_fastpath import blackwell_training_kernels
-            workspace_default=('256' if matrix_params[0].dtype==torch.float32
-                               and blackwell_training_kernels(matrix_params[0].device) else '64')
+            workspace_default = ('256' if matrix_params[0].dtype == torch.float32
+                                 and blackwell_training_kernels(matrix_params[0].device) else '64')
             muon_kwargs.setdefault('workspace_mb', float(os.environ.get('INSTINCT_MUON_WORKSPACE_MB', workspace_default)))
+            muon_kwargs.setdefault('use_mantissa', _muon_mantissa_enabled())
             muon_opt = BatchedMuon(matrix_params, lr=lr, **muon_kwargs)
             preallocate = os.environ.get('INSTINCT_MUON_PREALLOCATE', '0')
             if preallocate not in ('0', '1'):
@@ -967,7 +979,8 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
                 Logger(f'[Muon] preallocated zero momentum: {reserved / 2**30:.3f}GiB; no optimizer step')
             Logger(
                 f'[Muon] shape-batched BF16 updates: batch_size<={muon_opt.batch_size}, '
-                f'temporary workspace target={muon_opt.workspace_bytes / 2**20:g}MiB'
+                f'temporary workspace target={muon_opt.workspace_bytes / 2**20:g}MiB, '
+                f"mantissa={'on' if muon_opt.use_mantissa else 'off'}"
             )
             Logger(
                 '[Muon] CUDA kernels: NS=' + os.environ.get('INSTINCT_MUON_NS_BACKEND', 'auto')
