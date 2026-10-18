@@ -18,6 +18,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) { self.0.abort(); }
+}
+
 pub struct Relay {
     pub config_path: PathBuf,
     pub data_dir: PathBuf,
@@ -25,20 +30,27 @@ pub struct Relay {
     pub store: Arc<TaskStore>,
     children: Mutex<HashMap<String, Child>>,
     cancelling: Mutex<HashSet<String>>,
+    pub training_transition: Arc<Mutex<()>>,
+    pub training_operations_lock: std::sync::Mutex<()>,
+    pub data_locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl Relay {
     pub fn new(config_path: PathBuf, cfg: Config) -> anyhow::Result<Arc<Self>> {
         let data_dir = std::path::absolute(&cfg.server.data_dir)?;
         let store = Arc::new(TaskStore::open(&data_dir.join("tasks"))?);
-        Ok(Arc::new(Relay {
+        let relay = Arc::new(Relay {
             config_path,
             data_dir,
             cfg: std::sync::RwLock::new(cfg),
             store,
             children: Mutex::new(HashMap::new()),
             cancelling: Mutex::new(HashSet::new()),
-        }))
+            training_transition: Arc::new(Mutex::new(())),
+            training_operations_lock: std::sync::Mutex::new(()),
+            data_locks: std::sync::Mutex::new(HashMap::new()),
+        });
+        Ok(relay)
     }
 
     pub fn config(&self) -> Config {
@@ -102,8 +114,12 @@ impl Relay {
             remote_path: None,
             upload_total_bytes: 0,
             upload_done_bytes: 0,
+            upload_transferred_bytes: 0,
+            upload_attempt: 0,
+            upload_phase: String::new(),
             pull_token: None,
             error: None,
+            data_upload: None,
         };
         self.store.insert(task.clone())?;
         if autostart {
@@ -123,6 +139,9 @@ impl Relay {
         }
         let dir = self.store.task_dir(id);
         let script_path = dir.join(&task.script);
+        if task.data_upload.is_some() {
+            bail!("数据任务无需执行脚本，请使用继续交付");
+        }
         if !script_path.is_file() {
             bail!("脚本 {} 不存在", script_path.display());
         }
@@ -321,18 +340,29 @@ impl Relay {
         if task.status == TaskStatus::Uploading {
             bail!("任务 {id} 正在上传中");
         }
+        // Serialize data delivery with GPU mode changes and shutdown. A new
+        // data job waits safely while another job owns the transition guard.
+        let _data_transition = if task.data_upload.is_some() {
+            Some(Arc::clone(&self.training_transition).lock_owned().await)
+        } else { None };
         let dir = self.store.task_dir(id);
-        let cfg = self.config();
+        let mut cfg = self.config();
+        if let Some(data) = &task.data_upload {
+            cfg.autodl.instance_uuid = data.instance_uuid.clone();
+            // Direct delivery leaves the selected instance available for training.
+            cfg.autodl.power_off_after_upload = false;
+        }
         let log = |line: String| {
             append_log(&dir, &line).ok();
         };
         self.cancelling.lock().await.remove(id);
         let stop = Arc::new(AtomicBool::new(false));
+        let _stop_watcher;
         {
             let relay_for_stop = Arc::clone(&self);
             let id_for_stop = id.to_string();
             let stop_flag = Arc::clone(&stop);
-            tokio::spawn(async move {
+            let watcher = tokio::spawn(async move {
                 // map cancelling flag → stop flag for the upload loop
                 loop {
                     if relay_for_stop
@@ -347,11 +377,16 @@ impl Relay {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
             });
+            // Aborting the watcher on every return avoids a leaked task per upload.
+            _stop_watcher = AbortOnDrop(watcher);
         }
 
         self.store.update(id, |t| {
             t.status = TaskStatus::Uploading;
             t.upload_done_bytes = 0;
+            t.upload_transferred_bytes = 0;
+            t.upload_attempt += 1;
+            t.upload_phase = "preparing".into();
             t.error = None;
         })?;
         log(format!("[pipeline] {} 开始上传流程\n", timestamp()));
@@ -364,9 +399,13 @@ impl Relay {
             info.uuid, info.status, info.start_mode
         ));
 
-        let remote_root = cfg.autodl.remote_root.clone();
-        let remote_task = model::join_remote(&remote_root, id)
-            .ok_or_else(|| anyhow::anyhow!("remote_root 配置非法"))?;
+        let remote_root = if task.data_upload.is_some() {
+            crate::data_upload::DATASET_ROOT.to_string()
+        } else { cfg.autodl.remote_root.clone() };
+        let remote_task = if task.data_upload.is_some() {
+            crate::data_upload::remote_stage(id)
+        } else { model::join_remote(&remote_root, id)
+            .ok_or_else(|| anyhow::anyhow!("remote_root 配置非法"))? };
 
         // local payload
         let out_dir = if task.output_dir.is_empty() {
@@ -424,6 +463,7 @@ impl Relay {
             out_dir.clone()
         };
         let local_bytes = model::dir_size(&upload_root);
+        self.store.update(id, |t| t.upload_total_bytes = local_bytes)?;
         log(format!(
             "[pipeline] 本地待传 {} （{}）\n",
             upload_root.display(),
@@ -452,9 +492,11 @@ impl Relay {
                 }
                 let sftp = self
                     .connect_and_precheck(
-                        &info, &ssh, &password, &known_hosts_path, &remote_root, local_bytes, &log,
+                        &info, &ssh, &password, &known_hosts_path, &remote_root, local_bytes,
+                        task.data_upload.as_ref().map(|_| remote_task.as_str()), &log,
                     )
                     .await?;
+                crate::data_upload::remote_check(&sftp, &task, false).await?;
 
                 // 1. scan local output and build the control-plane artifacts
                 let files = pull::scan_local(&upload_root)?;
@@ -494,9 +536,17 @@ impl Relay {
                         script.as_bytes(),
                     )
                     .await?;
+                // Allocated blocks, rather than apparent file lengths: aria2
+                // can extend sparse files before their contents have arrived.
+                let (_, initial) = sftp.exec(&format!("du -sB1 '{remote_task}' 2>/dev/null | cut -f1")).await?;
+                let mut last_done = initial.trim().parse::<u64>().unwrap_or(0).saturating_sub(control_bytes).min(total);
+                self.store.update(id, |t| {
+                    t.upload_done_bytes = last_done;
+                    t.upload_phase = "transferring".into();
+                })?;
                 let (_, launch_out) = sftp
                     .exec(&format!(
-                        "chmod +x '{remote_task}/{}' && nohup bash '{remote_task}/{}' >/dev/null 2>&1 & echo RELAY-LAUNCHED",
+                        "chmod +x '{remote_task}/{}' && nohup setsid bash '{remote_task}/{}' >/dev/null 2>&1 & echo RELAY-LAUNCHED",
                         pull::PULL_SCRIPT,
                         pull::PULL_SCRIPT
                     ))
@@ -511,14 +561,12 @@ impl Relay {
                 ));
 
                 // 3. poll progress until the instance reports completion
-                let mut last_done = 0u64;
                 let mut stall_ticks = 0u32;
                 loop {
                     if stop.load(Ordering::SeqCst) {
                         let _ = sftp
                             .exec(&format!(
-                                "pkill -f '{remote_task}/{}' || true",
-                                pull::PULL_SCRIPT
+                                "if test -f '{remote_task}/_relay_pull.pid'; then pid=$(cat '{remote_task}/_relay_pull.pid'); case \"$pid\" in ''|*[!0-9]*) exit 1;; esac; kill -- -\"$pid\" 2>/dev/null || true; fi"
                             ))
                             .await;
                         bail!("上传已取消（已拉取部分保留，可断点续传）");
@@ -526,7 +574,7 @@ impl Relay {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     let (_, probe) = sftp
                         .exec(&format!(
-                            "du -sb '{remote_task}' 2>/dev/null | cut -f1; grep -o 'RELAY-PULL-EXIT=[0-9]*' '{remote_task}/{}' 2>/dev/null | tail -1",
+                            "du -sB1 '{remote_task}' 2>/dev/null | cut -f1; grep -o 'RELAY-PULL-EXIT=[0-9]*' '{remote_task}/{}' 2>/dev/null | tail -1",
                             pull::PULL_LOG
                         ))
                         .await?;
@@ -537,8 +585,10 @@ impl Relay {
                         .unwrap_or(0);
                     let done = used.saturating_sub(control_bytes).min(total);
                     if done != last_done {
-                        let delta = done - last_done;
-                        self.store.update(id, |t| t.upload_done_bytes += delta).ok();
+                        self.store.update(id, |t| {
+                            t.upload_done_bytes = done;
+                            t.upload_transferred_bytes += done.saturating_sub(last_done);
+                        }).ok();
                         last_done = done;
                         stall_ticks = 0;
                     } else {
@@ -551,7 +601,10 @@ impl Relay {
                             .parse()
                             .unwrap_or(1);
                         if rc == 0 {
-                            self.store.update(id, |t| t.upload_done_bytes = total).ok();
+                            self.store.update(id, |t| {
+                                t.upload_done_bytes = total;
+                                t.upload_phase = "verifying".into();
+                            }).ok();
                             log("[pipeline] 实例拉取完成，逐文件大小校验通过 ✓\n".into());
                         } else {
                             let (_, tail) = sftp
@@ -568,29 +621,38 @@ impl Relay {
                         bail!("拉取进度约 30 分钟无增长，疑似通道故障；断点已保留，可重试");
                     }
                 }
+                crate::data_upload::remote_check(&sftp, &task, true).await?;
             }
             UploadMode::Sftp => {
                 let sftp = self
                     .connect_and_precheck(
-                        &info, &ssh, &password, &known_hosts_path, &remote_root, local_bytes, &log,
+                        &info, &ssh, &password, &known_hosts_path, &remote_root, local_bytes,
+                        task.data_upload.as_ref().map(|_| remote_task.as_str()), &log,
                     )
                     .await?;
+                crate::data_upload::remote_check(&sftp, &task, false).await?;
+                self.store.update(id, |t| t.upload_phase = "transferring".into())?;
                 let store = Arc::clone(&self.store);
                 let id_owned = id.to_string();
-                let progress = move |delta: u64| {
-                    store.update(&id_owned, |t| t.upload_done_bytes += delta).ok();
+                let progress = move |delta: u64, resumed: bool| {
+                    store.update(&id_owned, |t| {
+                        t.upload_done_bytes += delta;
+                        if !resumed { t.upload_transferred_bytes += delta; }
+                    }).ok();
                 };
                 let stop_flag = Arc::clone(&stop);
                 let should_stop = move || stop_flag.load(Ordering::SeqCst);
                 let summary = sftp
                     .upload_tree(&upload_root, &remote_task, &progress, &should_stop)
                     .await?;
+                self.store.update(id, |t| t.upload_phase = "verifying".into())?;
                 log(format!(
                     "[pipeline] 上传完成：新传 {} 个文件 / 跳过 {} 个 / 本轮 {} \n",
                     summary.files,
                     summary.skipped,
                     model::human_bytes(summary.bytes)
                 ));
+                crate::data_upload::remote_check(&sftp, &task, true).await?;
             }
             UploadMode::Jupyter => {
                 let jupyter = info
@@ -617,8 +679,12 @@ impl Relay {
                 }
                 let store = Arc::clone(&self.store);
                 let id_owned = id.to_string();
+                self.store.update(id, |t| t.upload_phase = "transferring".into())?;
                 let progress = move |delta: u64| {
-                    store.update(&id_owned, |t| t.upload_done_bytes += delta).ok();
+                    store.update(&id_owned, |t| {
+                        t.upload_done_bytes += delta;
+                        t.upload_transferred_bytes += delta;
+                    }).ok();
                 };
                 let stop_flag = Arc::clone(&stop);
                 let should_stop = move || stop_flag.load(Ordering::SeqCst);
@@ -632,11 +698,21 @@ impl Relay {
         self.store.update(id, |t| {
             t.upload_total_bytes = local_bytes;
             t.upload_done_bytes = local_bytes;
-            t.remote_path = Some(remote_task.clone());
+            t.remote_path = Some(if task.data_upload.is_some() {
+                crate::data_upload::DATASET_ROOT.to_string()
+            } else { remote_task.clone() });
             t.status = TaskStatus::Uploaded;
         })?;
 
         if cfg.autodl.power_off_after_upload {
+            let _shutdown_guard = match crate::training::guard_shutdown(&self, &info.uuid).await {
+                Ok(guard) => guard,
+                Err(error) => {
+                    log(format!("[pipeline] 保持实例运行，关机检查未通过: {error:#}\n"));
+                    self.store.update_status(id, TaskStatus::Done)?;
+                    return Ok(());
+                }
+            };
             log("[pipeline] 上传完成，关闭实例（省无卡机时费）…\n".into());
             match client.power_off(&info.uuid).await {
                 Ok(()) => log("[pipeline] 已发送关机指令\n".into()),
@@ -697,6 +773,7 @@ impl Relay {
         known_hosts_path: &Path,
         remote_root: &str,
         incoming_bytes: u64,
+        existing_stage: Option<&str>,
         log: &F,
     ) -> anyhow::Result<SftpUploader> {
         let cfg = self.config();
@@ -733,13 +810,20 @@ impl Relay {
             model::human_bytes(usage.used),
             model::human_bytes(usage.free())
         ));
+        // Account for already allocated staging blocks on a resumed upload.
+        // du (without --apparent-size) also handles sparse aria2 files correctly.
+        let staged_bytes = if let Some(stage) = existing_stage {
+            let (code, output) = sftp.exec(&format!("du -sB1 '{stage}' 2>/dev/null")).await?;
+            if code == 0 { output.split_whitespace().next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0) } else { 0 }
+        } else { 0 };
+        let incoming_bytes = incoming_bytes.saturating_sub(staged_bytes);
         let mut decision = disk::plan(
             &usage,
             incoming_bytes,
             cfg.disk.max_used_ratio,
             cfg.disk.reserved_gb,
         );
-        if !decision.allowed && cfg.disk.auto_clean {
+        if !decision.allowed && cfg.disk.auto_clean && remote_root != crate::data_upload::DATASET_ROOT {
             log("[pipeline] 超出限额，尝试清理托管目录…\n".into());
             let freed = self
                 .cleanup_managed(&sftp, remote_root, &usage, incoming_bytes)
@@ -766,6 +850,9 @@ impl Relay {
     pub fn pull_root(&self, id: &str) -> Option<PathBuf> {
         let task = self.store.get(id)?;
         let dir = self.store.task_dir(id);
+        if dir.join("upload_paths.txt").is_file() && dir.join("_relay_stage").is_dir() {
+            return Some(dir.join("_relay_stage"));
+        }
         if task.output_dir.is_empty() {
             Some(dir)
         } else {
@@ -819,6 +906,7 @@ impl Relay {
         let cfg = self.config();
         let client = AutoDl::new(&cfg.autodl)?;
         let info = client.pick_instance().await?;
+        let _shutdown_guard = crate::training::guard_shutdown(self, &info.uuid).await?;
         client.power_off(&info.uuid).await?;
         Ok(json!({"ok": true, "message": "已发送关机指令"}))
     }

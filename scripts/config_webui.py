@@ -27,11 +27,21 @@ try:
     from scripts.cpt_defaults import apply_cpt_defaults
     from scripts.sft_profiles import track_sft_training_type, switch_sft_profile
     from scripts.sft_profiles import _apply_state_value
+    from scripts.config_templates import (
+        snapshot_config, restore_config, load_templates, save_template, delete_template,
+        initialize_default_templates,
+    )
+    from scripts.autotune_panel import active as autotune_active
 except ModuleNotFoundError:
     from moe_router_controls import migration_args as moe_router_migration_args
     from cpt_defaults import apply_cpt_defaults
     from sft_profiles import track_sft_training_type, switch_sft_profile
     from sft_profiles import _apply_state_value
+    from config_templates import (
+        snapshot_config, restore_config, load_templates, save_template, delete_template,
+        initialize_default_templates,
+    )
+    from autotune_panel import active as autotune_active
 
 # ═══════════════════════════════════════════════════════════════
 # Page config
@@ -234,8 +244,8 @@ PRESETS = {
         "model_architecture": "standard",
     },
     "Instinct V1 MoE": {
-        # 16GB-friendly deep-thin V1 MoE.  MobileLLM-style depth/width sizing,
-        # 16 query heads with GQA, and full-width top-1 experts.
+        # Deep-thin V1 MoE. MobileLLM-style depth/width sizing,
+        # 16 query heads with GQA, and normalized full-width top-2 experts.
         "hidden_size": 512,
         "intermediate_size": 1664,
         "num_hidden_layers": 32,
@@ -259,9 +269,9 @@ PRESETS = {
         "long_retained_start_tokens": 0,
         "use_moe": True,
         "num_experts": 8,
-        "num_experts_per_tok": 1,
+        "num_experts_per_tok": 2,
         "moe_intermediate_size": 1664,
-        "norm_topk_prob": False,
+        "norm_topk_prob": True,
         "router_aux_loss_coef": 5e-4,
         "rms_norm_eps": 1e-6,
         "flash_attn": True,
@@ -1691,7 +1701,9 @@ if "model_architecture" not in st.session_state:
 
 def _panel_state_key_allowed(key):
     """Buttons and upload widgets own their state; never restore saved values."""
-    return not (key.startswith('btn_') or key in ('clear_train_log', 'pipeline_upload'))
+    return not (key.startswith('btn_') or key in (
+        'clear_train_log', 'pipeline_upload', 'train_triggered', 'shutdown_deadline',
+    ))
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1724,7 +1736,7 @@ if not st.session_state.get("_config_auto_loaded"):
         restored_preset = _LEGACY_PRESET_NAMES.get(
             st.session_state.get("preset"), st.session_state.get("preset")
         )
-        if restored_preset in PRESETS:
+        if restored_preset in PRESETS and not st.session_state.get("config_template"):
             st.session_state.preset = restored_preset
             if saved_state.get("preset_fingerprint") != _preset_fingerprint(restored_preset):
                 init_from_preset(restored_preset)
@@ -1742,6 +1754,15 @@ if "_pending_config_load" in st.session_state:
     load_config_to_session(st.session_state._pending_config_load)
     del st.session_state._pending_config_load
     st.rerun()
+
+# Template loads must precede every model/training widget. Keep inactive widget
+# values as ordinary state so Streamlit cleanup cannot discard another stage.
+if "_pending_template_load" in st.session_state:
+    _template_name, _template_config = st.session_state.pop("_pending_template_load")
+    restore_config(st.session_state, _template_config)
+    st.session_state.config_template = _template_name
+for _config_key, _config_value in snapshot_config(st.session_state).items():
+    st.session_state[_config_key] = _config_value
 
 # ═══════════════════════════════════════════════════════════════
 # Refresh recovery — detect running training process on page reload
@@ -1780,6 +1801,9 @@ def _find_running_train_process():
             name = (process.info.get('name') or '').lower()
             if name not in ('python', 'python.exe'):
                 continue
+            if any(str(arg).split('=', 1)[0] == '--autotune_trial'
+                   for arg in process.info.get('cmdline') or ()):
+                continue
             script = _training_mode_from_argv(process.info.get('cmdline'))
             if script:
                 return int(process.info['pid']), script
@@ -1797,6 +1821,8 @@ def _find_running_train_process():
             )
             output = result.stdout.decode('utf-8', errors='replace')
             for line in output.splitlines():
+                if '--autotune_trial' in line:
+                    continue
                 match = re.search(r'(train_[A-Za-z0-9_]+)\.py(?:\s|$)', line)
                 if match:
                     parts = line.strip().rsplit(None, 1)
@@ -1811,6 +1837,8 @@ def _find_running_train_process():
             if pids:
                 result2 = _sp.run(['ps', '-p', pids[0], '-o', 'command='], capture_output=True, text=True, timeout=5)
                 command = result2.stdout
+                if '--autotune_trial' in command:
+                    return None, None
                 script = 'train_' + command.split('train_')[1].split('.py')[0] if 'train_' in command else '?'
                 if script == "train_pretrain" and re.search(r'--save_weight\s+["\']?cpt_', command, re.I):
                     script = "train_cpt"
@@ -2000,20 +2028,12 @@ def _matches_arch_tag(prefix, arch_tag):
 
 def _persist_panel_state(trainer_dir):
     """把训练面板参数（含训练超参）写入 webui_state.json，刷新/重启后自动恢复。"""
-    def _serializable(v):
-        return isinstance(v, (str, int, float, bool, list, dict, type(None)))
-    # 下划线前缀一般是内部状态，但这几个 override 开关需要跨会话保留：
-    # 否则恢复后 override 复位为 False，会把已保存的 moe/linear 维度改回自动值。
-    persistable_private_keys = ("_override_moe_int", "_override_lin_kd", "_override_lin_vd")
-    state = {
-        k: v for k, v in st.session_state.items()
-        if (not k.startswith("_") or k in persistable_private_keys)
-        and _panel_state_key_allowed(k)
-        and k not in ("train_proc", "train_status", "train_log_path",
-                      "train_executed_cmd", "clear_train_log")
-        and not k.startswith("save_prefix_")
-        and _serializable(v)
-    }
+    state = snapshot_config(st.session_state)
+    # Panel reloads resume monitoring; reusable templates never restore job IDs.
+    for key in ('autotune_run_dir', 'autotune_result', 'pipeline_run_dir', 'history_log_select'):
+        if isinstance(st.session_state.get(key), str):
+            state[key] = st.session_state[key]
+    state["config_template"] = st.session_state.get("config_template", "")
     state["preset_fingerprint"] = _preset_fingerprint(st.session_state.get("preset", ""))
     with open(os.path.join(trainer_dir, "webui_state.json"), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
@@ -2283,7 +2303,7 @@ def _base_weight_routing(base_weight_path):
 
 
 def _build_training_command(train_type, cfg, save_prefix, from_resume,
-                            continue_completed_sft=False):
+                            continue_completed_sft=False, apply_autotune=True):
     """按当前面板配置组装将要执行的完整训练命令行。
 
     命令预览与 Start Training 的实际启动共用这一份实现，保证展示与执行
@@ -2333,6 +2353,8 @@ def _build_training_command(train_type, cfg, save_prefix, from_resume,
     cmd.extend(["--bucket_gpu_memory_gb", str(
         st.session_state.get("bucket_gpu_memory_gb", 16.0)
     )])
+    if st.session_state.get('bucket_token_budget', 0):
+        cmd.extend(['--bucket_token_budget', str(st.session_state['bucket_token_budget'])])
     cmd.extend(["--bucket_max_seq_len", str(
         st.session_state.get("bucket_max_seq_len", 16384)
     )])
@@ -2355,6 +2377,9 @@ def _build_training_command(train_type, cfg, save_prefix, from_resume,
     cmd.extend(["--cache_build_mode", str(
         st.session_state.get("cache_build_mode", "inline")
     )])
+    if (train_type == 'pretrain' and st.session_state.get('dataset_streaming') == 'on'
+            and st.session_state.get('cache_build_mode', 'inline') == 'inline'):
+        cmd.extend(['--num_workers', '0'])
     packing_workers = _packing_preprocess_workers(
         st.session_state.get("packing_num_proc"),
     )
@@ -2399,6 +2424,15 @@ def _build_training_command(train_type, cfg, save_prefix, from_resume,
     selected_data_path = st.session_state.get(f"data_path_{train_type}")
     if selected_data_path:
         cmd.extend(["--data_path", selected_data_path])
+    if apply_autotune and train_type == 'pretrain' and st.session_state.get('autotune_use_profile'):
+        try:
+            from scripts.autotune_panel import profile_command
+        except ModuleNotFoundError:
+            from autotune_panel import profile_command
+        profile_path = st.session_state.get('autotune_profile_path', '').strip()
+        if not profile_path:
+            raise ValueError('请选择已验收的生产 profile 路径')
+        cmd = profile_command(cmd, profile_path, train_type, cfg)
     return {
         "cmd": cmd,
         "epochs": epochs,
@@ -2831,6 +2865,13 @@ _try_recover_training_state()
 # ═══ SIDEBAR ═══
 # ═══════════════════════════════════════════════════════════════
 
+try:
+    from scripts.config_layout import workspace, render_summary
+except ModuleNotFoundError:
+    from config_layout import workspace, render_summary
+
+_ui = workspace(st)
+
 with st.sidebar:
     st.markdown(
         '<div style="font-size:22px; font-weight:700; letter-spacing:-0.5px; '
@@ -2839,50 +2880,77 @@ with st.sidebar:
         'margin-bottom: 4px;">instinct</div>',
         unsafe_allow_html=True,
     )
-    st.caption("Interactive Model Configurator")
+    st.caption("配置模板 · 自动保存")
     st.markdown(
         '<hr style="margin: 8px 0 16px 0; border-color: #1e293b;">',
         unsafe_allow_html=True,
     )
 
-    # ── Model Preset ──
-    with st.expander("Model Preset", expanded=True):
-        preset_options = [
-            "Instinct V2",
-            "Instinct V2 MoE",
-            "Instinct V2 Small",
-            "Instinct V1",
-            "Instinct V1 MoE",
-            "instinct-linear",
-            "Custom",
-        ]
-        current_preset = _LEGACY_PRESET_NAMES.get(
-            st.session_state.preset, st.session_state.preset
+    with st.expander("配置模板", expanded=True):
+        try:
+            initialize_default_templates()
+            _templates = load_templates()
+            _templates_error = False
+        except (OSError, ValueError) as exc:
+            _templates = {}
+            _templates_error = True
+            st.error(f"无法读取模板：{exc}")
+        _template_options = [""] + list(_templates)
+        if st.session_state.get("_template_select") not in _template_options:
+            _active_template = st.session_state.get("config_template", "")
+            st.session_state._template_select = (
+                _active_template if _active_template in _templates else ""
+            )
+        _selected_template = _selectbox(
+            "已保存模板", _template_options, key="_template_select",
+            format_func=lambda name: name or "选择配置模板…",
         )
-        if current_preset != st.session_state.preset:
-            st.session_state.preset = current_preset
-            init_from_preset(current_preset)
-        default_idx = (
-            preset_options.index(current_preset)
-            if current_preset in preset_options
-            else len(preset_options) - 1
+        if not _templates and not _templates_error:
+            st.caption("暂无模板。调整配置后，输入名称并添加。")
+        st.caption("保存模型、训练、数据加载、精度、调优及流水线配置。")
+        _template_name = _text_input("新模板名称", key="_template_name")
+        if st.button("添加当前配置到模板", key="btn_template_add", width="stretch",
+                     disabled=_templates_error):
+            st.session_state._template_save = (_template_name, False)
+        _template_cols = st.columns(2)
+        _template_pipeline = st.session_state.get('_pipeline_proc')
+        _template_busy = (
+            st.session_state.get('train_status') == 'running'
+            or autotune_active(st.session_state)
+            or (_template_pipeline is not None and _template_pipeline.poll() is None)
         )
-        chosen = _radio(
-            "Quick-select preset",
-            preset_options,
-            index=default_idx,
-            key="_preset_radio",
-            label_visibility="collapsed",
-            horizontal=False,
-        )
-        if chosen != st.session_state.preset:
-            st.session_state.preset = chosen
-            if chosen != "Custom":
-                init_from_preset(chosen)
-            st.rerun()
+        with _template_cols[0]:
+            if st.button("载入模板", key="btn_template_load", width="stretch",
+                         disabled=not _selected_template or _template_busy):
+                st.session_state._pending_template_load = (
+                    _selected_template, _templates[_selected_template],
+                )
+                st.rerun()
+        with _template_cols[1]:
+            if st.button("更新所选模板", key="btn_template_update", width="stretch",
+                         disabled=not _selected_template):
+                st.session_state._template_save = (_selected_template, True)
+        if st.button("删除所选模板", key="btn_template_delete", width="stretch",
+                     disabled=not _selected_template):
+            try:
+                delete_template(_selected_template)
+                st.session_state.config_template = ""
+                st.session_state.pop("_template_select", None)
+                st.session_state._template_notice = "模板已删除"
+                st.rerun()
+            except (OSError, ValueError) as exc:
+                st.error(f"无法删除模板：{exc}")
+        if st.session_state.get("_template_notice"):
+            st.success(st.session_state.pop("_template_notice"))
+
+    st.divider()
+    st.markdown("**使用顺序**")
+    st.caption("1. 训练配置：选阶段、数据和精度。\n\n2. 自动调优：检查条件，实测并应用结果。\n\n3. 回到训练配置，检查命令并启动。")
+    st.caption("模型结构、流水线、监控与导出分别位于顶部页签。")
+    _sidebar_status = st.empty()
 
     # ── Model Architecture ──
-    with st.expander("Model Architecture", expanded=True):
+    with _ui["model_left"].expander("模型类型", expanded=True):
         arch_options = ["Standard Transformer", "MoE Transformer", "GatedDeltaNet (Linear)", "Instinct V2 Recurrent Depth"]
         current_arch = st.session_state.get("model_architecture", "standard")
         if current_arch == "standard":
@@ -2920,7 +2988,7 @@ with st.sidebar:
             st.rerun()
 
     # ── Core Architecture ──
-    with st.expander("Core Architecture", expanded=True):
+    with _ui["model_left"].expander("核心结构", expanded=True):
         _slider(
             "hidden_size",
             128,
@@ -2979,7 +3047,7 @@ with st.sidebar:
         )
 
     # ── Residual Connections ──
-    with st.expander("Residual Connections (Experimental)", expanded=True):
+    with _ui["model_right"].expander("残差连接 · 实验性", expanded=False):
         _residual_labels = {
             "standard": "Standard residual",
             "mhc": "mHC (Manifold-Constrained Hyper-Connections)",
@@ -3039,7 +3107,7 @@ with st.sidebar:
                 )
 
     # ── Attention ──
-    with st.expander("Attention", expanded=True):
+    with _ui["model_right"].expander("注意力", expanded=True):
         _q_heads = _slider(
             "num_attention_heads",
             1,
@@ -3079,7 +3147,7 @@ with st.sidebar:
 
     # ── Linear Attention Config ──
     if st.session_state.get("model_architecture") == "linear":
-        with st.expander("Linear Attention Config", expanded=True):
+        with _ui["model_right"].expander("线性注意力", expanded=True):
             _h = st.session_state.get("hidden_size", 768)
             _q = st.session_state.get("num_attention_heads", 8)
             _hd = compute_head_dim(_h, _q)
@@ -3152,7 +3220,7 @@ with st.sidebar:
 
     # ── Instinct V2 latent recurrent-depth Config ──
     if st.session_state.get("model_architecture") == "looped":
-        with st.expander("Instinct V2 Recurrent Depth", expanded=True):
+        with _ui["model_right"].expander("V2 循环深度", expanded=True):
             _n_layers = st.session_state.get("num_hidden_layers", 8)
             _number_input(
                 "Prelude layers",
@@ -3236,7 +3304,7 @@ with st.sidebar:
             )
 
     # ── Position Encoding ──
-    with st.expander("Position Encoding", expanded=True):
+    with _ui["model_right"].expander("位置编码与 RoPE", expanded=False):
         _number_input(
             "max_position_embeddings",
             value=st.session_state.get("max_position_embeddings", 32768),
@@ -3381,7 +3449,7 @@ with st.sidebar:
             )
 
     # ── MoE ──
-    with st.expander("MoE (Experimental)", expanded=True):
+    with _ui["model_left"].expander("MoE 专家与路由", expanded=True):
         _checkbox(
             "use_moe",
             value=st.session_state.get("use_moe", False),
@@ -3510,7 +3578,7 @@ with st.sidebar:
             )
 
     # ── Early Exit (training only) ──
-    with st.expander("Early Exit (Training)", expanded=False):
+    with _ui["model_right"].expander("提前退出 · 训练", expanded=False):
         _checkbox(
             "Enable Early Exit Loss",
             value=st.session_state.get("early_exit_enabled", False),
@@ -3537,7 +3605,7 @@ with st.sidebar:
             )
 
     # ── Misc ──
-    with st.expander("Misc"):
+    with _ui["model_right"].expander("其他结构选项", expanded=False):
         _number_input(
             "rms_norm_eps",
             value=st.session_state.get("rms_norm_eps", 1e-6),
@@ -3551,9 +3619,9 @@ with st.sidebar:
         )
 
     # ── Training: task & data ──
-    with st.expander("训练任务与数据", expanded=True, icon=":material/target:"):
+    with _ui["train_left"].expander("01 · 训练任务与数据", expanded=True, icon=":material/target:"):
         train_type = _selectbox(
-            "Training type",
+            "训练阶段",
             ["pretrain", "cpt", "full_sft", "lora", "dpo", "ppo", "grpo", "agent", "distillation"],
             key="train_type",
             format_func=lambda value: "cpt (continual pretraining)" if value == "cpt" else value,
@@ -3620,7 +3688,7 @@ with st.sidebar:
             if st.session_state.get(_dataset_key) not in _dataset_options:
                 st.session_state[_dataset_key] = _dataset_options[0]
             _selectbox(
-                "Training dataset",
+                "训练数据集",
                 _dataset_options,
                 key=_dataset_key,
                 format_func=_dataset_option_label,
@@ -3639,14 +3707,14 @@ with st.sidebar:
                 os.path.dirname(config_file), "config_pretrain.json"
             )
         if os.path.exists(config_file):
-            if st.button("Load config from file", width="stretch", key="btn_load_config",
+            if st.button("载入此阶段的模型配置", width="stretch", key="btn_load_config",
                          icon=":material/folder_open:",
                          help=f"Load model architecture from {config_file}"):
                 with open(config_file, "r", encoding="utf-8") as f:
                     st.session_state._pending_config_load = json.load(f)
                 st.rerun()
         if train_type != "full_sft":
-            _checkbox("Resume from checkpoint (--from_resume)", value=False, key="from_resume",
+            _checkbox("从检查点续训（Resume）", value=False, key="from_resume",
                       help="Auto-detect and resume from checkpoints/{weight}_{dim}{_moe}_resume.pth")
         # 基座权重自动解析：非从零场景一律取最新相关 checkpoint，不再让用户手选。
         # 模型结构从该 checkpoint 的配置边车预填进面板（读取不锁死，之后仍可修改）。
@@ -3678,57 +3746,63 @@ with st.sidebar:
         else:
             st.error(f"未找到 {train_type} 可用的基座权重（out/ 或 checkpoints/ 下的对应前缀 .pth）。")
     # ── Training: data loading & packing ──
-    with st.expander("数据加载与 Packing", expanded=False, icon=":material/dataset:"):
+    with _ui["train_right"].expander("02 · 数据加载与动态批量", expanded=True, icon=":material/dataset:"):
         _packing_supported = train_type in ("pretrain", "cpt", "full_sft", "lora", "distillation")
-        _number_input(
-            "Dataset cache budget (GB)",
-            min_value=0.0, max_value=1024.0,
-            value=float(st.session_state.get("data_cache_max_gb", 5.0)),
-            step=1.0, key="data_cache_max_gb",
-            help="Hugging Face/Arrow 可重建缓存的总上限。超限按 LRU 自动淘汰；"
-                 "正在训练使用的 mmap 文件受租约保护。0 表示不限制。",
-        )
-        _selectbox(
-            "Large dataset loading",
-            ["auto", "on", "off"],
-            index=["auto", "on", "off"].index(
-                st.session_state.get("dataset_streaming", "auto")
-            ),
-            key="dataset_streaming",
-            format_func=lambda value: {
-                "auto": "Auto — stream when cache is too small",
-                "on": "Streaming chunks — always",
-                "off": "Whole-dataset Arrow cache",
-            }[value],
-            help="Pretrain 把大型语料按块逐片展开、packing、训练和释放；不会生成整库 Arrow。"
-                 "JSONL 按字节范围切块，Parquet 按 row group 切块（token_count 直接取自列，无需分词）。",
-        )
-        _number_input(
-            "Streaming source chunk (MiB)",
-            min_value=64, max_value=16384,
-            value=int(st.session_state.get("streaming_chunk_mb", 1024)),
-            step=64, key="streaming_chunk_mb",
-            help="开启下一片预取时，5GB 缓存最多使用 1024 MiB；峰值按最多约 5× 源分片预留。",
-        )
-        _checkbox(
-            "Pack next chunk while training",
-            value=bool(st.session_state.get("streaming_prefetch_chunks", 1)),
-            key="streaming_prefetch_chunks",
-            help="双缓冲：GPU 训练当前分片时，rank 0 用后台线程展开并 packing 下一分片；"
-                 "配合 Inline 模式不启动 Python 子进程。",
-        )
-        _selectbox(
-            "Cache build process",
-            ["inline", "spawn"],
-            index=["inline", "spawn"].index(
-                st.session_state.get("cache_build_mode", "inline")
-            ),
-            key="cache_build_mode",
-            format_func=lambda value: {
-                "inline": "Inline — spawn-free and Windows-safe",
-                "spawn": "Spawn worker — faster isolation, higher risk",
-            }[value],
-            help="Inline 流式预训练会强制 packing_num_proc=1、DataLoader workers=0，避免任何 Python spawn。",
+        with st.expander("缓存与流式加载", expanded=False):
+            _number_input(
+                "Dataset cache budget (GB)",
+                min_value=0.0, max_value=1024.0,
+                value=float(st.session_state.get("data_cache_max_gb", 5.0)),
+                step=1.0, key="data_cache_max_gb",
+                help="Hugging Face/Arrow 可重建缓存的总上限。超限按 LRU 自动淘汰；"
+                     "正在训练使用的 mmap 文件受租约保护。0 表示不限制。",
+            )
+            _selectbox(
+                "Large dataset loading",
+                ["auto", "on", "off"],
+                index=["auto", "on", "off"].index(
+                    st.session_state.get("dataset_streaming", "auto")
+                ),
+                key="dataset_streaming",
+                format_func=lambda value: {
+                    "auto": "Auto — stream when cache is too small",
+                    "on": "Streaming chunks — always",
+                    "off": "Whole-dataset Arrow cache",
+                }[value],
+                help="Pretrain 把大型语料按块逐片展开、packing、训练和释放；不会生成整库 Arrow。"
+                     "JSONL 按字节范围切块，Parquet 按 row group 切块（token_count 直接取自列，无需分词）。",
+            )
+            _number_input(
+                "Streaming source chunk (MiB)",
+                min_value=64, max_value=16384,
+                value=int(st.session_state.get("streaming_chunk_mb", 1024)),
+                step=64, key="streaming_chunk_mb",
+                help="开启下一片预取时，5GB 缓存最多使用 1024 MiB；峰值按最多约 5× 源分片预留。",
+            )
+            _checkbox(
+                "Pack next chunk while training",
+                value=bool(st.session_state.get("streaming_prefetch_chunks", 1)),
+                key="streaming_prefetch_chunks",
+                help="双缓冲：GPU 训练当前分片时，rank 0 用后台线程展开并 packing 下一分片；"
+                     "配合 Inline 模式不启动 Python 子进程。",
+            )
+            _selectbox(
+                "Cache build process",
+                ["inline", "spawn"],
+                index=["inline", "spawn"].index(
+                    st.session_state.get("cache_build_mode", "inline")
+                ),
+                key="cache_build_mode",
+                format_func=lambda value: {
+                    "inline": "Inline — spawn-free and Windows-safe",
+                    "spawn": "Spawn worker — faster isolation, higher risk",
+                }[value],
+                help="Inline 流式预训练会强制 packing_num_proc=1、DataLoader workers=0，避免任何 Python spawn。",
+            )
+        st.caption(
+            f"流式加载：{st.session_state.get('dataset_streaming', 'auto')} · "
+            f"缓存构建：{st.session_state.get('cache_build_mode', 'inline')} · "
+            f"缓存预算：{st.session_state.get('data_cache_max_gb', 5):g} GB"
         )
         _checkbox(
             "Sequence packing",
@@ -3798,9 +3872,15 @@ with st.sidebar:
                 min_value=1.0, max_value=192.0,
                 value=float(st.session_state.get("bucket_gpu_memory_gb", 16.0)),
                 step=1.0, key="bucket_gpu_memory_gb",
-                help="填写每张训练 GPU 的显存硬预算。会先扣除全模型参数、梯度、"
-                     "Muon/AdamW 状态，并按 bucket 数量预留编译图与 allocator 空间，"
-                     "再计算每个长度桶的 batch_size。",
+                help="填写每张训练 GPU 的显存硬预算。启动时根据实际 GPU、模型、优化器和"
+                     "checkpoint 配置选择显存曲线，计入编译与临时张量预留，"
+                     "再计算每个长度桶的 batch_size。已保存的续训预算保持不变。",
+            )
+            _number_input(
+                'Bucket token budget（0=自动）', min_value=0, max_value=1048576,
+                value=int(st.session_state.get('bucket_token_budget', 0)),
+                step=512, key='bucket_token_budget',
+                help='手动覆盖自动 batch 的 token 预算。已验收调优 profile 启用时由 profile 管理；续训使用保存预算。',
             )
             _vram_plan = estimate_bucket_vram_plan(
                 build_config_dict(),
@@ -3814,10 +3894,11 @@ with st.sidebar:
             if _vram_plan["token_budget"] > 0:
                 _batch_4096 = max(1, _vram_plan["token_budget"] // 4096)
                 st.caption(
-                    f"模型常驻约 {_vram_plan['persistent_gb']:.2f} GiB；"
+                    f"保守预估：模型常驻约 {_vram_plan['persistent_gb']:.2f} GiB；"
                     f"安全/桶预留 {_vram_plan['reserve_gb']:.2f} GiB；"
                     f"activation token budget ≈ {_vram_plan['token_budget']:,}/card。"
                     f"例如 4096-token 桶预计 batch={_batch_4096}。"
+                    "匹配实测显存曲线的 GPU/训练配置会在启动时重新校准，以训练日志为准。"
                 )
             else:
                 st.error(
@@ -3825,7 +3906,7 @@ with st.sidebar:
                     f"再加 {_vram_plan['reserve_gb']:.2f} GiB 安全/桶预留后已超过"
                     f" {_bucket_gpu_memory:g} GiB；需要减少参数/桶数或提高显存预算。"
                 )
-            st.caption("上方手动 batch_size 在 Auto buckets 模式中不会参与每桶批量计算。")
+            st.caption("分桶模式按长度自动计算 batch；「批次与优化器」中的手动 batch_size 不参与计算。显存估算用于确定可运行预算；实测吞吐推荐请进入「自动调优」。")
         else:
             _number_input(
                 "max_seq_len (训练截断长度)",
@@ -3834,45 +3915,46 @@ with st.sidebar:
                 step=32, key="max_seq_len",
                 help="未启用 packing 或使用 Fixed packing 时的固定训练截断长度（token 数）。",
             )
-        _number_input(
-            "Packing cache batch size",
-            min_value=32, max_value=10000,
-            value=st.session_state.get("packing_batch_size", 1000),
-            step=100, key="packing_batch_size",
-            disabled=not _packing_enabled,
-            help="首次构建 Arrow cache 时每批处理的原始样本数；越大通常填充率越高，但占用更多 CPU 内存。",
-        )
-        _packing_worker_limit = _packing_preprocess_workers(
-            32, platform_name=os.name, cpu_count=os.cpu_count(),
-        )
-        _packing_workers = _packing_preprocess_workers(
-            st.session_state.get("packing_num_proc"),
-        )
-        # A saved value from an older UI may exceed the new Windows-safe max.
-        if st.session_state.get("packing_num_proc") != _packing_workers:
-            st.session_state.packing_num_proc = _packing_workers
-        _number_input(
-            "Packing preprocessing workers",
-            min_value=1, max_value=_packing_worker_limit,
-            value=_packing_workers,
-            step=1, key="packing_num_proc",
-            disabled=not _bucket_packing,
-            help="Auto buckets 的 tokenizer/长度统计和桶内 packing 使用的并行进程数；"
-                 "Windows 最多 4，避免多个 PyTorch 子进程耗尽提交内存。"
-                 "分桶 DP 已是 O(bucket×样本数)，通常不是耗时瓶颈。",
-        )
-        _number_input(
-            "Bucket training DataLoader workers",
-            min_value=0, max_value=max(1, min(16, os.cpu_count() or 1)),
-            value=min(
-                int(st.session_state.get("bucket_loader_workers", 0)),
-                max(1, min(16, os.cpu_count() or 1)),
-            ),
-            step=1, key="bucket_loader_workers",
-            disabled=not _bucket_packing,
-            help="训练阶段读取 packed Arrow 数据的进程数。Windows 建议 0：每个 spawn worker "
-                 "都会重新导入 PyTorch，显著增加任务管理器的已提交内存。",
-        )
+        with st.expander("Packing 预处理与加载进程", expanded=False):
+            _number_input(
+                "Packing cache batch size",
+                min_value=32, max_value=10000,
+                value=st.session_state.get("packing_batch_size", 1000),
+                step=100, key="packing_batch_size",
+                disabled=not _packing_enabled,
+                help="首次构建 Arrow cache 时每批处理的原始样本数；越大通常填充率越高，但占用更多 CPU 内存。",
+            )
+            _packing_worker_limit = _packing_preprocess_workers(
+                32, platform_name=os.name, cpu_count=os.cpu_count(),
+            )
+            _packing_workers = _packing_preprocess_workers(
+                st.session_state.get("packing_num_proc"),
+            )
+            # A saved value from an older UI may exceed the new Windows-safe max.
+            if st.session_state.get("packing_num_proc") != _packing_workers:
+                st.session_state.packing_num_proc = _packing_workers
+            _number_input(
+                "Packing preprocessing workers",
+                min_value=1, max_value=_packing_worker_limit,
+                value=_packing_workers,
+                step=1, key="packing_num_proc",
+                disabled=not _bucket_packing,
+                help="Auto buckets 的 tokenizer/长度统计和桶内 packing 使用的并行进程数；"
+                     "Windows 最多 4，避免多个 PyTorch 子进程耗尽提交内存。"
+                     "分桶 DP 已是 O(bucket×样本数)，通常不是耗时瓶颈。",
+            )
+            _number_input(
+                "Bucket training DataLoader workers",
+                min_value=0, max_value=max(1, min(16, os.cpu_count() or 1)),
+                value=min(
+                    int(st.session_state.get("bucket_loader_workers", 0)),
+                    max(1, min(16, os.cpu_count() or 1)),
+                ),
+                step=1, key="bucket_loader_workers",
+                disabled=not _bucket_packing,
+                help="训练阶段读取 packed Arrow 数据的进程数。Windows 建议 0：每个 spawn worker "
+                     "都会重新导入 PyTorch，显著增加任务管理器的已提交内存。",
+            )
         if _packing_enabled and st.session_state.get("from_resume", False):
             st.info(
                 "从非 packing checkpoint 切换时会保留模型、优化器与 GradScaler，并还原当前 "
@@ -3881,7 +3963,7 @@ with st.sidebar:
             )
 
     # ── Training: batch & optimizer ──
-    with st.expander("批次与优化器", expanded=True, icon=":material/tune:"):
+    with _ui["train_left"].expander("03 · 批次与优化器", expanded=True, icon=":material/tune:"):
         _bucket_auto_batch = (
             train_type in ("pretrain", "cpt", "full_sft", "lora", "distillation")
             and st.session_state.get("sequence_packing", False)
@@ -3895,7 +3977,7 @@ with st.sidebar:
             disabled=_bucket_auto_batch,
             help="批次大小。小模型 GPU 利用率低时，可提升到 64/128 放大单步 GEMM "
                  "(注意：batch×seq 与激活显存成正比，过高会 OOM)。Auto buckets 模式下"
-                 "此项停用（见『数据加载与 Packing』），改为根据显存和桶长度自动计算。",
+                 "此项停用（见『数据加载与动态批量』），改为根据显存和桶长度自动计算。",
         )
         epochs_key = f"epochs_{train_type}"
         _number_input(
@@ -3957,7 +4039,7 @@ with st.sidebar:
         )
 
     # ── Training: precision & performance ──
-    with st.expander("精度与性能", expanded=False, icon=":material/speed:"):
+    with _ui["train_right"].expander("04 · 精度与性能", expanded=False, icon=":material/speed:"):
         _checkbox(
             "Use torch.compile (Triton)",
             value=st.session_state.get("use_compile", True),
@@ -4096,7 +4178,7 @@ with st.sidebar:
             )
 
     # ── Training: after completion ──
-    with st.expander("训练完成后", expanded=False, icon=":material/bedtime:"):
+    with _ui["train_left"].expander("训练完成后", expanded=False, icon=":material/bedtime:"):
         _checkbox(
             "训练结束后自动关机",
             value=st.session_state.get("shutdown_after_train", False),
@@ -4114,65 +4196,86 @@ with st.sidebar:
                 help="训练完成后等待这么多秒再关机；期间可在页面点击「取消自动关机」。",
             )
 
+    # The tuner uses this same command builder, with profile application off,
+    # and freezes the model configuration into its own scratch run directory.
+    try:
+        from scripts.autotune_panel import render as render_autotune_panel
+    except ModuleNotFoundError:
+        from autotune_panel import render as render_autotune_panel
+    with _ui["tune"]:
+        render_autotune_panel(
+            st, build_config_dict(),
+            lambda *args: _build_training_command(*args, apply_autotune=False),
+            st.session_state.get('train_status') == 'running',
+        )
+
     # ── Training: launch & status ──
-    with st.expander("启动训练", expanded=True, icon=":material/play_circle:"):
-        # ── 将执行的训练命令 ──
-        _launch_proc = st.session_state.get("train_proc")
-        if (_launch_proc is not None and _launch_proc.poll() is None
-                and st.session_state.get("train_executed_cmd")):
-            # 运行中：冻结展示该进程实际执行的命令，不随面板修改而变。
-            st.caption("训练进程正在执行：")
-            st.code(_format_command(st.session_state.train_executed_cmd),
-                    language="bash", line_numbers=False)
-        else:
-            _cmd_error = None
-            try:
-                _preview_type = st.session_state.get("train_type", "pretrain")
-                _preview_cfg = build_config_dict()
-                _preview_sft_mode = st.session_state.get("sft_start_mode", "base")
-                _preview_resume = (
-                    _preview_sft_mode == "resume"
-                    if _preview_type == "full_sft"
-                    else st.session_state.get("from_resume", False)
-                )
-                _preview_continue_sft = (
-                    _preview_type == "full_sft" and _preview_sft_mode == "continue"
-                )
-                _preview_prefix = _resolve_save_prefix(
-                    _preview_type, _preview_cfg["hidden_size"], _preview_cfg["use_moe"],
-                    _preview_resume, time.strftime("%Y%m%d_%H%M%S"),
-                )
-                if _preview_resume and _preview_prefix is None:
-                    _cmd_error = "未找到匹配的续训检查点——请检查 Resume from checkpoint 设置。"
-                elif _preview_type != "pretrain" and not _auto_base_weight(
-                    _preview_type, _preview_continue_sft,
-                ):
-                    _cmd_error = f"未找到 {_preview_type} 可用的基座权重（out/ 或 checkpoints/）。"
-                elif not st.session_state.get(f"data_path_{_preview_type}"):
-                    _cmd_error = "未选择训练数据集。"
-                else:
-                    _preview_built = _build_training_command(
-                        _preview_type, _preview_cfg, _preview_prefix,
-                        _preview_resume, _preview_continue_sft,
+    with _ui["launch"].expander("检查并启动训练", expanded=True, icon=":material/play_circle:"):
+        _launch_details, _launch_action = st.columns([3, 1], gap="large")
+        with _launch_details:
+            _autotune_profile_invalid = False
+            # ── 将执行的训练命令 ──
+            _launch_proc = st.session_state.get("train_proc")
+            if (_launch_proc is not None and _launch_proc.poll() is None
+                    and st.session_state.get("train_executed_cmd")):
+                # 运行中：冻结展示该进程实际执行的命令，不随面板修改而变。
+                st.caption("训练进程正在执行：")
+                st.code(_format_command(st.session_state.train_executed_cmd),
+                        language="bash", line_numbers=False)
+            else:
+                _cmd_error = None
+                try:
+                    _preview_type = st.session_state.get("train_type", "pretrain")
+                    _preview_cfg = build_config_dict()
+                    _preview_sft_mode = st.session_state.get("sft_start_mode", "base")
+                    _preview_resume = (
+                        _preview_sft_mode == "resume"
+                        if _preview_type == "full_sft"
+                        else st.session_state.get("from_resume", False)
                     )
-                    st.caption("点击 Start Training 将执行：")
-                    st.code(_format_command(_preview_built["cmd"]), language="bash", line_numbers=False)
-                    if not _preview_resume:
-                        st.caption("新训练的 save_prefix 时间戳以实际启动时间为准。")
-            except Exception as _cmd_exc:
-                _cmd_error = f"命令预览生成失败：{_cmd_exc}"
-            if _cmd_error:
-                st.caption(_cmd_error)
-        if st.button(
-            "Start Training", width="stretch", key="btn_start_train",
-            disabled=(
-                _compile_invalid or _fp8_invalid or _low_precision_invalid
-                or _dataset_missing or _base_missing
-            ),
-        ):
-            st.session_state.train_triggered = True
+                    _preview_continue_sft = (
+                        _preview_type == "full_sft" and _preview_sft_mode == "continue"
+                    )
+                    _preview_prefix = _resolve_save_prefix(
+                        _preview_type, _preview_cfg["hidden_size"], _preview_cfg["use_moe"],
+                        _preview_resume, time.strftime("%Y%m%d_%H%M%S"),
+                    )
+                    if _preview_resume and _preview_prefix is None:
+                        _cmd_error = "未找到匹配的续训检查点——请检查 Resume from checkpoint 设置。"
+                    elif _preview_type != "pretrain" and not _auto_base_weight(
+                        _preview_type, _preview_continue_sft,
+                    ):
+                        _cmd_error = f"未找到 {_preview_type} 可用的基座权重（out/ 或 checkpoints/）。"
+                    elif not st.session_state.get(f"data_path_{_preview_type}"):
+                        _cmd_error = "未选择训练数据集。"
+                    else:
+                        _preview_built = _build_training_command(
+                            _preview_type, _preview_cfg, _preview_prefix,
+                            _preview_resume, _preview_continue_sft,
+                        )
+                        st.caption("启动后将使用以下命令。修改参数后自动更新预览。")
+                        with st.expander("查看完整训练命令", expanded=False):
+                            st.code(_format_command(_preview_built["cmd"]), language="bash", line_numbers=False)
+                        if not _preview_resume:
+                            st.caption("新训练的 save_prefix 时间戳以实际启动时间为准。")
+                except Exception as _cmd_exc:
+                    _cmd_error = f"命令预览生成失败：{_cmd_exc}"
+                    _autotune_profile_invalid = bool(st.session_state.get('autotune_use_profile'))
+                if _cmd_error:
+                    st.error(_cmd_error)
+        with _launch_action:
+            if st.button(
+                "开始训练", width="stretch", key="btn_start_train", type="primary",
+                disabled=(
+                    _compile_invalid or _fp8_invalid or _low_precision_invalid
+                    or _dataset_missing or _base_missing
+                    or autotune_active(st.session_state)
+                    or _autotune_profile_invalid
+                ),
+            ):
+                st.session_state.train_triggered = True
         if st.session_state.get("train_status") == "running":
-            if st.button("Pause Training", width="stretch", key="btn_pause_train",
+            if st.button("暂停并保存", width="stretch", key="btn_pause_train",
                          icon=":material/pause:",
                          help="写入 checkpoints/.pause_request，训练进程在下一个 step 边界保存检查点并退出(码42)"):
                 _request_pause(st.session_state.get("train_type", "pretrain"))
@@ -4211,13 +4314,18 @@ with st.sidebar:
                 with st.expander("Failure log (last 80 lines)", expanded=True):
                     st.code(_failed_tail, language="text")
         elif st.session_state.get("train_status") == "paused":
-            st.warning("Training paused — model state saved. Tick 'Resume from checkpoint' and press Start Training to continue.",
+            st.warning("训练已暂停并保存。如需继续，请勾选「从检查点续训」后点击「开始训练」。",
                        icon=":material/pause_circle:")
-            st.caption("Pause saves out/ + checkpoints/*_resume.pth so training can continue later.")
+            st.caption("暂停时已保存模型权重和完整续训状态。")
 
 # ═══════════════════════════════════════════════════════════════
 # ═══ MAIN AREA ═══
 # ═══════════════════════════════════════════════════════════════
+
+if st.session_state.get("train_triggered", False):
+    if autotune_active(st.session_state):
+        st.session_state.train_triggered = False
+        st.warning('自动调优正在运行，请先停止调优。')
 
 if st.session_state.get("train_triggered", False):
     _pipeline_process = st.session_state.get('_pipeline_proc')
@@ -4372,8 +4480,9 @@ try:
     from scripts.pipeline_panel import render as render_pipeline_panel
 except ModuleNotFoundError:  # running from scripts/ as documented
     from pipeline_panel import render as render_pipeline_panel
-render_pipeline_panel(st, cfg, st.session_state.get('train_status') == 'running',
-                      arm_shutdown_monitor=_maybe_arm_shutdown_monitor)
+with _ui["pipeline"]:
+    render_pipeline_panel(st, cfg, st.session_state.get('train_status') == 'running' or autotune_active(st.session_state),
+                          arm_shutdown_monitor=_maybe_arm_shutdown_monitor)
 
 # 流水线在本会话内从 running 转为退出：training_pipeline.py 以 0 退出表示
 # 全部阶段成功（暂停/失败返回 1），此时与单次训练一样触发自动关机。
@@ -4388,376 +4497,331 @@ if _pipeline_proc is not None:
 breakdown = calc_params(cfg)
 total_params = breakdown["Total Params"]["value"]
 
-# ── Header row ──
-name = st.session_state.preset
-if name == "Custom":
-    name = "Custom Model"
+with _ui["summary"]:
+    render_summary(st, cfg, breakdown)
+_status_labels = {"running": "训练运行中", "paused": "训练已暂停", "success": "训练已完成", "failed": "训练失败"}
+_sidebar_status.info("自动调优运行中" if autotune_active(st.session_state) else
+                     _status_labels.get(st.session_state.get("train_status"), "就绪 · 等待启动"))
 
-suffix = ""
-if cfg["use_moe"]:
-    active_total = breakdown["Active Total"]["value"]
-    suffix = " (MoE)"
-elif cfg.get("model_architecture") == "linear":
-    active_total = total_params
-    suffix = " (Linear)"
-elif cfg.get("model_architecture") == "looped":
-    active_total = total_params
-    suffix = " (Looped)"
-else:
-    active_total = total_params
-    suffix = ""
-if cfg.get("residual_type", "standard") == "mhc":
-    suffix = f"{suffix} + mHC" if suffix else " (mHC)"
-elif cfg.get("residual_type", "standard") == "attnres":
-    _attnres_label = f"{cfg.get('attnres_variant', 'block').title()} AttnRes"
-    suffix = f"{suffix} + {_attnres_label}" if suffix else f" ({_attnres_label})"
-name_label = (
-    name if cfg["use_moe"] and "MoE" in name
-    else f"{name} &nbsp;{suffix}" if suffix else name
-)
-
-col_title, col_badges = st.columns([1.2, 2])
-with col_title:
-    st.markdown(
-        f'<div style="font-size: 26px; font-weight: 700; '
-        f'letter-spacing: -0.5px; color: #f1f5f9;">{name_label}</div>',
-        unsafe_allow_html=True,
-    )
-
-with col_badges:
-    badge_html = (
-        f'<span class="badge">{fmt_num(total_params)} params</span>'
-    )
-    if cfg["use_moe"]:
-        badge_html += (
-            f'<span class="badge badge-moe">{fmt_num(active_total)} active</span>'
-        )
-    badge_html += (
-        f'<span class="badge badge-green">{cfg["num_hidden_layers"]} layers</span>'
-    )
-    badge_html += (
-        f'<span class="badge">dim={cfg["hidden_size"]}</span>'
-    )
-    badge_html += (
-        f'<span class="badge">vocab={cfg["vocab_size"]}</span>'
-    )
-    if cfg.get("residual_type", "standard") != "standard":
-        badge_html += (
-            f'<span class="badge badge-moe">residual={cfg["residual_type"]}</span>'
-        )
-    st.markdown(
-        f'<div style="margin-top: 6px;">{badge_html}</div>',
-        unsafe_allow_html=True,
-    )
-
-st.markdown(
-    '<hr style="margin: 4px 0 16px 0; border-color: #1e293b;">',
-    unsafe_allow_html=True,
-)
-
-# ── Training progress bar (prominent, top of page) ──
-if st.session_state.get("train_status") == "running":
-    log_path = st.session_state.get("train_log_path")
-    if log_path and os.path.exists(log_path):
-        with open(log_path, "r", encoding="utf-8") as f:
-            log = f.read()
-        progress = _training_progress_from_log(log)
-        if progress:
-            st.progress(progress['fraction'], text=f"Training — {progress['caption']}")
+with _ui["activity"]:
+    # ── Training progress bar (prominent, top of page) ──
+    if st.session_state.get("train_status") == "running":
+        log_path = st.session_state.get("train_log_path")
+        if log_path and os.path.exists(log_path):
+            with open(log_path, "r", encoding="utf-8") as f:
+                log = f.read()
+            progress = _training_progress_from_log(log)
+            if progress:
+                st.progress(progress['fraction'], text=f"Training — {progress['caption']}")
+            else:
+                st.info(_training_activity_from_log(log), icon=":material/hourglass_top:")
         else:
-            st.info(_training_activity_from_log(log), icon=":material/hourglass_top:")
-    else:
-        st.info("Training started...", icon=":material/hourglass_top:")
-elif st.session_state.get("train_status") == "paused":
-    tt = st.session_state.get("train_type", "pretrain")
-    cfg_local = build_config_dict()
-    ckpt_prefix = _latest_checkpoint_prefix(tt, cfg_local["hidden_size"], cfg_local["use_moe"], _arch_tag())
-    st.warning(f"Training paused. Resume checkpoint: checkpoints/{ckpt_prefix}_{cfg_local['hidden_size']}_resume.pth" if ckpt_prefix else "Training paused. Resume via 'Resume from checkpoint' + Start Training.",
-               icon=":material/pause_circle:")
+            st.info("Training started...", icon=":material/hourglass_top:")
+    elif st.session_state.get("train_status") == "paused":
+        tt = st.session_state.get("train_type", "pretrain")
+        cfg_local = build_config_dict()
+        ckpt_prefix = _latest_checkpoint_prefix(tt, cfg_local["hidden_size"], cfg_local["use_moe"], _arch_tag())
+        st.warning(f"Training paused. Resume checkpoint: checkpoints/{ckpt_prefix}_{cfg_local['hidden_size']}_resume.pth" if ckpt_prefix else "Training paused. Resume via 'Resume from checkpoint' + Start Training.",
+                   icon=":material/pause_circle:")
 
-# ── Auto-shutdown countdown ──
-if st.session_state.get("shutdown_deadline") is not None:
-    _shutdown_remaining = int(st.session_state["shutdown_deadline"] - time.time())
-    if _shutdown_remaining > 0:
-        st.warning(
-            f"训练已完成 — 系统将在约 {_shutdown_remaining} 秒后自动关机。"
-            "如需继续使用这台机器，请立即取消。",
-            icon=":material/power_settings_new:",
-        )
-        if st.button("取消自动关机", key="btn_cancel_shutdown", type="primary"):
-            _cancel_auto_shutdown()
-            st.rerun()
-    else:
-        st.session_state.pop("shutdown_deadline", None)
-
-# ── Main content (single column) ──
-
-# ═══ Architecture diagram ──
-architecture_title = (
-    "Instinct V2 Recurrent Architecture"
-    if cfg.get("model_architecture") == "looped"
-    else "Architecture"
-)
-st.markdown(
-    '<div style="font-size: 13px; font-weight: 600; letter-spacing: 0.8px; '
-    'color: #94a3b8; text-transform: uppercase; margin-bottom: 8px;">'
-    f"{architecture_title}</div>",
-    unsafe_allow_html=True,
-)
-
-st.markdown(arch_diagram(cfg), unsafe_allow_html=True)
-
-# Additional architecture info
-int_size = cfg.get("intermediate_size", compute_intermediate_size(cfg["hidden_size"]))
-loop_badges = ""
-if cfg.get("model_architecture") == "looped":
-    physical_depth = (
-        cfg.get("prelude_layers", 2)
-        + cfg.get("recurrent_layers", 4)
-        + cfg.get("coda_layers", 2)
-    )
-    effective_depth = (
-        cfg.get("prelude_layers", 2)
-        + cfg.get("loop_iters", 32) * cfg.get("recurrent_layers", 4)
-        + cfg.get("coda_layers", 2)
-    )
-    loop_badges = (
-        f'<span class="badge" style="background:#3b1f6e;">physical: {physical_depth}</span>'
-        f'<span class="badge" style="background:#4a1d5e;">effective: {effective_depth}</span>'
-        f'<span class="badge" style="background:#581c87;">'
-        f'recurrence: {cfg.get("loop_iters", 32)} / BPTT: {cfg.get("mean_backprop_depth", 8)}</span>'
-    )
-st.markdown(
-    f'<div style="margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px;">'
-    f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
-    f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
-    f"FFN intermediate: {fmt_num(int_size)}</span>"
-    f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
-    f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
-    f"head_dim: {cfg['head_dim']}</span>"
-    f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
-    f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
-    f"max_pos: {cfg['max_position_embeddings']}</span>"
-    f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
-    f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
-    f"rope_theta: {cfg['rope_theta']:.0e}</span>"
-    f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
-    f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
-    f"rope: {(cfg.get('rope_scaling') or {}).get('type', 'native')}</span>"
-    f"{loop_badges}"
-    f"</div>",
-    unsafe_allow_html=True,
-)
-
-# ═══ Breakdown + JSON + Code ═══
-# ── Parameter Breakdown ──
-st.markdown(
-    '<div class="section-title">Parameter Breakdown</div>',
-    unsafe_allow_html=True,
-)
-
-table_data = []
-for name, info in breakdown.items():
-    table_data.append(
-        {
-            "Component": name,
-            "Params": fmt_num(info["value"]),
-        }
-    )
-st.dataframe(
-    table_data,
-    width="stretch",
-    hide_index=True,
-    column_config={
-        "Component": st.column_config.TextColumn("Component", width="medium"),
-        "Params": st.column_config.TextColumn("Parameters", width="small"),
-    },
-)
-
-# Show percentage of total
-pct_rows = []
-for name, info in breakdown.items():
-    if name in ("Total Params", "Active Total", "Layer Distribution"):
-        continue
-    val = info["value"]
-    pct = (val / total_params * 100) if total_params > 0 else 0
-    pct_rows.append(
-        {
-            "Component": name,
-            "% of Total": f"{pct:.1f}%",
-        }
-    )
-st.dataframe(
-    pct_rows,
-    width="stretch",
-    hide_index=True,
-    column_config={
-        "Component": st.column_config.TextColumn("Component", width="medium"),
-        "% of Total": st.column_config.TextColumn("% of Total", width="small"),
-    },
-)
-
-# ── Config JSON ──
-st.markdown(
-    '<div class="section-title">Config JSON</div>',
-    unsafe_allow_html=True,
-)
-
-json_str = gen_config_json(cfg)
-st.code(json_str, language="json", line_numbers=False)
-
-# ── Python Code ──
-st.markdown(
-    '<div class="section-title">Python Code</div>',
-    unsafe_allow_html=True,
-)
-
-py_code = gen_python_code(cfg)
-st.code(py_code, language="python", line_numbers=False)
-
-# ── Training Log ──
-_auto_refresh_training_log = False
-_CHART_SVG = (
-    '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" '
-    'style="vertical-align:-1px;margin-right:5px;" aria-hidden="true">'
-    '<rect x="1" y="9" width="3" height="6" rx="1"/>'
-    '<rect x="6.5" y="5" width="3" height="10" rx="1"/>'
-    '<rect x="12" y="1" width="3" height="14" rx="1"/>'
-    "</svg>"
-)
-if st.session_state.get("train_status") == "running":
-    st.markdown(
-        f'<div class="section-title">{_CHART_SVG}Training Monitor</div>',
-        unsafe_allow_html=True,
-    )
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
-        _auto_refresh_training_log = _checkbox(
-            "Auto-refresh 2s", value=True, key="auto_refresh_log"
-        )
-    with c2:
-        if st.button("Clear Log", key="btn_clear_train_log"):
-            log_path = st.session_state.get("train_log_path")
-            if log_path and os.path.exists(log_path):
-                open(log_path, "w").close()
-                st.rerun()
-    with c3:
-        current_log = st.session_state.get("train_log_path")
-        st.caption(f"log: {os.path.basename(current_log) if current_log else '-'}")
-    log_path = st.session_state.get("train_log_path")
-    if log_path and os.path.exists(log_path):
-        with open(log_path, "r", encoding="utf-8") as f:
-            log = f.read()
-        metrics = parse_training_metrics(log)
-        with st.expander("Raw Log", expanded=len(metrics) == 0, icon=":material/description:"):
-            st.code(log[-10000:] if len(log) > 10000 else log or "(empty)", language="text", line_numbers=False)
-elif st.session_state.get("train_status") == "paused":
-    tt = st.session_state.get("train_type", "pretrain")
-    cfg_local = build_config_dict()
-    ckpt_prefix = _latest_checkpoint_prefix(tt, cfg_local["hidden_size"], cfg_local["use_moe"], _arch_tag())
-    st.warning(f"Training paused. Resume checkpoint: checkpoints/{ckpt_prefix}_{cfg_local['hidden_size']}_resume.pth" if ckpt_prefix else "Training paused. Resume via 'Resume from checkpoint' + Start Training.",
-               icon=":material/pause_circle:")
-    st.caption("Pause saves out/ + checkpoints/*_resume.pth so training can continue later.")
-elif st.session_state.get("train_status") == "success":
-    st.success("Training completed successfully")
-    log_path = st.session_state.get("train_log_path")
-    if log_path and os.path.exists(log_path):
-        with open(log_path, "r", encoding="utf-8") as f:
-            log = f.read()
-        with st.expander("Training Log", expanded=False, icon=":material/description:"):
-            st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
-elif st.session_state.get("train_status") == "failed":
-    st.error("Training stopped or failed (see log below)")
-    log_path = st.session_state.get("train_log_path")
-    if log_path and os.path.exists(log_path):
-        with open(log_path, "r", encoding="utf-8") as f:
-            log = f.read()
-        if log.strip():
-            with st.expander("Error Log", expanded=True, icon=":material/description:"):
-                st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
-
-# ── Training Data: exactly one historical log + the current log ──
-trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
-logs_dir = os.path.join(trainer_dir, "logs")
-current_log_path = st.session_state.get("train_log_path")
-if not current_log_path or not os.path.exists(current_log_path):
-    current_log_path = None
-
-log_candidates = []
-if os.path.isdir(logs_dir):
-    log_candidates.extend(
-        os.path.join(logs_dir, filename)
-        for filename in os.listdir(logs_dir)
-        if filename.endswith(".log")
-    )
-legacy_log = os.path.join(trainer_dir, "train_output.log")
-if os.path.exists(legacy_log):
-    log_candidates.append(legacy_log)
-
-current_log_key = (
-    os.path.normcase(os.path.abspath(current_log_path)) if current_log_path else None
-)
-history_logs = sorted(
-    (
-        path for path in log_candidates
-        if os.path.normcase(os.path.abspath(path)) != current_log_key
-    ),
-    key=os.path.getmtime,
-    reverse=True,
-)
-
-# Failed/compile-only logs have no Epoch metrics and should not occupy the one
-# historical comparison slot.
-history_data = {}
-for history_path in history_logs:
-    with open(history_path, "r", encoding="utf-8", errors="replace") as history_file:
-        history_content = history_file.read()
-    history_metrics = parse_training_metrics(history_content)
-    if history_metrics:
-        history_data[history_path] = (history_content, history_metrics)
-
-current_content, current_metrics = "", []
-if current_log_path:
-    with open(current_log_path, "r", encoding="utf-8", errors="replace") as current_file:
-        current_content = current_file.read()
-    current_metrics = parse_training_metrics(current_content)
-
-if history_data or current_log_path:
-    st.markdown(
-        f'<div class="section-title">{_CHART_SVG}Training Data</div>',
-        unsafe_allow_html=True,
-    )
-    history_column, current_column = st.columns(2)
-
-    with history_column:
-        st.markdown("#### Historical log")
-        if history_data:
-            if st.session_state.get("history_log_select") not in history_data:
-                st.session_state.history_log_select = next(iter(history_data))
-            selected_history = _selectbox(
-                "Compare against",
-                list(history_data),
-                format_func=os.path.basename,
-                key="history_log_select",
+    # ── Auto-shutdown countdown ──
+    if st.session_state.get("shutdown_deadline") is not None:
+        _shutdown_remaining = int(st.session_state["shutdown_deadline"] - time.time())
+        if _shutdown_remaining > 0:
+            st.warning(
+                f"训练已完成 — 系统将在约 {_shutdown_remaining} 秒后自动关机。"
+                "如需继续使用这台机器，请立即取消。",
+                icon=":material/power_settings_new:",
             )
-            historical_content, historical_metrics = history_data[selected_history]
-            st.caption(os.path.basename(selected_history))
-            render_log_metrics_charts(historical_metrics)
-            with st.expander("Historical raw log", expanded=False, icon=":material/description:"):
-                st.code(
-                    historical_content[-5000:] if len(historical_content) > 5000 else historical_content,
-                    language="text", line_numbers=False,
-                )
+            if st.button("取消自动关机", key="btn_cancel_shutdown", type="primary"):
+                _cancel_auto_shutdown()
+                st.rerun()
         else:
-            st.info("No earlier log with training metrics is available.")
+            st.session_state.pop("shutdown_deadline", None)
 
-    with current_column:
-        st.markdown("#### Current training")
-        if current_log_path:
-            st.caption(os.path.basename(current_log_path))
-            render_log_metrics_charts(current_metrics)
-        else:
-            st.info("No current training log is selected.")
+
+with _ui["diagram"]:
+    # ── Main content (single column) ──
+
+    # ═══ Architecture diagram ──
+    architecture_title = (
+        "Instinct V2 Recurrent Architecture"
+        if cfg.get("model_architecture") == "looped"
+        else "Architecture"
+    )
+    st.markdown(
+        '<div style="font-size: 13px; font-weight: 600; letter-spacing: 0.8px; '
+        'color: #94a3b8; text-transform: uppercase; margin-bottom: 8px;">'
+        f"{architecture_title}</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(arch_diagram(cfg), unsafe_allow_html=True)
+
+    # Additional architecture info
+    int_size = cfg.get("intermediate_size", compute_intermediate_size(cfg["hidden_size"]))
+    loop_badges = ""
+    if cfg.get("model_architecture") == "looped":
+        physical_depth = (
+            cfg.get("prelude_layers", 2)
+            + cfg.get("recurrent_layers", 4)
+            + cfg.get("coda_layers", 2)
+        )
+        effective_depth = (
+            cfg.get("prelude_layers", 2)
+            + cfg.get("loop_iters", 32) * cfg.get("recurrent_layers", 4)
+            + cfg.get("coda_layers", 2)
+        )
+        loop_badges = (
+            f'<span class="badge" style="background:#3b1f6e;">physical: {physical_depth}</span>'
+            f'<span class="badge" style="background:#4a1d5e;">effective: {effective_depth}</span>'
+            f'<span class="badge" style="background:#581c87;">'
+            f'recurrence: {cfg.get("loop_iters", 32)} / BPTT: {cfg.get("mean_backprop_depth", 8)}</span>'
+        )
+    st.markdown(
+        f'<div style="margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px;">'
+        f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
+        f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
+        f"FFN intermediate: {fmt_num(int_size)}</span>"
+        f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
+        f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
+        f"head_dim: {cfg['head_dim']}</span>"
+        f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
+        f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
+        f"max_pos: {cfg['max_position_embeddings']}</span>"
+        f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
+        f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
+        f"rope_theta: {cfg['rope_theta']:.0e}</span>"
+        f'<span class="badge" style="background: #1e293b; border: 1px solid #334155; '
+        f'background: none; -webkit-text-fill-color: #e2e8f0; color: #e2e8f0;">'
+        f"rope: {(cfg.get('rope_scaling') or {}).get('type', 'native')}</span>"
+        f"{loop_badges}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+with _ui["breakdown"]:
+    # ═══ Breakdown + JSON + Code ═══
+    # ── Parameter Breakdown ──
+    st.markdown(
+        '<div class="section-title">Parameter Breakdown</div>',
+        unsafe_allow_html=True,
+    )
+
+    table_data = []
+    for name, info in breakdown.items():
+        table_data.append(
+            {
+                "Component": name,
+                "Params": fmt_num(info["value"]),
+            }
+        )
+    st.dataframe(
+        table_data,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Component": st.column_config.TextColumn("Component", width="medium"),
+            "Params": st.column_config.TextColumn("Parameters", width="small"),
+        },
+    )
+
+    # Show percentage of total
+    pct_rows = []
+    for name, info in breakdown.items():
+        if name in ("Total Params", "Active Total", "Layer Distribution"):
+            continue
+        val = info["value"]
+        pct = (val / total_params * 100) if total_params > 0 else 0
+        pct_rows.append(
+            {
+                "Component": name,
+                "% of Total": f"{pct:.1f}%",
+            }
+        )
+    st.dataframe(
+        pct_rows,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Component": st.column_config.TextColumn("Component", width="medium"),
+            "% of Total": st.column_config.TextColumn("% of Total", width="small"),
+        },
+    )
+
+
+with _ui["export"]:
+    # ── Config JSON ──
+    st.markdown(
+        '<div class="section-title">Config JSON</div>',
+        unsafe_allow_html=True,
+    )
+
+    json_str = gen_config_json(cfg)
+    st.download_button("下载模型配置 JSON", json_str, file_name="instinct_config.json", mime="application/json", key="btn_export_model")
+    st.code(json_str, language="json", line_numbers=False)
+
+    # ── Python Code ──
+    st.markdown(
+        '<div class="section-title">Python Code</div>',
+        unsafe_allow_html=True,
+    )
+
+    py_code = gen_python_code(cfg)
+    st.download_button("下载 Python 配置", py_code, file_name="instinct_config.py", mime="text/x-python", key="btn_export_python")
+    with st.expander("查看 Python 配置代码"):
+        st.code(py_code, language="python", line_numbers=False)
+
+
+with _ui["monitor"]:
+    # ── Training Log ──
+    _auto_refresh_training_log = False
+    _CHART_SVG = (
+        '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" '
+        'style="vertical-align:-1px;margin-right:5px;" aria-hidden="true">'
+        '<rect x="1" y="9" width="3" height="6" rx="1"/>'
+        '<rect x="6.5" y="5" width="3" height="10" rx="1"/>'
+        '<rect x="12" y="1" width="3" height="14" rx="1"/>'
+        "</svg>"
+    )
+    if st.session_state.get("train_status") == "running":
+        st.markdown(
+            f'<div class="section-title">{_CHART_SVG}Training Monitor</div>',
+            unsafe_allow_html=True,
+        )
+        c1, c2, c3 = st.columns([1, 1, 1])
+        with c1:
+            _auto_refresh_training_log = _checkbox(
+                "Auto-refresh 2s", value=True, key="auto_refresh_log"
+            )
+        with c2:
+            if st.button("Clear Log", key="btn_clear_train_log"):
+                log_path = st.session_state.get("train_log_path")
+                if log_path and os.path.exists(log_path):
+                    open(log_path, "w").close()
+                    st.rerun()
+        with c3:
+            current_log = st.session_state.get("train_log_path")
+            st.caption(f"log: {os.path.basename(current_log) if current_log else '-'}")
+        log_path = st.session_state.get("train_log_path")
+        if log_path and os.path.exists(log_path):
+            with open(log_path, "r", encoding="utf-8") as f:
+                log = f.read()
+            metrics = parse_training_metrics(log)
+            with st.expander("Raw Log", expanded=len(metrics) == 0, icon=":material/description:"):
+                st.code(log[-10000:] if len(log) > 10000 else log or "(empty)", language="text", line_numbers=False)
+    elif st.session_state.get("train_status") == "paused":
+        tt = st.session_state.get("train_type", "pretrain")
+        cfg_local = build_config_dict()
+        ckpt_prefix = _latest_checkpoint_prefix(tt, cfg_local["hidden_size"], cfg_local["use_moe"], _arch_tag())
+        st.warning(f"Training paused. Resume checkpoint: checkpoints/{ckpt_prefix}_{cfg_local['hidden_size']}_resume.pth" if ckpt_prefix else "Training paused. Resume via 'Resume from checkpoint' + Start Training.",
+                   icon=":material/pause_circle:")
+        st.caption("暂停时已保存模型权重和完整续训状态。")
+    elif st.session_state.get("train_status") == "success":
+        st.success("Training completed successfully")
+        log_path = st.session_state.get("train_log_path")
+        if log_path and os.path.exists(log_path):
+            with open(log_path, "r", encoding="utf-8") as f:
+                log = f.read()
+            with st.expander("Training Log", expanded=False, icon=":material/description:"):
+                st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
+    elif st.session_state.get("train_status") == "failed":
+        st.error("Training stopped or failed (see log below)")
+        log_path = st.session_state.get("train_log_path")
+        if log_path and os.path.exists(log_path):
+            with open(log_path, "r", encoding="utf-8") as f:
+                log = f.read()
+            if log.strip():
+                with st.expander("Error Log", expanded=True, icon=":material/description:"):
+                    st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
+
+    # ── Training Data: exactly one historical log + the current log ──
+    trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
+    logs_dir = os.path.join(trainer_dir, "logs")
+    current_log_path = st.session_state.get("train_log_path")
+    if not current_log_path or not os.path.exists(current_log_path):
+        current_log_path = None
+
+    log_candidates = []
+    if os.path.isdir(logs_dir):
+        log_candidates.extend(
+            os.path.join(logs_dir, filename)
+            for filename in os.listdir(logs_dir)
+            if filename.endswith(".log")
+        )
+    legacy_log = os.path.join(trainer_dir, "train_output.log")
+    if os.path.exists(legacy_log):
+        log_candidates.append(legacy_log)
+
+    current_log_key = (
+        os.path.normcase(os.path.abspath(current_log_path)) if current_log_path else None
+    )
+    history_logs = sorted(
+        (
+            path for path in log_candidates
+            if os.path.normcase(os.path.abspath(path)) != current_log_key
+        ),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+
+    # Failed/compile-only logs have no Epoch metrics and should not occupy the one
+    # historical comparison slot.
+    history_data = {}
+    for history_path in history_logs:
+        with open(history_path, "r", encoding="utf-8", errors="replace") as history_file:
+            history_content = history_file.read()
+        history_metrics = parse_training_metrics(history_content)
+        if history_metrics:
+            history_data[history_path] = (history_content, history_metrics)
+
+    current_content, current_metrics = "", []
+    if current_log_path:
+        with open(current_log_path, "r", encoding="utf-8", errors="replace") as current_file:
+            current_content = current_file.read()
+        current_metrics = parse_training_metrics(current_content)
+
+    if history_data or current_log_path:
+        st.markdown(
+            f'<div class="section-title">{_CHART_SVG}Training Data</div>',
+            unsafe_allow_html=True,
+        )
+        history_column, current_column = st.columns(2)
+
+        with history_column:
+            st.markdown("#### Historical log")
+            if history_data:
+                if st.session_state.get("history_log_select") not in history_data:
+                    st.session_state.history_log_select = next(iter(history_data))
+                selected_history = _selectbox(
+                    "Compare against",
+                    list(history_data),
+                    format_func=os.path.basename,
+                    key="history_log_select",
+                )
+                historical_content, historical_metrics = history_data[selected_history]
+                st.caption(os.path.basename(selected_history))
+                render_log_metrics_charts(historical_metrics)
+                with st.expander("Historical raw log", expanded=False, icon=":material/description:"):
+                    st.code(
+                        historical_content[-5000:] if len(historical_content) > 5000 else historical_content,
+                        language="text", line_numbers=False,
+                    )
+            else:
+                st.info("No earlier log with training metrics is available.")
+
+        with current_column:
+            st.markdown("#### Current training")
+            if current_log_path:
+                st.caption(os.path.basename(current_log_path))
+                render_log_metrics_charts(current_metrics)
+            else:
+                st.info("No current training log is selected.")
+
+    if not history_data and not current_log_path:
+        st.info("还没有训练日志。启动训练后，这里会显示进度、loss 与吞吐曲线。")
+
 
 # Footer
 st.markdown(
@@ -4770,9 +4834,21 @@ unsafe_allow_html=True,
 
 # 每次交互后持久化面板参数（widget 变更触发 rerun，此时 session_state 即当前值）
 _trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
+if "_template_save" in st.session_state:
+    _save_name, _overwrite = st.session_state.pop("_template_save")
+    try:
+        _saved_name = save_template(_save_name, st.session_state, overwrite=_overwrite)
+        st.session_state.config_template = _saved_name
+        st.session_state.pop("_template_select", None)
+        st.session_state._template_notice = f"已保存完整配置：{_saved_name}"
+        _persist_panel_state(_trainer_dir)
+        st.rerun()
+    except (OSError, ValueError) as exc:
+        with st.sidebar:
+            st.error(f"无法保存模板：{exc}")
 _persist_panel_state(_trainer_dir)
 
-if _auto_refresh_training_log:
+if _auto_refresh_training_log or autotune_active(st.session_state):
     time.sleep(2)
     st.rerun()
 

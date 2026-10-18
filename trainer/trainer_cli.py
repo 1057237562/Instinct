@@ -36,11 +36,24 @@ def _apply_bucket_cuda_memory_limit(args) -> float | None:
     from scripts.data_loader.sequence_bucket import BUCKET_MEMORY_SAFETY_GB
 
     device = torch.device(args.device)
-    total_bytes = int(torch.cuda.get_device_properties(device).total_memory)
+    properties = torch.cuda.get_device_properties(device)
+    total_bytes = int(properties.total_memory)
     target_gb = float(getattr(args, 'bucket_gpu_memory_gb', 16.0))
     if not math.isfinite(target_gb) or target_gb <= 0:
         raise ValueError('--bucket_gpu_memory_gb must be a positive finite number')
+    requested_gb = target_gb
     gib = 1024 ** 3
+    from trainer.windows_gpu_memory import local_memory_budget, training_memory_target
+    driver_info = local_memory_budget(getattr(properties, 'name', None))
+    if driver_info:
+        target_gb = training_memory_target(target_gb, total_bytes,
+            reserved_bytes=torch.cuda.memory_reserved(device), driver_info=driver_info,
+            safety_gb=BUCKET_MEMORY_SAFETY_GB)
+        setattr(args, 'bucket_driver_budget_gb', driver_info['budget'] / gib)
+        Logger(f'[Packing WDDM Budget] process_budget={driver_info["budget"] / gib:.2f}GiB, '
+               f'current_usage={driver_info["current_usage"] / gib:.2f}GiB; target={target_gb:.2f}GiB')
+    if target_gb <= BUCKET_MEMORY_SAFETY_GB:
+        raise RuntimeError('GPU memory budget is smaller than the training safety reserve')
     # Context/cuBLAS/NCCL allocations are not all controlled by the caching
     # allocator, so keep the same safety reserve used by the batch estimator.
     allocator_bytes = min(
@@ -52,7 +65,7 @@ def _apply_bucket_cuda_memory_limit(args) -> float | None:
     limit_gb = allocator_bytes / gib
     setattr(args, 'bucket_allocator_limit_gb', limit_gb)
     Logger(
-        f'[Packing VRAM Limit] device={device}, requested={target_gb:g}GiB, '
+        f'[Packing VRAM Limit] device={device}, requested={requested_gb:g}GiB, '
         f'allocator_limit={limit_gb:.2f}GiB, physical={total_bytes / gib:.2f}GiB'
     )
     return limit_gb
@@ -74,6 +87,9 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
         训练脚本差异仅通过 defaults 覆盖默认值，不改变参数语义。
     """
     parser = argparse.ArgumentParser(description=description)
+    parser.add_argument('--autotune_profile', default=None,
+                        help='经过验证的本机 pretrain 自动调优 profile.json')
+    parser.add_argument('--autotune_trial', default=None, help=argparse.SUPPRESS)
     parser.add_argument("--save_dir", type=str, default="./out", help="模型保存目录")
     parser.add_argument('--save_weight', default='pretrain', type=str, help="保存权重的前缀名")
     parser.add_argument("--epochs", type=int, default=2, help="训练轮数")
@@ -123,7 +139,7 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     )
     parser.add_argument(
         '--bucket_gpu_memory_gb', default=16.0, type=float,
-        help='自动长度桶的单卡显存硬预算（GB）；先扣除全模型参数、梯度、优化器状态及多桶编译预留，再计算每桶 batch_size',
+        help='自动长度桶的单卡显存硬预算（GiB）；按匹配的实测曲线或保守模型估算，并保留编译/临时张量空间；续训继承已保存预算',
     )
     parser.add_argument(
         '--bucket_token_budget', default=0, type=int,
@@ -291,6 +307,11 @@ def setup_dist_and_seed(args) -> int:
         先 init_distributed_mode() 初始化进程组；已初始化时把 args.device 指向当前卡；
         随机种子 = 42 + 全局 rank，保证各进程采样一致。
     """
+    from trainer.autotune_config import apply_profile
+    apply_profile(args)
+    if getattr(args, 'autotune_trial', None):
+        from trainer.autotune_trial import prepare_trial
+        prepare_trial(args)
     if getattr(args, 'use_compile', 0):
         from model.compile_policy import configure_compile_limits
         configure_compile_limits()

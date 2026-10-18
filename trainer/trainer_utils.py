@@ -221,6 +221,13 @@ def apply_torchao_fp8_training(model: torch.nn.Module, args, *, label: str = "mo
         f"active={active_recipe}, filter={filter_mode}, linear_layers={len(converted_names)}, "
         f"ragged_inner_padding=on, torchao={version}"
     )
+    grouped_expert_layers = sum('.experts.' in name for name in converted_names)
+    if grouped_expert_layers and getattr(getattr(model, 'config', None), 'use_moe', False):
+        Logger(
+            f'[TorchAO FP8] coverage: {grouped_expert_layers} converted expert Linear layers '
+            'are bypassed by the BF16 grouped MoE dispatch, which reads weights directly. '
+            'Converted layer count is not executed FP8 GEMM coverage; verify the runtime trace.'
+        )
     setattr(args, "fp8_training_active", active_recipe)
     return model
 
@@ -733,6 +740,53 @@ def estimate_training_persistent_bytes(model: torch.nn.Module, args, *, extra_mo
     return int(parameter_bytes + gradient_bytes + optimizer_bytes)
 
 
+def _validated_bucket_memory_profile(model, args, extra_models=()):
+    """Select only the exact local topology/execution path measured in PLAN.md."""
+    if sys.platform != 'win32':
+        return None  # Linux must be calibrated independently of Windows/WDDM.
+    config = getattr(model, 'config', None)
+    if config is None or extra_models or (dist.is_initialized() and dist.get_world_size() > 1):
+        return None
+    topology = dict(hidden_size=512, num_hidden_layers=32, num_attention_heads=16,
+                    num_key_value_heads=4, head_dim=32, num_experts=8,
+                    num_experts_per_tok=2, moe_intermediate_size=1664, vocab_size=6400,
+                    use_grad_checkpoint=1, use_moe=True, norm_topk_prob=True,
+                    hidden_act='silu', dropout=0.0, tie_word_embeddings=True)
+    if any(getattr(config, key, None) != value for key, value in topology.items()):
+        return None
+    if (getattr(args, 'optimizer', '') != 'muon' or getattr(args, 'dtype', '') != 'bfloat16'
+            or getattr(args, 'param_dtype', 'fp32') != 'fp32'
+            or int(getattr(args, 'accumulation_steps', 1)) != 1
+            or int(getattr(args, 'use_compile', 0)) != 1
+            or getattr(args, 'compile_mode', '') != 'max-autotune-no-cudagraphs'
+            or not 1 <= int(getattr(args, 'bucket_max_seq_len', 0)) <= 4096
+            or getattr(config, 'model_architecture', 'standard') != 'standard'
+            or (getattr(args, 'fp8_training', 'off') != 'off'
+                and (getattr(args, 'fp8_training', '') != 'tensorwise'
+                     or getattr(args, 'fp8_filter', 'auto') != 'auto'))
+            or os.environ.get('INSTINCT_MOE_INNER_CHECKPOINT', '0') != '0'
+            or os.environ.get('INSTINCT_MOE_SELECTIVE_CHECKPOINT', '0') != '0'
+            or os.environ.get('INSTINCT_MOE_DIRECT_WEIGHTS', '0') != '0'
+            or os.environ.get('INSTINCT_MUON_BACKEND', 'batched') != 'batched'
+            or float(os.environ.get('INSTINCT_MUON_WORKSPACE_MB', '256')) > 256
+            or os.environ.get('INSTINCT_GROUPED_MM_BACKEND', 'auto') not in ('auto', 'triton')
+            or any(os.environ.get(name, 'auto') == '0' for name in (
+                'INSTINCT_MOE_FUSED_PACK', 'INSTINCT_MOE_FUSED_SWIGLU', 'INSTINCT_MOE_FUSED_ROUTING'))
+            or os.environ.get('INSTINCT_PACKED_ATTENTION_BACKEND', 'auto') == 'sdpa'
+            or os.environ.get('INSTINCT_CAUSAL_ATTENTION_BACKEND', 'auto') == 'sdpa'):
+        return None
+    params = list(model.parameters())
+    if (not params or any(p.dtype != torch.float32 or not p.requires_grad for p in params)
+            or sum(p.numel() for p in params) != 678726144):
+        return None
+    from model.cuda_fastpath import blackwell_training_kernels
+    if (not blackwell_training_kernels(params[0].device)
+            or torch.cuda.get_device_name(params[0].device) != 'NVIDIA GeForce RTX 5070 Ti'):
+        return None
+    from scripts.data_loader.sequence_bucket import V1_MOE_TRAINING_MEMORY_PROFILE
+    return V1_MOE_TRAINING_MEMORY_PROFILE
+
+
 def configure_bucket_memory_budget(
     model: torch.nn.Module, args, *, extra_models=(), checkpoint_data=None,
 ) -> int | None:
@@ -764,12 +818,36 @@ def configure_bucket_memory_budget(
     )
     bucket_count = int(getattr(args, 'seq_bucket', 1))
     target_gb = float(getattr(args, 'bucket_gpu_memory_gb', 16.0))
+    from scripts.data_loader.sequence_bucket import BUCKET_MEMORY_SAFETY_GB
+    resolved_allocator_gb = getattr(args, 'bucket_allocator_limit_gb', None)
+    if resolved_allocator_gb is not None:
+        # Respect the CLI's physical/driver cap on conservative paths as well.
+        target_gb = min(target_gb, float(resolved_allocator_gb) + BUCKET_MEMORY_SAFETY_GB)
+    memory_profile = _validated_bucket_memory_profile(model, args, extra_models)
+    if memory_profile:
+        # The configured target can exceed the physical card; allocator limits
+        # are already resolved by the CLI. Never extrapolate the curve past it.
+        device = next(model.parameters()).device
+        physical_gb = torch.cuda.get_device_properties(device).total_memory / gib
+        allocator_gb = float(getattr(args, 'bucket_allocator_limit_gb',
+                                    physical_gb - BUCKET_MEMORY_SAFETY_GB))
+        target_gb = min(target_gb, physical_gb,
+                        allocator_gb + BUCKET_MEMORY_SAFETY_GB)
+    gradient_gb = sum(p.numel() * p.element_size() for p in model.parameters() if p.requires_grad) / gib
     automatic_budget = bucket_token_budget(
         target_gb,
         persistent_memory_gb=persistent_gb,
         bucket_count=bucket_count,
         compile_mode=compile_mode,
+        memory_profile=memory_profile, gradient_memory_gb=gradient_gb,
     )
+    memory_budget = automatic_budget
+    if memory_profile:
+        # Local full-depth and real-corpus sweeps: filling the last GiB with a
+        # larger batch decreased useful tokens/s. Keep the measured throughput
+        # ceiling separate from the memory curve, and preserve explicit/resume
+        # budgets below. This is a calibrated choice, not an online autotuner.
+        automatic_budget = min(automatic_budget, 16384)
     token_budget = explicit_budget if explicit_budget > 0 else automatic_budget
     source = 'explicit' if explicit_budget > 0 else 'automatic'
 
@@ -795,12 +873,36 @@ def configure_bucket_memory_budget(
         f'target={target_gb:g}GiB, persistent={persistent_gb:.2f}GiB, '
         f'buckets={bucket_count}, compile_mode={compile_mode}, '
         f'token_budget={token_budget}, source={source}'
+        f', memory_curve={memory_profile or "legacy_conservative"}'
+        + (f', memory_capacity_tokens={memory_budget}, throughput_cap=16384'
+           if memory_profile else '')
         + (
             f', current_auto_estimate={automatic_budget}'
             if source == 'checkpoint' and automatic_budget != token_budget else ''
         )
     )
     return token_budget
+
+
+def configure_training_cpu_threads(args):
+    """Avoid intra-op thread-pool overhead in the validated single-GPU loop.
+
+    Called after model initialization, so CPU RNG/initial weights are unchanged.
+    Tokenizers and Arrow own independent worker pools. Zero preserves the
+    platform setting; an explicit positive value works on any device.
+    """
+    setting=os.environ.get('INSTINCT_TRAINING_CPU_THREADS','auto')
+    if setting=='auto':
+        from model.cuda_fastpath import blackwell_training_kernels
+        count=1 if blackwell_training_kernels(torch.device(args.device)) else 0
+    else:
+        count=int(setting)
+        if count<0:
+            raise ValueError('INSTINCT_TRAINING_CPU_THREADS must be auto or a nonnegative integer')
+    if count:
+        previous=torch.get_num_threads()
+        torch.set_num_threads(count)
+        Logger(f'[Training CPU] PyTorch intra-op threads: {previous} -> {count}; tokenizer/Arrow pools unchanged')
 
 
 def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> torch.optim.Optimizer:
@@ -852,11 +954,26 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
             muon_kwargs = dict(kwargs)
             muon_kwargs.setdefault('adjust_lr_fn', 'match_rms_adamw')
             muon_kwargs.setdefault('batch_size', int(os.environ.get('INSTINCT_MUON_BATCH_SIZE', '16')))
-            muon_kwargs.setdefault('workspace_mb', float(os.environ.get('INSTINCT_MUON_WORKSPACE_MB', '64')))
+            from model.cuda_fastpath import blackwell_training_kernels
+            workspace_default=('256' if matrix_params[0].dtype==torch.float32
+                               and blackwell_training_kernels(matrix_params[0].device) else '64')
+            muon_kwargs.setdefault('workspace_mb', float(os.environ.get('INSTINCT_MUON_WORKSPACE_MB', workspace_default)))
             muon_opt = BatchedMuon(matrix_params, lr=lr, **muon_kwargs)
+            preallocate = os.environ.get('INSTINCT_MUON_PREALLOCATE', '0')
+            if preallocate not in ('0', '1'):
+                raise ValueError('INSTINCT_MUON_PREALLOCATE must be 0 or 1')
+            if preallocate == '1':
+                reserved = muon_opt.reserve_momentum()
+                Logger(f'[Muon] preallocated zero momentum: {reserved / 2**30:.3f}GiB; no optimizer step')
             Logger(
                 f'[Muon] shape-batched BF16 updates: batch_size<={muon_opt.batch_size}, '
                 f'temporary workspace target={muon_opt.workspace_bytes / 2**20:g}MiB'
+            )
+            Logger(
+                '[Muon] CUDA kernels: NS=' + os.environ.get('INSTINCT_MUON_NS_BACKEND', 'auto')
+                + ', fused_updates=' + os.environ.get('INSTINCT_MUON_FUSED_UPDATES', 'auto')
+                + '; auto selects validated Blackwell/PyTorch shapes, otherwise torch. '
+                'NS graphs exclude LR, parameters and momentum.'
             )
         elif hasattr(torch.optim, 'Muon'):
             muon_kwargs = dict(kwargs)

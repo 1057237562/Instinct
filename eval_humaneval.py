@@ -281,7 +281,7 @@ def evaluate(args, problems):
     return summarize_results(args, problems, read_jsonl(args.output + '_results.jsonl'))
 
 
-def summarize_results(args, problems, rows):
+def summarize_results(args, problems, rows, metadata=None):
     totals = validate_samples(rows, problems)
     if set(totals) != set(problems):
         raise ValueError('Every selected problem must have at least one graded sample')
@@ -297,6 +297,8 @@ def summarize_results(args, problems, rows):
               'skipped_k': [k for k in args.k if k not in eligible],
               'problem_file': args.problem_file, 'limit': args.limit,
               'timeout': args.timeout}
+    if metadata:
+        report.update(metadata)
     Path(args.output + '_metrics.json').write_text(
         json.dumps(report, indent=2) + '\n', encoding='utf-8')
     from eval_report import write_analysis

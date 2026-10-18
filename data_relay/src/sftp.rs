@@ -12,6 +12,17 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 const CHUNK: usize = 256 * 1024;
 
+/// Non-interactive SSH shells on AutoDL do not activate Conda or read the
+/// interactive shell's PATH. Keep helpers independent of that activation.
+pub const REMOTE_PYTHON_PATH: &str = "/root/miniconda3/bin:/root/miniconda/bin:/opt/conda/bin";
+
+pub fn python_command(script: &str, argument: &str) -> String {
+    format!(
+        "export PATH=\"{REMOTE_PYTHON_PATH}:$PATH\"; python3 -c {} {}",
+        shell_quote(script), shell_quote(argument)
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct UploadSummary {
     pub files: u32,
@@ -80,6 +91,10 @@ impl SftpUploader {
             .channel_open_session()
             .await
             .context("打开 SFTP 会话失败")?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .context("启动 SSH SFTP 子系统失败")?;
         let sftp = SftpSession::new(channel.into_stream())
             .await
             .context("SFTP 初始化失败（实例是否已开机？）")?;
@@ -162,7 +177,7 @@ impl SftpUploader {
         &self,
         local_root: &Path,
         remote_root: &str,
-        on_progress: &(dyn Fn(u64) + Send + Sync),
+        on_progress: &(dyn Fn(u64, bool) + Send + Sync),
         should_stop: &(dyn Fn() -> bool + Send + Sync),
     ) -> anyhow::Result<UploadSummary> {
         let mut summary = UploadSummary::default();
@@ -197,12 +212,12 @@ impl SftpUploader {
             if let Some(remote_size) = self.metadata_size(&remote_path).await {
                 if remote_size == local_size {
                     summary.skipped += 1;
-                    on_progress(local_size); // already present — count as done
+                    on_progress(local_size, true); // present bytes are progress, not transfer speed
                     tracing::info!("跳过（大小一致）: {remote_path}");
                     continue;
                 }
             }
-            self.upload_file(entry.path(), &remote_path, local_size, on_progress)
+            self.upload_file_with_progress(entry.path(), &remote_path, local_size, on_progress)
                 .await?;
             summary.files += 1;
             summary.bytes += local_size;
@@ -211,16 +226,26 @@ impl SftpUploader {
         Ok(summary)
     }
 
-    async fn upload_file(
+    pub async fn upload_file(
         &self,
         local: &Path,
         remote_path: &str,
         local_size: u64,
         on_progress: &(dyn Fn(u64) + Send + Sync),
     ) -> anyhow::Result<()> {
+        self.upload_file_with_progress(local, remote_path, local_size, &|bytes, _| on_progress(bytes)).await
+    }
+
+    async fn upload_file_with_progress(
+        &self,
+        local: &Path,
+        remote_path: &str,
+        local_size: u64,
+        on_progress: &(dyn Fn(u64, bool) + Send + Sync),
+    ) -> anyhow::Result<()> {
         let part_path = format!("{remote_path}.rpart");
         let start = match self.metadata_size(&part_path).await {
-            Some(part_size) if part_size < local_size => part_size,
+            Some(part_size) if part_size <= local_size => part_size,
             _ => 0,
         };
 
@@ -245,6 +270,7 @@ impl SftpUploader {
 
         let mut buf = vec![0u8; CHUNK];
         let mut sent = start;
+        on_progress(start, true);
         loop {
             let n = local_file.read(&mut buf).await?;
             if n == 0 {
@@ -252,7 +278,7 @@ impl SftpUploader {
             }
             remote.write_all(&buf[..n]).await?;
             sent += n as u64;
-            on_progress(n as u64);
+            on_progress(n as u64, false);
         }
         remote
             .shutdown()
@@ -360,5 +386,12 @@ mod tests {
     fn shell_quote_escapes() {
         assert_eq!(shell_quote("/a b/c"), "'/a b/c'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn remote_python_bootstraps_conda_and_quotes_payload() {
+        let command = python_command("print('ok')", "x';$(touch /tmp/unwanted)");
+        assert!(command.starts_with("export PATH=\"/root/miniconda3/bin:/root/miniconda/bin:/opt/conda/bin:$PATH\"; python3 -c "));
+        assert!(command.ends_with(r#"'print('\''ok'\'')' 'x'\'';$(touch /tmp/unwanted)'"#));
     }
 }

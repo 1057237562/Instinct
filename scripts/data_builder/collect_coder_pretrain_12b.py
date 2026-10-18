@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import nullcontext
 import gzip
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from urllib.request import Request, urlopen
@@ -23,7 +25,6 @@ from urllib.parse import quote
 import orjson
 import pyarrow.parquet as pq
 from datasets import load_dataset  # noqa: F401  # before transformers on Windows
-from huggingface_hub import HfApi
 from transformers import AutoTokenizer
 
 
@@ -83,6 +84,17 @@ BAD_MARKERS = (
     "\ufffd", "write a paper online", "online casino", "click here to buy",
     "<|im_start|>", "<|im_end|>", "[assistant/analysis]",
 )
+EXCLUSION_INDEX = None
+IDENTITY_REVIEW = None
+
+
+class CollectionPaused(Exception):
+    """Pause at a safe boundary while keeping resumable raw downloads."""
+
+
+def check_pause():
+    if (ACTIVE_OUT / ".pause_request").exists():
+        raise CollectionPaused("Pause requested; completed shards and raw download partials retained")
 
 
 def parse_args():
@@ -112,6 +124,12 @@ def parse_args():
                             "Additional completed run directory whose per-shard "
                             "reports mark upstream shards to skip (repeatable)."
                         ))
+    parser.add_argument("--target-tokens", type=int, default=None,
+                        help="Override the collection quota for one --component.")
+    parser.add_argument("--novel-index", type=Path, default=None,
+                        help="Read-only prior-corpus fingerprint index; reject matching texts.")
+    parser.add_argument("--identity-review", action="store_true",
+                        help="Emit whole-row identity review candidates; shards remain raw, unapproved data.")
     return parser.parse_args()
 
 
@@ -153,15 +171,56 @@ def stable_order(files):
     return ordered
 
 
-def list_source_files(component):
+def list_source_files(component, timeout=90, retries=5):
+    check_pause()
     source = SOURCES[component]
     if component == "code":
         return stable_order([f"stack-edu-{index:04d}.json.gz" for index in range(95)])
-    info = HfApi().dataset_info(source["repo"], revision=source["revision"])
-    files = [item.rfilename for item in info.siblings
-             if item.rfilename.startswith(source["prefix"])
-             and item.rfilename.endswith(source["suffix"])]
-    return stable_order(sorted(files))
+    cache = ACTIVE_OUT / component / "upstream_files.json"
+    if cache.exists():
+        try:
+            saved = json.loads(cache.read_text(encoding="utf-8"))
+            if (saved.get("upstream_repo") == source["repo"]
+                    and saved.get("upstream_revision") == source["revision"]
+                    and isinstance(saved.get("files"), list) and saved["files"]
+                    and all(isinstance(path, str) and path.startswith(source["prefix"])
+                            and path.endswith(source["suffix"]) for path in saved["files"])):
+                return stable_order(sorted(saved["files"]))
+        except (ValueError, OSError):
+            pass
+    endpoints = [os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")]
+    fallback = os.environ.get("HF_FALLBACK_ENDPOINT", "").rstrip("/")
+    if fallback and fallback not in endpoints:
+        endpoints.append(fallback)
+    for attempt in range(1, retries + 1):
+        for endpoint in endpoints:
+            check_pause()
+            request = Request(f"{endpoint}/api/datasets/{source['repo']}/revision/{source['revision']}",
+                              headers={"User-Agent": USER_AGENT})
+            try:
+                # Use the same verified TLS/proxy path as data downloads.
+                # httpx's certifi store may differ from urllib's system trust.
+                with urlopen(request, timeout=timeout) as response:
+                    info = json.load(response)
+            except (OSError, TimeoutError) as error:
+                last_error = error
+                print(f"[{component}] metadata attempt {attempt}/{retries} at {endpoint}: {type(error).__name__}", flush=True)
+                continue
+            if info.get("sha") != source["revision"]:
+                raise ValueError("Upstream metadata does not match the pinned revision")
+            files = sorted({item["rfilename"] for item in info["siblings"]
+                            if item["rfilename"].startswith(source["prefix"])
+                            and item["rfilename"].endswith(source["suffix"])})
+            if not files:
+                raise ValueError(f"No upstream files for {component}")
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            temporary = cache.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps({"upstream_repo": source["repo"], "upstream_revision": source["revision"], "files": files}, indent=2) + "\n", encoding="utf-8")
+            os.replace(temporary, cache)
+            return stable_order(files)
+        if attempt < retries:
+            time.sleep(min(2 ** attempt, 30))
+    raise last_error
 
 
 def completed_state(component):
@@ -232,12 +291,17 @@ def accepted_text(component, row):
     return text.strip(), None
 
 
-def process_rows(component, rows, shard_name, destination, tokenizer, remaining):
+def process_rows(component, rows, shard_name, destination, tokenizer, remaining, review_destination=None):
     digest = hashlib.sha256()
     stats = Counter()
     seen_ids = set()
+    review_hash = hashlib.sha256()
+    keyword_hits = Counter()
+    review_rows = keyword_rows = 0
     tokens = rows_written = bytes_written = 0
     for row_index, row in enumerate(rows):
+        if row_index % 1024 == 0:
+            check_pause()
         stats["scanned"] += 1
         text, rejection = accepted_text(component, row)
         if rejection:
@@ -246,6 +310,9 @@ def process_rows(component, rows, shard_name, destination, tokenizer, remaining)
         source_id = str(row.get("id") or row.get("url") or f"{shard_name}:{row_index}")
         if source_id in seen_ids:
             stats["rejected_duplicate_id"] += 1
+            continue
+        if EXCLUSION_INDEX is not None and EXCLUSION_INDEX.contains(text):
+            stats["rejected_prior_corpus_text"] += 1
             continue
         token_count = len(tokenizer.encode(text, add_special_tokens=False).ids) + 2
         if not 64 <= token_count <= MAX_TOKENS:
@@ -257,6 +324,23 @@ def process_rows(component, rows, shard_name, destination, tokenizer, remaining)
                 break
             continue
         record = record_for(component, row, text, token_count, shard_name, row_index)
+        if IDENTITY_REVIEW is not None:
+            if review_destination is None:
+                raise ValueError("Identity review requires a candidate output stream")
+            reasons, hits = IDENTITY_REVIEW.inspect(record)
+            keyword_hits.update(hits)
+            keyword_rows += bool(hits)
+            if reasons:
+                candidate = {
+                    "_review": {"source": f"{SOURCES[component]['repo']}@{SOURCES[component]['revision']}/{shard_name}",
+                                "row_number": row_index + 1, "rules": [item["rule"] for item in reasons],
+                                "reasons": reasons, "instruction": "Review and decide keep/drop/edit before training. Candidates are not automatic deletion decisions."},
+                    "record": record,
+                }
+                review_line = orjson.dumps(candidate, option=orjson.OPT_APPEND_NEWLINE)
+                review_destination.write(review_line)
+                review_hash.update(review_line)
+                review_rows += 1
         line = orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE)
         destination.write(line)
         digest.update(line)
@@ -264,13 +348,23 @@ def process_rows(component, rows, shard_name, destination, tokenizer, remaining)
         tokens += token_count
         rows_written += 1
         bytes_written += len(line)
-    return {
+    result = {
         "tokens": tokens,
         "rows": rows_written,
         "bytes": bytes_written,
         "sha256": digest.hexdigest(),
         "selection": dict(stats),
     }
+    if EXCLUSION_INDEX is not None:
+        result["novelty"] = {"index_sha256": EXCLUSION_INDEX.report["index_sha256"],
+                             "prior_corpus_sha256": EXCLUSION_INDEX.report["source_sha256"],
+                             "method": "complete text, outer whitespace stripped, BLAKE2b-128", "cross_shard_dedup_pending": True}
+    if IDENTITY_REVIEW is not None:
+        result["identity_review"] = {"candidate_rows": review_rows, "keyword_rows": keyword_rows,
+                                     "keyword_hit_counts": dict(keyword_hits), "candidate_sha256": review_hash.hexdigest(),
+                                     "dropped_rows": 0, "rewritten_rows": 0, "training_ready": False,
+                                     "decision": "Raw candidates; contextual review and clean output required before training."}
+    return result
 
 
 def parquet_rows(path):
@@ -311,6 +405,7 @@ def direct_dataset_download(repo, revision, upstream_file, raw_dir, timeout):
 
 
 def _download_to(url, partial, existing, timeout, upstream_file, destination):
+    check_pause()
     headers = {"User-Agent": USER_AGENT}
     if existing:
         headers["Range"] = f"bytes={existing}-"
@@ -322,11 +417,19 @@ def _download_to(url, partial, existing, timeout, upstream_file, destination):
             existing = 0
         content_length = response.headers.get("Content-Length")
         expected = existing + int(content_length) if content_length else None
+        if status == 206:
+            content_range = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("Content-Range", ""))
+            if content_range is None or int(content_range[1]) != existing:
+                raise OSError(f"Invalid Content-Range for {upstream_file}; refusing to concatenate misaligned data")
+            # Some endpoints return a capped range even when asked for the rest
+            # of a file. Keep the partial and retry until the *total* is present.
+            expected = int(content_range[3])
         mode = "ab" if append else "wb"
         downloaded = existing
         next_report = ((downloaded // (256 * 1024 * 1024)) + 1) * 256 * 1024 * 1024
         with partial.open(mode) as output:
             while True:
+                check_pause()
                 block = response.read(8 * 1024 * 1024)
                 if not block:
                     break
@@ -366,8 +469,13 @@ def collect_shard(component, upstream_file, tokenizer, remaining, timeout):
         temporary.unlink()
 
     compressed_bytes = None
+    review_output = component_dir / "review_candidates" / f"{stem}.jsonl"
+    review_temporary = review_output.with_suffix(".jsonl.tmp")
+    if IDENTITY_REVIEW is not None:
+        review_output.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with temporary.open("xb", buffering=8 * 1024 * 1024) as destination:
+        review_context = review_temporary.open("wb") if IDENTITY_REVIEW is not None else nullcontext(None)
+        with temporary.open("xb", buffering=8 * 1024 * 1024) as destination, review_context as review_destination:
             if component == "code":
                 local_path = direct_dataset_download(
                     source["repo"], source["revision"], upstream_file,
@@ -377,7 +485,7 @@ def collect_shard(component, upstream_file, tokenizer, remaining, timeout):
                 with gzip.open(local_path, mode="rb") as archive:
                     rows = (orjson.loads(line) for line in archive)
                     result = process_rows(
-                        component, rows, upstream_file, destination, tokenizer, remaining
+                        component, rows, upstream_file, destination, tokenizer, remaining, review_destination
                     )
             else:
                 local_path = direct_dataset_download(
@@ -387,14 +495,22 @@ def collect_shard(component, upstream_file, tokenizer, remaining, timeout):
                 compressed_bytes = local_path.stat().st_size
                 result = process_rows(
                     component, parquet_rows(local_path), upstream_file,
-                    destination, tokenizer, remaining,
+                    destination, tokenizer, remaining, review_destination,
                 )
             destination.flush()
             os.fsync(destination.fileno())
+            if review_destination is not None:
+                review_destination.flush()
+                os.fsync(review_destination.fileno())
         os.replace(temporary, output)
+        if IDENTITY_REVIEW is not None:
+            os.replace(review_temporary, review_output)
+            result["identity_review"]["candidate_output"] = str(review_output)
     except BaseException:
         if temporary.exists():
             temporary.unlink()
+        if review_temporary.exists():
+            review_temporary.unlink()
         raise
 
     report = {
@@ -406,7 +522,9 @@ def collect_shard(component, upstream_file, tokenizer, remaining, timeout):
         "output": str(output),
         **result,
     }
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    report_temporary = report_path.with_suffix(".json.tmp")
+    report_temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(report_temporary, report_path)
     return report
 
 
@@ -464,9 +582,13 @@ def verify_prior_segments_complete(component, args):
 
 
 def collect_component(component, args, tokenizer):
+    check_pause()
     completed, total_tokens = completed_state(component)
+    if total_tokens >= TARGETS[component] - MAX_TOKENS:
+        print(f"[{component}] already complete: {total_tokens:,}/{TARGETS[component]:,} tokens; no network request needed", flush=True)
+        return total_tokens
     verify_prior_segments_complete(component, args)
-    files = list_source_files(component)
+    files = list_source_files(component, timeout=args.timeout, retries=args.retries)
     skip = skipped_upstream_files(component, args)
     if skip:
         before = len(files)
@@ -481,12 +603,14 @@ def collect_component(component, args, tokenizer):
           f"resume={total_tokens:,}/{TARGETS[component]:,} tokens, "
           f"completed_shards={len(completed)}", flush=True)
     for upstream_file in files:
+        check_pause()
         if total_tokens >= TARGETS[component] - MAX_TOKENS:
             break
         if upstream_file in completed:
             continue
         report = None
         for attempt in range(1, args.retries + 1):
+            check_pause()
             try:
                 report = collect_shard(
                     component, upstream_file, tokenizer,
@@ -531,7 +655,17 @@ def main():
             "timeout/retries/shard-workers must be positive, max-shards >= 0, "
             "segment >= 1, and worker-index must be within shard-workers"
         )
-    global ACTIVE_OUT
+    global ACTIVE_OUT, EXCLUSION_INDEX, IDENTITY_REVIEW
+    if args.target_tokens is not None:
+        if args.component == "all" or args.target_tokens < MAX_TOKENS:
+            raise ValueError("--target-tokens requires one component and at least 4096 tokens")
+        TARGETS[args.component] = args.target_tokens
+    if args.novel_index is not None:
+        from scripts.data_builder.coder_novelty import ExclusionIndex
+        EXCLUSION_INDEX = ExclusionIndex(args.novel_index)
+    if args.identity_review:
+        from scripts.data_builder.coder_novelty import IdentityReview
+        IDENTITY_REVIEW = IdentityReview()
     ACTIVE_OUT = (Path(args.out_dir).resolve() if args.out_dir
                   else segment_out_root(args.segment))
     roots = skip_roots(args)  # validated eagerly so a bad chain fails fast
@@ -545,9 +679,27 @@ def main():
     components = list(TARGETS) if args.component == "all" else [args.component]
     summary = {}
     for component in components:
+        component_root = ACTIVE_OUT / component
+        component_root.mkdir(parents=True, exist_ok=True)
+        selection = {"source": SOURCES[component], "target_tokens": TARGETS[component],
+                     "prior_shard_roots": [str(root.resolve()) for root in roots],
+                     "exclusion_index_sha256": EXCLUSION_INDEX.report["index_sha256"] if EXCLUSION_INDEX else None,
+                     "identity_review": bool(IDENTITY_REVIEW), "max_tokens": MAX_TOKENS}
+        selection_path = component_root / "selection.json"
+        if selection_path.exists():
+            if json.loads(selection_path.read_text(encoding="utf-8")) != selection:
+                raise ValueError(f"Collection selection changed: {selection_path}; use a fresh output directory")
+        else:
+            if (EXCLUSION_INDEX is not None or IDENTITY_REVIEW is not None) and list((component_root / "reports").glob("*.json")):
+                raise ValueError("Cannot attach novelty/review rules to previously collected shards")
+            selection_path.write_text(json.dumps(selection, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         summary[component] = collect_component(component, args, tokenizer)
     print(json.dumps({"targets": TARGETS, "collected": summary}, indent=2), flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except CollectionPaused as error:
+        print(f"[paused] {error}", flush=True)
+        sys.exit(42)

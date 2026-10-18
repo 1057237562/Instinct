@@ -28,6 +28,12 @@ BUCKET_CALIBRATION_PERSISTENT_GB = 0.75
 BUCKET_MEMORY_SAFETY_GB = 0.50
 BUCKET_GRAPH_RESERVE_GB = 0.125
 BUCKET_CUDAGRAPH_RESERVE_GB = 0.50
+# RTX 5070 Ti / FP32-master V1 MoE top-2 / checkpoint=1 / BF16 fused path.
+# Measured allocated peaks at 8192/16384 tokens: 8.614/11.733 GiB;
+# reserved peaks: 9.332/13.273 GiB. Use the reserved-memory slope with
+# headroom (0.0005 GiB/token), not the optimistic live-tensor slope.
+V1_MOE_TRAINING_MEMORY_PROFILE = 'v1_moe_top2_checkpoint1_sm120_v1'
+V1_MOE_RESERVED_GIB_PER_TOKEN = 0.0005
 
 # Initial one-point wall-time calibration from the measured fixed-packing run.
 _TIME_REFERENCE_BATCH_SIZE = 28
@@ -81,6 +87,8 @@ def bucket_token_budget(
     persistent_memory_gb: float | None = None,
     bucket_count: int = 1,
     compile_mode: str = "off",
+    memory_profile: str | None = None,
+    gradient_memory_gb: float = 0.0,
 ) -> int:
     """Return a per-card token budget with optional model-memory accounting.
 
@@ -118,6 +126,21 @@ def bucket_token_budget(
             f'plus safety/bucket reserve ({BUCKET_MEMORY_SAFETY_GB + graph_reserve:.2f} GiB) '
             f'exceeds the requested {gpu_memory_gb:.2f} GiB per-card limit'
         )
+    if memory_profile is not None:
+        if memory_profile != V1_MOE_TRAINING_MEMORY_PROFILE:
+            raise ValueError(f'unknown bucket memory profile: {memory_profile}')
+        gradient_memory_gb = float(gradient_memory_gb)
+        if not math.isfinite(gradient_memory_gb) or not 0 <= gradient_memory_gb <= persistent_memory_gb:
+            raise ValueError('gradient_memory_gb must be finite and within persistent memory')
+        # zero_grad(set_to_none=True): full gradient residency and peak saved
+        # activations occur in different phases. Keep the optimizer-phase
+        # feasibility check above, then fit the activation/allocator peak.
+        fixed_gb = persistent_memory_gb - gradient_memory_gb + 0.35
+        extra_shape_reserve = max(0.25, graph_per_extra) * (bucket_count - 1)
+        usable_gb = gpu_memory_gb - BUCKET_MEMORY_SAFETY_GB - extra_shape_reserve - fixed_gb
+        if usable_gb <= 0:
+            raise ValueError('calibrated activation/allocator reserve exceeds the per-card limit')
+        return max(1, min(24576, math.floor(usable_gb / V1_MOE_RESERVED_GIB_PER_TOKEN)))
     reference_activation_gb = (
         BUCKET_CALIBRATION_MEMORY_GB - BUCKET_CALIBRATION_PERSISTENT_GB
     )

@@ -63,3 +63,52 @@ def test_ready_blocks_coalesce_and_end_marker_is_preserved():
             return item
     updates = list(render_updates(TokenRateStreamer(Delegate())))
     assert updates == [('abc', False), ('abc', True)]
+
+
+def test_api_metrics_use_token_ids_and_exclude_prefill_from_tpot():
+    from scripts.stream_metrics import GenerationMetricsStreamer
+    times = iter([1.0, 2.0, 5.0, 6.0, 7.0])
+    forwarded = []
+    delegate = SimpleNamespace(put=forwarded.append, end=lambda: None)
+    metrics = GenerationMetricsStreamer(delegate, request_started=0.0, clock=lambda: next(times))
+    metrics.start_generation()  # t=1; request preprocessing took 1s.
+    metrics.put(SimpleNamespace(numel=lambda: 100))  # Prompt consumes no timing samples.
+    metrics.put(SimpleNamespace(numel=lambda: 1))    # First output at t=2.
+    metrics.put(SimpleNamespace(numel=lambda: 3))    # Final block at t=5.
+    metrics.finish_generation()                    # Generation returned at t=6.
+    stats = metrics.snapshot(4)                    # Parsing completed at t=7.
+    assert stats == {
+        'output_tokens': 4, 'tokens_per_second': 1.0, 'tpot_ms': 1000.0,
+        'ttft_ms': 2000.0, 'generation_ttft_ms': 1000.0, 'decode_ms': 3000.0,
+        'generation_ms': 5000.0, 'total_ms': 7000.0,
+        'generation_tokens_per_second': 0.8, 'end_to_end_tokens_per_second': 4 / 7,
+        'timing_source': 'token_delivery',
+    }
+    assert len(forwarded) == 3
+
+
+def test_api_metrics_single_token_has_ttft_but_no_tpot():
+    from scripts.stream_metrics import GenerationMetricsStreamer
+    times = iter([1.0, 2.0, 3.0, 4.0])
+    metrics = GenerationMetricsStreamer(request_started=0.0, clock=lambda: next(times))
+    metrics.start_generation()
+    metrics.put(SimpleNamespace(numel=lambda: 100))
+    metrics.put(SimpleNamespace(numel=lambda: 1))
+    metrics.finish_generation()
+    stats = metrics.snapshot(1)
+    assert stats['ttft_ms'] == 2000
+    assert stats['tpot_ms'] is None
+    assert stats['tokens_per_second'] is None
+
+
+def test_api_metrics_missing_token_callbacks_does_not_invent_ttft():
+    from scripts.stream_metrics import GenerationMetricsStreamer
+    times = iter([1.0, 3.0, 4.0])
+    metrics = GenerationMetricsStreamer(request_started=0.0, clock=lambda: next(times))
+    metrics.start_generation()
+    metrics.finish_generation()
+    stats = metrics.snapshot(4)
+    assert stats['timing_source'] == 'generation_only'
+    assert stats['ttft_ms'] is None
+    assert stats['tpot_ms'] is None
+    assert stats['generation_tokens_per_second'] == 2.0

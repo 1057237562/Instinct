@@ -1,5 +1,11 @@
 # Gram Newton-Schulz：数学等价的 Muon 正交化加速
 
+> 2026-10-12 复核：以下为历史微基准与推算，不是生产合入验收。真实 512×1664
+> 专家尺寸的两层 MoE GPU 短训中，Gram FP16 首步更新误差 14.48%、25 步 loss
+> 最大相对差 9.63%，未通过本轮预设一致性阈值。FP64 数学等价仍成立，但不足以
+> 保证工作精度训练轨迹；候选保持在实验脚本中，生产继续标准 BF16 NS。
+> 完整计算步实测与裁决见 [PLAN.md](../PLAN.md)。
+
 ## 结论
 
 用 Gram 形式重写 `BatchedMuon` 的 Newton-Schulz 迭代（`trainer/batched_muon.py:17`）：

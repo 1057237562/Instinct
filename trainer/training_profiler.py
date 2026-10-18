@@ -174,6 +174,9 @@ class TrainingProfiler:
             torch.cuda.synchronize(self.device)
 
         total_ms = sum(self._elapsed_ms(s.total_start, s.total_end) for s in self._samples)
+        # A continuous event span also includes GPU idle gaps between steps.
+        # Do not add host_gap_ms to CUDA timings: CPU work can overlap GPU work.
+        window_ms = self._elapsed_ms(self._samples[0].total_start, self._samples[-1].total_end)
         count = len(self._samples)
         tokens = sum(s.tokens for s in self._samples)
         useful_tokens = sum(s.useful_tokens for s in self._samples)
@@ -189,6 +192,9 @@ class TrainingProfiler:
             "profile/step_time_ms": total_ms / count,
             "profile/tokens_per_second": tokens / seconds,
             "profile/useful_tokens_per_second": useful_tokens / seconds,
+            "profile/window_step_time_ms": window_ms / count,
+            "profile/window_tokens_per_second": tokens / max(window_ms / 1000.0, 1e-9),
+            "profile/window_useful_tokens_per_second": useful_tokens / max(window_ms / 1000.0, 1e-9),
             "profile/host_gap_ms": sum(s.host_gap_ms for s in self._samples) / count,
         }
         for name, phase_ms in phase_totals.items():
@@ -212,6 +218,7 @@ class TrainingProfiler:
             f"step={metrics['profile/step_time_ms']:.2f}ms, "
             f"tokens/s={metrics['profile/tokens_per_second']:.0f}, "
             f"useful_tokens/s={metrics['profile/useful_tokens_per_second']:.0f}, "
+            f"window_tokens/s={metrics['profile/window_tokens_per_second']:.0f}, "
             f"host_gap={metrics['profile/host_gap_ms']:.2f}ms"
             + (f", {phase_text}" if phase_text else "") + memory_text
         )

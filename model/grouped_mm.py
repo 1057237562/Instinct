@@ -56,6 +56,20 @@ class GroupedMMPlan:
     ends: tuple[int, ...] | None = None
 
 
+@torch.library.custom_op('instinct::checkpoint_expert_mm', mutates_args=())
+def _checkpoint_expert_mm(x: torch.Tensor, weight: torch.Tensor,
+                          offsets: torch.Tensor) -> torch.Tensor:
+    # An opaque op lets selective checkpointing save this expensive result,
+    # while _RaggedMM still owns the existing explicit backward kernels.
+    from model.grouped_mm_triton import ragged_mm
+    return ragged_mm(x, weight, offsets)
+
+
+@_checkpoint_expert_mm.register_fake
+def _checkpoint_expert_mm_fake(x, weight, offsets):
+    return x.new_empty((x.shape[0], weight.shape[2]))
+
+
 def make_grouped_mm_plan(offsets, *, backend=None):
     if offsets.ndim != 1 or offsets.dtype != torch.int32:
         raise ValueError('grouped GEMM offsets must be a 1D int32 tensor')
@@ -77,6 +91,8 @@ class _RaggedMM(torch.autograd.Function):
         ctx.save_for_backward(x, weight, plan.offsets)
         ctx.plan = plan
         if plan.backend == 'triton':
+            if os.environ.get('INSTINCT_MOE_SELECTIVE_CHECKPOINT', '0') != '0':
+                return _checkpoint_expert_mm(x, weight, plan.offsets)
             from model.grouped_mm_triton import ragged_mm
             return ragged_mm(x, weight, plan.offsets)
         result = x.new_empty((x.size(0), weight.size(2)))
@@ -99,7 +115,13 @@ class _RaggedMM(torch.autograd.Function):
                 if ctx.needs_input_grad[0]:
                     dx = ragged_mm(grad, weight.transpose(1, 2), offsets)
                 if ctx.needs_input_grad[1]:
-                    dw = ragged_weight_grad(x, grad, offsets, weight.size(0))
+                    layout=os.environ.get('INSTINCT_MOE_TRANSPOSED_DW','auto')
+                    if layout not in ('auto','0','1'):
+                        raise ValueError('INSTINCT_MOE_TRANSPOSED_DW must be auto, 0 or 1')
+                    from model.cuda_fastpath import blackwell_training_kernels
+                    dw = ragged_weight_grad(x, grad, offsets, weight.size(0),
+                        transposed_output=((layout=='1' or (layout=='auto' and blackwell_training_kernels(x.device)))
+                                           and weight.stride(1) == 1))
             else:
                 dx = torch.empty_like(x) if ctx.needs_input_grad[0] else None
                 dw = torch.empty_like(weight) if ctx.needs_input_grad[1] else None

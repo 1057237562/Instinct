@@ -7,14 +7,37 @@ independent. This preserves parameter IDs/order in existing resume checkpoints.
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 
 
 _NS_COEFFICIENTS = (3.4445, -4.7750, 2.0315)
+_VALIDATED_SHAPES = {(512, 512), (128, 512), (1664, 512), (512, 1664)}
+
+
+def _ns_backend(update):
+    backend = os.environ.get('INSTINCT_MUON_NS_BACKEND', 'auto')
+    if backend not in ('torch', 'triton', 'triton_graph', 'auto'):
+        raise ValueError('INSTINCT_MUON_NS_BACKEND must be torch, triton, triton_graph or auto')
+    if backend == 'auto':
+        from model.cuda_fastpath import blackwell_training_kernels
+        backend = ('triton_graph' if tuple(update.shape[-2:]) in _VALIDATED_SHAPES
+                   and blackwell_training_kernels(update.device) else 'torch')
+    return backend
 
 
 def _batched_zeropower(update, *, ns_coefficients, ns_steps, eps):
+    backend = _ns_backend(update)
+    if (backend != 'torch' and update.is_cuda and update.ndim == 3
+            and min(update.shape[-2:]) >= 128):
+        from trainer.muon_kernels import zeropower
+        return zeropower(update, ns_coefficients=ns_coefficients, ns_steps=ns_steps, eps=eps)
+    return _batched_zeropower_reference(update, ns_coefficients=ns_coefficients,
+                                       ns_steps=ns_steps, eps=eps)
+
+
+def _batched_zeropower_reference(update, *, ns_coefficients, ns_steps, eps):
     """Apply the native quintic iteration independently to each matrix."""
     x = update.to(torch.bfloat16)
     transposed = x.size(-2) > x.size(-1)
@@ -76,9 +99,27 @@ class BatchedMuon(torch.optim.Optimizer):
 
     def __setstate__(self, state):
         super().__setstate__(state)
+        # The pure NS cache contains no optimizer state. Drop device allocations
+        # on load and rebuild lazily for the restored runtime/device.
+        self.__dict__.pop('_ns_graph_cache', None)
         for group in self.param_groups:
             # The older in-repo fallback did not serialize this native field.
             group.setdefault('ns_coefficients', _NS_COEFFICIENTS)
+
+    @torch.no_grad()
+    def reserve_momentum(self):
+        """Allocate zero momentum before activation buffers fragment the pool.
+
+        Does not take a step, create gradients, apply decay, or replace restored
+        state. Parameters with grad=None still skip every update in step().
+        """
+        allocated = 0
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.requires_grad and p.is_contiguous() and 'momentum_buffer' not in self.state[p]:
+                    self.state[p]['momentum_buffer'] = torch.zeros_like(p)
+                    allocated += p.numel() * p.element_size()
+        return allocated
 
     @staticmethod
     def _validate_parameter(p):
@@ -102,14 +143,34 @@ class BatchedMuon(torch.optim.Optimizer):
                 state['momentum_buffer'] = torch.zeros_like(p.grad)
             buffers.append(state['momentum_buffer'])
         momentum = group['momentum']
-        torch._foreach_lerp_(buffers, grads, 1 - momentum)
-        if group['nesterov']:
+        fused_setting = os.environ.get('INSTINCT_MUON_FUSED_UPDATES', 'auto')
+        if fused_setting not in ('0', '1', 'auto'):
+            raise ValueError('INSTINCT_MUON_FUSED_UPDATES must be 0, 1 or auto')
+        from model.cuda_fastpath import blackwell_training_kernels
+        fused = ((fused_setting == '1' or (fused_setting == 'auto'
+                  and tuple(params[0].shape) in _VALIDATED_SHAPES
+                  and blackwell_training_kernels(params[0].device)))
+                 and params[0].is_cuda and params[0].dtype == torch.float32
+                 and all(t.is_contiguous() for t in (*params, *grads, *buffers)))
+        if fused:
+            from trainer.muon_kernels import prepare_update
+            stacked = prepare_update(grads, buffers, momentum=momentum, nesterov=group['nesterov'])
+        elif group['nesterov']:
+            torch._foreach_lerp_(buffers, grads, 1 - momentum)
             updates = torch._foreach_lerp(grads, buffers, momentum)
             stacked = torch.stack(updates).to(torch.bfloat16)
             del updates
         else:
+            torch._foreach_lerp_(buffers, grads, 1 - momentum)
             stacked = torch.stack(buffers).to(torch.bfloat16)
-        update = _batched_zeropower(
+        ns_function = _batched_zeropower
+        if (_ns_backend(stacked) == 'triton_graph'
+                and stacked.is_cuda and min(stacked.shape[-2:]) >= 128):
+            from trainer.muon_kernels import ZeropowerGraphCache
+            if not hasattr(self, '_ns_graph_cache'):
+                self._ns_graph_cache = ZeropowerGraphCache()
+            ns_function = self._ns_graph_cache
+        update = ns_function(
             stacked,
             ns_coefficients=group.get('ns_coefficients', _NS_COEFFICIENTS),
             ns_steps=group['ns_steps'], eps=group['eps'],
@@ -121,6 +182,10 @@ class BatchedMuon(torch.optim.Optimizer):
             adjusted_lr = lr * 0.2 * math.sqrt(max(rows, cols))
         else:
             adjusted_lr = lr * math.sqrt(max(1.0, rows / cols))
+        if fused:
+            from trainer.muon_kernels import apply_update
+            apply_update(params, update, decay=1 - lr*group['weight_decay'], alpha=-adjusted_lr)
+            return
         torch._foreach_mul_(params, 1 - lr * group['weight_decay'])
         # Match dtypes so foreach can use its fused CUDA path, not a per-tensor
         # fallback for mixed FP32 parameters / BF16 updates.

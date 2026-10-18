@@ -368,6 +368,7 @@ class MOEFeedForward(nn.Module):
             act_fn=self.act_fn,
             inference_backend=self._inference_backend,
             inference_stacks=self._inference_stacked,
+            checkpoint_mode=self.config.use_grad_checkpoint if self.training else 0,
         )
         if self.training:
             load = F.one_hot(topk_idx, self.config.num_experts).float().mean(0)

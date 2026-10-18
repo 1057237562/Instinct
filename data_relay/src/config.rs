@@ -13,6 +13,29 @@ pub struct Config {
     pub runner: RunnerCfg,
     pub autodl: AutoDlCfg,
     pub disk: DiskCfg,
+    pub training: TrainingCfg,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrainingCfg {
+    pub repo_root: String,
+    pub python: String,
+    pub min_free_gb: f64,
+    pub cache_max_gb: f64,
+    pub panel_state_path: String,
+    /// Local source checkout for training-code synchronization, relative to config.toml.
+    pub local_repo_root: String,
+    /// Delay between capacity-rejected GPU boot attempts; not a boot timeout.
+    pub gpu_retry_secs: u64,
+}
+
+impl Default for TrainingCfg {
+    fn default() -> Self {
+        Self { repo_root: "/root/autodl-tmp".into(), python: "/root/miniconda3/bin/python".into(),
+            min_free_gb: 8.0, cache_max_gb: 1.0,
+            panel_state_path: "../trainer/webui_state.json".into(), local_repo_root: "..".into(), gpu_retry_secs: 60 }
+    }
 }
 
 
@@ -163,6 +186,16 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        let base = &self.autodl.pull_base_url;
+        if !base.is_empty() {
+            let url = reqwest::Url::parse(base)?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
+                || !url.username().is_empty() || url.password().is_some()
+                || url.query().is_some() || url.fragment().is_some()
+                || base.chars().any(|c| c.is_whitespace() || "\"'`$\\".contains(c)) {
+                anyhow::bail!("pull_base_url 必须是无凭据、查询参数或片段的 HTTP(S) 地址");
+            }
+        }
         if self.server.api_token.is_empty() || self.server.api_token == "change-me" {
             tracing::warn!("server.api_token 仍为默认值，请尽快修改");
         }
@@ -181,6 +214,14 @@ impl Config {
         }
         if self.disk.max_used_ratio <= 0.0 || self.disk.max_used_ratio > 1.0 {
             anyhow::bail!("disk.max_used_ratio 必须在 (0, 1] 区间");
+        }
+        if !self.training.repo_root.starts_with('/') || self.training.repo_root == "/"
+            || self.training.python.is_empty() || !self.training.min_free_gb.is_finite()
+            || self.training.panel_state_path.trim().is_empty()
+            || self.training.local_repo_root.trim().is_empty()
+            || self.training.min_free_gb < 0.0 || !self.training.cache_max_gb.is_finite()
+            || self.training.cache_max_gb <= 0.0 || !(10..=3600).contains(&self.training.gpu_retry_secs) {
+            anyhow::bail!("training 配置需要绝对仓库路径、Python 解释器及有效磁盘/缓存预算");
         }
         Ok(())
     }
@@ -207,6 +248,9 @@ impl Config {
         if let Some(v) = get("instance_uuid") {
             autodl.instance_uuid = v;
         }
+        if let Some(v) = get("pull_base_url") {
+            autodl.pull_base_url = v.trim().trim_end_matches('/').to_string();
+        }
         if let Some(v) = get("ssh_password") {
             autodl.ssh_password = v;
         }
@@ -215,6 +259,18 @@ impl Config {
         }
         if let Some(v) = patch.get("boot_no_gpu").and_then(|v| v.as_bool()) {
             autodl.boot_no_gpu = v;
+        }
+        if let Some(v) = patch.get("allow_gpu_boot").and_then(|v| v.as_bool()) {
+            autodl.allow_gpu_boot = v;
+        }
+        if let Some(training) = patch.get("training") {
+            if let Some(v) = training.get("repo_root").and_then(|v| v.as_str()) { self.training.repo_root = v.into(); }
+            if let Some(v) = training.get("python").and_then(|v| v.as_str()) { self.training.python = v.into(); }
+            if let Some(v) = training.get("panel_state_path").and_then(|v| v.as_str()) { self.training.panel_state_path = v.into(); }
+            if let Some(v) = training.get("local_repo_root").and_then(|v| v.as_str()) { self.training.local_repo_root = v.into(); }
+            if let Some(v) = training.get("min_free_gb").and_then(|v| v.as_f64()) { self.training.min_free_gb = v; }
+            if let Some(v) = training.get("cache_max_gb").and_then(|v| v.as_f64()) { self.training.cache_max_gb = v; }
+            if let Some(v) = training.get("gpu_retry_secs").and_then(|v| v.as_u64()) { self.training.gpu_retry_secs = v; }
         }
     }
 }
@@ -238,6 +294,8 @@ mod tests {
         let cfg: Config = toml::from_str("[server]\nlisten=\"1.2.3.4:1\"").unwrap();
         assert_eq!(cfg.runner.python, "python3");
         assert_eq!(cfg.disk.keep_last_uploads, 3);
+        assert_eq!(cfg.training.repo_root, "/root/autodl-tmp");
+        assert_eq!(cfg.training.cache_max_gb, 1.0);
     }
 
     #[test]
@@ -248,5 +306,16 @@ mod tests {
         assert_eq!(cfg.autodl.console_token, "abc");
         assert_eq!(cfg.autodl.instance_uuid, "p1-x");
         assert!(cfg.autodl.power_off_after_upload); // untouched
+    }
+
+    #[test]
+    fn training_patch_and_gpu_consent_are_validated() {
+        let mut cfg = Config::default();
+        cfg.apply_patch(&serde_json::json!({"allow_gpu_boot":true,"training":{"repo_root":"/root/Instinct","cache_max_gb":2.0}}));
+        assert!(cfg.autodl.allow_gpu_boot);
+        assert_eq!(cfg.training.repo_root,"/root/Instinct");
+        assert_eq!(cfg.training.cache_max_gb,2.0);
+        cfg.training.cache_max_gb = 0.0;
+        assert!(cfg.validate().is_err());
     }
 }

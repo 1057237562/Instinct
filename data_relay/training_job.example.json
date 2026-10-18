@@ -1,0 +1,11 @@
+{
+  "name": "Instinct V1 MoE pretrain",
+  "trainer": "pretrain",
+  "config_path": "__panel_cache__",
+  "use_panel_cache": true,
+  "nproc": 1,
+  "gpu_devices": "0",
+  "args": {
+    "data_path": "dataset/pretrain_identity_clean.parquet"
+  }
+}

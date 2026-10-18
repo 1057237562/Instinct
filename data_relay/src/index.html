@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>data_relay · 数据下载中继</title>
+<title>data_relay · 数据与服务器训练管理</title>
 <style>
   :root {
     --bg: #0f1419; --panel: #171d24; --panel2: #1d252e; --line: #2a3441;
@@ -20,9 +20,9 @@
           padding: 16px; margin-bottom: 16px; }
   .card h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
   .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-  .row > * { flex-shrink: 0; }
+  .row > * { flex-shrink: 0; max-width:100%; }
   label.f { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); }
-  input, select, button { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+  input, select, button, textarea { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
          border-radius: 6px; padding: 7px 10px; font-size: 13px; outline: none; }
   input:focus, select:focus { border-color: var(--acc); }
   button { cursor: pointer; }
@@ -48,17 +48,77 @@
   .ok-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--err); display: inline-block; }
   .ok-dot.on { background: var(--ok); }
   a { color: var(--acc); }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid2 { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; }
   @media (max-width: 860px) { .grid2 { grid-template-columns: 1fr; } }
   .acts button { padding: 3px 8px; font-size: 12px; margin-right: 4px; }
+  .training-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+  .training-grid input,.training-grid select { width:100%; }
+  textarea { width:100%; font-family:var(--mono); resize:vertical; }
+  #trainingLog { background:#0b0f14; padding:12px; max-height:400px; overflow:auto; white-space:pre-wrap; }
+  .table-scroll { overflow-x:auto; }
+  .b-paused { color:var(--warn); } .b-completed { color:var(--ok); }
+  .model-preview { border:1px solid var(--line); border-radius:8px; padding:14px; margin-top:14px; }
+  .model-preview h3 { font-size:14px; margin:0 0 10px; }
+  .model-summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px 16px; margin:0; }
+  .model-summary dt { color:var(--dim); font-size:12px; }
+  .model-summary dd { margin:2px 0 0; overflow-wrap:anywhere; }
+  #trainingModelJson { max-height:420px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; background:#0b0f14; padding:12px; border-radius:6px; font:12px/1.6 var(--mono); }
+  @media (max-width:700px) { .model-summary { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+  @media (max-width:700px) { .training-grid { grid-template-columns:1fr; } }
+  :root { --bg:#0c121a; --panel:#141e2a; --panel2:#1b2838; --line:#2b3b4e; --text:#e6edf5; --dim:#9aadc2; --acc:#69dfc0; }
+  .wrap { max-width:1280px; padding-top:30px; }
+  h1 { font-size:26px; letter-spacing:-.6px; } .sub { font-size:14px; }
+  .card { padding:22px; border-radius:14px; } .card h2 { font-size:17px; flex-wrap:wrap; }
+  button,input,select { min-height:38px; } button { transition:background .15s; }
+  button:disabled { opacity:.45; cursor:not-allowed; } :focus-visible { outline:2px solid var(--acc); outline-offset:3px; }
+  [hidden] { display:none!important; } summary { cursor:pointer; }
+  .nav { display:flex; gap:6px; padding:6px; background:var(--panel); border:1px solid var(--line); border-radius:12px; margin:20px 0; overflow-x:auto; }
+  .nav button { border:0; background:transparent; padding:10px 22px; white-space:nowrap; font-weight:600; }
+  .nav button[aria-current="page"] { background:var(--panel2); color:var(--acc); }
+  .eyebrow { color:var(--acc); text-transform:uppercase; letter-spacing:2px; font-size:11px; font-weight:700; margin-bottom:8px; }
+  .upload-layout { display:grid; grid-template-columns:minmax(0,1.6fr) minmax(280px,1fr); gap:20px; }
+  .dropzone { display:flex; min-height:190px; align-items:center; justify-content:center; flex-direction:column; text-align:center; border:1px dashed #526c85; border-radius:12px; background:#101c29; cursor:pointer; padding:24px; gap:8px; }
+  .dropzone.drag { background:#19392f; border-color:var(--acc); }
+  .dropzone strong { font-size:18px; } .drop-icon { color:var(--acc); font-size:30px; }
+  .dropzone input { max-width:100%; } .flow { display:flex; gap:8px; align-items:center; flex-wrap:wrap; color:var(--dim); font-size:12px; margin:14px 0; }
+  .flow span { background:var(--panel2); padding:4px 9px; border-radius:6px; }
+  .file-list { max-height:210px; overflow:auto; margin:12px 0; }
+  .file-item { display:flex; gap:12px; align-items:center; padding:8px 0; border-bottom:1px solid var(--line); }
+  .file-item .filename { flex:1; overflow-wrap:anywhere; min-width:0; } .file-item button { min-height:28px; padding:2px 8px; }
+  .callout { background:#102c2a; border:1px solid #29544c; border-radius:10px; padding:14px; margin-bottom:16px; }
+  .callout code { display:block; overflow-wrap:anywhere; color:var(--acc); margin-top:5px; }
+  .status-text { margin-top:12px; overflow-wrap:anywhere; min-height:24px; }
+  .b-receiving,.b-verifying { color:var(--acc); } .transfer-card { border:1px solid var(--line); border-radius:10px; margin-top:12px; padding:16px; }
+  .transfer-card h3 { margin:0; font-size:14px; overflow-wrap:anywhere; } .transfer-meta { color:var(--dim); font-size:12px; margin:8px 0; overflow-wrap:anywhere; }
+  .steps { display:flex; gap:12px; margin:12px 0; font-size:12px; color:var(--dim); flex-wrap:wrap; }
+  .steps .current { color:var(--acc); } .empty { padding:30px 12px; text-align:center; color:var(--dim); }
+  #toast { position:fixed; bottom:24px; right:24px; max-width:min(450px,90vw); background:var(--panel2); padding:14px 20px; border:1px solid var(--acc); border-radius:10px; z-index:10; }
+  .dataset-stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin:18px 0; }
+  .dataset-stats div { background:var(--panel2); border-radius:10px; padding:14px; }
+  .dataset-stats strong { display:block; font-size:21px; margin-top:4px; }
+  .dataset-name { border:0; background:none; padding:0; text-align:left; color:var(--acc); overflow-wrap:anywhere; }
+  #datasetRows td:first-child { max-width:380px; overflow-wrap:anywhere; }
+  dialog { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:14px; width:min(720px,calc(100vw - 32px)); padding:24px; }
+  dialog::backdrop { background:#0009; } dialog h2 { margin-top:0; font-size:18px; }
+  dialog pre { background:var(--bg); border-radius:8px; padding:14px; max-height:55vh; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+  dialog code { display:block; overflow-wrap:anywhere; margin:14px 0; }
+  #datasetBreadcrumb { overflow-wrap:anywhere; margin:16px 0; } #datasetBreadcrumb button { min-height:30px; }
+  @media(max-width:800px) { .upload-layout { grid-template-columns:1fr; } .card { padding:16px; } .nav button { padding:8px 12px; } h1 { font-size:23px; } }
+  .training-control-group { border:1px solid var(--border,#30363d); border-radius:8px; margin:12px 0; padding:12px; }
+  .training-control-group summary { cursor:pointer; font-weight:600; }
+  .training-control-group .training-grid { margin-top:14px; }
+  #trainingCommand { white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.7 var(--mono); max-height:240px; overflow:auto; }
+  #trainingControls .f { min-width:0; }
+  #trainingControls input,#trainingControls select { width:100%; min-width:0; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>⇄ data_relay · 数据下载中继</h1>
-  <div class="sub">上传下载脚本 → 自动执行 → AutoDL 无卡开机 → 数据上传（SFTP/Jupyter）→ 数据盘配额管理 → 自动关机</div>
+  <div class="eyebrow">INSTINCT / DATA RELAY</div>
+  <h1>数据就绪，开始训练。</h1>
+  <div class="sub">把本地数据或脚本产物交付到 AutoDL，在同一处管理训练。</div>
 
-  <div class="card">
+  <div class="card" id="connectionCard">
     <div class="row">
       <label class="f">访问令牌<input id="token" type="password" style="width:260px" placeholder="config.toml 里的 api_token"></label>
       <button class="pri" onclick="saveToken()">保存令牌</button>
@@ -68,7 +128,94 @@
     </div>
   </div>
 
-  <div class="card">
+  <nav class="nav" aria-label="功能导航">
+    <button data-view-button="data" aria-current="page" onclick="switchView('data')">数据上传</button>
+    <button data-view-button="datasets" onclick="switchView('datasets')">远端数据集</button>
+    <button data-view-button="scripts" onclick="switchView('scripts')">脚本任务</button>
+    <button data-view-button="training" onclick="switchView('training')">服务器训练</button>
+    <button data-view-button="settings" onclick="switchView('settings')">连接设置</button>
+  </nav>
+  <section data-view="data" id="dataPanel">
+    <div class="upload-layout">
+      <div class="card">
+        <h2>上传本地数据 <span class="badge">可断点续传</span></h2>
+        <p class="muted">选择数据集及审计、来源文件，可一次添加多个文件。</p>
+        <label class="dropzone" id="dataDrop">
+          <span class="drop-icon" aria-hidden="true">↥</span>
+          <strong>拖入文件，或点击选择</strong>
+          <span class="muted">JSONL · Parquet · 压缩包 · 审计报告等</span>
+          <input type="file" id="dataFiles" multiple aria-label="选择数据文件">
+        </label>
+        <div id="selectedFiles" class="file-list"></div>
+        <div class="row" style="margin:14px 0">
+          <label class="f" style="flex:1">任务名称（可选）<input id="dataName" placeholder="例如：CPT 数据与审计报告"></label>
+          <label class="f">交付通道<select id="dataMode"><option value="sftp">SFTP · 无需公网中继地址</option><option value="pull">HTTP 拉取 · 16 连接</option></select></label>
+        </div>
+        <p class="muted" id="channelHint"></p>
+        <div class="row">
+          <button id="dataStart" class="pri" onclick="startDataUpload()">上传并交付到 dataset</button>
+          <button id="dataPause" hidden onclick="pauseDataUpload()">暂停本地上传</button>
+          <button id="dataReset" hidden onclick="resetDataUpload()">新建上传</button>
+          <span id="selectionSummary" class="muted">尚未选择文件</span>
+        </div>
+        <div id="dataMessage" class="status-text" role="status" aria-live="polite"></div>
+        <div class="bar" style="margin-top:8px"><i id="ingestBar" style="width:0%"></i></div>
+        <p class="muted" style="font-size:12px">本地上传时保持页面打开；提交完成后，后台交付可在关闭页面后继续。训练前仍需完成身份清洗及审计。</p>
+      </div>
+      <aside>
+        <div class="callout"><strong>固定交付目录</strong><code>/root/autodl-tmp/dataset</code><div class="muted" style="margin-top:8px">保留原文件名 · SHA-256 校验 · 同名不同内容不覆盖</div></div>
+        <div id="dataInstanceSlot"></div>
+        <div class="flow"><span>1 本地上传</span> → <span>2 校验与交付</span> → <span>3 数据就绪</span></div>
+      </aside>
+    </div>
+    <div class="card">
+      <h2>数据传输记录 <span style="flex:1"></span><button onclick="loadTasks()">刷新</button></h2>
+      <div class="row"><label class="f">筛选状态<select id="dataFilter" onchange="renderDataTasks()"><option value="all">全部任务</option><option value="active">进行中 / 待续传</option><option value="failed">失败</option><option value="done">已完成</option></select></label></div>
+      <div id="dataTasks"><div class="empty">连接中继后显示传输记录</div></div>
+    </div>
+  </section>
+
+  <section class="card" data-view="datasets" id="datasetsPanel" hidden>
+    <h2>远端 dataset <span class="badge">AutoDL 数据盘</span><span style="flex:1"></span><button onclick="switchView('data')">上传数据</button></h2>
+    <div class="row">
+      <label class="f" style="flex:1">目标实例<select id="datasetInstance" onchange="selectInstance(this.value)"><option value="">请先连接中继</option></select></label>
+      <button id="datasetRefresh" onclick="loadRemoteDatasets(datasetPath)">刷新文件与容量</button>
+    </div>
+    <div id="datasetMessage" class="status-text" role="status" aria-live="polite">选择实例后查看 /root/autodl-tmp/dataset</div>
+    <div class="dataset-stats">
+      <div><span class="muted">数据盘剩余</span><strong id="datasetFree">—</strong></div>
+      <div><span class="muted">当前目录文件</span><strong id="datasetCount">—</strong></div>
+      <div><span class="muted">当前目录文件总量</span><strong id="datasetSize">—</strong></div>
+    </div>
+    <div id="datasetBreadcrumb" aria-label="数据集目录"></div>
+    <div class="row">
+      <label class="f" style="flex:1">搜索当前目录<input id="datasetSearch" type="search" placeholder="文件名或扩展名" oninput="renderRemoteDatasets()"></label>
+      <label class="f">类型<select id="datasetType" onchange="renderRemoteDatasets()"><option value="all">全部</option><option value="corpus">训练语料</option><option value="report">JSON / 审计报告</option><option value="directory">目录</option></select></label>
+      <label class="f">排序<select id="datasetSort" onchange="renderRemoteDatasets()"><option value="name">名称</option><option value="newest">最近修改</option><option value="largest">体积从大到小</option></select></label>
+    </div>
+    <div class="table-scroll" style="margin-top:16px"><table><thead><tr><th>名称</th><th>类型</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>
+      <tbody id="datasetRows"><tr><td colspan="5" class="empty">尚未加载远端文件</td></tr></tbody></table></div>
+    <div class="row" style="margin-top:14px"><span id="datasetResultCount" class="muted" style="flex:1"></span><button id="datasetPrev" onclick="changeDatasetPage(-1)">上一页</button><button id="datasetNext" onclick="changeDatasetPage(1)">下一页</button></div>
+    <p class="muted" style="font-size:12px">浏览不会自动开机。上传暂存目录不显示；目录可进入浏览，文件可单独删除。训练运行中或数据交付时会阻止删除。</p>
+  </section>
+  <dialog id="datasetPreviewDialog" aria-labelledby="datasetPreviewTitle">
+    <h2 id="datasetPreviewTitle">文本预览</h2><div id="datasetPreviewHint" class="muted"></div><pre id="datasetPreviewText"></pre>
+    <button onclick="$('#datasetPreviewDialog').close()">关闭预览</button>
+  </dialog>
+  <dialog id="datasetDeleteDialog" aria-labelledby="datasetDeleteTitle">
+    <h2 id="datasetDeleteTitle">删除远端文件</h2><div id="datasetDeleteInstance" class="muted"></div><code id="datasetDeletePath"></code>
+    <p>此操作不可撤销。只删除上方选中的文件，关联审计报告与中继副本会保留。</p>
+    <div id="datasetDeleteMessage" class="status-text" role="status"></div>
+    <div class="row"><button id="datasetDeleteConfirm" class="danger" onclick="confirmDatasetDelete()">确认删除</button><button onclick="$('#datasetDeleteDialog').close()">取消</button></div>
+  </dialog>
+
+  <div class="card" data-view="settings" hidden>
+    <h2>高速拉取地址</h2>
+    <p class="muted">填写 AutoDL 实例能访问的中继 HTTP(S) 地址。HTTP 拉取支持单文件 16 连接；未配置时使用 SFTP。</p>
+    <div class="row"><label class="f" style="flex:1">中继公开地址<input id="pullBaseUrl" placeholder="https://relay.example.com"></label><button onclick="savePullAddress()">保存地址</button></div>
+    <div id="pullMessage" role="status"></div>
+  </div>
+  <div class="card" data-view="settings" hidden>
     <h2>AutoDL 控制台 Token</h2>
     <div id="tokenStatus" class="muted" style="font-size:12px">加载中…</div>
     <div class="muted" style="font-size:12px;margin-top:10px;margin-bottom:4px">方式一：微信扫码（推荐 · 免密码 · 无验证码）</div>
@@ -99,10 +246,12 @@
     </details>
   </div>
 
+  <section data-view="scripts" hidden>
   <div class="grid2">
     <div>
       <div class="card">
-        <h2>① 上传下载脚本</h2>
+        <h2>上传并运行脚本</h2>
+        <p class="muted">目标实例沿用“数据上传”页面的选择。<button onclick="switchView('data')">查看 / 更换实例</button></p>
         <form id="taskForm" onsubmit="return submitTask(event)">
           <div class="row" style="margin-bottom:10px">
             <label class="f">脚本 (.py / .sh)<input type="file" id="script" required accept=".py,.sh"></label>
@@ -127,7 +276,7 @@
         </form>
       </div>
 
-      <div class="card">
+      <div class="card" id="instanceCard">
         <h2>AutoDL 实例</h2>
         <div class="row" style="margin-bottom:8px">
           <label class="f">选择实例
@@ -142,7 +291,7 @@
         <div class="row" style="margin-top:12px">
           <button onclick="act('/api/autodl/boot_no_gpu')">无卡模式开机</button>
           <button class="danger" onclick="act('/api/autodl/power_off')">关机</button>
-          <button onclick="loadRemote()">查看托管目录</button>
+          <button onclick="loadRemote()">脚本产物目录</button>
         </div>
         <div id="remoteBox" style="margin-top:10px"></div>
       </div>
@@ -160,28 +309,142 @@
   </div>
 
   <div class="card">
-    <h2>② 下载任务</h2>
-    <table>
+    <h2>脚本任务记录</h2>
+    <div class="table-scroll"><table>
       <thead><tr><th>任务</th><th>状态</th><th>上传进度</th><th>远端路径</th><th>创建时间</th><th>操作</th></tr></thead>
       <tbody id="taskRows"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
-    </table>
+    </table></div>
+  </div>
+  </section>
+  <div class="card" id="trainingPanel" data-view="training" hidden>
+    <h2>服务器训练管理 <span style="flex:1"></span><button onclick="loadTrainingPanelCache(true)">导入 Config WebUI 当前配置</button><button onclick="refreshTraining()">刷新训练环境</button></h2>
+    <div id="trainingEnvironment" class="muted">保存访问令牌后加载服务器训练环境</div>
+    <div id="trainingCacheSource" class="muted" style="margin-top:6px">训练参数从 config_webui 缓存读取</div>
+    <details style="margin:12px 0">
+      <summary>服务器训练设置</summary>
+      <div class="training-grid" style="margin-top:10px">
+        <label class="f">仓库根目录<input id="trainingRepo" value="/root/autodl-tmp"></label>
+        <label class="f">服务器 Python<input id="trainingPython" value="/root/miniconda3/bin/python"></label>
+        <label class="f">Config WebUI 缓存（本机路径）<input id="trainingPanelPath" value="../trainer/webui_state.json"></label>
+        <label class="f">代码同步的本机仓库（相对 relay 配置文件）<input id="trainingLocalRepo" value=".."></label>
+        <label class="f">最低剩余空间（GiB）<input id="trainingMinFree" type="number" min="0" step="0.5" value="8"></label>
+        <label class="f">数据缓存预算（GiB）<input id="trainingCache" type="number" min="0.1" step="0.5" value="1"></label>
+        <label class="f">GPU 等待重试间隔（秒）<input id="trainingGpuRetry" type="number" min="10" max="3600" value="60"></label>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label><input type="checkbox" id="trainingAllowGpu"> 允许独立开机按钮及 CLI 有卡开机（按 GPU 计费）</label>
+        <button onclick="saveTrainingSettings()">保存设置</button>
+        <button onclick="trainingBootGpu()">有卡模式开机</button>
+      </div>
+    </details>
+    <section class="model-preview" aria-labelledby="codeSyncTitle">
+      <h3 id="codeSyncTitle">训练链路代码同步</h3>
+      <p class="muted">本机仓库 → 当前 AutoDL 仓库。读取本地工作区，包含未提交修改；先比较，再安装比较时的快照。</p>
+      <div class="row">
+        <label><input id="codeSyncAssets" type="checkbox" checked> 包含训练配置模板、tokenizer 与 requirements</label>
+        <button id="codeSyncCompare" onclick="compareTrainingCode()">比较本地与远端代码</button>
+        <button id="codeSyncApply" class="pri" onclick="confirmCodeSync('apply')" disabled>同步变更文件</button>
+      </div>
+      <p class="muted" style="font-size:12px">范围：trainer、model、scripts 顶层 Python、scripts/data_loader 及训练启动器。保留远端其他文件；不包含 webui_state.json、数据、权重、检查点、缓存和凭据，不自动安装依赖。</p>
+      <div id="codeSyncMessage" class="status-text" role="status">比较不会修改训练代码，也不会自动开机。</div>
+      <div id="codeSyncSummary" class="transfer-meta"></div>
+      <div class="bar"><i id="codeSyncProgress" style="width:0%"></i></div>
+      <details id="codeSyncDetails" style="margin-top:12px"><summary>查看文件差异</summary>
+        <label><input id="codeSyncShowSame" type="checkbox" onchange="renderCodeSyncPlan()"> 显示一致的文件</label>
+        <div class="table-scroll" style="max-height:360px;overflow:auto"><table><thead><tr><th>文件</th><th>差异</th><th>大小</th><th>本机 / 远端 SHA-256</th></tr></thead><tbody id="codeSyncFiles"></tbody></table></div>
+      </details>
+      <details style="margin-top:12px"><summary onclick="loadCodeSyncHistory()">同步记录与回滚</summary><div id="codeSyncHistory"></div></details>
+    </section>
+    <form onsubmit="return startTraining(event)">
+      <div class="training-grid">
+        <label class="f">任务名称<input id="trainingName" placeholder="留空自动命名"></label>
+        <label class="f">训练阶段<select id="trainingTrainer" onchange="changeTrainingStage()">
+          <option value="pretrain">预训练（从头）</option><option value="cpt">CPT（继续预训练）</option>
+          <option value="full_sft">SFT</option><option value="lora">LoRA</option><option value="dpo">DPO</option>
+          <option value="ppo">PPO</option><option value="grpo">GRPO / CISPO</option><option value="agent">Agent RL</option><option value="distillation">知识蒸馏</option>
+        </select></label>
+        <label class="f">模型配置<select id="trainingConfig" onchange="updateTrainingModelNotice()"><option value="__panel_cache__">面板中的模型配置</option></select></label>
+        <label class="f">训练语料<input id="trainingData" list="trainingDatasets" onchange="panelChanged()" placeholder="dataset/pretrain_coder_12b.parquet"><datalist id="trainingDatasets"></datalist></label>
+        <label class="f">GPU 数量<input id="trainingNproc" type="number" min="1" max="8" value="1"></label>
+        <label class="f">基座权重（CPT/SFT/后训练）<input id="trainingBase" list="trainingWeights" placeholder="选择或填写完成的权重前缀"><datalist id="trainingWeights"></datalist></label>
+        <label class="f">续训已有检查点（可选）<select id="trainingExisting" onchange="inferTrainingStage()"><option value="">新训练任务</option></select></label>
+        <label class="f">GPU 编号（可选）<input id="trainingDevices" placeholder="例如 0 或 0,1；空为全部可见 GPU"></label>
+      </div>
+      <div class="row" style="margin-top:16px;flex-wrap:wrap">
+        <label class="f">模型预设<select id="trainingPreset"><option value="">载入中…</option></select></label>
+        <button type="button" onclick="saveTrainingPanel().catch(()=>{})">保存配置</button>
+        <button type="button" onclick="exportTrainingPanel()">导出配置</button>
+        <label class="f">导入配置 / webui_state.json<input type="file" id="trainingImport" accept=".json"></label>
+      </div>
+      <p id="trainingPanelStatus" class="muted" role="status">正在载入配置…</p>
+      <div id="trainingControls"></div>
+      <section class="model-preview" aria-labelledby="trainingModelTitle">
+        <h3 id="trainingModelTitle">缓存模型配置</h3>
+        <dl id="trainingModelSummary" class="model-summary"><div><dt>配置状态</dt><dd>正在读取缓存…</dd></div></dl>
+        <p id="trainingModelNotice" class="muted" style="font-size:12px;margin:12px 0 0"></p>
+        <details style="margin-top:10px"><summary>查看完整模型配置 JSON</summary>
+          <pre id="trainingModelJson">等待缓存加载</pre>
+        </details>
+      </section>
+      <details class="training-control-group"><summary>额外参数 JSON（可选，仅覆盖上方阶段专用参数）</summary>
+        <label class="f"><textarea id="trainingArgs" rows="5">{}</textarea></label>
+      </details>
+      <details class="training-control-group" open><summary>训练命令预览</summary>
+        <p id="trainingCommandNote" class="muted"></p><pre id="trainingCommand">正在生成命令…</pre>
+      </details>
+      <div class="row" style="margin-top:10px">
+        <button id="trainingStart" class="pri" type="submit">启动训练（自动切换 GPU）</button>
+      </div>
+      <div class="muted" style="margin-top:8px;font-size:12px">启动或续训会自动切换 GPU 模式；GPU 库存不足时进入等待队列，资源可用后继续开机并训练。每次请求默认下发自动关机配置，成功训练结束 60 秒后由远端自行关机；暂停、停止或失败保留开机。关闭浏览器不影响队列和训练，同一仓库同时运行一个受管任务。</div>
+      <div id="trainingMessage" style="margin-top:8px" role="status"></div>
+    </form>
+    <section class="training-control-group"><h3>训练启动队列</h3><div id="trainingQueue" role="status">暂无排队任务</div></section>
+    <div class="table-scroll" style="margin-top:18px">
+      <table><thead><tr><th>任务 / 阶段</th><th>状态</th><th>权重前缀</th><th>开始时间</th><th>操作</th></tr></thead>
+        <tbody id="trainingRows"><tr><td colspan="5" class="muted">暂无训练任务</td></tr></tbody></table>
+    </div>
+    <div class="row" style="margin-top:12px"><strong>训练日志</strong><span id="trainingLogTitle" class="muted"></span>
+      <label class="f">执行次数<select id="trainingLogAttempt" onchange="loadTrainingLog()"><option value="0">第 1 次</option></select></label>
+      <label><input type="checkbox" id="trainingAutoLog" checked> 自动刷新</label></div>
+    <pre id="trainingLog">选择一个训练任务查看日志</pre>
   </div>
 </div>
+<div id="toast" role="status" hidden></div>
+<dialog id="codeSyncDialog" aria-labelledby="codeSyncDialogTitle">
+  <h2 id="codeSyncDialogTitle">确认同步训练代码</h2><pre id="codeSyncReview"></pre>
+  <p id="codeSyncWarning">即将替换列出的远端代码。旧文件保留备份；正在训练时操作会被拒绝。</p>
+  <div id="codeSyncDialogMessage" role="status"></div>
+  <div class="row"><button class="pri" id="codeSyncConfirm" onclick="executeCodeSync()">确认执行</button><button onclick="$('#codeSyncDialog').close()">取消</button></div>
+</dialog>
 
+<script src="transfer_rates.js"></script>
 <script>
 const $ = s => document.querySelector(s);
+// Serve standalone at / or behind the monitor's authenticated /relay/ proxy.
+const RELAY_MANAGED = new URLSearchParams(location.search).get('managed') === '1';
+function relayUrl(path){return new URL(String(path).replace(/^\//,''),new URL('./',location.href)).href;}
 const fmtB = n => n==null ? '—' : (n<1024?n+' B':n<1048576?(n/1024).toFixed(1)+' KB'
   : n<1073741824?(n/1048576).toFixed(1)+' MB':(n/1073741824).toFixed(2)+' GB');
 const fmtT = s => s ? new Date(s*1000).toLocaleString() : '—';
 
-function getToken(){ return localStorage.getItem('relay_token') || ''; }
+function getToken(){ return RELAY_MANAGED ? 'managed-session' : (localStorage.getItem('relay_token') || ''); }
 function saveToken(){ localStorage.setItem('relay_token', $('#token').value.trim()); refreshAll(); }
 $('#token').value = getToken();
+if(RELAY_MANAGED){
+  $('#connectionCard .f').hidden=true;
+  $('#connectionCard .pri').hidden=true;
+  $('#token').value='';
+  $('#userscript').closest('details').hidden=true;
+}
 
 async function api(path, opts={}) {
   const headers = Object.assign({'Authorization': getToken()}, opts.headers||{});
-  const resp = await fetch(path, Object.assign({}, opts, {headers}));
-  if (resp.status === 401) { setConn(false, '令牌无效'); throw new Error('401'); }
+  const resp = await fetch(relayUrl(path), Object.assign({}, opts, {headers}));
+  if (resp.status === 401) {
+    setConn(false, RELAY_MANAGED?'管理登录已过期':'令牌无效');
+    if(RELAY_MANAGED&&parent!==window)parent.postMessage({type:'relay-auth-required'},location.origin);
+    throw new Error('401');
+  }
   const ct = resp.headers.get('content-type') || '';
   const body = ct.includes('json') ? await resp.json() : await resp.text();
   if (!resp.ok) throw new Error((body && body.error) || resp.status);
@@ -192,10 +455,14 @@ function setConn(on, text){
 }
 
 let curLogTask = null;
+const transferRateTracker = new RelayTransferRates.Tracker();
+let tasksLoading = false;
+function transferRateText(task){return RelayTransferRates.describe(task,task.transfer_metrics||{phase:task.upload_phase,rate:null,eta:null},fmtB);}
 
 async function refreshAll(){
   try {
-    await Promise.all([loadTasks(), loadInst(), loadTokenStatus(), loadInstances()]);
+    await api('/api/health');
+    await Promise.all([loadTasks(), loadInst(), loadTokenStatus(), loadInstances(), loadUploadSettings()]);
     setConn(true, '已连接');
   } catch(e) {
     setConn(false, e.message==='401' ? '令牌无效' : '连接失败');
@@ -203,26 +470,36 @@ async function refreshAll(){
 }
 
 async function loadTasks(){
-  const data = await api('/api/tasks');
-  const rows = data.tasks.map(t => {
+  if(tasksLoading)return;tasksLoading=true;
+  try{
+  const data = await api('/api/tasks',{signal:AbortSignal.timeout(10000)});
+  transferRateTracker.retain(new Set(data.tasks.map(t=>t.id)));
+  const sampledAt=performance.now();
+  data.tasks.forEach(t=>t.transfer_metrics=transferRateTracker.observe(t,sampledAt));
+  if(typeof updateDataTasks==='function')updateDataTasks(data.tasks.filter(t=>t.data_upload));
+  const rows = data.tasks.filter(t=>!t.data_upload).map(t => {
     const pct = t.upload_total_bytes ? Math.min(100, Math.round(t.upload_done_bytes/t.upload_total_bytes*100)) : 0;
-    const err = t.error ? `<div class="muted" style="font-size:12px">${t.error}</div>` : '';
+    const err = t.error ? `<div class="muted" style="font-size:12px">${escapeHtml(t.error)}</div>` : '';
     return `<tr>
-      <td><span class="mono">${t.id}</span><br>${t.name}${err}</td>
-      <td><span class="badge b-${t.status}">${t.status}</span>${t.exit_code!=null?`<br><span class="muted">exit ${t.exit_code}</span>`:''}</td>
+      <td><span class="mono">${escapeHtml(t.id)}</span><br>${escapeHtml(t.name)}${err}</td>
+      <td><span class="badge b-${t.status}">${({queued:'待运行',running:'脚本执行中',download_done:'待交付',uploading:'交付中',uploaded:'已上传',done:'已完成',failed:'失败',cancelled:'已取消'})[t.status]||escapeHtml(t.status)}</span>${t.exit_code!=null?`<br><span class="muted">exit ${t.exit_code}</span>`:''}</td>
       <td>${t.upload_mode}<div class="bar"><i style="width:${pct}%"></i></div>
-          <span class="muted" style="font-size:11px">${fmtB(t.upload_done_bytes)} / ${fmtB(t.upload_total_bytes)}</span></td>
-      <td class="mono" style="font-size:11px">${t.remote_path||'—'}</td>
+          <span class="muted" style="font-size:11px">${fmtB(t.upload_done_bytes)} / ${fmtB(t.upload_total_bytes)}</span>
+          <div class="muted" data-transfer-rate="${escapeHtml(t.id)}" style="font-size:11px">${escapeHtml(transferRateText(t))}</div></td>
+      <td class="mono" style="font-size:11px">${escapeHtml(t.remote_path||'—')}</td>
       <td class="muted" style="font-size:12px">${fmtT(t.created_at)}</td>
       <td class="acts">
         <button onclick="showLog('${t.id}')">日志</button>
-        <button onclick="run('${t.id}','start')">重跑</button>
-        <button onclick="run('${t.id}','upload')">上传</button>
-        <button class="danger" onclick="run('${t.id}','cancel')">取消</button>
-        <button class="danger" onclick="del('${t.id}')">删除</button>
+        ${['running','uploading'].includes(t.status)?`<button class="danger" onclick="run('${t.id}','cancel')">取消</button>`:`<button onclick="run('${t.id}','start')">重跑</button><button onclick="run('${t.id}','upload')">交付产物</button><button class="danger" onclick="del('${t.id}')">删除</button>`}
       </td></tr>`;
   });
   $('#taskRows').innerHTML = rows.join('') || '<tr><td colspan="6" class="muted">暂无任务</td></tr>';
+  }catch(error){
+    transferRateTracker.samples.clear();
+    document.querySelectorAll('[data-transfer-rate]').forEach(el=>el.textContent='进度暂未更新 · 等待重新连接');
+    if(typeof dataRecords!=='undefined')dataRecords.forEach(t=>t.transfer_metrics={stale:true});
+    throw error;
+  }finally{tasksLoading=false;}
 }
 
 async function submitTask(ev){
@@ -269,32 +546,38 @@ async function loadInstances(){
     const d = await api('/api/autodl/instances');
     if (!d.instances || !d.instances.length) {
       sel.innerHTML = '<option value="">账号下无实例（api_mode=pro 时仅显示 Pro 实例）</option>';
+      if(typeof syncDatasetInstanceChoices==='function')syncDatasetInstanceChoices();
       return;
     }
     sel.innerHTML = d.instances.map(i => {
       const auto = !d.selected && d.instances.length === 1;
       const picked = i.selected || auto;
-      return `<option value="${i.uuid}" ${picked ? 'selected' : ''}>${i.name || i.uuid} · ${i.status}${auto ? '（自动）' : ''}</option>`;
+      return `<option value="${escapeHtml(i.uuid)}" ${picked ? 'selected' : ''}>${escapeHtml(i.name || i.uuid)} · ${escapeHtml(i.status)}${auto ? '（自动）' : ''}</option>`;
     }).join('');
+    if(typeof syncDatasetInstanceChoices==='function')syncDatasetInstanceChoices();
   } catch(e) {
-    sel.innerHTML = `<option value="">列表获取失败：${e.message}</option>`;
+    sel.innerHTML = `<option value="">列表获取失败：${escapeHtml(e.message)}</option>`;
+    if(typeof syncDatasetInstanceChoices==='function')syncDatasetInstanceChoices();
   }
 }
 async function selectInstance(uuid){
   if (!uuid) return;
   try {
     await api('/api/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({instance_uuid: uuid})});
-    loadInst();
-  } catch(e) { alert('切换实例失败: ' + e.message); }
+    $('#instSelect').value=uuid;
+    if(typeof syncDatasetInstanceChoices==='function')syncDatasetInstanceChoices();
+    loadInst(); if(!$('#trainingPanel').hidden)refreshTraining();
+    if(typeof renderCodeSyncPlan==='function')renderCodeSyncPlan();
+  } catch(e) { if(typeof syncDatasetInstanceChoices==='function')syncDatasetInstanceChoices();alert('切换实例失败: ' + e.message); }
 }
 async function loadInst(){
   try {
     const s = await api('/api/autodl/status');
     const mode = s.start_mode==='gpu' ? '有卡' : (s.start_mode||'—');
     $('#instBox').innerHTML =
-      `<b>${s.name||s.uuid}</b> <span class="badge b-${s.status==='running'?'done':'queued'}">${s.status}</span>
-       <div class="muted" style="font-size:12px">uuid: <span class="mono">${s.uuid}</span> · 开机模式: ${mode}
-       · 计费: ${s.charge_type||'—'} · Jupyter: ${s.jupyter_available?'✓':'—'}</div>`;
+      `<b>${escapeHtml(s.name||s.uuid)}</b> <span class="badge b-${s.status==='running'?'done':'queued'}">${escapeHtml(s.status)}</span>
+       <div class="muted" style="font-size:12px">uuid: <span class="mono">${escapeHtml(s.uuid)}</span> · 开机模式: ${escapeHtml(mode)}
+       · 计费: ${escapeHtml(s.charge_type||'—')} · Jupyter: ${s.jupyter_available?'✓':'—'}</div>`;
     const used = s.data_disk_used, total = s.data_disk_total;
     if (total) {
       const pct = Math.round(used/total*100);
@@ -364,7 +647,7 @@ async function wxPoll(uuid){
   } catch(e) { clearInterval(wxPollTimer); alert('轮询失败: ' + e.message); }
 }
 function fillTokenHelpers(){
-  const relay = location.origin;
+  const relay = new URL('./',location.href).href.replace(/\/$/,'');
   const t = getToken() || 'REPLACE_WITH_RELAY_TOKEN';
   const ep = `${relay}/api/config/console_token?t=${encodeURIComponent(t)}`;
   $('#userscript').textContent =
@@ -400,9 +683,196 @@ async function loadTokenStatus(){
     $('#tokenStatus').textContent = `console_token: ${c.console_token || '未设置'} · 更新于 ${c.console_token_updated_at ? new Date(c.console_token_updated_at*1000).toLocaleString() : '—'}`;
   } catch(e) { $('#tokenStatus').textContent = '状态获取失败（先在顶部保存访问令牌）'; }
 }
+const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let trainingSettingsLoaded = false, trainingJobsBusy = false, trainingLogBusy = false, trainingCanStart = true;
+let trainingOperationId = null, trainingOperationBusy = false;
+let trainingPanelCache = null, trainingPanelBusy = false;
+let trainingPanelConfiguredPath = '';
+let trainingJobs = [], trainingLogId = null;
+const trainingStates = {starting:'启动中',running:'训练中',pausing:'保存后暂停',paused:'已暂停',stopping:'正在停止',cancelled:'已停止',completed:'完成',failed:'失败',interrupted:'进程中断',orphaned:'守护进程中断（训练仍在运行）'};
+function fillTrainingOptions(selector, files, defaultValue, transform=path=>path){
+  const select = $(selector), previous = select.value;
+  if(select.tagName==='INPUT'){
+    select.list.replaceChildren(...files.map(file=>new Option(file.path,transform(file.path))));return;
+  }
+  const placeholder = selector==='#trainingConfig' ? '' : '<option value="">'+(selector==='#trainingExisting'?'新训练任务':'请选择完成的基座权重')+'</option>';
+  select.innerHTML = placeholder + (selector==='#trainingConfig'?'<option value="__panel_cache__">面板中的模型配置</option>':'') + files.map(file=>`<option value="${escapeHtml(transform(file.path))}">${escapeHtml(file.path)}</option>`).join('');
+  if ([...select.options].some(option=>option.value===previous)) select.value=previous;
+  else if (defaultValue) select.value=defaultValue;
+}
+
+async function refreshTraining(){
+  try {
+    const cfg = await api('/api/config');
+    if (!trainingSettingsLoaded) {
+      $('#trainingRepo').value=cfg.training.repo_root; $('#trainingPython').value=cfg.training.python;
+      $('#trainingMinFree').value=cfg.training.min_free_gb; $('#trainingCache').value=cfg.training.cache_max_gb;
+      $('#trainingGpuRetry').value=cfg.training.gpu_retry_secs||60;
+      $('#trainingPanelPath').value=cfg.training.panel_state_path;
+      $('#trainingLocalRepo').value=cfg.training.local_repo_root||'..';
+      trainingPanelConfiguredPath=cfg.training.panel_state_path;
+      $('#trainingAllowGpu').checked=cfg.allow_gpu_boot; trainingSettingsLoaded=true;
+    }
+    if(!trainingPanelDocument)await loadEditableTrainingPanel();
+    const env = await api('/api/training/environment');
+    const instance=env.instance||{};
+    $('#trainingEnvironment').textContent = `${instance.uuid||'实例'} · ${instance.status||'未知'} · ${instance.start_mode||'模式未知'}` +
+      (env.reachable ? ` · 数据盘剩余 ${(env.free_bytes/1073741824).toFixed(2)} GiB · GPU：${(env.gpu||[]).join('；')||'不可见'}` : ' · 实例离线，可查看缓存任务记录');
+    if (env.reachable) {
+      $('#trainingDatasets').innerHTML=(env.datasets||[]).map(file=>`<option value="${escapeHtml(file.path)}">${escapeHtml(file.path)}</option>`).join('');
+      fillTrainingOptions('#trainingConfig',(env.configs||[]).filter(file=>file.path.includes('config_')),'__panel_cache__');
+      fillTrainingOptions('#trainingBase',env.weights||[],'', path=>path.split('/').pop().replace(/_\d+(_moe)?\.pth$/,''));
+      fillTrainingOptions('#trainingExisting',env.resume_checkpoints||[],'');
+      updateTrainingModelNotice();
+    }
+    await loadTrainingJobs();
+  } catch(error) { $('#trainingEnvironment').textContent='训练环境读取失败：'+error.message; }
+}
+
+async function saveTrainingSettings(){
+  try {
+    const nextPanelPath=$('#trainingPanelPath').value.trim(),panelChanged=nextPanelPath!==trainingPanelConfiguredPath;
+    await api('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      training:{repo_root:$('#trainingRepo').value.trim(),python:$('#trainingPython').value.trim(),panel_state_path:$('#trainingPanelPath').value.trim(),local_repo_root:$('#trainingLocalRepo').value.trim(),
+                min_free_gb:Number($('#trainingMinFree').value),cache_max_gb:Number($('#trainingCache').value),gpu_retry_secs:Number($('#trainingGpuRetry').value)},
+      allow_gpu_boot:$('#trainingAllowGpu').checked})});
+    trainingPanelConfiguredPath=nextPanelPath;
+    if(panelChanged)await loadTrainingPanelCache(true);
+    $('#trainingMessage').textContent='训练设置已保存'; await refreshTraining(); return true;
+  } catch(error) { $('#trainingMessage').textContent=error.message; return false; }
+}
+
+function renderTrainingCachedModel(cached){
+  const model=cached.model_config, arch={standard:'标准 Transformer',linear:'线性注意力',looped:'循环主干'};
+  const shown=value=>value==null?'未配置':String(value);
+  const moe=Boolean(model.use_moe),rope=model.rope_scaling||{};
+  const fields=[
+    ['主干',arch[model.model_architecture]||model.model_architecture||'标准 Transformer'],
+    ['模型类型',moe?'MoE':'Dense'],['隐藏维度 / 层数',`${shown(model.hidden_size)} / ${shown(model.num_hidden_layers)}`],
+    ['Q 头 / KV 头',`${shown(model.num_attention_heads)} / ${shown(model.num_key_value_heads)}`],
+    ['Head dimension',shown(model.head_dim)],['词表大小',shown(model.vocab_size)],
+    ['最大上下文（tokens）',shown(model.max_position_embeddings)],['残差结构',shown(model.residual_type||'standard')],
+    ['FFN 中间维度',shown(model.intermediate_size)],['共享输入/输出嵌入',model.tie_word_embeddings?'是':'否'],
+    ['RoPE 缩放',rope.type?`${rope.type} · factor ${shown(rope.factor)}`:'未启用'],['RoPE θ',shown(model.rope_theta)],
+  ];
+  if(moe)fields.push(['专家数 / 每 token 激活',`${shown(model.num_experts)} / ${shown(model.num_experts_per_tok)}`],
+    ['MoE FFN 中间维度',shown(model.moe_intermediate_size)],['Top-k 概率归一化',model.norm_topk_prob?'开启':'关闭'],
+    ['路由辅助损失系数',shown(model.router_aux_loss_coef)]);
+  if(model.model_architecture==='looped')fields.push(['Prelude / recurrent / coda',`${shown(model.prelude_layers)} / ${shown(model.recurrent_layers)} / ${shown(model.coda_layers)}`],['循环次数',shown(model.loop_iters)]);
+  if(model.model_architecture==='linear')fields.push(['完整注意力间隔',shown(model.full_attention_interval)],['线性 K / V 维度',`${shown(model.linear_key_head_dim)} / ${shown(model.linear_value_head_dim)}`]);
+  $('#trainingModelTitle').textContent='缓存模型配置'+(cached.preset?' · '+cached.preset:'');
+  const summary=$('#trainingModelSummary');summary.replaceChildren();
+  for(const [label,value] of fields){
+    const item=document.createElement('div'),term=document.createElement('dt'),description=document.createElement('dd');
+    term.textContent=label;description.textContent=value;item.append(term,description);summary.append(item);
+  }
+  $('#trainingModelJson').textContent=JSON.stringify(model,null,2);
+  updateTrainingModelNotice();
+}
+
+function updateTrainingModelNotice(){
+  const checkpoint=$('#trainingExisting').value,selected=$('#trainingConfig').value;
+  $('#trainingModelNotice').textContent=checkpoint?
+    `已选择续训检查点 ${checkpoint}。续训使用检查点保存的模型结构；上方展示面板配置。`:
+    selected==='__panel_cache__'?'新训练将使用上方面板模型配置，启动时保存完整配置快照。':
+    `当前选择服务器配置 ${selected}，启动将读取该文件；上方展示面板配置。`;
+}
+
+async function trainingBootGpu(){
+  try {
+    if (!await saveTrainingSettings()) return;
+    const result=await api('/api/training/boot_gpu',{method:'POST'});
+    $('#trainingMessage').textContent=result.message; await refreshTraining();
+  } catch(error) { $('#trainingMessage').textContent=error.message; }
+}
+
+async function loadTrainingJobs(){
+  if (trainingJobsBusy) return;
+  trainingJobsBusy=true;
+  try {
+    const response=await api('/api/training/jobs'); trainingJobs=response.jobs||[];
+    $('#trainingRows').innerHTML=trainingJobs.map(job=>{
+      const active=['starting','running','pausing','stopping','orphaned'].includes(job.status);
+      return `<tr><td>${escapeHtml(job.name)}<br><span class="muted mono">${escapeHtml(job.id)} · ${escapeHtml(job.trainer)}${response.reachable?'':' · 离线缓存'}</span>`+
+        `${job.error?`<div class="muted">${escapeHtml(job.error)}</div>`:''}</td><td><span class="badge b-${escapeHtml(job.status)}">${escapeHtml(trainingStates[job.status]||job.status)}</span>`+
+        `${job.exit_code!=null?`<br>exit ${job.exit_code}`:''}`+
+        `${job.settings?.shutdown_after_train?`<br><span class="muted">${escapeHtml(({scheduled:'即将自动关机',requested:'已请求自动关机',skipped:'自动关机已跳过',failed:'自动关机失败'})[job.shutdown_status]||'成功后自动关机')}</span>`:''}`+
+        `${job.shutdown_error?`<br><span class="muted">${escapeHtml(job.shutdown_error)}</span>`:''}</td><td class="mono">${escapeHtml(job.save_weight)}</td><td>${escapeHtml(fmtT(job.started_at))}</td>`+
+        `<td class="acts"><button data-job="${escapeHtml(job.id)}" data-train-action="log">日志</button>`+
+        `${response.reachable&&['running','pausing','orphaned'].includes(job.status)?`<button data-job="${escapeHtml(job.id)}" data-train-action="pause">暂停并保存</button>`:''}`+
+        `${job.can_resume?`<button data-job="${escapeHtml(job.id)}" data-train-action="resume">续训（自动切换 GPU）</button>`:''}`+
+        `${response.reachable&&active?`<button class="danger" data-job="${escapeHtml(job.id)}" data-train-action="stop">停止（不保存）</button>`:''}</td></tr>`;
+    }).join('')||'<tr><td colspan="5" class="muted">暂无受管训练任务</td></tr>';
+  } catch(error) { $('#trainingMessage').textContent='任务查询失败：'+error.message; }
+  finally { trainingJobsBusy=false; }
+}
+
+$('#trainingRows').addEventListener('click',async event=>{
+  const button=event.target.closest('button[data-train-action]'); if (!button) return;
+  const action=button.dataset.trainAction, id=button.dataset.job;
+  if (action==='log') return showTrainingLog(id);
+  if (action==='stop'&&!confirm('停止不会执行暂停保存，将丢失最近一次检查点之后的训练进度。继续？')) return;
+  button.disabled=true;
+  try {
+    const result=await api(`/api/training/jobs/${encodeURIComponent(id)}/${action}`,{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({auto_gpu:action==='resume',shutdown_after_train:true,shutdown_delay_seconds:60})});
+    if(result.operation_id){trainingOperationId=result.operation_id;trainingCanStart=false;$('#trainingStart').disabled=true;await loadTrainingOperations();}
+    await loadTrainingJobs();
+  }
+  catch(error) { $('#trainingMessage').textContent=error.message; button.disabled=false; }
+});
+
+function showTrainingLog(id){
+  trainingLogId=id; $('#trainingLogTitle').textContent=id;
+  const job=trainingJobs.find(job=>job.id===id), attempt=job?.attempt||0;
+  $('#trainingLogAttempt').innerHTML=Array.from({length:attempt+1},(_,index)=>`<option value="${index}" ${index===attempt?'selected':''}>第 ${index+1} 次</option>`).join('');
+  loadTrainingLog();
+}
+async function loadTrainingLog(){
+  if (!trainingLogId||trainingLogBusy) return;
+  trainingLogBusy=true;
+  try {
+    const result=await api(`/api/training/jobs/${encodeURIComponent(trainingLogId)}/log?bytes=262144&attempt=${$('#trainingLogAttempt').value}`);
+    $('#trainingLog').textContent=result.text||'等待训练器日志…'; $('#trainingLog').scrollTop=$('#trainingLog').scrollHeight;
+  } catch(error) { $('#trainingLog').textContent=error.message; }
+  finally { trainingLogBusy=false; }
+}
+setInterval(()=>{if(getToken()&&!$('#trainingPanel').hidden)loadTrainingJobs();},12000);
+async function loadTrainingOperations(){
+  if(trainingOperationBusy)return; trainingOperationBusy=true;
+  try {
+    const result=await api('/api/training/operations'), records=result.operations||[];
+    const finished=record=>['completed','failed','interrupted','cancelled'].includes(record.status);
+    $('#trainingQueue').innerHTML=records.slice(0,8).map(record=>`<div class="row" style="justify-content:space-between;margin:8px 0"><div><strong>${escapeHtml(record.instance_uuid||'实例')}</strong> · ${escapeHtml(record.message||record.status)}<br><span class="muted mono">${escapeHtml(record.id)}${record.gpu_attempts?' · 资源不足 '+record.gpu_attempts+' 次':''}${record.status==='waiting_gpu'&&record.next_retry_at?' · 下次重试 '+escapeHtml(fmtT(record.next_retry_at)):''}</span></div>${!finished(record)&&record.status!=='starting'?`<button type="button" data-cancel-operation="${escapeHtml(record.id)}">取消排队</button>`:''}</div>`).join('')||'暂无排队任务';
+    const pending=records.find(record=>!finished(record));
+    if(pending&&!trainingOperationId)trainingOperationId=pending.id;
+    const operation=records.find(record=>record.id===trainingOperationId);
+    if(operation){
+      $('#trainingMessage').textContent=(operation.instance_uuid?operation.instance_uuid+'：':'')+operation.message+(operation.job_id?'：'+operation.job_id:'');
+      if(finished(operation)){
+        trainingOperationId=null;trainingCanStart=true;$('#trainingStart').disabled=false;
+        await loadTrainingJobs();if(operation.job_id)showTrainingLog(operation.job_id);
+      }else{trainingCanStart=false;$('#trainingStart').disabled=true;}
+    }
+  }catch(error){$('#trainingMessage').textContent='启动状态查询失败：'+error.message;}
+  finally{trainingOperationBusy=false;}
+}
+$('#trainingQueue').addEventListener('click',async event=>{
+  const button=event.target.closest('[data-cancel-operation]');if(!button)return;
+  button.disabled=true;
+  try{const result=await api(`/api/training/operations/${encodeURIComponent(button.dataset.cancelOperation)}/cancel`,{method:'POST'});$('#trainingMessage').textContent=result.message||'排队已取消';await loadTrainingOperations();}
+  catch(error){$('#trainingMessage').textContent=error.message;button.disabled=false;}
+});
+setInterval(()=>{if(getToken()&&!$('#trainingPanel').hidden)loadTrainingOperations();},4000);
+setInterval(()=>{if(getToken()&&!$('#trainingPanel').hidden&&$('#trainingAutoLog').checked)loadTrainingLog();},4000);
+
 fillTokenHelpers();
-refreshAll();
-setInterval(() => { if (getToken()) { loadTasks().catch(()=>{}); loadInst().catch(()=>{}); } }, 8000);
+setInterval(() => { if (getToken()&&!document.hidden)loadTasks().catch(()=>{}); }, 3000);
+setInterval(() => { if (getToken()&&!document.hidden)loadInst().catch(()=>{}); }, 15000);
 </script>
+<script src="upload.js"></script>
+<script src="training_panel.js"></script>
+<script src="datasets.js"></script>
+<script src="code_sync.js"></script>
 </body>
 </html>

@@ -88,6 +88,82 @@ def test_muon_persistent_memory_includes_parameter_gradient_and_state():
     assert estimate_training_persistent_bytes(model, args) == expected
 
 
+def test_calibrated_moe_budget_uses_reserved_curve_and_shape_headroom():
+    from scripts.data_loader.sequence_bucket import V1_MOE_TRAINING_MEMORY_PROFILE
+    options=dict(persistent_memory_gb=7.60,gradient_memory_gb=2.53,
+                 memory_profile=V1_MOE_TRAINING_MEMORY_PROFILE,
+                 compile_mode='max-autotune-no-cudagraphs')
+    budget=bucket_token_budget(15.5,bucket_count=2,**options)
+    assert budget//4096 == 4  # 6x4096 measured a severe throughput collapse.
+    assert budget//2928 == 6  # Recover memory unused by the legacy calibration.
+    assert bucket_token_budget(15.5,bucket_count=5,**options) < budget
+    assert bucket_token_budget(14.0,bucket_count=2,**options) < budget
+    with pytest.raises(ValueError,match='gradient_memory_gb'):
+        bucket_token_budget(15.5,persistent_memory_gb=7.6,gradient_memory_gb=8,
+                            memory_profile=V1_MOE_TRAINING_MEMORY_PROFILE)
+
+
+def test_calibrated_profile_rejects_unmeasured_training_paths(monkeypatch):
+    import trainer.trainer_utils as utils
+    monkeypatch.setattr(utils.sys, 'platform', 'win32')
+    from trainer.trainer_utils import _validated_bucket_memory_profile
+    from scripts.data_loader.sequence_bucket import V1_MOE_TRAINING_MEMORY_PROFILE
+    import model.cuda_fastpath as fastpath
+    monkeypatch.setattr(fastpath, 'blackwell_training_kernels', lambda device: True)
+    monkeypatch.setattr(torch.cuda, 'get_device_name', lambda device: 'NVIDIA GeForce RTX 5070 Ti')
+    param=SimpleNamespace(dtype=torch.float32,requires_grad=True,device=torch.device('cuda'),
+                          numel=lambda:678726144)
+    config=InstinctConfig(**json.loads(open('trainer/config_instinct_v1_moe.json',encoding='utf-8').read()))
+    config.use_grad_checkpoint=1
+    model=SimpleNamespace(config=config,parameters=lambda:iter([param]))
+    args=SimpleNamespace(optimizer='muon',dtype='bfloat16',accumulation_steps=1,
+                         use_compile=1,compile_mode='max-autotune-no-cudagraphs',bucket_max_seq_len=4096)
+    assert _validated_bucket_memory_profile(model,args)==V1_MOE_TRAINING_MEMORY_PROFILE
+    args.accumulation_steps=2
+    assert _validated_bucket_memory_profile(model,args) is None
+    args.accumulation_steps=1
+    args.bucket_max_seq_len=8192
+    assert _validated_bucket_memory_profile(model,args) is None
+    args.bucket_max_seq_len=4096
+    monkeypatch.setenv('INSTINCT_MOE_INNER_CHECKPOINT','1')
+    assert _validated_bucket_memory_profile(model,args) is None
+    monkeypatch.setenv('INSTINCT_MOE_INNER_CHECKPOINT','0')
+    monkeypatch.setattr(utils.sys, 'platform', 'linux')
+    assert _validated_bucket_memory_profile(model,args) is None
+
+
+@pytest.mark.parametrize('explicit,saved,expected', [(0,0,16384),(20480,0,20480),(0,18661,18661)])
+def test_local_throughput_cap_preserves_explicit_and_resume_budgets(monkeypatch, explicit, saved, expected):
+    import trainer.trainer_utils as utils
+    from scripts.data_loader.sequence_bucket import V1_MOE_TRAINING_MEMORY_PROFILE
+    param=SimpleNamespace(requires_grad=True,device=torch.device('cuda'),
+                          numel=lambda:678726144,element_size=lambda:4)
+    model=SimpleNamespace(parameters=lambda:iter([param]))
+    monkeypatch.setattr(utils,'estimate_training_persistent_bytes',lambda *a,**k:int(7.60*2**30))
+    monkeypatch.setattr(utils,'_validated_bucket_memory_profile',lambda *a:V1_MOE_TRAINING_MEMORY_PROFILE)
+    monkeypatch.setattr(torch.cuda,'get_device_properties',lambda d:SimpleNamespace(total_memory=16*2**30))
+    args=SimpleNamespace(sequence_packing=1,sequence_packing_mode='bucket',
+        bucket_gpu_memory_gb=16.,bucket_allocator_limit_gb=14.37,bucket_token_budget=explicit,
+        seq_bucket=2,use_compile=1,compile_mode='max-autotune-no-cudagraphs')
+    checkpoint={'data_config':dict(active_sequence_packing=True,sequence_packing_mode='bucket',
+                                  bucket_token_budget=saved)}
+    assert configure_bucket_memory_budget(model,args,checkpoint_data=checkpoint)==expected
+    if explicit == saved == 0:
+        args.bucket_token_budget=0
+        args.bucket_allocator_limit_gb=12.
+        assert configure_bucket_memory_budget(model,args) < expected
+
+
+def test_conservative_bucket_curve_respects_resolved_driver_limit():
+    model=torch.nn.Linear(16,16)
+    args=SimpleNamespace(optimizer='muon',sequence_packing=1,sequence_packing_mode='bucket',
+        bucket_gpu_memory_gb=16.,bucket_allocator_limit_gb=11.5,bucket_token_budget=0,
+        seq_bucket=2,use_compile=0)
+    budget=configure_bucket_memory_budget(model,args)
+    assert budget==bucket_token_budget(12.,persistent_memory_gb=args.bucket_persistent_memory_gb,
+                                      bucket_count=2,compile_mode='off')
+
+
 def test_bucket_budget_resume_inherits_resolved_checkpoint_value():
     model = torch.nn.Linear(16, 16, bias=True)
     args = SimpleNamespace(

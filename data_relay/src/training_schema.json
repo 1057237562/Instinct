@@ -1,0 +1,2541 @@
+{
+  "groups": [
+    {
+      "title": "训练超参数",
+      "fields": [
+        {
+          "key": "epochs_{stage}",
+          "label": "训练轮数",
+          "default": 2,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "learning_rate_{stage}",
+          "label": "学习率",
+          "default": 0.0005,
+          "type": "float",
+          "min": 0
+        },
+        {
+          "key": "warmup_ratio_{stage}",
+          "label": "Warmup 比例",
+          "default": 0.0,
+          "type": "float",
+          "min": 0,
+          "max": 1
+        },
+        {
+          "key": "batch_size",
+          "label": "Batch size",
+          "default": 32,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "accumulation_steps",
+          "label": "梯度累积",
+          "default": 1,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "max_seq_len",
+          "label": "序列长度（tokens）",
+          "default": 768,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "optimizer",
+          "label": "优化器",
+          "default": "adamw",
+          "type": "text",
+          "choices": [
+            "adamw",
+            "adafactor",
+            "muon"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "精度与计算",
+      "fields": [
+        {
+          "key": "activation_dtype",
+          "label": "激活精度",
+          "default": "bfloat16",
+          "type": "text",
+          "choices": [
+            "bfloat16",
+            "float16",
+            "fp32"
+          ]
+        },
+        {
+          "key": "param_dtype",
+          "label": "参数精度",
+          "default": "fp32",
+          "type": "text",
+          "choices": [
+            "fp32",
+            "bf16",
+            "fp16"
+          ]
+        },
+        {
+          "key": "kv_cache_dtype",
+          "label": "KV Cache 精度",
+          "default": "fp32",
+          "type": "text",
+          "choices": [
+            "fp32",
+            "bf16",
+            "fp16",
+            "fp8_e4m3",
+            "fp8_e5m2"
+          ]
+        },
+        {
+          "key": "fp8_training",
+          "label": "FP8 训练",
+          "default": "off",
+          "type": "text",
+          "choices": [
+            "off",
+            "tensorwise",
+            "rowwise",
+            "rowwise_with_gw_hp"
+          ]
+        },
+        {
+          "key": "fp8_filter",
+          "label": "FP8 层筛选",
+          "default": "auto",
+          "type": "text",
+          "choices": [
+            "auto",
+            "eligible"
+          ]
+        },
+        {
+          "key": "use_grad_checkpoint",
+          "label": "梯度检查点（0 关闭）",
+          "default": 0,
+          "type": "int",
+          "min": 0,
+          "choices": [
+            0,
+            1,
+            2
+          ]
+        },
+        {
+          "key": "use_compile",
+          "label": "启用 torch.compile",
+          "default": true,
+          "type": "bool"
+        },
+        {
+          "key": "compile_mode",
+          "label": "编译模式",
+          "default": "reduce-overhead",
+          "type": "text",
+          "choices": [
+            "default",
+            "reduce-overhead",
+            "max-autotune",
+            "max-autotune-no-cudagraphs"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "数据加载、Packing 与缓存",
+      "fields": [
+        {
+          "key": "sequence_packing",
+          "label": "启用序列打包",
+          "default": false,
+          "type": "bool"
+        },
+        {
+          "key": "sequence_packing_mode",
+          "label": "打包模式",
+          "default": "fixed",
+          "type": "text",
+          "choices": [
+            "fixed",
+            "bucket"
+          ]
+        },
+        {
+          "key": "seq_bucket",
+          "label": "长度桶倍率",
+          "default": 2,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "bucket_gpu_memory_gb",
+          "label": "显存预算（GiB）",
+          "default": 16.0,
+          "type": "float",
+          "min": 0
+        },
+        {
+          "key": "bucket_token_budget",
+          "label": "每批 token 预算（0 自动）",
+          "default": 0,
+          "type": "int",
+          "min": 0
+        },
+        {
+          "key": "bucket_max_seq_len",
+          "label": "桶最大长度",
+          "default": 16384,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "bucket_large_threshold",
+          "label": "大序列阈值",
+          "default": 8192,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "packing_batch_size",
+          "label": "预处理 batch",
+          "default": 1000,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "packing_num_proc",
+          "label": "预处理进程数（空为平台默认）",
+          "default": null,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "bucket_loader_workers",
+          "label": "桶加载进程数",
+          "default": 0,
+          "type": "int",
+          "min": -1
+        },
+        {
+          "key": "data_cache_max_gb",
+          "label": "缓存预算（GiB）",
+          "default": 5.0,
+          "type": "float",
+          "min": 0
+        },
+        {
+          "key": "dataset_streaming",
+          "label": "流式加载",
+          "default": "auto",
+          "type": "text",
+          "choices": [
+            "auto",
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "streaming_chunk_mb",
+          "label": "流式分块（MiB）",
+          "default": 1024,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "streaming_prefetch_chunks",
+          "label": "预取下一块",
+          "default": true,
+          "type": "bool"
+        },
+        {
+          "key": "cache_build_mode",
+          "label": "缓存构建",
+          "default": "inline",
+          "type": "text",
+          "choices": [
+            "inline",
+            "spawn"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "模型结构",
+      "fields": [
+        {
+          "key": "model_architecture",
+          "label": "模型主干",
+          "default": "standard",
+          "type": "text",
+          "choices": [
+            "standard",
+            "linear",
+            "looped"
+          ]
+        },
+        {
+          "key": "hidden_size",
+          "label": "隐藏维度",
+          "default": 512,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "num_hidden_layers",
+          "label": "层数",
+          "default": 32,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "intermediate_size",
+          "label": "FFN 中间维度（空为自动）",
+          "default": null,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "vocab_size",
+          "label": "词表大小",
+          "default": 6400,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "num_attention_heads",
+          "label": "Q 头数",
+          "default": 8,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "num_key_value_heads",
+          "label": "KV 头数",
+          "default": 4,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "max_position_embeddings",
+          "label": "最大上下文",
+          "default": 32768,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "dropout",
+          "label": "Dropout",
+          "default": 0.0,
+          "type": "float",
+          "min": 0,
+          "max": 1
+        },
+        {
+          "key": "hidden_act",
+          "label": "激活函数",
+          "default": "silu",
+          "type": "text"
+        },
+        {
+          "key": "tie_word_embeddings",
+          "label": "共享输入输出嵌入",
+          "default": false,
+          "type": "bool"
+        },
+        {
+          "key": "rms_norm_eps",
+          "label": "RMSNorm epsilon",
+          "default": 1e-06,
+          "type": "float",
+          "min": 0
+        },
+        {
+          "key": "flash_attn",
+          "label": "Flash Attention",
+          "default": true,
+          "type": "bool"
+        },
+        {
+          "key": "residual_type",
+          "label": "残差结构",
+          "default": "standard",
+          "type": "text",
+          "choices": [
+            "standard",
+            "mhc",
+            "attnres"
+          ]
+        },
+        {
+          "key": "use_moe",
+          "label": "启用 MoE",
+          "default": false,
+          "type": "bool"
+        },
+        {
+          "key": "num_experts",
+          "label": "专家总数",
+          "default": 4,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "num_experts_per_tok",
+          "label": "Top-k",
+          "default": 1,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "moe_intermediate_size",
+          "label": "专家 FFN 维度（空为自动）",
+          "default": null,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "norm_topk_prob",
+          "label": "归一化 Top-k 概率",
+          "default": true,
+          "type": "bool"
+        },
+        {
+          "key": "router_aux_loss_coef",
+          "label": "路由辅助损失",
+          "default": 0.0005,
+          "type": "float",
+          "min": 0
+        },
+        {
+          "key": "moe_router_migration",
+          "label": "继续训练时迁移路由配置",
+          "default": false,
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "title": "位置编码与高级结构",
+      "fields": [
+        {
+          "key": "rope_theta",
+          "label": "RoPE theta",
+          "default": 1000000.0,
+          "type": "float",
+          "min": 1
+        },
+        {
+          "key": "rope_scaling_type",
+          "label": "RoPE 缩放",
+          "default": "none",
+          "type": "text",
+          "choices": [
+            "none",
+            "yarn",
+            "longrope"
+          ]
+        },
+        {
+          "key": "factor",
+          "label": "RoPE factor",
+          "default": 16.0,
+          "type": "float",
+          "min": 1
+        },
+        {
+          "key": "original_max_position_embeddings",
+          "label": "原始上下文长度",
+          "default": 2048,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "beta_fast",
+          "label": "YaRN beta fast",
+          "default": 32,
+          "type": "int"
+        },
+        {
+          "key": "beta_slow",
+          "label": "YaRN beta slow",
+          "default": 1,
+          "type": "int"
+        },
+        {
+          "key": "attention_factor",
+          "label": "YaRN 注意力倍率",
+          "default": 1.0,
+          "type": "float"
+        },
+        {
+          "key": "longrope_short_factors",
+          "label": "LongRoPE short factors（JSON 数组，空为自动）",
+          "default": "",
+          "type": "text"
+        },
+        {
+          "key": "longrope_long_factors",
+          "label": "LongRoPE long factors（JSON 数组，空为自动）",
+          "default": "",
+          "type": "text"
+        },
+        {
+          "key": "longrope_short_attention_factor",
+          "label": "LongRoPE short attention",
+          "default": 1.0,
+          "type": "float"
+        },
+        {
+          "key": "longrope_long_attention_factor",
+          "label": "LongRoPE long attention（0 自动）",
+          "default": 0.0,
+          "type": "float"
+        },
+        {
+          "key": "longrope_short_retained_tokens",
+          "label": "LongRoPE short retained tokens",
+          "default": 0,
+          "type": "int",
+          "min": 0
+        },
+        {
+          "key": "longrope_long_retained_tokens",
+          "label": "LongRoPE long retained tokens",
+          "default": 0,
+          "type": "int",
+          "min": 0
+        },
+        {
+          "key": "hc_mult",
+          "label": "mHC 扩展倍数",
+          "default": 4,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "hc_sinkhorn_iters",
+          "label": "mHC Sinkhorn 次数",
+          "default": 20,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "hc_eps",
+          "label": "mHC epsilon",
+          "default": 1e-06,
+          "type": "float"
+        },
+        {
+          "key": "attnres_variant",
+          "label": "AttnRes 类型",
+          "default": "block",
+          "type": "text",
+          "choices": [
+            "full",
+            "block"
+          ]
+        },
+        {
+          "key": "attnres_block_size",
+          "label": "AttnRes 块大小（空为自动）",
+          "default": null,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "early_exit_enabled",
+          "label": "Early exit 训练",
+          "default": false,
+          "type": "bool"
+        },
+        {
+          "key": "early_exit_layers",
+          "label": "Early exit 层索引（JSON 数组）",
+          "default": [
+            4,
+            5,
+            6,
+            7
+          ],
+          "type": "json"
+        },
+        {
+          "key": "early_exit_loss_weight",
+          "label": "Early exit loss 权重",
+          "default": 0.3,
+          "type": "float",
+          "min": 0
+        }
+      ]
+    },
+    {
+      "title": "Linear / Looped 结构",
+      "fields": [
+        {
+          "key": "full_attention_interval",
+          "label": "完整注意力间隔",
+          "default": 4,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "linear_conv_kernel_dim",
+          "label": "线性卷积核",
+          "default": 4,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "prelude_layers",
+          "label": "Prelude 层数",
+          "default": 2,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "recurrent_layers",
+          "label": "Recurrent 层数",
+          "default": 4,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "coda_layers",
+          "label": "Coda 层数",
+          "default": 2,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "loop_iters",
+          "label": "循环深度",
+          "default": 8,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "mean_backprop_depth",
+          "label": "平均反传深度",
+          "default": 4,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "max_recurrence",
+          "label": "最大循环深度",
+          "default": 32,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "linear_key_head_dim",
+          "label": "Linear K head dim（空为自动）",
+          "default": null,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "linear_value_head_dim",
+          "label": "Linear V head dim（空为自动）",
+          "default": null,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "linear_num_key_heads",
+          "label": "Linear K heads（空为自动）",
+          "default": null,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "linear_num_value_heads",
+          "label": "Linear V heads（空为自动）",
+          "default": null,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "qk_bias",
+          "label": "QK bias",
+          "default": true,
+          "type": "bool"
+        },
+        {
+          "key": "qk_norm",
+          "label": "QK norm",
+          "default": false,
+          "type": "bool"
+        },
+        {
+          "key": "use_input_injection",
+          "label": "输入注入",
+          "default": true,
+          "type": "bool"
+        },
+        {
+          "key": "recurrence_sampling",
+          "label": "循环采样",
+          "default": "lognormal_poisson",
+          "type": "text",
+          "choices": [
+            "lognormal_poisson",
+            "fixed"
+          ]
+        },
+        {
+          "key": "recurrence_log_normal_sigma",
+          "label": "Log-normal sigma",
+          "default": 1.0,
+          "type": "float"
+        },
+        {
+          "key": "state_init_std",
+          "label": "状态初始标准差",
+          "default": 0.6324555320336759,
+          "type": "float"
+        },
+        {
+          "key": "embedding_scale",
+          "label": "嵌入缩放（空为自动）",
+          "default": null,
+          "type": "float",
+          "min": 0
+        }
+      ]
+    },
+    {
+      "title": "性能分析与调优结果",
+      "fields": [
+        {
+          "key": "profile",
+          "label": "Profiler",
+          "default": "off",
+          "type": "text",
+          "choices": [
+            "off",
+            "timing",
+            "torch"
+          ]
+        },
+        {
+          "key": "profile_warmup",
+          "label": "预热步数",
+          "default": 10,
+          "type": "int",
+          "min": 0
+        },
+        {
+          "key": "profile_interval",
+          "label": "采样间隔",
+          "default": 100,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "profile_active_steps",
+          "label": "采样步数",
+          "default": 5,
+          "type": "int",
+          "min": 1
+        },
+        {
+          "key": "autotune_use_profile",
+          "label": "使用服务器已验收的调优结果",
+          "default": false,
+          "type": "bool"
+        },
+        {
+          "key": "autotune_profile_path",
+          "label": "服务器 profile.json 路径",
+          "default": "",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "presets": {
+    "Instinct V2": {
+      "residual_type": "standard",
+      "intermediate_size": 4224,
+      "qk_bias": true,
+      "qk_norm": false,
+      "hidden_size": 1248,
+      "num_hidden_layers": 8,
+      "vocab_size": 6400,
+      "dropout": 0.0,
+      "hidden_act": "silu",
+      "tie_word_embeddings": true,
+      "num_attention_heads": 13,
+      "num_key_value_heads": 13,
+      "max_position_embeddings": 32768,
+      "rope_theta": 50000.0,
+      "inference_rope_scaling": false,
+      "rope_scaling_type": "none",
+      "use_moe": false,
+      "num_experts": 4,
+      "num_experts_per_tok": 1,
+      "norm_topk_prob": true,
+      "router_aux_loss_coef": 0.0005,
+      "rms_norm_eps": 1e-06,
+      "flash_attn": true,
+      "use_grad_checkpoint": 2,
+      "model_architecture": "looped",
+      "prelude_layers": 2,
+      "recurrent_layers": 4,
+      "coda_layers": 2,
+      "loop_iters": 32,
+      "mean_backprop_depth": 8,
+      "recurrence_sampling": "lognormal_poisson",
+      "recurrence_log_normal_sigma": 1.0,
+      "max_recurrence": 256,
+      "state_init_std": 0.6324555320336759,
+      "embedding_scale": 35.32704346531139,
+      "use_input_injection": true,
+      "preset": "Instinct V2"
+    },
+    "Instinct V2 MoE": {
+      "residual_type": "standard",
+      "intermediate_size": 2432,
+      "qk_bias": true,
+      "qk_norm": false,
+      "hidden_size": 768,
+      "num_hidden_layers": 8,
+      "vocab_size": 6400,
+      "dropout": 0.0,
+      "hidden_act": "silu",
+      "tie_word_embeddings": true,
+      "num_attention_heads": 8,
+      "num_key_value_heads": 4,
+      "max_position_embeddings": 32768,
+      "rope_theta": 1000000.0,
+      "inference_rope_scaling": false,
+      "rope_scaling_type": "none",
+      "beta_fast": 32,
+      "beta_slow": 1,
+      "factor": 16,
+      "original_max_position_embeddings": 2048,
+      "attention_factor": 1.0,
+      "use_moe": true,
+      "num_experts": 4,
+      "num_experts_per_tok": 1,
+      "norm_topk_prob": false,
+      "router_aux_loss_coef": 0.0005,
+      "rms_norm_eps": 1e-06,
+      "flash_attn": true,
+      "model_architecture": "looped",
+      "prelude_layers": 2,
+      "recurrent_layers": 4,
+      "coda_layers": 2,
+      "loop_iters": 8,
+      "mean_backprop_depth": 4,
+      "recurrence_sampling": "lognormal_poisson",
+      "recurrence_log_normal_sigma": 0.5,
+      "max_recurrence": 32,
+      "state_init_std": 0.6324555320336759,
+      "embedding_scale": 27.712812921102035,
+      "use_input_injection": true,
+      "preset": "Instinct V2 MoE"
+    },
+    "Instinct V2 Small": {
+      "residual_type": "standard",
+      "intermediate_size": 1664,
+      "qk_bias": true,
+      "qk_norm": false,
+      "hidden_size": 512,
+      "num_hidden_layers": 8,
+      "vocab_size": 6400,
+      "dropout": 0.0,
+      "hidden_act": "silu",
+      "tie_word_embeddings": true,
+      "num_attention_heads": 8,
+      "num_key_value_heads": 2,
+      "max_position_embeddings": 32768,
+      "rope_theta": 1000000.0,
+      "inference_rope_scaling": false,
+      "rope_scaling_type": "none",
+      "beta_fast": 32,
+      "beta_slow": 1,
+      "factor": 16,
+      "original_max_position_embeddings": 2048,
+      "attention_factor": 1.0,
+      "use_moe": false,
+      "num_experts": 4,
+      "num_experts_per_tok": 1,
+      "norm_topk_prob": true,
+      "router_aux_loss_coef": 0.0005,
+      "rms_norm_eps": 1e-06,
+      "flash_attn": true,
+      "model_architecture": "looped",
+      "prelude_layers": 2,
+      "recurrent_layers": 4,
+      "coda_layers": 2,
+      "loop_iters": 8,
+      "mean_backprop_depth": 4,
+      "recurrence_sampling": "lognormal_poisson",
+      "recurrence_log_normal_sigma": 0.5,
+      "max_recurrence": 32,
+      "state_init_std": 0.6324555320336759,
+      "embedding_scale": 22.627416997969522,
+      "use_input_injection": true,
+      "preset": "Instinct V2 Small"
+    },
+    "Instinct V1": {
+      "residual_type": "standard",
+      "intermediate_size": 2432,
+      "qk_bias": false,
+      "qk_norm": true,
+      "hidden_size": 768,
+      "num_hidden_layers": 20,
+      "vocab_size": 6400,
+      "dropout": 0.0,
+      "hidden_act": "silu",
+      "tie_word_embeddings": true,
+      "num_attention_heads": 8,
+      "num_key_value_heads": 4,
+      "max_position_embeddings": 32768,
+      "rope_theta": 1000000.0,
+      "inference_rope_scaling": true,
+      "rope_scaling_type": "yarn",
+      "beta_fast": 32,
+      "beta_slow": 1,
+      "factor": 4.0,
+      "original_max_position_embeddings": 4096.0,
+      "attention_factor": 1.1385,
+      "use_moe": false,
+      "num_experts": 4,
+      "num_experts_per_tok": 1,
+      "norm_topk_prob": true,
+      "router_aux_loss_coef": 0.0005,
+      "rms_norm_eps": 1e-06,
+      "flash_attn": true,
+      "model_architecture": "standard",
+      "preset": "Instinct V1"
+    },
+    "Instinct V1 MoE": {
+      "residual_type": "standard",
+      "intermediate_size": 1664,
+      "qk_bias": false,
+      "qk_norm": true,
+      "hidden_size": 512,
+      "num_hidden_layers": 32,
+      "vocab_size": 6400,
+      "dropout": 0.0,
+      "hidden_act": "silu",
+      "tie_word_embeddings": true,
+      "num_attention_heads": 16,
+      "num_key_value_heads": 4,
+      "max_position_embeddings": 32768,
+      "rope_theta": 1000000.0,
+      "inference_rope_scaling": true,
+      "rope_scaling_type": "longrope",
+      "factor": 8.0,
+      "original_max_position_embeddings": 4096.0,
+      "short_factor": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "long_factor": [
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0,
+        8.0
+      ],
+      "short_attention_factor": 1.0,
+      "short_retained_start_tokens": 0,
+      "long_retained_start_tokens": 0,
+      "use_moe": true,
+      "num_experts": 8,
+      "num_experts_per_tok": 2,
+      "moe_intermediate_size": 1664,
+      "norm_topk_prob": true,
+      "router_aux_loss_coef": 0.0005,
+      "rms_norm_eps": 1e-06,
+      "flash_attn": true,
+      "use_grad_checkpoint": 1,
+      "model_architecture": "standard",
+      "longrope_short_factors": "[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]",
+      "longrope_long_factors": "[8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0]",
+      "longrope_short_retained_tokens": 0,
+      "longrope_long_retained_tokens": 0,
+      "longrope_short_attention_factor": 1.0,
+      "longrope_long_attention_factor": 0.0,
+      "batch_size": 1,
+      "accumulation_steps": 1,
+      "max_seq_len": 4096,
+      "optimizer": "muon",
+      "use_compile": true,
+      "compile_mode": "max-autotune-no-cudagraphs",
+      "preset": "Instinct V1 MoE"
+    },
+    "instinct-linear": {
+      "residual_type": "standard",
+      "intermediate_size": 2432,
+      "qk_bias": false,
+      "qk_norm": true,
+      "hidden_size": 768,
+      "num_hidden_layers": 8,
+      "vocab_size": 6400,
+      "dropout": 0.0,
+      "hidden_act": "silu",
+      "tie_word_embeddings": true,
+      "num_attention_heads": 8,
+      "num_key_value_heads": 4,
+      "max_position_embeddings": 32768,
+      "rope_theta": 1000000.0,
+      "inference_rope_scaling": false,
+      "rope_scaling_type": "none",
+      "beta_fast": 32,
+      "beta_slow": 1,
+      "factor": 16,
+      "original_max_position_embeddings": 2048,
+      "attention_factor": 1.0,
+      "use_moe": false,
+      "num_experts": 4,
+      "num_experts_per_tok": 1,
+      "norm_topk_prob": true,
+      "router_aux_loss_coef": 0.0005,
+      "rms_norm_eps": 1e-06,
+      "flash_attn": true,
+      "model_architecture": "linear",
+      "full_attention_interval": 4,
+      "linear_conv_kernel_dim": 4,
+      "linear_key_head_dim": 96,
+      "linear_value_head_dim": 96,
+      "linear_num_key_heads": 8,
+      "linear_num_value_heads": 8,
+      "preset": "instinct-linear"
+    }
+  },
+  "arguments": {
+    "pretrain": {
+      "warmup_steps": {
+        "key": "warmup_steps",
+        "label": "显式 warmup micro-steps；大于 0 时优先于 --warmup_ratio",
+        "default": 0,
+        "type": "int"
+      },
+      "min_lr_ratio": {
+        "key": "min_lr_ratio",
+        "label": "余弦衰减末端 LR / peak LR（默认 0.1）",
+        "default": 0.1,
+        "type": "float"
+      },
+      "grad_clip": {
+        "key": "grad_clip",
+        "label": "梯度裁剪阈值",
+        "default": 1.0,
+        "type": "float"
+      },
+      "log_interval": {
+        "key": "log_interval",
+        "label": "日志打印间隔",
+        "default": 100,
+        "type": "int"
+      },
+      "save_interval": {
+        "key": "save_interval",
+        "label": "模型保存间隔",
+        "default": 1000,
+        "type": "int"
+      },
+      "depth_reward": {
+        "key": "depth_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_weight": {
+        "key": "distill_weight",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_temperature": {
+        "key": "distill_temperature",
+        "label": "自蒸馏温度T（软化教师/学生分布）",
+        "default": 2.0,
+        "type": "float"
+      },
+      "teacher_stop_grad": {
+        "key": "teacher_stop_grad",
+        "label": "教师logits是否stop-grad（1=是，0=否）",
+        "default": 1,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "depth_gain_reward": {
+        "key": "depth_gain_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": 0.0,
+        "type": "float"
+      },
+      "exit_in_training": {
+        "key": "exit_in_training",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1,
+        "type": "int",
+        "choices": [
+          -1,
+          0,
+          1
+        ]
+      },
+      "n_supervision": {
+        "key": "n_supervision",
+        "label": "已弃用的LoopUS参数；请使用--mean_backprop_depth",
+        "default": -1,
+        "type": "int"
+      },
+      "use_wandb": {
+        "key": "use_wandb",
+        "label": "是否使用wandb",
+        "default": null,
+        "type": "bool"
+      },
+      "wandb_project": {
+        "key": "wandb_project",
+        "label": "wandb项目名",
+        "default": "Instinct-Pretrain",
+        "type": "text"
+      },
+      "profile_dir": {
+        "key": "profile_dir",
+        "label": "PyTorch profiler trace 输出目录",
+        "default": "./profiler_traces",
+        "type": "text"
+      },
+      "moe_router_top_k": {
+        "key": "moe_router_top_k",
+        "label": "显式迁移基座的每token激活专家数；范围1到基座专家总数，仅用于新训练阶段",
+        "default": null,
+        "type": "int"
+      },
+      "moe_router_norm_topk_prob": {
+        "key": "moe_router_norm_topk_prob",
+        "label": "显式覆盖基座路由归一化；top-1新训练用0。改变专家输出幅度，仅用于新阶段，不能与from_resume=1同时使用",
+        "default": null,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      }
+    },
+    "cpt": {
+      "warmup_steps": {
+        "key": "warmup_steps",
+        "label": "显式 warmup micro-steps；大于 0 时优先于 --warmup_ratio",
+        "default": 0,
+        "type": "int"
+      },
+      "min_lr_ratio": {
+        "key": "min_lr_ratio",
+        "label": "余弦衰减末端 LR / peak LR（默认 0.1）",
+        "default": 0.1,
+        "type": "float"
+      },
+      "grad_clip": {
+        "key": "grad_clip",
+        "label": "梯度裁剪阈值",
+        "default": 1.0,
+        "type": "float"
+      },
+      "log_interval": {
+        "key": "log_interval",
+        "label": "日志打印间隔",
+        "default": 100,
+        "type": "int"
+      },
+      "save_interval": {
+        "key": "save_interval",
+        "label": "模型保存间隔",
+        "default": 1000,
+        "type": "int"
+      },
+      "depth_reward": {
+        "key": "depth_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_weight": {
+        "key": "distill_weight",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_temperature": {
+        "key": "distill_temperature",
+        "label": "自蒸馏温度T（软化教师/学生分布）",
+        "default": 2.0,
+        "type": "float"
+      },
+      "teacher_stop_grad": {
+        "key": "teacher_stop_grad",
+        "label": "教师logits是否stop-grad（1=是，0=否）",
+        "default": 1,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "depth_gain_reward": {
+        "key": "depth_gain_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": 0.0,
+        "type": "float"
+      },
+      "exit_in_training": {
+        "key": "exit_in_training",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1,
+        "type": "int",
+        "choices": [
+          -1,
+          0,
+          1
+        ]
+      },
+      "n_supervision": {
+        "key": "n_supervision",
+        "label": "已弃用的LoopUS参数；请使用--mean_backprop_depth",
+        "default": -1,
+        "type": "int"
+      },
+      "use_wandb": {
+        "key": "use_wandb",
+        "label": "是否使用wandb",
+        "default": null,
+        "type": "bool"
+      },
+      "wandb_project": {
+        "key": "wandb_project",
+        "label": "wandb项目名",
+        "default": "Instinct-Pretrain",
+        "type": "text"
+      },
+      "profile_dir": {
+        "key": "profile_dir",
+        "label": "PyTorch profiler trace 输出目录",
+        "default": "./profiler_traces",
+        "type": "text"
+      },
+      "moe_router_top_k": {
+        "key": "moe_router_top_k",
+        "label": "显式迁移基座的每token激活专家数；范围1到基座专家总数，仅用于新训练阶段",
+        "default": null,
+        "type": "int"
+      },
+      "moe_router_norm_topk_prob": {
+        "key": "moe_router_norm_topk_prob",
+        "label": "显式覆盖基座路由归一化；top-1新训练用0。改变专家输出幅度，仅用于新阶段，不能与from_resume=1同时使用",
+        "default": null,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      }
+    },
+    "full_sft": {
+      "warmup_steps": {
+        "key": "warmup_steps",
+        "label": "显式 warmup micro-steps；大于 0 时优先于 --warmup_ratio",
+        "default": 0,
+        "type": "int"
+      },
+      "min_lr_ratio": {
+        "key": "min_lr_ratio",
+        "label": "余弦衰减末端 LR / peak LR（默认 0.1）",
+        "default": 0.1,
+        "type": "float"
+      },
+      "grad_clip": {
+        "key": "grad_clip",
+        "label": "梯度裁剪阈值",
+        "default": 1.0,
+        "type": "float"
+      },
+      "log_interval": {
+        "key": "log_interval",
+        "label": "日志打印间隔",
+        "default": 100,
+        "type": "int"
+      },
+      "save_interval": {
+        "key": "save_interval",
+        "label": "模型保存间隔",
+        "default": 1000,
+        "type": "int"
+      },
+      "depth_reward": {
+        "key": "depth_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_weight": {
+        "key": "distill_weight",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_temperature": {
+        "key": "distill_temperature",
+        "label": "自蒸馏温度T（软化教师/学生分布）",
+        "default": 2.0,
+        "type": "float"
+      },
+      "teacher_stop_grad": {
+        "key": "teacher_stop_grad",
+        "label": "教师logits是否stop-grad（1=是，0=否）",
+        "default": 1,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "depth_gain_reward": {
+        "key": "depth_gain_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": 0.0,
+        "type": "float"
+      },
+      "exit_in_training": {
+        "key": "exit_in_training",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1,
+        "type": "int",
+        "choices": [
+          -1,
+          0,
+          1
+        ]
+      },
+      "n_supervision": {
+        "key": "n_supervision",
+        "label": "已弃用的LoopUS参数；请使用--mean_backprop_depth",
+        "default": -1,
+        "type": "int"
+      },
+      "use_wandb": {
+        "key": "use_wandb",
+        "label": "是否使用wandb",
+        "default": null,
+        "type": "bool"
+      },
+      "wandb_project": {
+        "key": "wandb_project",
+        "label": "wandb项目名",
+        "default": "Instinct-Pretrain",
+        "type": "text"
+      },
+      "profile_dir": {
+        "key": "profile_dir",
+        "label": "PyTorch profiler trace 输出目录",
+        "default": "./profiler_traces",
+        "type": "text"
+      },
+      "moe_router_top_k": {
+        "key": "moe_router_top_k",
+        "label": "显式迁移基座的每token激活专家数；范围1到基座专家总数，仅用于新训练阶段",
+        "default": null,
+        "type": "int"
+      },
+      "moe_router_norm_topk_prob": {
+        "key": "moe_router_norm_topk_prob",
+        "label": "显式覆盖基座路由归一化；top-1新训练用0。改变专家输出幅度，仅用于新阶段，不能与from_resume=1同时使用",
+        "default": null,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      }
+    },
+    "lora": {
+      "warmup_steps": {
+        "key": "warmup_steps",
+        "label": "显式 warmup micro-steps；大于 0 时优先于 --warmup_ratio",
+        "default": 0,
+        "type": "int"
+      },
+      "min_lr_ratio": {
+        "key": "min_lr_ratio",
+        "label": "余弦衰减末端 LR / peak LR（默认 0.1）",
+        "default": 0.1,
+        "type": "float"
+      },
+      "grad_clip": {
+        "key": "grad_clip",
+        "label": "梯度裁剪阈值",
+        "default": 1.0,
+        "type": "float"
+      },
+      "log_interval": {
+        "key": "log_interval",
+        "label": "日志打印间隔",
+        "default": 100,
+        "type": "int"
+      },
+      "save_interval": {
+        "key": "save_interval",
+        "label": "模型保存间隔",
+        "default": 1000,
+        "type": "int"
+      },
+      "depth_reward": {
+        "key": "depth_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_weight": {
+        "key": "distill_weight",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_temperature": {
+        "key": "distill_temperature",
+        "label": "自蒸馏温度T（软化教师/学生分布）",
+        "default": 2.0,
+        "type": "float"
+      },
+      "teacher_stop_grad": {
+        "key": "teacher_stop_grad",
+        "label": "教师logits是否stop-grad（1=是，0=否）",
+        "default": 1,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "depth_gain_reward": {
+        "key": "depth_gain_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": 0.0,
+        "type": "float"
+      },
+      "exit_in_training": {
+        "key": "exit_in_training",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1,
+        "type": "int",
+        "choices": [
+          -1,
+          0,
+          1
+        ]
+      },
+      "n_supervision": {
+        "key": "n_supervision",
+        "label": "已弃用的LoopUS参数；请使用--mean_backprop_depth",
+        "default": -1,
+        "type": "int"
+      },
+      "use_wandb": {
+        "key": "use_wandb",
+        "label": "是否使用wandb",
+        "default": null,
+        "type": "bool"
+      },
+      "wandb_project": {
+        "key": "wandb_project",
+        "label": "wandb项目名",
+        "default": "Instinct-Pretrain",
+        "type": "text"
+      },
+      "profile_dir": {
+        "key": "profile_dir",
+        "label": "PyTorch profiler trace 输出目录",
+        "default": "./profiler_traces",
+        "type": "text"
+      },
+      "moe_router_top_k": {
+        "key": "moe_router_top_k",
+        "label": "显式迁移基座的每token激活专家数；范围1到基座专家总数，仅用于新训练阶段",
+        "default": null,
+        "type": "int"
+      },
+      "moe_router_norm_topk_prob": {
+        "key": "moe_router_norm_topk_prob",
+        "label": "显式覆盖基座路由归一化；top-1新训练用0。改变专家输出幅度，仅用于新阶段，不能与from_resume=1同时使用",
+        "default": null,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      }
+    },
+    "dpo": {
+      "warmup_steps": {
+        "key": "warmup_steps",
+        "label": "显式 warmup micro-steps；大于 0 时优先于 --warmup_ratio",
+        "default": 0,
+        "type": "int"
+      },
+      "min_lr_ratio": {
+        "key": "min_lr_ratio",
+        "label": "余弦衰减末端 LR / peak LR（默认 0.1）",
+        "default": 0.1,
+        "type": "float"
+      },
+      "grad_clip": {
+        "key": "grad_clip",
+        "label": "梯度裁剪阈值",
+        "default": 1.0,
+        "type": "float"
+      },
+      "log_interval": {
+        "key": "log_interval",
+        "label": "日志打印间隔",
+        "default": 100,
+        "type": "int"
+      },
+      "save_interval": {
+        "key": "save_interval",
+        "label": "模型保存间隔",
+        "default": 1000,
+        "type": "int"
+      },
+      "depth_reward": {
+        "key": "depth_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_weight": {
+        "key": "distill_weight",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_temperature": {
+        "key": "distill_temperature",
+        "label": "自蒸馏温度T（软化教师/学生分布）",
+        "default": 2.0,
+        "type": "float"
+      },
+      "teacher_stop_grad": {
+        "key": "teacher_stop_grad",
+        "label": "教师logits是否stop-grad（1=是，0=否）",
+        "default": 1,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "depth_gain_reward": {
+        "key": "depth_gain_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": 0.0,
+        "type": "float"
+      },
+      "exit_in_training": {
+        "key": "exit_in_training",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1,
+        "type": "int",
+        "choices": [
+          -1,
+          0,
+          1
+        ]
+      },
+      "n_supervision": {
+        "key": "n_supervision",
+        "label": "已弃用的LoopUS参数；请使用--mean_backprop_depth",
+        "default": -1,
+        "type": "int"
+      },
+      "use_wandb": {
+        "key": "use_wandb",
+        "label": "是否使用wandb",
+        "default": null,
+        "type": "bool"
+      },
+      "wandb_project": {
+        "key": "wandb_project",
+        "label": "wandb项目名",
+        "default": "Instinct-Pretrain",
+        "type": "text"
+      },
+      "profile_dir": {
+        "key": "profile_dir",
+        "label": "PyTorch profiler trace 输出目录",
+        "default": "./profiler_traces",
+        "type": "text"
+      },
+      "moe_router_top_k": {
+        "key": "moe_router_top_k",
+        "label": "显式迁移基座的每token激活专家数；范围1到基座专家总数，仅用于新训练阶段",
+        "default": null,
+        "type": "int"
+      },
+      "moe_router_norm_topk_prob": {
+        "key": "moe_router_norm_topk_prob",
+        "label": "显式覆盖基座路由归一化；top-1新训练用0。改变专家输出幅度，仅用于新阶段，不能与from_resume=1同时使用",
+        "default": null,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "beta": {
+        "key": "beta",
+        "label": "DPO中的beta参数",
+        "default": 0.15,
+        "type": "float"
+      }
+    },
+    "ppo": {
+      "warmup_steps": {
+        "key": "warmup_steps",
+        "label": "显式 warmup micro-steps；大于 0 时优先于 --warmup_ratio",
+        "default": 0,
+        "type": "int"
+      },
+      "min_lr_ratio": {
+        "key": "min_lr_ratio",
+        "label": "余弦衰减末端 LR / peak LR（默认 0.1）",
+        "default": 0.1,
+        "type": "float"
+      },
+      "grad_clip": {
+        "key": "grad_clip",
+        "label": "梯度裁剪阈值",
+        "default": 1.0,
+        "type": "float"
+      },
+      "log_interval": {
+        "key": "log_interval",
+        "label": "日志打印间隔",
+        "default": 100,
+        "type": "int"
+      },
+      "save_interval": {
+        "key": "save_interval",
+        "label": "模型保存间隔",
+        "default": 1000,
+        "type": "int"
+      },
+      "depth_reward": {
+        "key": "depth_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_weight": {
+        "key": "distill_weight",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_temperature": {
+        "key": "distill_temperature",
+        "label": "自蒸馏温度T（软化教师/学生分布）",
+        "default": 2.0,
+        "type": "float"
+      },
+      "teacher_stop_grad": {
+        "key": "teacher_stop_grad",
+        "label": "教师logits是否stop-grad（1=是，0=否）",
+        "default": 1,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "depth_gain_reward": {
+        "key": "depth_gain_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": 0.0,
+        "type": "float"
+      },
+      "exit_in_training": {
+        "key": "exit_in_training",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1,
+        "type": "int",
+        "choices": [
+          -1,
+          0,
+          1
+        ]
+      },
+      "n_supervision": {
+        "key": "n_supervision",
+        "label": "已弃用的LoopUS参数；请使用--mean_backprop_depth",
+        "default": -1,
+        "type": "int"
+      },
+      "use_wandb": {
+        "key": "use_wandb",
+        "label": "是否使用wandb",
+        "default": null,
+        "type": "bool"
+      },
+      "wandb_project": {
+        "key": "wandb_project",
+        "label": "wandb项目名",
+        "default": "Instinct-Pretrain",
+        "type": "text"
+      },
+      "profile_dir": {
+        "key": "profile_dir",
+        "label": "PyTorch profiler trace 输出目录",
+        "default": "./profiler_traces",
+        "type": "text"
+      },
+      "moe_router_top_k": {
+        "key": "moe_router_top_k",
+        "label": "显式迁移基座的每token激活专家数；范围1到基座专家总数，仅用于新训练阶段",
+        "default": null,
+        "type": "int"
+      },
+      "moe_router_norm_topk_prob": {
+        "key": "moe_router_norm_topk_prob",
+        "label": "显式覆盖基座路由归一化；top-1新训练用0。改变专家输出幅度，仅用于新阶段，不能与from_resume=1同时使用",
+        "default": null,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "critic_learning_rate": {
+        "key": "critic_learning_rate",
+        "label": "Critic学习率",
+        "default": 5e-07,
+        "type": "float"
+      },
+      "max_gen_len": {
+        "key": "max_gen_len",
+        "label": "生成的最大长度",
+        "default": 1024,
+        "type": "int"
+      },
+      "clip_epsilon": {
+        "key": "clip_epsilon",
+        "label": "PPO裁剪参数",
+        "default": 0.2,
+        "type": "float"
+      },
+      "vf_coef": {
+        "key": "vf_coef",
+        "label": "Value function系数",
+        "default": 0.5,
+        "type": "float"
+      },
+      "kl_coef": {
+        "key": "kl_coef",
+        "label": "KL散度惩罚系数",
+        "default": 0.02,
+        "type": "float"
+      },
+      "gamma": {
+        "key": "gamma",
+        "label": "GAE折扣因子",
+        "default": 1.0,
+        "type": "float"
+      },
+      "lam": {
+        "key": "lam",
+        "label": "GAE lambda参数",
+        "default": 0.95,
+        "type": "float"
+      },
+      "cliprange_value": {
+        "key": "cliprange_value",
+        "label": "Value function裁剪范围",
+        "default": 0.2,
+        "type": "float"
+      },
+      "ppo_update_iters": {
+        "key": "ppo_update_iters",
+        "label": "同一批rollout重复更新次数",
+        "default": 2,
+        "type": "int"
+      },
+      "early_stop_kl": {
+        "key": "early_stop_kl",
+        "label": "PPO early stop 的 KL 阈值",
+        "default": 0.25,
+        "type": "float"
+      },
+      "mini_batch_size": {
+        "key": "mini_batch_size",
+        "label": "PPO每次更新的minibatch大小",
+        "default": 2,
+        "type": "int"
+      },
+      "reward_model_path": {
+        "key": "reward_model_path",
+        "label": "Reward模型路径",
+        "default": "../internlm2-1_8b-reward",
+        "type": "text"
+      },
+      "debug_mode": {
+        "key": "debug_mode",
+        "label": "是否打印训练调试采样",
+        "default": null,
+        "type": "bool"
+      },
+      "debug_interval": {
+        "key": "debug_interval",
+        "label": "debug模式下每隔多少step打印一次采样",
+        "default": 20,
+        "type": "int"
+      },
+      "thinking_ratio": {
+        "key": "thinking_ratio",
+        "label": "按概率开启thinking（0.0~1.0）",
+        "default": 0.9,
+        "type": "float"
+      },
+      "rollout_engine": {
+        "key": "rollout_engine",
+        "label": "rollout引擎类型",
+        "default": "torch",
+        "type": "text",
+        "choices": [
+          "torch",
+          "sglang"
+        ]
+      },
+      "sglang_base_url": {
+        "key": "sglang_base_url",
+        "label": "SGLang服务器URL",
+        "default": "http://localhost:8998",
+        "type": "text"
+      },
+      "sglang_model_path": {
+        "key": "sglang_model_path",
+        "label": "SGLang tokenizer路径",
+        "default": "./model",
+        "type": "text"
+      },
+      "sglang_shared_path": {
+        "key": "sglang_shared_path",
+        "label": "SGLang共享存储路径",
+        "default": "./sglang_ckpt_ppo",
+        "type": "text"
+      }
+    },
+    "grpo": {
+      "warmup_steps": {
+        "key": "warmup_steps",
+        "label": "显式 warmup micro-steps；大于 0 时优先于 --warmup_ratio",
+        "default": 0,
+        "type": "int"
+      },
+      "min_lr_ratio": {
+        "key": "min_lr_ratio",
+        "label": "余弦衰减末端 LR / peak LR（默认 0.1）",
+        "default": 0.1,
+        "type": "float"
+      },
+      "grad_clip": {
+        "key": "grad_clip",
+        "label": "梯度裁剪阈值",
+        "default": 1.0,
+        "type": "float"
+      },
+      "log_interval": {
+        "key": "log_interval",
+        "label": "日志打印间隔",
+        "default": 100,
+        "type": "int"
+      },
+      "save_interval": {
+        "key": "save_interval",
+        "label": "模型保存间隔",
+        "default": 1000,
+        "type": "int"
+      },
+      "depth_reward": {
+        "key": "depth_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_weight": {
+        "key": "distill_weight",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_temperature": {
+        "key": "distill_temperature",
+        "label": "自蒸馏温度T（软化教师/学生分布）",
+        "default": 2.0,
+        "type": "float"
+      },
+      "teacher_stop_grad": {
+        "key": "teacher_stop_grad",
+        "label": "教师logits是否stop-grad（1=是，0=否）",
+        "default": 1,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "depth_gain_reward": {
+        "key": "depth_gain_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": 0.0,
+        "type": "float"
+      },
+      "exit_in_training": {
+        "key": "exit_in_training",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1,
+        "type": "int",
+        "choices": [
+          -1,
+          0,
+          1
+        ]
+      },
+      "n_supervision": {
+        "key": "n_supervision",
+        "label": "已弃用的LoopUS参数；请使用--mean_backprop_depth",
+        "default": -1,
+        "type": "int"
+      },
+      "use_wandb": {
+        "key": "use_wandb",
+        "label": "是否使用wandb",
+        "default": null,
+        "type": "bool"
+      },
+      "wandb_project": {
+        "key": "wandb_project",
+        "label": "wandb项目名",
+        "default": "Instinct-Pretrain",
+        "type": "text"
+      },
+      "profile_dir": {
+        "key": "profile_dir",
+        "label": "PyTorch profiler trace 输出目录",
+        "default": "./profiler_traces",
+        "type": "text"
+      },
+      "moe_router_top_k": {
+        "key": "moe_router_top_k",
+        "label": "显式迁移基座的每token激活专家数；范围1到基座专家总数，仅用于新训练阶段",
+        "default": null,
+        "type": "int"
+      },
+      "moe_router_norm_topk_prob": {
+        "key": "moe_router_norm_topk_prob",
+        "label": "显式覆盖基座路由归一化；top-1新训练用0。改变专家输出幅度，仅用于新阶段，不能与from_resume=1同时使用",
+        "default": null,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "max_gen_len": {
+        "key": "max_gen_len",
+        "label": "生成的最大长度",
+        "default": 1024,
+        "type": "int"
+      },
+      "num_generations": {
+        "key": "num_generations",
+        "label": "每个prompt生成的样本数",
+        "default": 6,
+        "type": "int"
+      },
+      "beta": {
+        "key": "beta",
+        "label": "KL惩罚系数",
+        "default": 0.1,
+        "type": "float"
+      },
+      "loss_type": {
+        "key": "loss_type",
+        "label": "loss类型",
+        "default": "cispo",
+        "type": "text",
+        "choices": [
+          "grpo",
+          "cispo"
+        ]
+      },
+      "epsilon": {
+        "key": "epsilon",
+        "label": "GRPO的PPO clip epsilon",
+        "default": 0.2,
+        "type": "float"
+      },
+      "epsilon_high": {
+        "key": "epsilon_high",
+        "label": "epsilon上界",
+        "default": 5.0,
+        "type": "float"
+      },
+      "reward_model_path": {
+        "key": "reward_model_path",
+        "label": "Reward模型路径",
+        "default": "../internlm2-1_8b-reward",
+        "type": "text"
+      },
+      "debug_mode": {
+        "key": "debug_mode",
+        "label": "是否打印训练调试采样",
+        "default": null,
+        "type": "bool"
+      },
+      "debug_interval": {
+        "key": "debug_interval",
+        "label": "debug模式下每隔多少step打印一次采样",
+        "default": 20,
+        "type": "int"
+      },
+      "thinking_ratio": {
+        "key": "thinking_ratio",
+        "label": "按概率开启thinking（0.0~1.0）",
+        "default": 0.9,
+        "type": "float"
+      },
+      "rollout_engine": {
+        "key": "rollout_engine",
+        "label": "rollout引擎类型",
+        "default": "torch",
+        "type": "text",
+        "choices": [
+          "torch",
+          "sglang"
+        ]
+      },
+      "sglang_base_url": {
+        "key": "sglang_base_url",
+        "label": "SGLang服务器URL",
+        "default": "http://localhost:8998",
+        "type": "text"
+      },
+      "sglang_model_path": {
+        "key": "sglang_model_path",
+        "label": "SGLang tokenizer路径",
+        "default": "./model",
+        "type": "text"
+      },
+      "sglang_shared_path": {
+        "key": "sglang_shared_path",
+        "label": "SGLang共享存储路径",
+        "default": "./sglang_ckpt_grpo",
+        "type": "text"
+      }
+    },
+    "agent": {
+      "warmup_steps": {
+        "key": "warmup_steps",
+        "label": "显式 warmup micro-steps；大于 0 时优先于 --warmup_ratio",
+        "default": 0,
+        "type": "int"
+      },
+      "min_lr_ratio": {
+        "key": "min_lr_ratio",
+        "label": "余弦衰减末端 LR / peak LR（默认 0.1）",
+        "default": 0.1,
+        "type": "float"
+      },
+      "grad_clip": {
+        "key": "grad_clip",
+        "label": "梯度裁剪阈值",
+        "default": 1.0,
+        "type": "float"
+      },
+      "log_interval": {
+        "key": "log_interval",
+        "label": "日志打印间隔",
+        "default": 100,
+        "type": "int"
+      },
+      "save_interval": {
+        "key": "save_interval",
+        "label": "模型保存间隔",
+        "default": 1000,
+        "type": "int"
+      },
+      "depth_reward": {
+        "key": "depth_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_weight": {
+        "key": "distill_weight",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_temperature": {
+        "key": "distill_temperature",
+        "label": "自蒸馏温度T（软化教师/学生分布）",
+        "default": 2.0,
+        "type": "float"
+      },
+      "teacher_stop_grad": {
+        "key": "teacher_stop_grad",
+        "label": "教师logits是否stop-grad（1=是，0=否）",
+        "default": 1,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "depth_gain_reward": {
+        "key": "depth_gain_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": 0.0,
+        "type": "float"
+      },
+      "exit_in_training": {
+        "key": "exit_in_training",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1,
+        "type": "int",
+        "choices": [
+          -1,
+          0,
+          1
+        ]
+      },
+      "n_supervision": {
+        "key": "n_supervision",
+        "label": "已弃用的LoopUS参数；请使用--mean_backprop_depth",
+        "default": -1,
+        "type": "int"
+      },
+      "use_wandb": {
+        "key": "use_wandb",
+        "label": "是否使用wandb",
+        "default": null,
+        "type": "bool"
+      },
+      "wandb_project": {
+        "key": "wandb_project",
+        "label": "wandb项目名",
+        "default": "Instinct-Pretrain",
+        "type": "text"
+      },
+      "profile_dir": {
+        "key": "profile_dir",
+        "label": "PyTorch profiler trace 输出目录",
+        "default": "./profiler_traces",
+        "type": "text"
+      },
+      "moe_router_top_k": {
+        "key": "moe_router_top_k",
+        "label": "显式迁移基座的每token激活专家数；范围1到基座专家总数，仅用于新训练阶段",
+        "default": null,
+        "type": "int"
+      },
+      "moe_router_norm_topk_prob": {
+        "key": "moe_router_norm_topk_prob",
+        "label": "显式覆盖基座路由归一化；top-1新训练用0。改变专家输出幅度，仅用于新阶段，不能与from_resume=1同时使用",
+        "default": null,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "max_gen_len": {
+        "key": "max_gen_len",
+        "label": "单次最大生成长度",
+        "default": 768,
+        "type": "int"
+      },
+      "max_total_len": {
+        "key": "max_total_len",
+        "label": "训练侧最终总长度上界",
+        "default": 2500,
+        "type": "int"
+      },
+      "num_generations": {
+        "key": "num_generations",
+        "label": "每个prompt生成数量",
+        "default": 4,
+        "type": "int"
+      },
+      "beta": {
+        "key": "beta",
+        "label": "KL散度惩罚系数",
+        "default": 0.1,
+        "type": "float"
+      },
+      "loss_type": {
+        "key": "loss_type",
+        "label": "loss类型",
+        "default": "cispo",
+        "type": "text",
+        "choices": [
+          "grpo",
+          "cispo"
+        ]
+      },
+      "epsilon": {
+        "key": "epsilon",
+        "label": "GRPO的PPO clip epsilon",
+        "default": 0.2,
+        "type": "float"
+      },
+      "epsilon_high": {
+        "key": "epsilon_high",
+        "label": "epsilon上界",
+        "default": 5.0,
+        "type": "float"
+      },
+      "debug_mode": {
+        "key": "debug_mode",
+        "label": "调试模式",
+        "default": null,
+        "type": "bool"
+      },
+      "debug_interval": {
+        "key": "debug_interval",
+        "label": "调试日志间隔",
+        "default": 20,
+        "type": "int"
+      },
+      "thinking_ratio": {
+        "key": "thinking_ratio",
+        "label": "按概率开启thinking（0.0~1.0）",
+        "default": 0.1,
+        "type": "float"
+      },
+      "reward_model_path": {
+        "key": "reward_model_path",
+        "label": "Reward模型路径",
+        "default": "../internlm2-1_8b-reward",
+        "type": "text"
+      },
+      "rollout_engine": {
+        "key": "rollout_engine",
+        "label": "rollout引擎类型",
+        "default": "torch",
+        "type": "text",
+        "choices": [
+          "torch",
+          "sglang"
+        ]
+      },
+      "sglang_base_url": {
+        "key": "sglang_base_url",
+        "label": "SGLang服务器URL",
+        "default": "http://localhost:8998",
+        "type": "text"
+      },
+      "sglang_model_path": {
+        "key": "sglang_model_path",
+        "label": "SGLang tokenizer路径",
+        "default": "./model",
+        "type": "text"
+      },
+      "sglang_shared_path": {
+        "key": "sglang_shared_path",
+        "label": "SGLang共享存储路径",
+        "default": "./sglang_ckpt_agent",
+        "type": "text"
+      }
+    },
+    "distillation": {
+      "warmup_steps": {
+        "key": "warmup_steps",
+        "label": "显式 warmup micro-steps；大于 0 时优先于 --warmup_ratio",
+        "default": 0,
+        "type": "int"
+      },
+      "min_lr_ratio": {
+        "key": "min_lr_ratio",
+        "label": "余弦衰减末端 LR / peak LR（默认 0.1）",
+        "default": 0.1,
+        "type": "float"
+      },
+      "grad_clip": {
+        "key": "grad_clip",
+        "label": "梯度裁剪阈值",
+        "default": 1.0,
+        "type": "float"
+      },
+      "log_interval": {
+        "key": "log_interval",
+        "label": "日志打印间隔",
+        "default": 100,
+        "type": "int"
+      },
+      "save_interval": {
+        "key": "save_interval",
+        "label": "模型保存间隔",
+        "default": 1000,
+        "type": "int"
+      },
+      "depth_reward": {
+        "key": "depth_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_weight": {
+        "key": "distill_weight",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1.0,
+        "type": "float"
+      },
+      "distill_temperature": {
+        "key": "distill_temperature",
+        "label": "自蒸馏温度T（软化教师/学生分布）",
+        "default": 2.0,
+        "type": "float"
+      },
+      "teacher_stop_grad": {
+        "key": "teacher_stop_grad",
+        "label": "教师logits是否stop-grad（1=是，0=否）",
+        "default": 1,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "depth_gain_reward": {
+        "key": "depth_gain_reward",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": 0.0,
+        "type": "float"
+      },
+      "exit_in_training": {
+        "key": "exit_in_training",
+        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "default": -1,
+        "type": "int",
+        "choices": [
+          -1,
+          0,
+          1
+        ]
+      },
+      "n_supervision": {
+        "key": "n_supervision",
+        "label": "已弃用的LoopUS参数；请使用--mean_backprop_depth",
+        "default": -1,
+        "type": "int"
+      },
+      "use_wandb": {
+        "key": "use_wandb",
+        "label": "是否使用wandb",
+        "default": null,
+        "type": "bool"
+      },
+      "wandb_project": {
+        "key": "wandb_project",
+        "label": "wandb项目名",
+        "default": "Instinct-Pretrain",
+        "type": "text"
+      },
+      "profile_dir": {
+        "key": "profile_dir",
+        "label": "PyTorch profiler trace 输出目录",
+        "default": "./profiler_traces",
+        "type": "text"
+      },
+      "moe_router_top_k": {
+        "key": "moe_router_top_k",
+        "label": "显式迁移基座的每token激活专家数；范围1到基座专家总数，仅用于新训练阶段",
+        "default": null,
+        "type": "int"
+      },
+      "moe_router_norm_topk_prob": {
+        "key": "moe_router_norm_topk_prob",
+        "label": "显式覆盖基座路由归一化；top-1新训练用0。改变专家输出幅度，仅用于新阶段，不能与from_resume=1同时使用",
+        "default": null,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "student_hidden_size": {
+        "key": "student_hidden_size",
+        "label": "学生模型隐藏层维度",
+        "default": 768,
+        "type": "int"
+      },
+      "student_num_layers": {
+        "key": "student_num_layers",
+        "label": "学生模型隐藏层数量",
+        "default": 8,
+        "type": "int"
+      },
+      "teacher_hidden_size": {
+        "key": "teacher_hidden_size",
+        "label": "教师模型隐藏层维度",
+        "default": 768,
+        "type": "int"
+      },
+      "teacher_num_layers": {
+        "key": "teacher_num_layers",
+        "label": "教师模型隐藏层数量",
+        "default": 8,
+        "type": "int"
+      },
+      "student_use_moe": {
+        "key": "student_use_moe",
+        "label": "学生模型是否使用MoE（0=否，1=是）",
+        "default": 0,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "teacher_use_moe": {
+        "key": "teacher_use_moe",
+        "label": "教师模型是否使用MoE（0=否，1=是）",
+        "default": 1,
+        "type": "int",
+        "choices": [
+          0,
+          1
+        ]
+      },
+      "from_student_weight": {
+        "key": "from_student_weight",
+        "label": "学生模型基于哪个权重",
+        "default": "full_sft",
+        "type": "text"
+      },
+      "from_teacher_weight": {
+        "key": "from_teacher_weight",
+        "label": "教师模型基于哪个权重",
+        "default": "full_sft",
+        "type": "text"
+      },
+      "alpha": {
+        "key": "alpha",
+        "label": "CE损失权重，总损失=alpha*CE+(1-alpha)*KL",
+        "default": 0.5,
+        "type": "float"
+      },
+      "temperature": {
+        "key": "temperature",
+        "label": "蒸馏温度（推荐范围1.0-2.0）",
+        "default": 1.5,
+        "type": "float"
+      }
+    }
+  },
+  "stages": [
+    "pretrain",
+    "cpt",
+    "full_sft",
+    "lora",
+    "dpo",
+    "ppo",
+    "grpo",
+    "agent",
+    "distillation"
+  ],
+  "stage_defaults": {
+    "pretrain": {
+      "epochs": 2,
+      "learning_rate": 0.0005,
+      "warmup_ratio": 0.0
+    },
+    "cpt": {
+      "epochs": 1,
+      "learning_rate": 3e-05,
+      "warmup_ratio": 0.03
+    },
+    "full_sft": {
+      "epochs": 2,
+      "learning_rate": 1e-05,
+      "warmup_ratio": 0.0
+    },
+    "lora": {
+      "epochs": 10,
+      "learning_rate": 0.0001,
+      "warmup_ratio": 0.0
+    },
+    "dpo": {
+      "epochs": 1,
+      "learning_rate": 4e-08,
+      "warmup_ratio": 0.0
+    },
+    "ppo": {
+      "epochs": 1,
+      "learning_rate": 3e-07,
+      "warmup_ratio": 0.0
+    },
+    "grpo": {
+      "epochs": 1,
+      "learning_rate": 3e-07,
+      "warmup_ratio": 0.0
+    },
+    "agent": {
+      "epochs": 1,
+      "learning_rate": 3e-07,
+      "warmup_ratio": 0.0
+    },
+    "distillation": {
+      "epochs": 6,
+      "learning_rate": 5e-06,
+      "warmup_ratio": 0.0
+    }
+  }
+}

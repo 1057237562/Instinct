@@ -43,6 +43,22 @@ def snapshot(state, model, trainer):
     args.update(migration_args(
         state, model, trainer, from_resume=bool(state.get('from_resume', False)),
     ))
+    if state.get('bucket_token_budget', 0):
+        args['bucket_token_budget'] = int(state['bucket_token_budget'])
+    if trainer == 'pretrain' and args['dataset_streaming'] == 'on' and args['cache_build_mode'] == 'inline':
+        args['num_workers'] = 0
+    if trainer == 'pretrain' and state.get('autotune_use_profile'):
+        try:
+            from scripts.autotune_panel import profile_command, cli_values
+        except ModuleNotFoundError:
+            from autotune_panel import profile_command, cli_values
+        profile = state.get('autotune_profile_path', '').strip()
+        if not profile:
+            raise ValueError('请选择已验收的生产 profile 路径')
+        command = [sys.executable, 'trainer/train_pretrain.py']
+        for key, value in args.items():
+            command.extend(['--' + key, str(int(value) if isinstance(value, bool) else value)])
+        args = cli_values(profile_command(command, profile, trainer, model))
     return json.loads(json.dumps(dict(name=trainer, trainer=trainer, model=model, args=args)))
 
 

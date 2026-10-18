@@ -36,8 +36,8 @@ def document_mask(sequence_ids):
     return allowed
 
 
-@lru_cache(maxsize=1)
-def _flex_functions():
+@lru_cache(maxsize=2)
+def _flex_functions(autotune=False):
     from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
     # Flex also compiles when the outer trainer uses --use_compile 0.
@@ -45,7 +45,8 @@ def _flex_functions():
     configure_compile_limits()
     return (
         torch.compile(create_block_mask, fullgraph=True),
-        torch.compile(flex_attention, fullgraph=True),
+        torch.compile(flex_attention, fullgraph=True,
+                      **({'mode':'max-autotune-no-cudagraphs'} if autotune else {})),
     )
 
 
@@ -93,7 +94,7 @@ def maybe_prepare_flex_mask(
 
 @torch.compiler.disable
 def packed_flex_attention(q, k, v, mask: PackedFlexMask):
-    _, attention = _flex_functions()
+    _, attention = _flex_functions(_training_autotune(q))
     # Do not repeat KV heads: FlexAttention implements GQA in its kernels and
     # accumulates gradients into the original compact K/V tensors.
     output = attention(
@@ -102,3 +103,30 @@ def packed_flex_attention(q, k, v, mask: PackedFlexMask):
         kernel_options={'BACKEND': 'TRITON'},
     )
     return output.transpose(1, 2)
+
+
+@lru_cache(maxsize=8)
+def _causal_flex_mask(length, device):
+    create_mask, _ = _flex_functions()
+    def causal(batch, head, query, key):
+        return query >= key
+    return create_mask(causal, None, None, length, length, device=device, BLOCK_SIZE=128)
+
+
+@torch.compiler.disable
+def causal_flex_attention(q, k, v):
+    """Full causal attention with compact GQA, including single-document batches."""
+    _, attention = _flex_functions(_training_autotune(q))
+    mask = _causal_flex_mask(q.shape[1], str(q.device))
+    return attention(q.transpose(1,2), k.transpose(1,2), v.transpose(1,2),
+                     block_mask=mask, enable_gqa=True,
+                     kernel_options={'BACKEND': 'TRITON'}).transpose(1,2)
+
+
+def _training_autotune(q):
+    setting=os.environ.get('INSTINCT_FLEX_AUTOTUNE','auto')
+    if setting not in ('auto','0','1'):
+        raise ValueError('INSTINCT_FLEX_AUTOTUNE must be auto, 0 or 1')
+    from model.cuda_fastpath import blackwell_training_kernels
+    return torch.is_grad_enabled() and (setting=='1' or
+        (setting=='auto' and blackwell_training_kernels(q.device)))

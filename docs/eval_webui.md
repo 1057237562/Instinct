@@ -49,13 +49,13 @@ Windows 可双击 `start_eval_webui.bat`，浏览器打开 http://localhost:8503
 | 类型 | 功能 | 输出 |
 | --- | --- | --- |
 | HumanEval | 仅生成、仅评分、生成并评分，pass@k、本地数据、续跑 | 答案 JSONL、逐样本结果、指标 JSON |
-| HumanEval-OJ | OJ 形式（纯文本 stdin/stdout，逐字节比对）评测 `dataset/humaneval_oj` 题目，pass@k、续跑 | 答案 JSONL、逐样本结果、指标 JSON |
+| HumanEval-OJ | 默认模式；完整程序、纯文本 stdin/stdout，全部 164 题原始测试，pass@k、续跑 | 答案 JSONL、逐样本结果、独立 OJ 指标 JSON |
 | GSM8K | 官方 test 集，批量数学推理、数值判分、accuracy / pass@K | 答案、抽取值/参考值、压缩失败分析 |
 | LiveCodeBench | 数据版本、日期范围、采样、续跑、官方评分 | 答案 JSON、官方 evaluator 结果与日志 |
 | 推理自动测试 | eval_llm.py 内置 8 个问题 | 对话和生成速度日志 |
 | ToolCall | eval_toolcall.py 本地模型内置用例 | 工具调用与回复日志，无准确率 |
 
-HumanEval-OJ 的题目由 `scripts/data_builder/build_humaneval_oj.py` 从 HumanEval 转换而来：经典 OJ 风格的纯文本 I/O（标量逐行、数组 N 前缀、空格分隔，不是 JSON），每个测试用例独立运行模型返回的完整程序，stdout 与参考输出逐字节比对，全部用例通过该题才算通过。默认最大生成 tokens 为 4096（参考程序本身最长约 830 tokens，模型叙述会额外占用数倍预算；512 会截断全部回答，2048 仅剩个位数余量）。数据由官方 canonical_solution 执行验证（见 `dataset/humaneval_oj/README.md`）；注意该数据源自 HumanEval 本身，用于训练会烧掉 HumanEval 基准。
+HumanEval-OJ 默认自动构建缺失题库，并由 `scripts/data_builder/build_humaneval_oj.py` 验证全部 164 道题的参考程序。模型可先思考，再返回完整程序，默认开启思考、最大生成 tokens 4096。stdin/stdout 使用纯文本，各题说明格式；评分把 stdout 还原为值后执行完整的官方检查，保留浮点容差、随机循环及多解条件，不使用参考 stdout 的逐字节比较。指标标为 HumanEval-OJ，不能与官方函数补全分数混报。题库与参考答案仅用于评测；构建器不生成训练数据。旧版自定义题库继续使用原有文本比较规则。详见 `dataset/humaneval_oj/README.md`。
 
 在「配置评测」选择评测类型与模型。所有路径相对于仓库根目录，ToolCall 与其他入口共用完整模型配置加载逻辑。仅评分不会加载模型。可展开查看实际启动命令，点击「开始评测」后在「任务与结果」查看每两秒刷新的日志，也可停止整个任务进程树。
 

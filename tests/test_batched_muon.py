@@ -16,6 +16,32 @@ def small_cpu_thread_pool():
     torch.set_num_threads(previous)
 
 
+def test_preallocated_momentum_preserves_updates_missing_grad_and_restored_state():
+    torch.manual_seed(63)
+    a = [torch.nn.Parameter(torch.randn(16, 8)) for _ in range(3)]
+    b = [torch.nn.Parameter(p.detach().clone()) for p in a]
+    lazy, early = BatchedMuon(a), BatchedMuon(b)
+    assert early.reserve_momentum() == sum(p.numel()*p.element_size() for p in b)
+    assert all(p.grad is None for p in b)
+    for step in range(3):
+        for i, (p, q) in enumerate(zip(a, b)):
+            p.grad = None if i == step else torch.randn_like(p)
+            q.grad = None if p.grad is None else p.grad.clone()
+        before = [p.detach().clone() for p in b]
+        lazy.step(); early.step()
+        for p, q, old in zip(a, b, before):
+            assert torch.equal(p, q)
+            if q.grad is None:
+                assert torch.equal(q, old)
+            if lazy.state[p]:
+                assert torch.equal(lazy.state[p]['momentum_buffer'], early.state[q]['momentum_buffer'])
+    restored = BatchedMuon(b)
+    restored.load_state_dict(copy.deepcopy(early.state_dict()))
+    snapshots = [restored.state[p]['momentum_buffer'].clone() for p in b]
+    assert restored.reserve_momentum() == 0
+    assert all(torch.equal(restored.state[p]['momentum_buffer'], value) for p, value in zip(b, snapshots))
+
+
 def _compare_native(device, *, nesterov=True, momentum=0.95, scaling='match_rms_adamw'):
     if not hasattr(torch.optim, 'Muon'):
         pytest.skip('requires native Muon for independent reference')

@@ -121,7 +121,7 @@ def test_instinct_v1_architecture_diagram_remains_sequential():
     assert "recurrent-shell" not in diagram
 
 
-def test_instinct_v1_moe_preserves_dense_per_token_ffn_capacity():
+def test_instinct_v1_moe_uses_normalized_top2_routing():
     helpers = _preset_helpers()
     config = helpers["PRESETS"]["Instinct V1 MoE"]
     assert config["model_architecture"] == "standard"
@@ -131,7 +131,8 @@ def test_instinct_v1_moe_preserves_dense_per_token_ffn_capacity():
     assert config["num_attention_heads"] == 16
     assert config["num_key_value_heads"] == 4
     assert config["num_experts"] == 8
-    assert config["num_experts_per_tok"] == 1
+    assert config["num_experts_per_tok"] == 2
+    assert config["norm_topk_prob"] is True
     assert config["moe_intermediate_size"] == 1664
     assert config["rope_scaling_type"] == "longrope"
     assert config["factor"] == 8.0
@@ -141,9 +142,9 @@ def test_instinct_v1_moe_preserves_dense_per_token_ffn_capacity():
     assert config["short_attention_factor"] == 1.0
     breakdown = helpers["calc_params"](config)
     assert breakdown["Total Params"]["value"] == 678_726_144
-    assert breakdown["Active Total"]["value"] == 106_203_648
+    assert breakdown["Active Total"]["value"] == 187_992_576
     diagram = helpers["arch_diagram"](config)
-    assert "MoE-FFN (8E, top-1)" in diagram
+    assert "MoE-FFN (8E, top-2)" in diagram
     assert "Layer 32" in diagram
 
     vram = helpers["estimate_bucket_vram_plan"](

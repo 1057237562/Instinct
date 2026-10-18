@@ -116,11 +116,21 @@ class ChunkedPackedEpochLoader:
         self.epoch = int(epoch)
         self.data_config = data_config
         self.prefetch = bool(int(getattr(args, "streaming_prefetch_chunks", 1)))
+        self._pending_prefetch = None
         resume_config = resume_config or {}
         self.resume_chunk = int(resume_config.get("streaming_chunk_index", 0))
         self.resume_chunk_step = int(resume_config.get("streaming_chunk_step", 0))
         if not 0 <= self.resume_chunk <= len(plan["chunks"]):
             raise ValueError("streaming checkpoint chunk cursor is outside the source plan")
+
+    def wait_for_pending_prefetch(self):
+        """Optional calibration boundary; ordinary training never calls this.
+
+        Finish the first background cache build before comparing warm-cache
+        candidates. The iterator still owns the dataset, leases and cleanup.
+        """
+        if self._pending_prefetch is not None:
+            self._pending_prefetch.result()
 
     def __len__(self):
         """Conservative progress estimate; LR uses exact consumed tokens."""
@@ -233,6 +243,7 @@ class ChunkedPackedEpochLoader:
                                 True, None, byte_range
                             )
                         )
+                        self._pending_prefetch = prefetch_task
                 self.data_config.update(
                     streaming_chunk_index=index + 1,
                     streaming_chunk_step=0,
@@ -252,6 +263,7 @@ class ChunkedPackedEpochLoader:
                         error_text = payload[0]
                     if error_text:
                         prefetch_error = RuntimeError(error_text)
+                self._pending_prefetch = None
                 del loader, dataset
                 gc.collect()
                 release_cache_use(leases)

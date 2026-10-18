@@ -8,6 +8,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::{get, post};
+use axum::extract::DefaultBodyLimit;
 use axum::Router;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -17,6 +18,21 @@ const INDEX_HTML: &str = include_str!("index.html");
 pub fn router(state: Arc<Relay>) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/upload.js", get(|| async {
+            ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("upload.js"))
+        }))
+        .route("/datasets.js", get(|| async {
+            ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("datasets.js"))
+        }))
+        .route("/transfer_rates.js", get(|| async {
+            ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("transfer_rates.js"))
+        }))
+        .route("/code_sync.js", get(|| async {
+            ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("code_sync.js"))
+        }))
+        .route("/training_panel.js", get(|| async {
+            ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("training_panel.js"))
+        }))
         .route("/api/health", get(health))
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{id}", get(get_task).delete(delete_task))
@@ -24,6 +40,11 @@ pub fn router(state: Arc<Relay>) -> Router {
         .route("/api/tasks/{id}/start", post(start_task))
         .route("/api/tasks/{id}/upload", post(upload_task))
         .route("/api/tasks/{id}/cancel", post(cancel_task))
+        .route("/api/data/uploads", post(create_data_upload))
+        .route("/api/data/uploads/{id}/files/{file}/chunks/{chunk}",
+            axum::routing::put(upload_data_chunk)
+                .layer(DefaultBodyLimit::max(crate::data_upload::CHUNK_SIZE as usize)))
+        .route("/api/data/uploads/{id}/complete", post(complete_data_upload))
         .route("/api/autodl/status", get(autodl_status))
         .route("/api/autodl/instances", get(list_instances))
         .route("/api/autodl/boot_no_gpu", post(boot_no_gpu))
@@ -32,7 +53,26 @@ pub fn router(state: Arc<Relay>) -> Router {
         .route("/api/autodl/wx_poll", post(wx_login_poll))
         .route("/api/autodl/disk", get(autodl_disk))
         .route("/api/autodl/remote", get(list_remote).delete(delete_remote))
+        .route("/api/datasets", get(dataset_list).delete(dataset_delete))
+        .route("/api/datasets/preview", get(dataset_preview))
         .route("/api/config", get(get_config).put(put_config))
+        .route("/api/training/environment", get(training_environment))
+        .route("/api/training/panel_cache", get(training_panel_cache))
+        .route("/api/training/panel", get(training_panel_get).put(training_panel_save))
+        .route("/api/training/preview", post(training_preview))
+        .route("/api/code-sync", get(code_sync_list).post(code_sync_preview))
+        .route("/api/code-sync/{id}", get(code_sync_get))
+        .route("/api/code-sync/{id}/apply", post(code_sync_apply))
+        .route("/api/code-sync/{id}/rollback", post(code_sync_rollback))
+        .route("/api/training/jobs", get(training_jobs).post(training_start))
+        .route("/api/training/operations", get(training_operations))
+        .route("/api/training/operations/{id}/cancel", post(training_cancel_operation))
+        .route("/api/training/jobs/{id}", get(training_get))
+        .route("/api/training/jobs/{id}/log", get(training_log))
+        .route("/api/training/jobs/{id}/pause", post(training_pause))
+        .route("/api/training/jobs/{id}/resume", post(training_resume))
+        .route("/api/training/jobs/{id}/stop", post(training_stop))
+        .route("/api/training/boot_gpu", post(training_boot_gpu))
         .route(
             "/api/config/console_token",
             post(push_console_token).options(push_console_token_options),
@@ -63,7 +103,7 @@ async fn auth_middleware(
     // /pull/* carries its own per-task token (aria2/curl on the instance
     // cannot send headers conveniently); everything else needs the relay token.
     let path = index_path.path();
-    let is_public = path == "/"
+    let is_public = path == "/" || path == "/upload.js" || path == "/datasets.js" || path == "/transfer_rates.js" || path == "/code_sync.js" || path == "/training_panel.js"
         || path.starts_with("/pull/")
         || path == "/api/config/console_token";
     let expected = relay.config().server.api_token;
@@ -82,10 +122,77 @@ fn err_response(e: anyhow::Error) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({"error": format!("{e:#}")}))).into_response()
 }
 
+async fn code_sync_list(State(relay): State<Arc<Relay>>) -> Response {
+    match crate::code_sync::list(&relay) {Ok(v)=>Json(v).into_response(),Err(e)=>err_response(e)}
+}
+async fn code_sync_get(State(relay): State<Arc<Relay>>, AxumPath(id): AxumPath<String>) -> Response {
+    match crate::code_sync::get(&relay,&id) {Ok(v)=>Json(v).into_response(),Err(e)=>err_response(e)}
+}
+async fn code_sync_preview(State(relay): State<Arc<Relay>>, Json(input): Json<crate::code_sync::CompareRequest>) -> Response {
+    match crate::code_sync::preview(&relay,input).await {Ok(v)=>Json(v).into_response(),Err(e)=>err_response(e)}
+}
+async fn code_sync_apply(State(relay): State<Arc<Relay>>, AxumPath(id): AxumPath<String>) -> Response {
+    match crate::code_sync::submit(relay,id,false).await {Ok(v)=>(StatusCode::ACCEPTED,Json(v)).into_response(),Err(e)=>err_response(e)}
+}
+async fn code_sync_rollback(State(relay): State<Arc<Relay>>, AxumPath(id): AxumPath<String>) -> Response {
+    match crate::code_sync::submit(relay,id,true).await {Ok(v)=>(StatusCode::ACCEPTED,Json(v)).into_response(),Err(e)=>err_response(e)}
+}
+
+async fn dataset_list(State(relay): State<Arc<Relay>>, Query(input): Query<crate::datasets::Request>) -> Response {
+    dataset_response(&relay, "list", input).await
+}
+async fn dataset_preview(State(relay): State<Arc<Relay>>, Query(input): Query<crate::datasets::Request>) -> Response {
+    dataset_response(&relay, "preview", input).await
+}
+async fn dataset_delete(State(relay): State<Arc<Relay>>, Json(input): Json<crate::datasets::Request>) -> Response {
+    dataset_response(&relay, "delete", input).await
+}
+async fn dataset_response(relay: &Relay, action: &str, input: crate::datasets::Request) -> Response {
+    match crate::datasets::request(relay, action, input).await {
+        Ok(value) => Json(value).into_response(), Err(error) => err_response(error),
+    }
+}
+
 // ---- tasks ---------------------------------------------------------------------
 
 async fn list_tasks(State(relay): State<Arc<Relay>>) -> Json<Value> {
-    Json(json!({"tasks": relay.store.list()}))
+    let tasks: Vec<Value> = relay.store.list().into_iter().map(|task| {
+        let mut value = json!(task);
+        if let Some(data) = task.data_upload {
+            let received: u64 = data.files.iter().map(|f| f.chunks.iter().enumerate()
+                .filter(|(_, hash)| hash.is_some())
+                .map(|(i, _)| crate::data_upload::CHUNK_SIZE.min(f.size - i as u64 * crate::data_upload::CHUNK_SIZE)).sum::<u64>()).sum();
+            value["received_bytes"] = json!(received);
+            if let Some(files) = value["data_upload"]["files"].as_array_mut() {
+                for file in files { file.as_object_mut().unwrap().remove("chunks"); }
+            }
+        }
+        value
+    }).collect();
+    Json(json!({"tasks": tasks}))
+}
+
+async fn create_data_upload(State(relay): State<Arc<Relay>>, Json(input): Json<crate::data_upload::CreateUpload>) -> Response {
+    match crate::data_upload::create(&relay, input).await {
+        Ok(task) => (StatusCode::CREATED, Json(task)).into_response(),
+        Err(e) => err_response(e),
+    }
+}
+
+async fn upload_data_chunk(State(relay): State<Arc<Relay>>,
+    AxumPath((id, file, chunk)): AxumPath<(String, usize, usize)>,
+    headers: HeaderMap, bytes: axum::body::Bytes) -> Response {
+    let hash = headers.get("x-chunk-sha256").and_then(|h| h.to_str().ok()).unwrap_or("");
+    match crate::data_upload::chunk(&relay, &id, file, chunk, hash, &bytes).await {
+        Ok(()) => Json(json!({"ok":true})).into_response(), Err(e) => err_response(e),
+    }
+}
+
+async fn complete_data_upload(State(relay): State<Arc<Relay>>, AxumPath(id): AxumPath<String>) -> Response {
+    match crate::data_upload::dispatch(&relay, &id).await {
+        Ok(()) => (StatusCode::ACCEPTED, Json(json!({"ok":true,"message":"后台校验和交付已启动"}))).into_response(),
+        Err(e) => err_response(e),
+    }
 }
 
 async fn get_task(
@@ -219,6 +326,9 @@ async fn upload_task(
     State(relay): State<Arc<Relay>>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
+    if relay.store.get(&id).is_some_and(|t| t.data_upload.is_some()) {
+        return complete_data_upload(State(relay), AxumPath(id)).await;
+    }
     let this = Arc::clone(&relay);
     let id2 = id.clone();
     // run in background; the HTTP response returns immediately
@@ -251,6 +361,8 @@ async fn delete_task(
     State(relay): State<Arc<Relay>>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
+    let lock = match crate::data_upload::gate(&relay, &id) { Ok(lock) => lock, Err(e) => return err_response(e) };
+    let Ok(_guard) = lock.try_lock() else { return err_response(anyhow::anyhow!("任务正在处理，无法删除")); };
     match relay.store.remove(&id) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => err_response(e),
@@ -584,6 +696,9 @@ async fn get_config(State(relay): State<Arc<Relay>>) -> Json<Value> {
         "instance_uuid": cfg.autodl.instance_uuid,
         "ssh_password_set": !cfg.autodl.ssh_password.is_empty(),
         "upload_mode": cfg.autodl.upload_mode.as_str(),
+        "pull_base_url": cfg.autodl.pull_base_url,
+        "data_chunk_size": crate::data_upload::CHUNK_SIZE,
+        "dataset_root": crate::data_upload::DATASET_ROOT,
         "remote_root": cfg.autodl.remote_root,
         "boot_no_gpu": cfg.autodl.boot_no_gpu,
         "power_off_after_upload": cfg.autodl.power_off_after_upload,
@@ -596,7 +711,101 @@ async fn get_config(State(relay): State<Arc<Relay>>) -> Json<Value> {
             "keep_last_uploads": cfg.disk.keep_last_uploads,
         },
         "runner_python": cfg.runner.python,
+        "training": cfg.training,
     }))
+}
+
+async fn training_response(relay: &Relay, action: &str, input: Value) -> Response {
+    match crate::training::request(relay, action, input).await {
+        Ok(result) => Json(result).into_response(), Err(error) => err_response(error),
+    }
+}
+async fn training_environment(State(relay): State<Arc<Relay>>) -> Response { training_response(&relay, "inventory", json!({})).await }
+async fn training_panel_cache(State(relay): State<Arc<Relay>>, Query(query): Query<std::collections::HashMap<String,String>>) -> Response {
+    match crate::training_cache::load(&relay.config(), &relay.config_path, query.get("trainer").map(String::as_str)) {
+        Ok(value) => Json(value).into_response(), Err(error) => err_response(error)
+    }
+}
+async fn training_jobs(State(relay): State<Arc<Relay>>) -> Response { training_response(&relay, "list", json!({})).await }
+async fn training_panel_get(State(relay): State<Arc<Relay>>) -> Response {
+    match crate::training_panel::load(&relay) { Ok(value) => Json(value).into_response(), Err(error) => err_response(error) }
+}
+async fn training_panel_save(State(relay): State<Arc<Relay>>, Json(input): Json<Value>) -> Response {
+    match crate::training_panel::save(&relay, input) { Ok(value) => Json(value).into_response(), Err(error) => err_response(error) }
+}
+async fn training_preview(State(relay): State<Arc<Relay>>, Json(input): Json<Value>) -> Response {
+    match crate::training_panel::preview(&relay, input) { Ok(value) => Json(value).into_response(), Err(error) => err_response(error) }
+}
+async fn training_start(State(relay): State<Arc<Relay>>, Json(input): Json<Value>) -> Response {
+    match crate::training::submit(relay, "start", input).await {
+        Ok(value) => (StatusCode::ACCEPTED, Json(value)).into_response(), Err(error) => err_response(error)
+    }
+}
+async fn training_operations(State(relay): State<Arc<Relay>>) -> Response {
+    match crate::training::operations(&relay) { Ok(value) => Json(value).into_response(), Err(error) => err_response(error) }
+}
+async fn training_cancel_operation(State(relay): State<Arc<Relay>>, AxumPath(id): AxumPath<String>) -> Response {
+    match crate::training::cancel_operation(&relay, &id) { Ok(value) => Json(value).into_response(), Err(error) => err_response(error) }
+}
+async fn training_get(State(relay): State<Arc<Relay>>, AxumPath(id): AxumPath<String>) -> Response { training_response(&relay, "get", json!({"id":id})).await }
+async fn training_pause(State(relay): State<Arc<Relay>>, AxumPath(id): AxumPath<String>) -> Response { training_response(&relay, "pause", json!({"id":id})).await }
+async fn training_resume(State(relay): State<Arc<Relay>>, AxumPath(id): AxumPath<String>, Json(input): Json<Value>) -> Response {
+    match crate::training::submit(relay, "resume", json!({"id":id,"auto_gpu":input.get("auto_gpu").cloned().unwrap_or(json!(false))})).await {
+        Ok(value) => (StatusCode::ACCEPTED, Json(value)).into_response(), Err(error) => err_response(error)
+    }
+}
+async fn training_stop(State(relay): State<Arc<Relay>>, AxumPath(id): AxumPath<String>) -> Response { training_response(&relay, "stop", json!({"id":id})).await }
+async fn training_log(State(relay): State<Arc<Relay>>, AxumPath(id): AxumPath<String>, Query(query): Query<std::collections::HashMap<String,String>>) -> Response {
+    let mut body = json!({"id":id});
+    for key in ["bytes", "attempt"] {
+        if let Some(value) = query.get(key).and_then(|value| value.parse::<u64>().ok()) { body[key] = json!(value); }
+    }
+    training_response(&relay, "log", body).await
+}
+async fn training_boot_gpu(State(relay): State<Arc<Relay>>) -> Response {
+    match crate::training::boot_gpu(&relay).await { Ok(result) => Json(result).into_response(), Err(error) => err_response(error) }
+}
+
+#[cfg(test)]
+mod training_route_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn training_routes_require_access_token_and_gpu_boot_is_opt_in() {
+        let root = std::env::temp_dir().join(format!("relay_api_test_{}", uuid::Uuid::new_v4()));
+        let mut cfg = crate::config::Config::default();
+        cfg.server.data_dir = root.to_string_lossy().into();
+        cfg.server.api_token = "training-test-token".into();
+        cfg.training.panel_state_path=root.join("webui_state.json").to_string_lossy().into();
+        let relay = Relay::new(root.join("config.toml"), cfg).unwrap();
+        std::fs::write(root.join("webui_state.json"),r#"{"hidden_size":512,"num_hidden_layers":32,"batch_size":1,"optimizer":"muon","btn_start":true}"#).unwrap();
+        let app = router(relay);
+        for (method, path) in [("GET", "/api/training/jobs"),("GET", "/api/training/environment"),("GET", "/api/training/panel_cache"),("GET", "/api/training/operations"),
+            ("GET", "/api/training/panel"),("PUT", "/api/training/panel"),("POST", "/api/training/preview"),
+            ("POST", "/api/training/operations/op_123/cancel"),
+            ("POST", "/api/training/jobs"),("POST", "/api/training/jobs/r_123/pause"),
+            ("POST", "/api/training/jobs/r_123/resume"),("POST", "/api/training/jobs/r_123/stop"),
+            ("POST", "/api/training/boot_gpu")] {
+            let response = app.clone().oneshot(Request::builder().method(method).uri(path)
+                .header("Content-Type", "application/json").body(Body::from("{}")).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+        let response = app.clone().oneshot(Request::builder().uri("/training_panel.js").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
+        let response = app.clone().oneshot(Request::builder().uri("/api/training/panel_cache")
+            .header("Authorization", "training-test-token").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
+        let body=axum::body::to_bytes(response.into_body(),32768).await.unwrap();
+        let profile:Value=serde_json::from_slice(&body).unwrap();
+        assert_eq!(profile["args"]["batch_size"],1);assert_eq!(profile["args"]["optimizer"],"muon");
+        assert!(profile["args"].get("btn_start").is_none());
+        let response = app.oneshot(Request::builder().method("POST").uri("/api/training/boot_gpu")
+            .header("Authorization", "training-test-token").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 async fn put_config(

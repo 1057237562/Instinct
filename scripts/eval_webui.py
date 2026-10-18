@@ -141,9 +141,9 @@ def artifacts(run):
 st.title('Instinct 评测工作台')
 st.caption('统一配置模型与评测任务，查看执行日志和结果。所有相对路径以仓库根目录为基准。')
 with st.sidebar:
-    benchmark = st.selectbox('评测类型', ['HumanEval', 'HumanEval-OJ', 'LiveCodeBench', 'GSM8K', '推理自动测试', 'ToolCall'])
-    st.caption('HumanEval / HumanEval-OJ / LiveCodeBench：代码功能评分。HumanEval-OJ 用 OJ 题面（stdin/stdout 逐字节比对）'
-               '评测 dataset/humaneval_oj 的题目。GSM8K：数学答案评分。\n\n推理 / ToolCall：内置用例的定性测试。')
+    benchmark = st.selectbox('评测类型', ['HumanEval-OJ', 'HumanEval', 'LiveCodeBench', 'GSM8K', '推理自动测试', 'ToolCall'])
+    st.caption('HumanEval-OJ：完整程序的标准输入输出评测，自动准备全部 164 题并保留原始测试规则。'
+               'HumanEval：原版函数补全。LiveCodeBench：代码功能评分。GSM8K：数学答案评分。')
 
 configure, monitor, pass_k_tab = st.tabs(['配置评测', '任务与结果', '计算 pass@K'])
 with configure:
@@ -190,7 +190,7 @@ with configure:
             runners = [str(p) for p in (ROOT / 'LiveCodeBench', ROOT.parent / 'LiveCodeBench') if (p / 'lcb_runner').is_dir()]
             config['runner_path'] = runners[0] if runners else ''
         with st.expander('评测高级设置'):
-            config['problem_file'] = choose('本地数据文件（留空自动下载）', discover(ROOT / 'dataset', ['*.jsonl', '*.jsonl.gz', '*.json', '*/*.jsonl']), key=prefix + '_data')
+            config['problem_file'] = choose('本地数据文件（留空自动准备）', discover(ROOT / 'dataset', ['*.jsonl', '*.jsonl.gz', '*.json', '*/*.jsonl']), key=prefix + '_data')
             if config['mode'] != 'evaluate':
                 config['output'] = choose('答案文件路径', answers, default_output, key=prefix + '_eval_output')
                 config['resume'] = st.checkbox('从答案文件续跑')
@@ -202,7 +202,7 @@ with configure:
                     '批量 KV Cache 精度', ['auto', 'configured'],
                     help='auto 在显存充足时临时使用 BF16/FP16 提速；configured 沿用模型配置，便于严格比较旧结果。')
                 config['prompt_style'] = choose('提示方式', ['auto', 'base', 'chat'], 'auto')
-                config['open_thinking'] = st.checkbox('开启思考')
+                config['open_thinking'] = st.checkbox('开启思考', value=benchmark == 'HumanEval-OJ', key=prefix + '_thinking')
             config['limit'] = choose('题数限制（0 = 全部）', [0, 3, 10, 50, 100], 0, minimum=0)
             if benchmark != 'GSM8K':
                 config['workers'] = choose('评分并发数', [1, 2, 4, 8, 16], min(4, os.cpu_count() or 1), minimum=1)
@@ -221,8 +221,8 @@ with configure:
         else:
             st.caption('评分会执行生成代码，请在隔离评测环境运行。')
             if benchmark == 'HumanEval-OJ':
-                st.caption('HumanEval-OJ：模型需返回完整 Python 程序，每个测试用例独立运行，stdout 单行 JSON 逐字节比对；'
-                           '全部用例通过该题才算通过。')
+                st.caption('HumanEval-OJ：模型可先思考，再返回完整 Python 程序；使用纯文本 stdin/stdout，'
+                           '保留官方全部断言、循环测试、浮点容差及多解判断。分数单独标为 HumanEval-OJ pass@K。')
             elif config['mode'] == 'all':
                 st.caption('HumanEval：每批答案生成后立即并行评分，结束时统一计算 pass@K。' if benchmark == 'HumanEval'
                            else 'LiveCodeBench：官方评分入口要求完整答案文件，生成完成后评分。')

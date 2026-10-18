@@ -1,12 +1,9 @@
-"""HumanEval-OJ: OJ-style stdin/stdout evaluation over dataset/humaneval_oj problems.
+"""HumanEval-OJ: complete Python programs with plain-text stdin/stdout.
 
-Problems come from scripts/data_builder/build_humaneval_oj.py: each carries an OJ
-statement with a plain-text line-based I/O format (one line per scalar, N-prefixed
-arrays - never JSON) and executable test cases verified against the canonical
-solution. The model must return a complete Python program; a sample passes only
-when the program reproduces every stored stdout byte for byte (one program run per
-case). Artifact contract (raw jsonl, _results, _progress, _metrics, _analysis)
-matches eval_humaneval.py so the Eval WebUI and the pass@K tab work unchanged.
+The default bundle is built automatically from all 164 official problems. V2
+judging adapts stdout back to values and runs every original check, preserving
+float tolerances, randomized loops and multiple valid answers. V1 local bundles
+retain their legacy text comparison. Reports identify this as HumanEval-OJ.
 """
 import argparse
 import json
@@ -21,21 +18,37 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from eval_humaneval import (read_jsonl, validate_samples, estimate_pass_at_k,
-                            summarize_results)
+from eval_humaneval import read_jsonl, validate_samples, summarize_results as _summarize_results
+from scripts.data_builder import humaneval_oj_protocol as protocol
 
 DEFAULT_PROBLEM_FILE = 'dataset/humaneval_oj/humaneval_oj_problems.jsonl'
 INSTRUCTION = ('Solve the following competitive programming problem. Return a complete Python '
                'program that reads from standard input and prints to standard output. '
-               'Output ONLY one Python code block containing the program - no explanations.\n\n')
+               'You may reason about the solution before the final answer. Finish with one '
+               'Python code block containing the complete program.\n\n')
 
 
 def load_problems(path=None, limit=0):
     path = Path(path or DEFAULT_PROBLEM_FILE)
     if not path.is_absolute():
         path = Path(__file__).resolve().parent / path
+    default = (Path(__file__).resolve().parent / DEFAULT_PROBLEM_FILE).resolve()
+    is_default = path.resolve() == default
+    if not path.is_file():
+        if not is_default:
+            raise FileNotFoundError(f'HumanEval-OJ 数据文件不存在：{path}。'
+                                    '留空使用自动构建的默认题库，或先运行 scripts/data_builder/build_humaneval_oj.py。')
+        print('[HumanEval-OJ] 默认题库尚未生成，正在转换并验证全部 164 题。', flush=True)
+        from scripts.data_builder.build_humaneval_oj import build_dataset
+        build_dataset(output_dir=path.parent)
+    rows = read_jsonl(path)
+    if is_default and (len(rows) != 164 or any(row.get('protocol_version') != protocol.PROTOCOL_VERSION for row in rows)):
+        print('[HumanEval-OJ] 重建旧题库，以保留全部题目及官方测试。', flush=True)
+        from scripts.data_builder.build_humaneval_oj import build_dataset
+        build_dataset(output_dir=path.parent)
+        rows = read_jsonl(path)
     problems = {}
-    for row in read_jsonl(path):
+    for row in rows:
         for field in ('task_id', 'statement', 'test_cases', 'entry_point'):
             if field not in row:
                 raise ValueError(f'Invalid HumanEval-OJ field: {field}')
@@ -52,6 +65,10 @@ def load_problems(path=None, limit=0):
 
 def extract_program(response):
     """Prefer the longest fenced block; models often add short usage snippets."""
+    if '</think>' in response:
+        response = response.rsplit('</think>', 1)[1]
+    elif '<think>' in response:
+        return ''
     blocks = re.findall(r'```(?:python)?[ \t]*\r?\n(.*?)(?:```|\Z)', response, re.DOTALL)
     if blocks:
         return max(blocks, key=len).strip('\n')
@@ -59,7 +76,9 @@ def extract_program(response):
 
 
 def check_program(problem, program, timeout, details=False):
-    """Run one program per test case; exact byte-for-byte stdout compare (multi-line ok)."""
+    """Use complete official checks for V2, legacy text comparison otherwise."""
+    if problem.get('protocol_version') == protocol.PROTOCOL_VERSION:
+        return check_official_program(problem, program, timeout, details)
     with tempfile.TemporaryDirectory(prefix='humaneval-oj-') as directory:
         path = Path(directory) / 'program.py'
         path.write_text(program, encoding='utf-8')
@@ -67,7 +86,7 @@ def check_program(problem, program, timeout, details=False):
             try:
                 result = subprocess.run(
                     [sys.executable, '-I', str(path)], input=case['input'],
-                    capture_output=True, text=True, timeout=timeout, cwd=directory,
+                    capture_output=True, text=True, encoding='utf-8', timeout=timeout, cwd=directory,
                     env={**os.environ, 'PYTHONIOENCODING': 'utf-8', 'OMP_NUM_THREADS': '1'},
                 )
             except subprocess.TimeoutExpired:
@@ -84,6 +103,35 @@ def check_program(problem, program, timeout, details=False):
                               'error_message': f'Case {index}: expected {case["output"].rstrip(chr(10))[:300]!r}, got {result.stdout.rstrip(chr(10))[:300]!r}'}
                 return diagnostic if details else 'failed'
     return {'result': 'passed'} if details else 'passed'
+
+
+def check_official_program(problem, program, timeout, details=False):
+    with tempfile.TemporaryDirectory(prefix='humaneval-oj-') as directory:
+        path = Path(directory) / 'program.py'
+        path.write_text(program, encoding='utf-8')
+        manifest, result = Path(directory) / 'job.json', Path(directory) / 'result.json'
+        manifest.write_text(json.dumps({'mode': 'judge', 'task': problem['official_task'],
+            'plan': problem['io_plan'], 'program': str(path), 'cwd': directory,
+            'timeout': timeout, 'seed': 42}, ensure_ascii=False), encoding='utf-8')
+        try:
+            proc = subprocess.run([sys.executable, '-I', str(Path(protocol.__file__).resolve()),
+                str(manifest), str(result)], capture_output=True, text=True, encoding='utf-8',
+                timeout=max(10, timeout * (problem['num_test_cases'] + 1)), cwd=directory,
+                env={**os.environ, 'PYTHONIOENCODING': 'utf-8', 'OMP_NUM_THREADS': '1'})
+            diagnostic = json.loads(result.read_text(encoding='utf-8')) if result.is_file() else {
+                'result': 'failed', 'error_type': 'JudgeError', 'error_message': proc.stderr[-1500:]}
+        except subprocess.TimeoutExpired:
+            diagnostic = {'result': 'timed out', 'error_type': 'Timeout', 'error_message': 'Official test runner exceeded its total time budget'}
+    return diagnostic if details else diagnostic['result']
+
+
+def summarize_results(args, problems, rows):
+    return _summarize_results(args, problems, rows, metadata={
+        'benchmark': 'HumanEval-OJ',
+        'test_seed': 42,
+        'protocol_versions': sorted({p.get('protocol_version', 1) for p in problems.values()}),
+        'judge': 'official checks via stdin/stdout adapter' if all(
+            p.get('protocol_version') == protocol.PROTOCOL_VERSION for p in problems.values()) else 'legacy/mixed OJ bundle'})
 
 
 def _write_oj_stats(output, passed, failed, types):
@@ -149,7 +197,7 @@ def generate(args, problems, on_sample=None):
     from eval_batch import generate_batches
     jobs = []
     for index, (task_id, problem) in enumerate(problems.items()):
-        text = problem['statement'] if style == 'base' else tokenizer.apply_chat_template(
+        text = INSTRUCTION + problem['statement'] if style == 'base' else tokenizer.apply_chat_template(
             [{'role': 'user', 'content': INSTRUCTION + problem['statement']}],
             tokenize=False, add_generation_prompt=True, open_thinking=bool(args.open_thinking))
         for sample_index in range(counts[task_id], args.num_samples):
@@ -197,7 +245,7 @@ def generate_and_evaluate(args, problems):
     evaluator.oj_types = Counter()
     evaluator._run = lambda row: _oj_run(evaluator, problems[row['task_id']], row)
     print(f"[HumanEval-OJ scoring] start: workers={args.workers} timeout={args.timeout}s "
-          f"one subprocess per test case, exact stdout compare", flush=True)
+          f"stdin/stdout adapter + original problem checks", flush=True)
     with evaluator:
         generate(args, problems, on_sample=evaluator.submit)
         print('[HumanEval-OJ] Generation complete; waiting for remaining tests.', flush=True)

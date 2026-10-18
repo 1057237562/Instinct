@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import os
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers.activations import SiLUActivation
 from model.grouped_mm import (
     expert_grouped_mm,
     inference_backend,
@@ -91,7 +93,19 @@ def _stacked_expert_weights(
             and all(stored is weight for stored, weight in zip(entry[_STACK_WEIGHTS], weights))
         ):
             return entry[_STACK_TENSOR]
-    stacked = torch.stack(weights, dim=0).transpose(1, 2).to(dtype=dtype)
+    pack_setting = os.environ.get('INSTINCT_MOE_FUSED_PACK', 'auto')
+    if pack_setting not in ('0', '1', 'auto'):
+        raise ValueError('INSTINCT_MOE_FUSED_PACK must be 0, 1 or auto')
+    from model.cuda_fastpath import blackwell_training_kernels
+    if (torch.is_grad_enabled() and (pack_setting == '1' or
+            (pack_setting == 'auto' and blackwell_training_kernels(weights[0].device)))
+            and weights[0].is_cuda
+            and dtype == torch.bfloat16 and weights[0].dtype == torch.float32
+            and 0 < len(weights) <= 16 and all(w.is_contiguous() for w in weights)):
+        from model.expert_weight_pack import pack_weights
+        stacked = pack_weights(weights, dtype)
+    else:
+        stacked = torch.stack(weights, dim=0).transpose(1, 2).to(dtype=dtype)
     if cache is not None:
         cache[name] = (tuple(weights), versions, dtype, stacked)
     return stacked
@@ -114,49 +128,122 @@ def _sorted_expert_offsets(
     )
 
 
+def inner_checkpoint_eligible(x, experts, act_fn, mode):
+    """Narrow opt-in for recomputing gate/up inside their fused autograd op."""
+    setting = os.environ.get('INSTINCT_MOE_INNER_CHECKPOINT', '0')
+    if setting not in ('0', '1', '2'):
+        raise ValueError('INSTINCT_MOE_INNER_CHECKPOINT must be 0, 1 or 2')
+    if setting == '0' or mode != 1 or not torch.is_grad_enabled():
+        return False
+    from model.cuda_fastpath import blackwell_training_kernels
+    from model.grouped_mm import _auto_backend
+    backend = os.environ.get('INSTINCT_GROUPED_MM_BACKEND', 'auto')
+    if backend == 'auto':
+        backend = _auto_backend(x.device)
+    if (not blackwell_training_kernels(x.device) or x.dtype != torch.float32
+            or backend != 'triton'
+            or _cuda_compute_dtype(x) != torch.bfloat16 or len(experts) != 8
+            or type(act_fn) not in (SiLUActivation, nn.SiLU)
+            or getattr(act_fn, 'inplace', False)):
+        return False
+    return all(
+        expert.gate_proj.in_features == 512 and expert.gate_proj.out_features == 1664
+        and all(getattr(expert, name).weight.dtype == torch.float32
+                and getattr(expert, name).weight.is_contiguous()
+                and getattr(expert, name).weight.requires_grad
+                and getattr(expert, name).bias is None
+                for name in ('gate_proj', 'up_proj', 'down_proj'))
+        for expert in experts)
+
+
 def _grouped_expert_forward(
     x_flat: torch.Tensor,
     topk_idx: torch.Tensor,
     topk_weight: torch.Tensor,
     experts: Sequence[nn.Module],
     act_fn,
+    inner_checkpoint=False,
 ) -> torch.Tensor:
     """Run all experts with three grouped GEMMs and one final scatter-add."""
     num_tokens = x_flat.shape[0]
     num_experts = len(experts)
     top_k = topk_idx.shape[-1]
 
-    route_expert = topk_idx.reshape(-1)
-    route_token = torch.arange(
-        num_tokens, device=x_flat.device, dtype=torch.long
-    ).view(-1, 1).expand(-1, top_k).reshape(-1)
+    routing_setting = os.environ.get('INSTINCT_MOE_FUSED_ROUTING', 'auto')
+    if routing_setting not in ('auto','0','1'):
+        raise ValueError('INSTINCT_MOE_FUSED_ROUTING must be auto, 0 or 1')
+    from model.cuda_fastpath import blackwell_training_kernels
+    fused_routing = ((routing_setting == '1' or (routing_setting == 'auto'
+                      and blackwell_training_kernels(x_flat.device)))
+                     and top_k in (1, 2) and num_experts in (2,4,8,16)
+                     and 0 < num_tokens * top_k <= 65536
+                     and x_flat.is_contiguous() and x_flat.dtype == torch.float32
+                     and topk_idx.is_contiguous() and topk_weight.is_contiguous())
+    if fused_routing:
+        from model.moe_routing_triton import permutation, gather, combine
+        order, inverse, offsets = permutation(topk_idx, num_experts)
+        plan = make_grouped_mm_plan(offsets)
+        routed_x = gather(x_flat, order, inverse, top_k)
+    else:
+        route_expert = topk_idx.reshape(-1)
+        route_token = torch.arange(
+            num_tokens, device=x_flat.device, dtype=torch.long
+        ).view(-1, 1).expand(-1, top_k).reshape(-1)
 
-    # Route metadata is shared by all three projections and their backward.
-    order = torch.argsort(route_expert, stable=True)
-    route_expert = route_expert.index_select(0, order)
-    route_token = route_token.index_select(0, order)
-    route_weight = topk_weight.reshape(-1).index_select(0, order).unsqueeze(-1)
-    offsets = _sorted_expert_offsets(route_expert, num_experts)
-    plan = make_grouped_mm_plan(offsets)
+        # Route metadata is shared by all three projections and their backward.
+        order = torch.argsort(route_expert, stable=True)
+        route_expert = route_expert.index_select(0, order)
+        route_token = route_token.index_select(0, order)
+        route_weight = topk_weight.reshape(-1).index_select(0, order).unsqueeze(-1)
+        offsets = _sorted_expert_offsets(route_expert, num_experts)
+        plan = make_grouped_mm_plan(offsets)
+        routed_x = x_flat.index_select(0, route_token).to(dtype=torch.bfloat16)
 
     compute_dtype = torch.bfloat16
-    routed_x = x_flat.index_select(0, route_token).to(dtype=compute_dtype)
-    gate = expert_grouped_mm(
-        routed_x,
-        _stacked_expert_weights(experts, "gate_proj", compute_dtype),
-        plan,
-    )
-    up = expert_grouped_mm(
-        routed_x,
-        _stacked_expert_weights(experts, "up_proj", compute_dtype),
-        plan,
-    )
-    hidden = act_fn(gate) * up
-    routed_y = expert_grouped_mm(
-        hidden,
-        _stacked_expert_weights(experts, "down_proj", compute_dtype),
-        plan,
-    )
+    direct_setting=os.environ.get('INSTINCT_MOE_DIRECT_WEIGHTS','0')
+    def project(value,name):
+        weights=[getattr(expert,name).weight for expert in experts]
+        if (direct_setting=='1' and plan.backend=='triton'
+                and all(w.dtype==torch.float32 and w.is_contiguous() for w in weights)):
+            from model.expert_linear_triton import expert_linear
+            return expert_linear(value,weights,offsets)
+        return expert_grouped_mm(value,_stacked_expert_weights(experts,name,compute_dtype),plan)
+    if inner_checkpoint and plan.backend == 'triton':
+        from model.checkpoint_swiglu_triton import checkpoint_swiglu, checkpoint_experts
+        from model.expert_linear_triton import expert_linear
+        gate_weights = [expert.gate_proj.weight for expert in experts]
+        up_weights = [expert.up_proj.weight for expert in experts]
+        down_weights = [expert.down_proj.weight for expert in experts]
+        if os.environ.get('INSTINCT_MOE_INNER_CHECKPOINT', '0') == '2':
+            routed_y = checkpoint_experts(routed_x,gate_weights,up_weights,down_weights,offsets)
+        else:
+            hidden = checkpoint_swiglu(routed_x,gate_weights,up_weights,offsets)
+            routed_y = expert_linear(hidden,down_weights,offsets)
+        if fused_routing:
+            return combine(routed_y, topk_weight, order, inverse, x_flat.dtype)
+        routed_y = (routed_y * route_weight.to(routed_y.dtype)).to(x_flat.dtype)
+        y = torch.zeros_like(x_flat)
+        y.index_add_(0, route_token, routed_y)
+        return y
+    gate = project(routed_x,'gate_proj')
+    up = project(routed_x,'up_proj')
+    swiglu_setting = os.environ.get('INSTINCT_MOE_FUSED_SWIGLU', 'auto')
+    if swiglu_setting not in ('0', '1', 'auto'):
+        raise ValueError('INSTINCT_MOE_FUSED_SWIGLU must be 0, 1 or auto')
+    from model.cuda_fastpath import blackwell_training_kernels
+    if ((swiglu_setting == '1' or (swiglu_setting == 'auto'
+            and blackwell_training_kernels(gate.device)))
+            and type(act_fn) in (SiLUActivation, nn.SiLU)
+            and not getattr(act_fn, 'inplace', False)
+            and gate.is_cuda and gate.dtype == torch.bfloat16
+            and gate.is_contiguous() and up.is_contiguous() and gate.numel() > 0):
+        from model.swiglu_triton import swiglu
+        hidden = swiglu(gate, up)
+    else:
+        hidden = act_fn(gate) * up
+    routed_y = project(hidden,'down_proj')
+    if fused_routing:
+        return combine(routed_y, topk_weight, order, inverse, x_flat.dtype)
     routed_y = (routed_y * route_weight.to(routed_y.dtype)).to(x_flat.dtype)
 
     y = torch.zeros_like(x_flat)
@@ -280,6 +367,7 @@ def routed_moe_forward(
     act_fn,
     inference_backend: str | None = None,
     inference_stacks=None,
+    checkpoint_mode=0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Route tokens and return ``(output, router_scores, selected_experts)``.
 
@@ -314,7 +402,8 @@ def routed_moe_forward(
             )
         else:
             y = _grouped_expert_forward(
-                x_flat, topk_idx, topk_weight, experts, act_fn
+                x_flat, topk_idx, topk_weight, experts, act_fn,
+                inner_checkpoint=inner_checkpoint_eligible(x_flat, experts, act_fn, checkpoint_mode),
             )
     else:
         y = _synchronization_free_expert_loop(
