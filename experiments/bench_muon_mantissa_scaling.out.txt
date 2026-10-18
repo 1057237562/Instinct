@@ -1,0 +1,109 @@
+D:\Program Files\Python\Lib\site-packages\torch\profiler\profiler.py:224: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+====================================================================================================================================
+Muon mantissa slowdown: implementation overhead vs fundamental cost
+device     : NVIDIA GeForce RTX 5060 Ti
+total VRAM : 8546353152 bytes (7.96 GiB)
+torch      : 2.11.0+cu130   CUDA runtime: 13.0
+protocol   : warmup=20, iters=50, seed=0, torch.cuda.Event + synchronize
+fp32 cap   : 2.00 GiB per point
+====================================================================================================================================
+Shape-set preparation:
+  P1_fam_w768    4 matrices,     4,718,592 elements, max_dim=2304   fp32_est=   136.0 MiB  fits=True
+  P2_fam_w1600   4 matrices,    20,480,000 elements, max_dim=4800   fp32_est=   376.5 MiB  fits=True
+  P3_fam_w2432   4 matrices,    47,316,992 elements, max_dim=7296   fp32_est=   786.0 MiB  fits=True
+  P4_fam_w3264   4 matrices,    85,229,568 elements, max_dim=9792   fp32_est=  1364.5 MiB  fits=True
+  P5_sq4096_x4   4 matrices,    67,108,864 elements, max_dim=4096   fp32_est=  1344.0 MiB  fits=True
+  P6_sq8192_x1   1 matrices,    67,108,864 elements, max_dim=8192   fp32_est=  1344.0 MiB  fits=True
+
+
+------------------------------------------------------------------------------------------------------------------------------------
+SIZE SWEEP (isolated optimizer step). A=mantissa(bf16 params), B=fp32 master.
+------------------------------------------------------------------------------------------------------------------------------------
+point          mats     elements  A_med_ms  B_med_ms   ratio   A_ns/e   B_ns/e   d_ns/e     d_ms
+------------------------------------------------------------------------------------------------------------------------------------
+P1_fam_w768       4    4,718,592    4.7652    2.7091  1.7589   1.0099   0.5741   0.4357   2.0561
+P2_fam_w1600      4   20,480,000   23.3101   20.3557  1.1451   1.1382   0.9939   0.1443   2.9544
+P3_fam_w2432      4   47,316,992   76.6021   68.4417  1.1192   1.6189   1.4465   0.1725   8.1604
+P4_fam_w3264      4   85,229,568  174.9573  159.8582  1.0945   2.0528   1.8756   0.1772  15.0991
+P5_sq4096_x4      4   67,108,864  195.7859  184.1671  1.0631   2.9174   2.7443   0.1731  11.6188
+P6_sq8192_x1      1   67,108,864  366.2707  354.6329  1.0328   5.4579   5.2844   0.1734  11.6378
+------------------------------------------------------------------------------------------------------------------------------------
+
+[profiler section uses point P3_fam_w2432: 4 matrices, 47,316,992 elements]
+
+------------------------------------------------------------------------------------------------------------------------------------
+PROFILER: single opt.step()  (CUDA activities, record_shapes=False)
+------------------------------------------------------------------------------------------------------------------------------------
+total CUDA events : A=188    B=144    (delta +44)
+kernel launches   : A=188    B=144    (delta +44)
+distinct op keys  : A=20     B=13    
+total CUDA time   : A=  76595.8 us  B=  68579.5 us  (delta +8016.4 us)
+
+  top kernels by self CUDA time -- A_mantissa:
+      count     self_us   us/launch  kernel
+         40     34935.5      873.39  _ZN7cutlass7Kernel2I66cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8EEvNT_6ParamsE
+         20     22866.2     1143.31  _ZN7cutlass7Kernel2I66cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8EEvNT_6ParamsE
+         52      4108.3       79.01  Memcpy DtoD (Device -> Device)
+          4      1575.6      393.91  _ZN2at6native29vectorized_elementwise_kernelILi4ENS0_13BinaryFunctorIiiiNS0_16BitwiseOrFunctorIiEEEESt5arrayIPcLy3EEEEviT0_T1_
+          8      1466.8      183.35  _ZN2at6native27unrolled_elementwise_kernelIZZZNS0_23direct_copy_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE1_clEvENKUlvE5_clEvEUlfE_St5arrayIPcLy2EELi4E23TrivialOffsetCalculatorILi1EjESB_NS0_6memory12LoadWithCastILi1EEENSC_13StoreWithCastILi1EEEEEviT_T0_T2_T3_T4_T5_
+          4      1418.1      354.53  _ZN2at6native52_GLOBAL__N__20b37f10_19_ForeachTernaryOp_cu_5285c63625multi_tensor_apply_kernelINS1_18TensorListMetadataILi3EEENS1_22TernaryOpScalarFunctorIfLi3ELi2ELi2EEEJNS0_11LerpFunctorIfEEfEEEvT_T0_DpT1_
+          4      1411.7      352.93  _ZN2at6native55_GLOBAL__N__3e70d511_22_ForeachBinaryOpList_cu_a911ec4325multi_tensor_apply_kernelINS1_18TensorListMetadataILi2EEENS1_24BinaryOpListAlphaFunctorIfLi2ELi2ELi0EEEJSt4plusIfEfEEEvT_T0_DpT1_
+          4      1407.7      351.92  _ZN2at6native52_GLOBAL__N__20b37f10_19_ForeachTernaryOp_cu_5285c63625multi_tensor_apply_kernelINS1_18TensorListMetadataILi2EEENS1_22TernaryOpScalarFunctorIfLi2ELi2ELi0EEEJNS0_11LerpFunctorIfEEfEEEvT_T0_DpT1_
+          8      1341.6      167.71  _ZN2at6native27unrolled_elementwise_kernelIZZZNS0_23direct_copy_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE1_clEvENKUlvE1_clEvEUliE_St5arrayIPcLy2EELi4E23TrivialOffsetCalculatorILi1EjESB_NS0_6memory12LoadWithCastILi1EEENSC_13StoreWithCastILi1EEEEEviT_T0_T2_T3_T4_T5_
+          4       931.3      232.81  _ZN2at6native29vectorized_elementwise_kernelILi4ENS0_13BUnaryFunctorIiiiZZZNS0_18lshift_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE_clEvENKUlvE1_clEvEUliiE_EESt5arrayIPcLy2EEEEviT0_T1_
+          4       923.8      230.94  _ZN2at6native29vectorized_elementwise_kernelILi4ENS0_13AUnaryFunctorIiiiNS0_17BitwiseAndFunctorIiEEEESt5arrayIPcLy2EEEEviT0_T1_
+          4       865.5      216.38  _ZN2at6native29vectorized_elementwise_kernelILi4ENS0_13BUnaryFunctorIiiiZZZNS0_18rshift_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE_clEvENKUlvE1_clEvEUliiE_EESt5arrayIPcLy2EEEEviT0_T1_
+
+  top kernels by self CUDA time -- B_fp32:
+      count     self_us   us/launch  kernel
+         40     35096.8      877.42  _ZN7cutlass7Kernel2I66cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8EEvNT_6ParamsE
+         20     23232.1     1161.61  _ZN7cutlass7Kernel2I66cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8EEvNT_6ParamsE
+         44      3224.5       73.28  Memcpy DtoD (Device -> Device)
+          4      1436.4      359.10  _ZN2at6native55_GLOBAL__N__3e70d511_22_ForeachBinaryOpList_cu_a911ec4325multi_tensor_apply_kernelINS1_18TensorListMetadataILi2EEENS1_24BinaryOpListAlphaFunctorIfLi2ELi2ELi0EEEJSt4plusIfEfEEEvT_T0_DpT1_
+          4      1409.5      352.38  _ZN2at6native52_GLOBAL__N__20b37f10_19_ForeachTernaryOp_cu_5285c63625multi_tensor_apply_kernelINS1_18TensorListMetadataILi3EEENS1_22TernaryOpScalarFunctorIfLi3ELi2ELi2EEEJNS0_11LerpFunctorIfEEfEEEvT_T0_DpT1_
+          4      1371.6      342.89  _ZN2at6native52_GLOBAL__N__20b37f10_19_ForeachTernaryOp_cu_5285c63625multi_tensor_apply_kernelINS1_18TensorListMetadataILi2EEENS1_22TernaryOpScalarFunctorIfLi2ELi2ELi0EEEJNS0_11LerpFunctorIfEEfEEEvT_T0_DpT1_
+          4       872.2      218.04  _ZN2at6native57_GLOBAL__N__25943659_24_ForeachBinaryOpScalar_cu_86b9896c25multi_tensor_apply_kernelINS1_18TensorListMetadataILi1EEENS1_21BinaryOpScalarFunctorIfLi1ELi1ELi0EEEJSt10multipliesIfEfEEEvT_T0_DpT1_
+          4       720.9      180.23  _ZN2at6native27unrolled_elementwise_kernelIZZZNS0_23direct_copy_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE1_clEvENKUlvE5_clEvEUlfE_St5arrayIPcLy2EELi4E23TrivialOffsetCalculatorILi1EjESB_NS0_6memory12LoadWithCastILi1EEENSC_13StoreWithCastILi1EEEEEviT_T0_T2_T3_T4_T5_
+          4       617.2      154.30  _ZN2at6native29vectorized_elementwise_kernelILi4EZNS0_25bfloat16_copy_kernel_cudaERNS_18TensorIteratorBaseEEUlfE_St5arrayIPcLy2EEEEviT0_T1_
+          4       420.5      105.12  _ZN2at6native18elementwise_kernelILi128ELi4EZNS0_22gpu_kernel_impl_nocastINS0_13BinaryFunctorIN3c108BFloat16ES5_S5_NS0_15binary_internal10DivFunctorIS5_EEEEEEvRNS_18TensorIteratorBaseERKT_EUliE_EEviT1_
+          4       170.3       42.57  _ZN2at6native13reduce_kernelILi512ELi1ENS0_8ReduceOpIN3c108BFloat16ENS0_10NormTwoOpsIS4_fS4_Lb1EEEjS4_Li4ELi4EEEEEvT1_
+          4         5.5        1.38  _ZN2at6native29vectorized_elementwise_kernelILi4EZZZNS0_49_GLOBAL__N__97375e57_16_TensorCompare_cu_71e06f4e19launch_clamp_scalarERNS_18TensorIteratorBaseEN3c106ScalarES6_NS0_6detail11ClampLimitsEENKUlvE_clEvENKUlvE7_clEvEUlNS5_8BFloat16EE_St5arrayIPcLy2EEEEviT0_T1_
+
+  kernels present in A but not B (the mantissa bookkeeping):
+      count     self_us  kernel
+          4      1575.6  _ZN2at6native29vectorized_elementwise_kernelILi4ENS0_13BinaryFunctorIiiiNS0_16BitwiseOrFunctorIiEEEESt5arrayIPcLy3EEEEviT0_T1_
+          8      1341.6  _ZN2at6native27unrolled_elementwise_kernelIZZZNS0_23direct_copy_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE1_clEvENKUlvE1_clEvEUliE_St5arrayIPcLy2EELi4E23TrivialOffsetCalculatorILi1EjESB_NS0_6memory12LoadWithCastILi1EEENSC_13StoreWithCastILi1EEEEEviT_T0_T2_T3_T4_T5_
+          4       931.3  _ZN2at6native29vectorized_elementwise_kernelILi4ENS0_13BUnaryFunctorIiiiZZZNS0_18lshift_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE_clEvENKUlvE1_clEvEUliiE_EESt5arrayIPcLy2EEEEviT0_T1_
+          4       923.8  _ZN2at6native29vectorized_elementwise_kernelILi4ENS0_13AUnaryFunctorIiiiNS0_17BitwiseAndFunctorIiEEEESt5arrayIPcLy2EEEEviT0_T1_
+          4       865.5  _ZN2at6native29vectorized_elementwise_kernelILi4ENS0_13BUnaryFunctorIiiiZZZNS0_18rshift_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE_clEvENKUlvE1_clEvEUliiE_EESt5arrayIPcLy2EEEEviT0_T1_
+          4       644.4  _ZN2at6native27unrolled_elementwise_kernelIZZZNS0_23direct_copy_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE1_clEvENKUlvE3_clEvEUlsE_St5arrayIPcLy2EELi4E23TrivialOffsetCalculatorILi1EjESB_NS0_6memory12LoadWithCastILi1EEENSC_13StoreWithCastILi1EEEEEviT_T0_T2_T3_T4_T5_
+          4       636.3  _ZN2at6native27unrolled_elementwise_kernelIZZZNS0_23direct_copy_kernel_cudaERNS_18TensorIteratorBaseEENKUlvE1_clEvENKUlvE12_clEvEUltE_St5arrayIPcLy2EELi4E23TrivialOffsetCalculatorILi1EjESB_NS0_6memory12LoadWithCastILi1EEENSC_13StoreWithCastILi1EEEEEviT_T0_T2_T3_T4_T5_
+    -> 7 distinct A-only kernels, 6918.5 us total (9.0% of A CUDA time)
+
+Correctness check (optimized prototype vs production, one step):
+  multi-matrix chunk (6x [256,256])   : bit-exact=True max|diff|=0.0
+  single-matrix chunk (1x [1024,1024]): bit-exact=True max|diff|=0.0
+
+------------------------------------------------------------------------------------------------------------------------------------
+OPTIMIZED PROTOTYPE vs production (same shapes, same protocol)
+------------------------------------------------------------------------------------------------------------------------------------
+point           A_prod_ms   A_opt_ms      B_ms ratio_prod ratio_opt  recovered
+------------------------------------------------------------------------------------------------------------------------------------
+P1_fam_w768        5.5589     5.1645    2.7164     2.0464    1.9012      13.9%
+P2_fam_w1600      23.4217    23.2811   20.5079     1.1421    1.1352       4.8%
+P4_fam_w3264     176.2786   174.7305  161.3210     1.0927    1.0831      10.4%
+P6_sq8192_x1     367.1964   366.1128  355.3324     1.0334    1.0303       9.1%
+------------------------------------------------------------------------------------------------------------------------------------
+recovered% = fraction of the production A/B gap removed by the optimized variant, per point.
+
+====================================================================================================================================
+VERDICT
+====================================================================================================================================
+ratio vs size      : P1=1.759  P2=1.145  P3=1.119  P4=1.094  P5=1.063  P6=1.033
+delta A-B (ms)     : P1=+2.056  P2=+2.954  P3=+8.160  P4=+15.099  P5=+11.619  P6=+11.638
+delta A-B (ns/elem): P1=+0.4357  P2=+0.1443  P3=+0.1725  P4=+0.1772  P5=+0.1731  P6=+0.1734
+element span       : 4,718,592 .. 85,229,568 (18.1x)
+optimized recovery : P1=13.9%  P2=4.8%  P4=10.4%  P6=9.1%
+====================================================================================================================================
+json written to experiments/bench_muon_mantissa_scaling.json
