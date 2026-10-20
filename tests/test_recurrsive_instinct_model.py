@@ -1,6 +1,6 @@
-"""TDD tests for Loop-variant gradient checkpointing (plan T8).
+"""TDD tests for RecurrsiveInstinct gradient checkpointing (plan T8).
 
-RED first: this file is written before ``model/model_instinct_loop.py`` has the
+RED first: this file is written before ``model/model_recurrsive_instinct.py`` has the
 Mode 1 (selective attention/FFN recompute) and Mode 2 (loop-body whole-block
 checkpoint) wiring, so ``use_grad_checkpoint=1/2`` are silently ignored and the
 mode-equality assertions fail. After wiring, the suite must go fully green with
@@ -30,7 +30,7 @@ Coverage:
 import pytest
 import torch
 
-from model import model_instinct_loop
+from model import model_recurrsive_instinct
 from tests.helpers import make_tiny_config, assert_grads_equal
 
 # Fixed deterministic inputs: token ids well below vocab_size=256, seq=8.
@@ -49,7 +49,7 @@ def _make_loop_causal_lm(use_moe, mode, seed=0, loop_iters=2):
     config.state_init_std = 0.0
     config.recurrent_layers = 2
     config.use_grad_checkpoint = mode
-    model = model_instinct_loop.InstinctForCausalLM(config)
+    model = model_recurrsive_instinct.InstinctForCausalLM(config)
     model.train()
     return model
 
@@ -98,13 +98,13 @@ def test_mode1_engages_recompute(monkeypatch):
     attention path during training (prelude + coda + loop_iters loop blocks)."""
     m = _make_loop_causal_lm(use_moe=False, mode=1, seed=0)
     calls = {"n": 0}
-    orig = model_instinct_loop.recompute_attention
+    orig = model_recurrsive_instinct.recompute_attention
 
     def spy(*args, **kwargs):
         calls["n"] += 1
         return orig(*args, **kwargs)
 
-    monkeypatch.setattr(model_instinct_loop, "recompute_attention", spy)
+    monkeypatch.setattr(model_recurrsive_instinct, "recompute_attention", spy)
     out = m(input_ids=INPUT_IDS, labels=LABELS)
     assert out.loss is not None
     assert calls["n"] > 0, "Mode 1: recompute_attention never called in training"

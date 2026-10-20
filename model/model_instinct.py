@@ -571,6 +571,8 @@ class InstinctModel(nn.Module):
                 enabled=self.config.flash_attn,
                 dropout_p=self.config.dropout if self.training else 0.0,
                 head_dim=self.config.head_dim,
+                num_attention_heads=self.config.num_attention_heads,
+                num_key_value_heads=self.config.num_key_value_heads,
             )
             if flex_mask is not None:
                 attention_mask = flex_mask

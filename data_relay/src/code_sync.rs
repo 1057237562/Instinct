@@ -73,7 +73,7 @@ pub fn allowed(relative: &str, assets: bool) -> bool {
             || (parts.len() > 1
                 && parts[0] == "scripts"
                 && (parts.len() == 2 || parts[1] == "data_loader"))
-            || matches!(relative, "run_loop.py" | "run_linear.py" | "eval_llm.py");
+            || matches!(relative, "run_recurrsive.py" | "run_linear.py" | "eval_llm.py");
     }
     if matches!(
         relative,
@@ -507,7 +507,7 @@ mod tests {
             "trainer/trainer_utils.py",
             "trainer/compile_cache.py",
             "scripts/data_loader/source_format.py",
-            "run_loop.py",
+            "run_recurrsive.py",
         ] {
             assert!(records.iter().any(|f| f.path == path), "{path}");
         }

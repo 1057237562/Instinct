@@ -2,12 +2,12 @@
 
 `trainer/autotune.py` 联合搜索整条预训练路径的性能参数。它像编译器 autotune 一样
 试跑候选、缓存测量、选择通过验收的配置，但测量对象是完整训练 step 和真实数据
-加载，不只是一条 GEMM。搜索有时间/次数上限，采用显存边界二分搜索及离散策略
+加载，不只是一条 GEMM。搜索有次数上限、不设运行超时，采用显存边界二分搜索及离散策略
 对照，不宣称穷举得到全局最优。
 
 当前支持：单 CUDA GPU、标准 Dense/MoE、从零预训练、JSONL/Parquet 单文件、
 bucket packing、inline streaming。保持 gradient checkpoint 开启。SFT、RL、
-DDP、Looped/Linear 和加载基座的 CPT 尚未接入，不能套用本档案。
+DDP、RecurrsiveInstinct/Linear 和加载基座的 CPT 尚未接入，不能套用本档案。
 
 ## 执行
 
@@ -31,8 +31,7 @@ DDP、Looped/Linear 和加载基座的 CPT 尚未接入，不能套用本档案�
 2. 进入「自动调优」，查看全部前置条件。可点 **一键准备调优设置**，补齐
    checkpoint、bucket packing、streaming=on 和 inline cache build；这一步
    保留模型、数据、学习率与精度，不启动实验，也不切换训练阶段或续训状态。
-3. 确认清洗审计 JSON；Parquet 还需要来源 provenance。检查次数和时间预算
-   （默认最多 24 次，20 步预热、60 步计时，总上限 3600 秒）。
+3. 检查试跑次数和步数（默认最多 24 次，20 步预热、60 步计时）。
 4. 点击 **检查并预览搜索计划**，在进度日志中检查输出。这一步不使用 CUDA。
    确认计划后点 **开始自动调优**，实际占用 GPU 运行短训与验证。
 5. 在 **查看并应用结果** 中选择通过验收的 profile，点击 **用于后续预训练**。
@@ -42,12 +41,20 @@ DDP、Looped/Linear 和加载基座的 CPT 尚未接入，不能套用本档案�
 「计划预览完成」不等于已有性能结果，只有真实试跑并通过最终复测才会发布 profile。
 实测结果绑定当前训练机、代码、模型与语料，不能直接用于 CPT、SFT、RL 或 DDP。
 
-数据源切换时自动更新默认审计路径，手工指定的报告保留。
-Parquet 的同名 provenance 存在时自动填写。
+不继续搜索时，也可显式保存 `status: "manual"` 的固定配置 profile。它不宣称通过短训
+或独立复测，界面不会展示虚构的吞吐指标；加载时仍检查硬件/软件/代码、模型、数据
+SHA-256 与训练合约，设置仍受性能参数白名单约束。手动 profile 和实测 profile 都可
+填入「生产 profile 路径」，勾选「预训练使用 profile（实测 / 手动）」后应用。
+
+自动调优直接使用训练配置中选定的数据，不需要额外填写审计或 provenance 文件。
+子进程自动计算数据 SHA-256，并将性能结果绑定到该文件，数据改变后需重新调优。
 
 - **检查并预览搜索计划**：通过实际 CLI 检查搜索范围；不初始化 CUDA 或训练。
 - **开始自动调优**：冻结当前面板模型与共享训练命令中的参数，独立后台运行。
-  可设置次数、预热/计时 steps、验证样本数和时间上限，支持缓存复用 / 强制重测。
+  可设置次数、预热/计时 steps、验证样本数，支持缓存复用 / 强制重测。
+- **调优进度与日志**：直接显示当前/最近试跑的 `trial.log`，包含数据准备、编译、
+  训练与异常输出；运行时每 2 秒刷新，切换候选时自动跟随，展示末尾最多 64 KB。
+  调度日志单独折叠显示。环境探测 `probe` 不测吞吐，`tokens/s=None` 表示尚无吞吐数据。
 - **高级调优选项**：可选计算 MFU 的非稀疏峰值、可选吞吐验收门槛、自定义
   搜索空间和性能环境参数。吞吐门槛默认 0，没有固定的 25,081 token/s 目标。
 - **停止自动调优**：仅回收本次 supervisor 所拥有的 controller / 实验进程树。
@@ -73,11 +80,11 @@ Parquet 的同名 provenance 存在时自动填写。
 # 只检查配置、查看搜索范围，不启动训练
 python trainer/autotune.py --config trainer/autotune_pretrain.json --plan-only
 
-# 默认最多 24 次试跑，包含基线和最终复测；总时间预算一小时
+# 默认最多 24 次试跑，包含基线和最终复测；不设运行超时
 python trainer/autotune.py --config trainer/autotune_pretrain.json
 
-# 显式限制时间和试跑次数
-python trainer/autotune.py --config trainer/autotune_pretrain.json --max-trials 12 --time-limit 2400
+# 显式限制试跑次数
+python trainer/autotune.py --config trainer/autotune_pretrain.json --max-trials 12
 
 # 本机性能验收：20 步预热 + 80 步统计，未达到目标不发布新档案
 python trainer/autotune.py --config trainer/autotune_pretrain.json --steps 80 --target-tokens-per-second 25081
@@ -92,8 +99,9 @@ compile_cache-before-torch 的既有顺序加载。
 `bucket_gpu_memory_gb: "auto"` 读取目标卡物理容量，再由生产 CLI 的驱动预算和
 安全余量限制；没有固定的 16 GiB 或 16,384-token 搜索上限。
 
-`audit` 必须指向该训练文件的已审核 SHA-256 报告。Parquet 还需要 `provenance`
-指向原清洗/来源审计。程序校验文件哈希，但不会用哈希校验替代身份污染审查。
+CLI 配置中的 `audit` 和 `provenance` 为可选项；显式提供 `audit` 时，校验报告的
+`output_sha256`（或 `output.sha256`）与训练文件一致。无论是否提供报告，都计算并保存
+训练文件 SHA-256。数据清洗与内容审核仍在离线数据准备阶段进行。
 验证集固定读取源文件第二数据块的前 N 条文本，所有候选使用相同 token；试跑
 若进入第二块会失败，避免污染验证集。因此源文件必须能划分为至少两个数据块。
 
@@ -139,7 +147,7 @@ compile_cache-before-torch 的既有顺序加载。
 
 - 一个候选一个新进程，避免 OOM、编译状态和优化器状态污染下一候选。
   调用真实 `train_pretrain.train_epoch`：真实 Arrow、预取、LR、前反向、裁剪、
-  optimizer、zero_grad 和正常日志。超时只终止该调优器创建的进程树。
+  optimizer、zero_grad 和正常日志。手动停止只终止该调优器创建的进程树。
 - 默认 20 步预热、60 步计时；计时区间含数据等待，排除初始读数/编译、验证和
   存盘。计时前等待首次后台预取完成，使各候选都在暖缓存条件下比较；这个额外
   等待单独记录，普通生产训练不执行该等待。开启预取时 warmup 至少为 2。
@@ -147,8 +155,13 @@ compile_cache-before-torch 的既有顺序加载。
 - 每次重新使用相同初始化。验证 token 和初始参数均记录 SHA-256；每 20 步
   训练 loss 均值恶化不得超过 2%，公共验证 NLL 恶化不得超过 1%，loss 必须有限。
   用户已允许扩大 batch；这些是等更新次数的短训门槛，不是等 token 的收敛证明。
-- OOM/编译失败/超时不作为有效结果；基线在训练中 OOM 时会减半 token budget
-  重试。显存预算越界的结果也不参与选择。基线模型本身装不下时需调整模型配置。
+- OOM/编译失败不作为有效结果；基线在训练中 OOM 或驱动显存预算越界时，
+  若已解析 token budget，会减半后重试。基线模型本身装不下时需调整模型配置。
+- 预检、基线、候选和最终复测均不设超时；整个搜索也不设总时限。首次打包和
+  长序列桶编译可持续运行，达到候选次数上限或无新候选后进入最终复测。需要中止时，
+  点击 WebUI「停止自动调优」，或在 CLI 按 Ctrl+C。失败结果不会当作成功结果复用。
+  旧命令中的 `--time-limit`、`--trial-timeout`、`--baseline-timeout` 仅兼容接收并
+  提示已忽略；WebUI 会移除旧的超时设置，保存的值不会重新启用限制。
 - 目标是最大有效 tokens/s，最高有效实测为主结果；最终候选必须独立复测且再次
   通过质量门槛。保留所有成功/失败记录和 GPU 快照，避免隐藏后台负载波动。
 - 默认不猜测 GPU 峰值。需要 MFU 时显式给 `--peak-tflops`，确保是目标卡、实际

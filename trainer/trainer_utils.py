@@ -26,8 +26,8 @@ def _architecture_classes(architecture):
     if architecture == 'linear':
         from model.model_instinct_linear import InstinctConfig as Config, InstinctForCausalLM as Model
         return Config, Model
-    if architecture == 'looped':
-        from model.model_instinct_loop import InstinctConfig as Config, InstinctForCausalLM as Model
+    if architecture == 'recurrsive_instinct':
+        from model.model_recurrsive_instinct import InstinctConfig as Config, InstinctForCausalLM as Model
         return Config, Model
     return InstinctConfig, InstinctForCausalLM
 
@@ -241,11 +241,11 @@ def config_from_args(args, **overrides):
 
     参数:
         args: argparse 解析出的命令行参数对象
-        **overrides: 显式覆盖项（hidden_size / num_hidden_layers / use_moe / use_looped 等）
+        **overrides: 显式覆盖项（hidden_size / num_hidden_layers / use_moe / use_recurrsive 等）
 
     说明:
         - 指定 config_path 时，以 JSON 为基底再叠加命令行覆盖；
-        - 按 model_architecture（兼容 use_looped）选择 Dense / Linear / Looped 配置类。
+        - 按 model_architecture（兼容 use_recurrsive）选择 Dense / Linear / RecurrsiveInstinct 配置类。
     """
     overrides.setdefault('param_dtype', getattr(args, 'param_dtype', 'fp32'))
     overrides.setdefault('kv_cache_dtype', getattr(args, 'kv_cache_dtype', 'fp32'))
@@ -266,10 +266,10 @@ def config_from_args(args, **overrides):
     hidden_size = overrides.pop('hidden_size', getattr(args, 'hidden_size', 768))
     num_hidden_layers = overrides.pop('num_hidden_layers', getattr(args, 'num_hidden_layers', 8))
     use_moe = overrides.pop('use_moe', bool(getattr(args, 'use_moe', 0)))
-    use_looped = overrides.pop('use_looped', bool(getattr(args, 'use_looped', 0)))
+    use_recurrsive = overrides.pop('use_recurrsive', bool(getattr(args, 'use_recurrsive', 0)))
     architecture = getattr(args, 'model_architecture', None)
-    if use_looped:
-        architecture = 'looped'
+    if use_recurrsive:
+        architecture = 'recurrsive_instinct'
     config_path = getattr(args, 'config_path', None)
     if config_path and os.path.exists(config_path):
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -623,7 +623,11 @@ class CombinedOptimizer(torch.optim.Optimizer):
                 "请改用 --from_weight 从模型权重继续，而非 --from_resume。"
             )
         saved_optimizers = state_dict["optimizers"]
+        from trainer.batched_muon import has_mantissa_state, reject_mantissa_state
+        split_weights = has_mantissa_state(state_dict)
         if len(saved_optimizers) != len(self.optimizers):
+            if split_weights:
+                raise ValueError('Cannot discard Muon mantissa state after optimizer layout changed')
             Logger(
                 "[Resume] optimizer layout changed; keeping fresh optimizer state "
                 "while restoring model/progress"
@@ -638,12 +642,18 @@ class CombinedOptimizer(torch.optim.Optimizer):
             for sd in saved_optimizers
         ]
         if current_group_sizes != saved_group_sizes:
+            if split_weights:
+                raise ValueError('Cannot discard Muon mantissa state after parameter groups changed')
             Logger(
                 "[Resume] optimizer parameter groups changed (for example, embeddings "
                 "moved from Muon to AdamW); keeping fresh optimizer state while "
                 "restoring model/progress"
             )
             return
+        # Check every target before mutating any child optimizer.
+        for opt, sd in zip(self.optimizers, saved_optimizers):
+            if not getattr(opt, 'use_mantissa', False):
+                reject_mantissa_state(opt, sd)
         for opt, sd in zip(self.optimizers, saved_optimizers):
             opt.load_state_dict(sd)
         self.param_groups = [g for opt in self.optimizers for g in opt.param_groups]
@@ -659,7 +669,17 @@ _OPTIMIZER_ALIASES = {
 
 def _muon_mantissa_enabled() -> bool:
     """Opt-in uint16-mantissa Muon updates (off unless INSTINCT_MUON_MANTISSA=1)."""
-    return str(os.environ.get('INSTINCT_MUON_MANTISSA', '0')).strip().lower() in ('1', 'true', 'yes')
+    setting = os.environ.get('INSTINCT_MUON_MANTISSA', '0').strip().lower()
+    if setting not in ('0', 'false', 'no', '1', 'true', 'yes'):
+        raise ValueError('INSTINCT_MUON_MANTISSA must be 0 or 1 (false/no or true/yes)')
+    return setting in ('1', 'true', 'yes')
+
+
+def _muon_momentum_dtype() -> str:
+    setting = os.environ.get('INSTINCT_MUON_MOMENTUM_DTYPE', 'fp32').strip().lower()
+    if setting not in ('fp32', 'bf16'):
+        raise ValueError('INSTINCT_MUON_MOMENTUM_DTYPE must be fp32 or bf16')
+    return setting
 
 
 _LOW_PRECISION_LR_FLOORS = {
@@ -702,6 +722,25 @@ def _is_muon_hidden_matrix(name: str, param: torch.nn.Parameter) -> bool:
     return not any(part in lowered for part in ("embed", "embedding", "lm_head", "output_head"))
 
 
+def cast_training_parameters(model, param_dtype):
+    """Apply the requested storage dtype before optimizer/DDP construction.
+
+    Experimental split-weight Muon only covers hidden matrices. Keep AdamW
+    parameters (including tied embeddings and norms) in FP32 from initialization,
+    so they do not silently lose small updates or low precision moment estimates.
+    """
+    if _muon_mantissa_enabled():
+        if param_dtype != 'bf16':
+            raise ValueError('INSTINCT_MUON_MANTISSA=1 requires --param_dtype bf16')
+        for name, param in model.named_parameters():
+            dtype = torch.bfloat16 if _is_muon_hidden_matrix(name, param) else torch.float32
+            param.data = param.data.to(dtype)
+        return model
+    if param_dtype != 'fp32':
+        return model.to({'bf16': torch.bfloat16, 'fp16': torch.float16}[param_dtype])
+    return model
+
+
 def estimate_training_persistent_bytes(model: torch.nn.Module, args, *, extra_models=()) -> int:
     """Estimate per-card tensors resident independently of batch/sequence size.
 
@@ -726,13 +765,14 @@ def estimate_training_persistent_bytes(model: torch.nn.Module, args, *, extra_mo
     optimizer = str(getattr(args, 'optimizer', 'adamw')).strip().lower()
     if optimizer == 'muon':
         mantissa = _muon_mantissa_enabled()
+        momentum_bytes = 2 if _muon_momentum_dtype() == 'bf16' else 4
         optimizer_bytes = 0
         for name, param in named_trainable:
             one_state = param.numel() * param.element_size()
             if _is_muon_hidden_matrix(name, param):
-                if mantissa and param.element_size() == 2:
-                    # fp32 momentum (4 B) + uint16 mantissa (2 B) replaces one_state.
-                    optimizer_bytes += param.numel() * 6
+                if mantissa and param.dtype == torch.bfloat16:
+                    # Selected momentum storage + uint16 low bits.
+                    optimizer_bytes += param.numel() * (momentum_bytes + 2)
                 else:
                     optimizer_bytes += one_state
             else:
@@ -933,9 +973,25 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
                       交给 AdamW。两类都存在时组合为 CombinedOptimizer 返回。
     """
     named_params = _materialize_named_params(params)
-    _validate_optimizer_param_precision(named_params, lr)
     trainable_params = [param for _, param in named_params]
     name = _OPTIMIZER_ALIASES.get(str(optimizer).strip().lower(), str(optimizer).strip().lower())
+    mantissa = bool(kwargs.get('use_mantissa', _muon_mantissa_enabled()))
+    momentum_dtype = kwargs.get('momentum_dtype', _muon_momentum_dtype())
+    if momentum_dtype == 'bf16' and not mantissa:
+        raise ValueError('BF16 Muon momentum requires INSTINCT_MUON_MANTISSA=1')
+    if mantissa:
+        if name != 'muon' or os.environ.get('INSTINCT_MUON_BACKEND', 'batched').strip().lower() != 'batched':
+            raise ValueError('Muon mantissa requires optimizer=muon and INSTINCT_MUON_BACKEND=batched')
+        unprotected = [(n, p) for n, p in named_params if not _is_muon_hidden_matrix(n, p)]
+        if any(p.dtype != torch.float32 for _, p in unprotected):
+            raise ValueError(
+                'Muon mantissa does not protect AdamW parameters; embeddings, heads, '
+                'norms and biases must stay FP32. Use cast_training_parameters(model, "bf16") '
+                'before building the optimizer (shared init_model already does this).'
+            )
+        _validate_optimizer_param_precision(unprotected, lr)
+    else:
+        _validate_optimizer_param_precision(named_params, lr)
     if name == 'adamw':
         return torch.optim.AdamW(trainable_params, lr=lr, **kwargs)
     if name == 'adafactor':
@@ -956,6 +1012,8 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
         matrix_ids = {id(param) for param in matrix_params}
         other_params = [param for param in trainable_params if id(param) not in matrix_ids]
         if not matrix_params:
+            if mantissa:
+                raise ValueError('Muon mantissa requires trainable hidden 2D parameters')
             return torch.optim.AdamW(other_params, lr=lr)
         muon_backend = os.environ.get('INSTINCT_MUON_BACKEND', 'batched').strip().lower()
         if muon_backend not in ('batched', 'native'):
@@ -970,6 +1028,7 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
                                  and blackwell_training_kernels(matrix_params[0].device) else '64')
             muon_kwargs.setdefault('workspace_mb', float(os.environ.get('INSTINCT_MUON_WORKSPACE_MB', workspace_default)))
             muon_kwargs.setdefault('use_mantissa', _muon_mantissa_enabled())
+            muon_kwargs.setdefault('momentum_dtype', momentum_dtype)
             muon_opt = BatchedMuon(matrix_params, lr=lr, **muon_kwargs)
             preallocate = os.environ.get('INSTINCT_MUON_PREALLOCATE', '0')
             if preallocate not in ('0', '1'):
@@ -980,8 +1039,14 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
             Logger(
                 f'[Muon] shape-batched BF16 updates: batch_size<={muon_opt.batch_size}, '
                 f'temporary workspace target={muon_opt.workspace_bytes / 2**20:g}MiB, '
-                f"mantissa={'on' if muon_opt.use_mantissa else 'off'}"
+                f"mantissa={'on' if muon_opt.use_mantissa else 'off'}, "
+                f"momentum_storage={muon_opt.momentum_dtype if muon_opt.use_mantissa else matrix_params[0].dtype}"
             )
+            if muon_opt.use_mantissa:
+                Logger('[Muon] experimental split weights: BF16 high bits + uint16 low bits, '
+                       f'{momentum_dtype} momentum storage with FP32 update arithmetic; '
+                       'forward weights truncate toward zero. '
+                       'Full-pretraining quality versus FP32 master weights is not established.')
             Logger(
                 '[Muon] CUDA kernels: NS=' + os.environ.get('INSTINCT_MUON_NS_BACKEND', 'auto')
                 + ', fused_updates=' + os.environ.get('INSTINCT_MUON_FUSED_UPDATES', 'auto')
@@ -997,6 +1062,9 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
             muon_kwargs = dict(kwargs)
             muon_kwargs.setdefault('adjust_lr_fn', 'match_rms_adamw')
             muon_opt = MuonOptimizer(matrix_params, lr=lr, **muon_kwargs)
+        if muon_backend == 'native':
+            from trainer.batched_muon import reject_mantissa_state
+            muon_opt.register_load_state_dict_pre_hook(reject_mantissa_state)
         if not other_params:
             return muon_opt
         return CombinedOptimizer([muon_opt, torch.optim.AdamW(other_params, lr=lr)])
@@ -1167,6 +1235,12 @@ def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = '
         lm_config.__dict__.clear()
         lm_config.__dict__.update(restored_config.__dict__)
     configure_moe_training_router(lm_config, norm_topk_prob=router_norm_topk_prob, top_k=router_top_k)
+    if getattr(lm_config, 'flash_attn', False):
+        # An optional-package import failure inside a checkpoint region makes
+        # Dynamo leave that region eager, including FP8 casts in every layer.
+        # Resolve once in setup, before the trainer wraps the model in compile.
+        from model.flash_attn_4 import resolve_flash_attn
+        resolve_flash_attn()
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     architecture = getattr(lm_config, 'model_architecture', 'standard')
     _, model_cls = _architecture_classes(architecture)
@@ -1179,7 +1253,7 @@ def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = '
             moe_suffix = '_moe' if lm_config.use_moe else ''
             weight_path = f'{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
         weights = torch.load(weight_path, map_location=device)
-        if architecture == 'looped':
+        if architecture == 'recurrsive_instinct':
             model.load_pretrained_weights(weights)
         else:
             model.load_state_dict(weights, strict=False)
@@ -1187,8 +1261,7 @@ def init_model(lm_config, from_weight: str = 'pretrain', tokenizer_path: str = '
     get_model_params(model, lm_config)
     Logger(f'Trainable Params: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f}M')
     param_dtype = getattr(lm_config, 'param_dtype', 'fp32')
-    if param_dtype != 'fp32':
-        model = model.to({'bf16': torch.bfloat16, 'fp16': torch.float16}[param_dtype])
+    model = cast_training_parameters(model, param_dtype)
     return model.to(device), tokenizer
 
 

@@ -158,7 +158,7 @@ pub fn preview(relay: &Relay, input: Value) -> anyhow::Result<Value> {
     let mut argv = vec![cfg.training.python.clone()];
     if count > 1 { argv.extend(["-m".into(),"torch.distributed.run".into(),"--nproc_per_node".into(),count.to_string(),"--master_port".into(),"<port>".into()]); }
     match model["model_architecture"].as_str() {
-        Some("linear") => argv.push("run_linear.py".into()), Some("looped") => argv.push("run_loop.py".into()), _ => ()
+        Some("linear") => argv.push("run_linear.py".into()), Some("recurrsive_instinct") => argv.push("run_recurrsive.py".into()), _ => ()
     }
     argv.push(format!("trainer/train_{}.py",if stage == "cpt" {"pretrain"} else {stage}));
     for (key,value) in args {

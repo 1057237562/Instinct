@@ -149,8 +149,8 @@ def gpu_snapshot():
         return None
 
 
-def subprocess_trial(command, environment, log, timeout):
-    """Only the child we created (and its descendants) is stopped on timeout."""
+def subprocess_trial(command, environment, log):
+    """Wait without a deadline; interruption stops only our owned process tree."""
     options = dict(cwd=None if Path.cwd() == ROOT else ROOT, env=environment)
     if os.name == 'nt':
         options['creationflags'] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -159,20 +159,30 @@ def subprocess_trial(command, environment, log, timeout):
     with Path(log).open('w', encoding='utf-8') as output:
         process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT, **options)
         try:
-            return process.wait(timeout=timeout), False
-        except subprocess.TimeoutExpired:
-            kill_trial(process)
-            return -1, True
+            return process.wait()
         except BaseException:
             kill_trial(process)
             raise
+
+
+def trial_failure_message(stage, result):
+    """Report the actual failure; only memory failures justify a smaller batch."""
+    status = result['status']
+    if status in ('oom', 'driver_budget_exceeded'):
+        reason = f'{status}; lower initial bucket_token_budget or reduce model memory requirements'
+    else:
+        reason = status
+        if result.get('exit_code') is not None:
+            reason += f' (exit code {result["exit_code"]})'
+        if result.get('error', '').strip():
+            reason += ': ' + result['error'].strip().splitlines()[-1]
+    return f'{stage} failed: {reason}; see {Path(result["directory"])/"trial.log"}'
 
 
 class Search:
     def __init__(self, spec, options, directory, source):
         self.spec, self.options, self.directory, self.source = spec, options, directory, source
         self.hardware = self.contract = None
-        self.started = time.monotonic()
         self.rows = []
         self.seen = set()
         self.memory_searches = {}
@@ -256,18 +266,13 @@ class Search:
         if self.options.worker_launcher:
             command.append(str(Path(self.options.worker_launcher).resolve()))
         command += [str(ROOT/'trainer/train_pretrain.py'), *arguments(values)]
-        remaining = self.options.time_limit - (time.monotonic()-self.started)
-        if remaining <= 0:
-            raise TimeoutError('autotuning time budget exhausted')
-        print(f'[Autotune] {identifier}: {json.dumps(settings)}', flush=True)
+        print(f'[Autotune] {identifier}: {json.dumps(settings)}; '
+              f'log={directory/"trial.log"}', flush=True)
         telemetry_before = gpu_snapshot()
         trial_started = time.monotonic()
-        code, timed_out = subprocess_trial(command, environment, directory/'trial.log',
-            min(self.options.trial_timeout, remaining))
+        code = subprocess_trial(command, environment, directory/'trial.log')
         result = read_json(previous) if previous.exists() else dict(status='process_error', exit_code=code)
-        if timed_out:
-            result = dict(status='timeout', exit_code=code)
-        elif result.get('status') == 'running' or code != 0 and result.get('status') in ('ok', 'probe'):
+        if result.get('status') == 'running' or code != 0 and result.get('status') in ('ok', 'probe'):
             result = dict(status='process_error', exit_code=code)
         result.update(settings=settings, request_key=key, directory=str(directory),
                       startup_and_training_seconds=time.monotonic()-trial_started,
@@ -291,8 +296,9 @@ def main():
     parser.add_argument('--warmup', type=int, default=20)
     parser.add_argument('--steps', type=int, default=60)
     parser.add_argument('--validation-examples', type=int, default=16)
-    parser.add_argument('--time-limit', type=float, default=3600, help='Total wall-clock seconds, including compilation')
-    parser.add_argument('--trial-timeout', type=float, default=900)
+    # Accept old saved launch commands without restoring their removed deadlines.
+    for name in ('time-limit', 'trial-timeout', 'baseline-timeout'):
+        parser.add_argument('--' + name, help=argparse.SUPPRESS)
     parser.add_argument('--peak-tflops', type=float, help='Optional explicit dense peak for the actual compute precision')
     parser.add_argument('--target-tokens-per-second', type=float,
                         help='Require this measured useful-token throughput before publishing a profile')
@@ -301,14 +307,17 @@ def main():
     parser.add_argument('--worker-launcher', type=Path, help='Optional diagnostic Python bootstrap, normally omitted')
     options = parser.parse_args()
     if (options.max_trials < 2 or min(options.warmup, options.steps, options.validation_examples) < 1
-            or any(not math.isfinite(x) or x <= 0 for x in (options.time_limit, options.trial_timeout))
             or options.peak_tflops is not None and (not math.isfinite(options.peak_tflops) or options.peak_tflops <= 0)):
         parser.error('positive limits and at least two trials required')
+    if any(getattr(options, name) is not None for name in ('time_limit', 'trial_timeout', 'baseline_timeout')):
+        print('[Autotune] time limits have been removed; legacy timeout arguments are ignored', file=sys.stderr, flush=True)
     if options.target_tokens_per_second is not None and (
             not math.isfinite(options.target_tokens_per_second) or options.target_tokens_per_second <= 0):
         parser.error('target throughput must be positive and finite')
     spec = read_json(options.config)
     base = spec['args']
+    from scripts.muon_controls import extract_performance_options
+    extract_performance_options(base, spec.setdefault('environment', {}))
     if any(key in base for key in ('autotune_profile', 'autotune_trial')) or base.get('from_resume', 0):
         raise ValueError('calibrate fresh scratch state, not a resume cursor or another profile')
     if base.get('use_wandb'):
@@ -320,12 +329,12 @@ def main():
     validate_settings({'env': spec.get('environment', {})})
     if options.plan_only:
         grid = search_space(spec, {'resolved_token_budget': int(base.get('bucket_token_budget', 0) or 16384)})
-        print(json.dumps(dict(scope='single GPU, standard Dense/MoE pretrain, real audited streaming source',
+        print(json.dumps(dict(scope='single GPU, standard Dense/MoE pretrain, real streaming source',
             search=grid, default_budget_note='default batch candidates scale from measured baseline',
             max_trials=options.max_trials, maximum_updates=options.max_trials*(options.warmup+options.steps),
-            time_limit_seconds=options.time_limit, saves_formal_weights=False), indent=2))
+            time_limit_seconds=None, saves_formal_weights=False), indent=2))
         return
-    source = audit_source(base['data_path'], spec['audit'], spec.get('provenance'))
+    source = audit_source(base['data_path'], spec.get('audit'), spec.get('provenance'))
     settings = dict(args={key: base[key] for key in ARG_CHOICES if key in base},
                     env={key: os.environ[key] for key in PERF_ENV if key in os.environ})
     settings['env'].update(spec.get('environment', {}))
@@ -343,7 +352,7 @@ def main():
         search = Search(spec, options, options.output/'probe', source)
         probe = search.trial(settings, probe=True)
         if probe['status'] != 'probe':
-            raise RuntimeError(f'preflight failed; see {probe["directory"]}/trial.log')
+            raise RuntimeError(trial_failure_message('preflight', probe))
         search.hardware, search.contract = probe['hardware'], probe['contract']
         if memory == 'auto':
             settings['args']['bucket_gpu_memory_gb'] = search.hardware['vram_bytes']/2**30
@@ -355,8 +364,10 @@ def main():
         try:
             baseline = search.trial(settings)
             search.record(baseline)
-            while baseline['status'] == 'oom' and len(search.rows) < options.max_trials-1:
-                previous_budget = baseline['resolved_token_budget']
+            while baseline['status'] in ('oom', 'driver_budget_exceeded') and len(search.rows) < options.max_trials-1:
+                previous_budget = baseline.get('resolved_token_budget')
+                if not previous_budget:
+                    break
                 reduced = max(16, previous_budget//32*16)
                 if reduced >= previous_budget:
                     break
@@ -364,7 +375,7 @@ def main():
                 baseline = search.trial(settings)
                 search.record(baseline)
             if baseline['status'] != 'ok':
-                raise RuntimeError(f'baseline failed; lower initial bucket_token_budget; see {baseline["directory"]}/trial.log')
+                raise RuntimeError(trial_failure_message('baseline', baseline))
             settings = copy.deepcopy(baseline['resolved_settings'])
             baseline['settings'] = settings
             search.seen.add(digest(settings))
@@ -372,8 +383,7 @@ def main():
             best = baseline
             # Same-shape kernels first, binary memory boundaries per strategy,
             # then other coordinate neighbors. No monotone-throughput assumption.
-            while (len(search.rows) < options.max_trials-1
-                   and options.time_limit-(time.monotonic()-search.started) > options.trial_timeout):
+            while len(search.rows) < options.max_trials-1:
                 settings_to_try = search.next_candidate(best, grid)
                 if settings_to_try is None:
                     break
@@ -389,7 +399,9 @@ def main():
             confirm.update(quality_passed=passed, quality_reason=reason)
             search.record(confirm)
             if not passed:
-                raise RuntimeError('winner confirmation failed; no production profile was published')
+                detail = (trial_failure_message('winner confirmation', confirm)
+                          if confirm['status'] != 'ok' else f'winner confirmation failed: {reason}')
+                raise RuntimeError(detail + '; no production profile was published')
             # Requested convention: best valid observed throughput is primary;
             # retain confirmation and variation rather than silently discarding them.
             primary = max((best, confirm), key=lambda x:x['useful_tokens_per_second'])
@@ -411,8 +423,8 @@ def main():
             write_json(search.directory/'launch.json', dict(cwd=str(ROOT), argv=launch))
             print('[Autotune] validated profile: ' + str(profile_path), flush=True)
             print(subprocess.list2cmdline(launch) if os.name == 'nt' else shlex.join(launch), flush=True)
-        except (TimeoutError, KeyboardInterrupt):
-            print('[Autotune] stopped at budget/interruption; completed trials remain cached, no unconfirmed profile published', flush=True)
+        except KeyboardInterrupt:
+            print('[Autotune] interrupted; completed trials remain cached, no unconfirmed profile published', flush=True)
             raise
 
 

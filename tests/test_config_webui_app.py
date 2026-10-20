@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from streamlit.testing.v1 import AppTest
+from scripts.config_templates import load_model_presets, load_legacy_preset_names
 
 
 SOURCE = Path(__file__).parents[1] / "scripts" / "config_webui.py"
@@ -37,7 +38,9 @@ def _preset_fingerprint_fn():
             target.id for target in node.targets if isinstance(target, ast.Name)
         } & {"PRESETS", "_LEGACY_PRESET_NAMES"}:
             selected.append(node)
-    namespace = {"json": json, "hashlib": hashlib}
+    namespace = {"json": json, "hashlib": hashlib,
+                 "load_model_presets": load_model_presets,
+                 "load_legacy_preset_names": load_legacy_preset_names}
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(SOURCE), "exec"), namespace)
     return namespace["_preset_fingerprint"]
 
@@ -121,7 +124,9 @@ def test_autotune_plan_freezes_current_model_and_shared_cli(guard_state_file, tm
     monkeypatch.setattr(autotune_panel, 'launch', launch)
     STATE_FILE.write_text(json.dumps(dict(preset='Instinct V1 MoE',
         sequence_packing=True, sequence_packing_mode='bucket', dataset_streaming='on',
-        cache_build_mode='inline', autotune_output=str(tmp_path))), encoding='utf-8')
+        cache_build_mode='inline', autotune_output=str(tmp_path),
+        autotune_audit='obsolete.report.json', autotune_provenance='obsolete.provenance.json')),
+        encoding='utf-8')
     app = AppTest.from_file(str(SOURCE), default_timeout=60)
     app.run()
     assert not app.exception
@@ -136,6 +141,9 @@ def test_autotune_plan_freezes_current_model_and_shared_cli(guard_state_file, tm
     model = autotune_panel.read_json(directory / 'model.json')
     assert model['num_experts_per_tok'] == 2 and model['norm_topk_prob'] is True
     assert spec['args']['config_path'] == str(directory / 'model.json')
+    assert 'audit' not in spec and 'provenance' not in spec
+    assert not any(widget.key in ('autotune_audit', 'autotune_provenance') for widget in app.text_input)
+    assert not any('自动填入路径不代表审核通过' in caption.value for caption in app.caption)
     assert spec['args']['dtype'] == app.session_state['activation_dtype']
     assert spec['args']['num_workers'] == 0
     assert spec['args']['use_grad_checkpoint'] in (1, 2)
@@ -222,13 +230,48 @@ def _input(app, kind, key):
     return next(widget for widget in getattr(app, kind) if widget.key == key)
 
 
+def test_instinct_v2_is_added_to_existing_library_and_loads_complete_recipe(guard_state_file):
+    from scripts import config_templates
+
+    config_templates.TEMPLATES_FILE.write_text(json.dumps({
+        'version': 1, 'defaults_initialized': True,
+        'templates': {'custom': {'batch_size': 7}},
+    }), encoding='utf-8')
+    app = _run_app()
+    assert 'Instinct V2' in _input(app, 'selectbox', '_template_select').options
+    _input(app, 'selectbox', '_template_select').set_value('Instinct V2').run()
+    _button(app, 'btn_template_load').click().run()
+    assert not app.exception
+    expected = dict(
+        config_template='Instinct V2', preset='Instinct V2',
+        model_architecture='standard', use_moe=False, hidden_size=1536,
+        intermediate_size=5504, num_hidden_layers=32, num_attention_heads=16,
+        num_key_value_heads=4, max_position_embeddings=4096, inference_rope_scaling=False,
+        param_dtype='bf16', activation_dtype='bfloat16', optimizer='muon',
+        muon_mantissa=True, muon_momentum_dtype='bf16', muon_workspace_mb=128.0,
+        use_grad_checkpoint=2, max_seq_len=2048, batch_size=1, accumulation_steps=8,
+        use_compile=False, fp8_training='off', epochs_pretrain=1,
+        learning_rate_pretrain=0.0003, warmup_ratio_pretrain=0.02,
+    )
+    assert {key: app.session_state[key] for key in expected} == expected
+    preview = next(code.value for code in app.code if 'train_pretrain.py' in code.value)
+    for flag in ('--hidden_size 1536', '--num_hidden_layers 32', '--param_dtype bf16',
+                 '--optimizer muon', '--muon_mantissa 1', '--muon_momentum_dtype bf16',
+                 '--use_grad_checkpoint 2', '--max_seq_len 2048', '--accumulation_steps 8'):
+        assert flag in preview, flag
+    assert '--use_compile 1' not in preview
+    reloaded = _run_app()
+    assert {key: reloaded.session_state[key] for key in expected} == expected
+    assert config_templates.load_templates()['custom'] == {'batch_size': 7}
+
+
 def test_custom_template_lifecycle_restores_full_recipe_and_survives_reload(guard_state_file):
     from scripts.config_templates import load_templates
 
     app = _run_app()
     assert not any(radio.key == '_preset_radio' for radio in app.sidebar.radio)
-    default_names = ['Instinct V2', 'Instinct V2 MoE', 'Instinct V2 Small',
-                     'Instinct V1', 'Instinct V1 MoE', 'instinct-linear']
+    default_names = ['RecurrsiveInstinct', 'RecurrsiveInstinct MoE', 'RecurrsiveInstinct Small',
+                     'Instinct V1', 'Instinct V1 MoE', 'Instinct V2', 'instinct-linear']
     assert _input(app, 'selectbox', '_template_select').options == ['选择配置模板…'] + default_names
     _input(app, 'number_input', 'batch_size').set_value(5).run()
     _input(app, 'number_input', 'learning_rate_pretrain').set_value(0.000321).run()

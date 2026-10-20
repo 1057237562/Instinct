@@ -33,7 +33,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from model.model_looped_instinct import LoopedInstinctConfig, LoopedInstinctForCausalLM
+from model.model_recurrsive_instinct import RecurrsiveInstinctConfig, RecurrsiveInstinctForCausalLM
 from transformers import AutoTokenizer
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -68,8 +68,8 @@ def make_batch(ids, batch_size, rng):
     return inp.to(DEVICE)
 
 
-def build_looped(depth_reward):
-    cfg = LoopedInstinctConfig(
+def build_recurrsive_instinct(depth_reward):
+    cfg = RecurrsiveInstinctConfig(
         hidden_size=768, num_hidden_layers=8, vocab_size=6400,
         flash_attn=False, inference_rope_scaling=False,
         loop_encoder_layers=[0, 1], loop_body_layers=[2, 3, 4],
@@ -77,7 +77,7 @@ def build_looped(depth_reward):
         q_threshold=Q_THRESHOLD, exit_in_training=True,
         n_supervision=N_SUPERVISION, beta=BETA, depth_reward=depth_reward,
     )
-    model = LoopedInstinctForCausalLM(cfg).to(DEVICE)
+    model = RecurrsiveInstinctForCausalLM(cfg).to(DEVICE)
     sd = torch.load("out/pretrain_768.pth", map_location=DEVICE)
     if "model_state_dict" in sd:
         sd = sd["model_state_dict"]
@@ -148,7 +148,7 @@ def eval_forced(model, ids, k):
 
 def run_scheme(name, seed):
     print(f"\n=== {name}, seed={seed} ===")
-    m = build_looped(0.1 if name == "S1" else 0.0)
+    m = build_recurrsive_instinct(0.1 if name == "S1" else 0.0)
     if name == "S1":
         sc = train_iters(m, ids, seed, PHASE1 + PHASE2, 0.1, True, name)
     elif name == "S2":

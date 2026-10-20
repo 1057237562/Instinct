@@ -81,7 +81,7 @@ def test_search_selects_binary_midpoint_instead_of_linear_budget_sweep(tmp_path)
 def test_optional_throughput_gate_controls_publication(tmp_path,monkeypatch,target,published):
     spec_path=tmp_path/'spec.json'
     cfg.write_json(spec_path,{'args':{'from_weight':'none','sequence_packing':1,
-        'sequence_packing_mode':'bucket','data_path':'unused'},'audit':'unused','search':{}})
+        'sequence_packing_mode':'bucket','data_path':'unused'},'search':{}})
     monkeypatch.setattr(autotune,'audit_source',lambda *a:{'sha256':'source'})
     class FakeSearch(autotune.Search):
         def trial(self,settings,*,probe=False,confirm=False):
@@ -134,6 +134,17 @@ def test_argument_vector_preserves_paths_and_has_no_shell_expansion():
 def test_training_contract_survives_json_round_trip():
     contract=cfg.training_contract(SimpleNamespace())
     assert contract==json.loads(json.dumps(contract))
+
+
+@pytest.mark.parametrize('name,value', [('INSTINCT_MUON_MANTISSA','1'),
+                                       ('INSTINCT_MUON_MOMENTUM_DTYPE','bf16')])
+def test_training_contract_detects_muon_mantissa_change(monkeypatch, name, value):
+    monkeypatch.delenv(name, raising=False)
+    before = cfg.training_contract(SimpleNamespace())
+    monkeypatch.setenv(name, value)
+    after = cfg.training_contract(SimpleNamespace())
+    assert before != after
+    assert after['context_env'][name] == value
 
 
 def test_restored_model_must_match_profile(tmp_path):
@@ -190,7 +201,41 @@ def test_profile_rejects_other_trainers(tmp_path,monkeypatch):
         cfg.apply_profile(args)
 
 
-def test_audit_requires_exact_bytes_and_provenance(tmp_path):
+def test_profile_rejects_changed_corpus_without_report_metadata(tmp_path, monkeypatch):
+    args, _, _ = profile_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(cfg, 'file_digest', lambda path: 'changed-corpus')
+    with pytest.raises(ValueError, match='corpus changed'):
+        cfg.apply_profile(args)
+
+
+@pytest.mark.parametrize('mismatch,expected', [
+    (None, None), ('hardware', 'fingerprint'), ('contract', 'configuration changed'),
+    ('source', 'corpus changed'),
+])
+def test_manual_profile_retains_fingerprint_guards(tmp_path, monkeypatch, mismatch, expected):
+    args, profile, path = profile_fixture(tmp_path, monkeypatch)
+    profile.update(status='manual', validation={'performed': False})
+    profile['settings']['args']['bucket_token_budget'] = 5344
+    profile['settings']['env']['INSTINCT_MUON_WORKSPACE_MB'] = '256'
+    cfg.write_json(path, profile)
+    monkeypatch.setenv('INSTINCT_MUON_WORKSPACE_MB', '256')
+    if mismatch == 'hardware':
+        monkeypatch.setattr(cfg, 'hardware_fingerprint', lambda _: {'gpu': 'different'})
+    elif mismatch == 'contract':
+        monkeypatch.setattr(cfg, 'training_contract', lambda _: {'model': 'different'})
+    elif mismatch == 'source':
+        monkeypatch.setattr(cfg, 'file_digest', lambda _: 'different')
+    if expected:
+        with pytest.raises(ValueError, match=expected):
+            cfg.apply_profile(args)
+    else:
+        cfg.apply_profile(args)
+        assert args.bucket_token_budget == 5344
+        assert os.environ['INSTINCT_MUON_WORKSPACE_MB'] == '256'
+        assert cfg.read_json(path)['status'] == 'manual'
+
+
+def test_explicit_audit_requires_exact_bytes(tmp_path):
     source=tmp_path/'clean.jsonl';source.write_text('{"text":"hello"}\n')
     audit=tmp_path/'audit.json';cfg.write_json(audit,{'output_sha256':cfg.file_digest(source)})
     assert cfg.audit_source(source,audit)['sha256']==cfg.file_digest(source)
@@ -199,10 +244,141 @@ def test_audit_requires_exact_bytes_and_provenance(tmp_path):
         cfg.audit_source(source,audit)
 
 
-def test_timeout_reaps_owned_subprocess(tmp_path):
-    code,timed_out=autotune.subprocess_trial([sys.executable,'-c','import time; time.sleep(30)'],
-                                          dict(os.environ),tmp_path/'log',.2)
-    assert timed_out and code==-1
+@pytest.mark.parametrize('suffix', ['.jsonl', '.parquet'])
+def test_source_fingerprint_without_reports_still_tracks_changed_bytes(tmp_path, suffix):
+    source = tmp_path / ('source' + suffix)
+    source.write_bytes(b'first corpus')
+    original = cfg.audit_source(source)
+    assert original['sha256'] == cfg.file_digest(source)
+    assert original['size'] == len(b'first corpus')
+    assert 'audit_sha256' not in original and 'provenance_sha256' not in original
+    source.write_bytes(b'changed corpus')
+    assert cfg.audit_source(source)['sha256'] != original['sha256']
+
+
+def test_optional_compiler_report_accepts_nested_output_hash(tmp_path):
+    source = tmp_path / 'source.parquet'
+    source.write_bytes(b'corpus')
+    report = tmp_path / 'compiler.report.json'
+    cfg.write_json(report, {'output': {'sha256': cfg.file_digest(source)}})
+    result = cfg.audit_source(source, report)
+    assert result['audit_sha256'] == cfg.file_digest(report)
+    cfg.write_json(report, {'output': {'sha256': 'wrong'}})
+    with pytest.raises(ValueError, match='SHA-256'):
+        cfg.audit_source(source, report)
+
+
+@pytest.mark.parametrize('interrupted', [False, True])
+def test_subprocess_wait_has_no_deadline_and_interrupt_still_reaps_tree(tmp_path, monkeypatch, interrupted):
+    calls = []
+    def wait():  # A timeout argument would fail this contract.
+        calls.append('wait')
+        if interrupted:
+            raise KeyboardInterrupt
+        return 7
+    process = SimpleNamespace(wait=wait)
+    monkeypatch.setattr(autotune.subprocess, 'Popen', lambda *a, **kw: process)
+    monkeypatch.setattr(autotune, 'kill_trial', lambda owned: calls.append(owned))
+    if interrupted:
+        with pytest.raises(KeyboardInterrupt):
+            autotune.subprocess_trial(['trainer'], {}, tmp_path/'log')
+        assert calls == ['wait', process]
+    else:
+        assert autotune.subprocess_trial(['trainer'], {}, tmp_path/'log') == 7
+        assert calls == ['wait']
+
+
+@pytest.mark.parametrize('role', ['candidate', 'confirm', 'probe'])
+def test_long_trials_complete_and_old_timeouts_are_retried(tmp_path, monkeypatch, role):
+    options = SimpleNamespace(warmup=20, steps=60, validation_examples=16, peak_tflops=None,
+                              refresh=False, worker_launcher=None)
+    clock = iter(range(0, 100000, 7200))
+    monkeypatch.setattr(autotune.time, 'monotonic', lambda: next(clock))
+    monkeypatch.setattr(autotune, 'gpu_snapshot', lambda: None)
+    calls = []
+    def complete_trial(command, environment, log):
+        calls.append(command)
+        cfg.write_json(log.parent/'result.json', dict(status='probe' if role == 'probe' else 'ok',
+                                                     useful_tokens_per_second=100.))
+        return 0
+    monkeypatch.setattr(autotune, 'subprocess_trial', complete_trial)
+    search = autotune.Search({'args': {}}, options, tmp_path, {})
+    settings = {'args': {'bucket_token_budget': 1024}, 'env': {}}
+    flags = {role: True} if role != 'candidate' else {}
+    result = search.trial(settings, **flags)
+    assert result['status'] == ('probe' if role == 'probe' else 'ok')
+    assert result['startup_and_training_seconds'] == 7200
+    assert 'effective_timeout_seconds' not in result
+    # Reproduce a result cached by the old controller with the same request key.
+    cfg.write_json(Path(result['directory'])/'result.json', dict(result, status='timeout'))
+    retried = search.trial(settings, **flags)
+    assert retried['status'] == result['status']
+    assert len(calls) == 2
+    search.trial(settings, **flags)
+    assert len(calls) == (3 if role == 'probe' else 2)
+
+
+@pytest.mark.parametrize('status,retries,expected', [
+    ('error', 1, 'ValueError: new shape reached timed window'),
+    ('process_error', 1, 'exit code 7'),
+    ('oom', 2, 'lower initial bucket_token_budget'),
+    ('driver_budget_exceeded', 2, 'lower initial bucket_token_budget'),
+])
+def test_baseline_failure_reports_cause_and_only_reduces_memory_failures(
+        tmp_path, monkeypatch, status, retries, expected):
+    spec_path = tmp_path / 'spec.json'
+    cfg.write_json(spec_path, {'args': {'from_weight': 'none', 'sequence_packing': 1,
+        'sequence_packing_mode': 'bucket', 'data_path': 'unused', 'bucket_token_budget': 1024}})
+    monkeypatch.setattr(autotune, 'audit_source', lambda *a: {})
+    budgets = []
+    class FakeSearch(autotune.Search):
+        def trial(self, settings, *, probe=False, confirm=False):
+            if probe:
+                return dict(status='probe', hardware={'vram_bytes': 16*2**30}, contract={})
+            assert not confirm
+            budgets.append(settings['args']['bucket_token_budget'])
+            result = dict(status=status, settings=settings, resolved_token_budget=budgets[-1],
+                          directory=str(self.directory / 'trial'), exit_code=7)
+            if status == 'error':
+                result['error'] = 'Traceback\nValueError: new shape reached timed window\n'
+            return result
+    monkeypatch.setattr(autotune, 'Search', FakeSearch)
+    monkeypatch.setattr(sys, 'argv', ['autotune.py', '--config', str(spec_path),
+        '--output', str(tmp_path / 'output'), '--max-trials', '3'])
+    with pytest.raises(RuntimeError, match=expected) as exc:
+        autotune.main()
+    assert budgets == [1024, 512][:retries]
+    assert 'trial.log' in str(exc.value)
+    if retries == 1:
+        assert 'lower initial bucket_token_budget' not in str(exc.value)
+    assert not list((tmp_path / 'output').rglob('profile.json'))
+
+
+def test_search_finishes_trial_count_and_confirmation_despite_legacy_time_limits(tmp_path, monkeypatch, capsys):
+    spec_path = tmp_path/'spec.json'
+    cfg.write_json(spec_path, {'args': {'from_weight': 'none', 'sequence_packing': 1,
+        'sequence_packing_mode': 'bucket', 'data_path': 'unused', 'bucket_token_budget': 16},
+        'search': {'args.bucket_token_budget': [8, 16, 32, 64]}})
+    monkeypatch.setattr(autotune, 'audit_source', lambda *a: {})
+    elapsed, roles = [0], []
+    monkeypatch.setattr(autotune.time, 'monotonic', lambda: elapsed[0])
+    class FakeSearch(autotune.Search):
+        def trial(self, settings, *, probe=False, confirm=False):
+            elapsed[0] += 7200
+            if probe:
+                return dict(status='probe', hardware={'vram_bytes': 16*2**30}, contract={})
+            roles.append('confirm' if confirm else 'trial')
+            return dict(good_result(), settings=copy.deepcopy(settings), resolved_settings=copy.deepcopy(settings),
+                        resolved_token_budget=settings['args']['bucket_token_budget'],
+                        directory=str(self.directory/'trial'))
+    monkeypatch.setattr(autotune, 'Search', FakeSearch)
+    monkeypatch.setattr(sys, 'argv', ['autotune.py', '--config', str(spec_path),
+        '--output', str(tmp_path/'output'), '--max-trials', '4', '--time-limit', '1',
+        '--trial-timeout', '1', '--baseline-timeout', '1'])
+    autotune.main()
+    assert roles == ['trial', 'trial', 'trial', 'confirm']
+    assert len(list((tmp_path/'output').rglob('profile.json'))) == 1
+    assert 'legacy timeout arguments are ignored' in capsys.readouterr().err
 
 
 def test_validation_parquet_starts_at_second_chunk(tmp_path):

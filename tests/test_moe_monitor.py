@@ -11,7 +11,7 @@ from tests.helpers import make_tiny_config
     "variant,module_name",
     [
         ("dense", "model.model_instinct"),
-        ("loop", "model.model_instinct_loop"),
+        ("loop", "model.model_recurrsive_instinct"),
         ("linear", "model.model_instinct_linear"),
     ],
 )

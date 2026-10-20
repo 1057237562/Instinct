@@ -36,7 +36,7 @@ import torch.nn.functional as F
 import pytest
 
 from model.model_instinct import InstinctForCausalLM as DenseForCausalLM
-from model.model_instinct_loop import InstinctForCausalLM as LoopForCausalLM
+from model.model_recurrsive_instinct import InstinctForCausalLM as LoopForCausalLM
 from model.model_instinct_linear import InstinctForCausalLM as LinearForCausalLM
 from tests.helpers import assert_grads_equal, make_tiny_config
 

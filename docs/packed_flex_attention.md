@@ -18,7 +18,7 @@ in the current PyTorch 2.13 / Triton 3.4 environment.
   and gradient parity is tested against the existing SDPA path; training trajectories
   are not promised to be bitwise identical.
 
-The model-entry selector is shared by the standard Dense/MoE and looped backbones.
+The model-entry selector is shared by the standard Dense/MoE and RecurrsiveInstinct backbones.
 Unpacked attention and KV-cache generation continue through the previous path.
 Arbitrary explicit caller masks, nonzero attention dropout, non-BF16 compute,
 CPU, and unsupported head dimensions retain the shared-bias SDPA implementation.
@@ -48,7 +48,7 @@ backward. Block metadata is per batch, not a cache of previous sequence IDs.
 
 CUDA tests cover output/dQ/dK/dV, non-aligned lengths, GQA, padding, document/future
 isolation, changing document boundaries between batches, MoE gradients, checkpoint
-modes 1/2, looped models, strict state-dict loading, and outer `torch.compile`.
+modes 1/2, RecurrsiveInstinct models, strict state-dict loading, and outer `torch.compile`.
 
 ```powershell
 python -m pytest tests/test_packed_attention.py -q

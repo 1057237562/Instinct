@@ -564,12 +564,19 @@ async function selectInstance(uuid){
   if (!uuid) return;
   try {
     await api('/api/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({instance_uuid: uuid})});
+    if(RELAY_MANAGED)window.parent.postMessage({type:'relay-server-changed',uuid},location.origin);
     $('#instSelect').value=uuid;
     if(typeof syncDatasetInstanceChoices==='function')syncDatasetInstanceChoices();
     loadInst(); if(!$('#trainingPanel').hidden)refreshTraining();
     if(typeof renderCodeSyncPlan==='function')renderCodeSyncPlan();
-  } catch(e) { if(typeof syncDatasetInstanceChoices==='function')syncDatasetInstanceChoices();alert('切换实例失败: ' + e.message); }
+  } catch(e) { await loadInstances();alert('切换实例失败: ' + e.message); }
 }
+window.addEventListener('message',event=>{
+  if(!RELAY_MANAGED || event.origin!==location.origin || event.source!==window.parent || event.data?.type!=='monitor-server-changed')return;
+  loadInstances();loadInst();
+  if(!$('#trainingPanel').hidden)refreshTraining();
+  if(typeof renderCodeSyncPlan==='function')renderCodeSyncPlan();
+});
 async function loadInst(){
   try {
     const s = await api('/api/autodl/status');
@@ -743,7 +750,7 @@ async function saveTrainingSettings(){
 }
 
 function renderTrainingCachedModel(cached){
-  const model=cached.model_config, arch={standard:'标准 Transformer',linear:'线性注意力',looped:'循环主干'};
+  const model=cached.model_config, arch={standard:'标准 Transformer',linear:'线性注意力',recurrsive_instinct:'RecurrsiveInstinct'};
   const shown=value=>value==null?'未配置':String(value);
   const moe=Boolean(model.use_moe),rope=model.rope_scaling||{};
   const fields=[
@@ -758,7 +765,7 @@ function renderTrainingCachedModel(cached){
   if(moe)fields.push(['专家数 / 每 token 激活',`${shown(model.num_experts)} / ${shown(model.num_experts_per_tok)}`],
     ['MoE FFN 中间维度',shown(model.moe_intermediate_size)],['Top-k 概率归一化',model.norm_topk_prob?'开启':'关闭'],
     ['路由辅助损失系数',shown(model.router_aux_loss_coef)]);
-  if(model.model_architecture==='looped')fields.push(['Prelude / recurrent / coda',`${shown(model.prelude_layers)} / ${shown(model.recurrent_layers)} / ${shown(model.coda_layers)}`],['循环次数',shown(model.loop_iters)]);
+  if(model.model_architecture==='recurrsive_instinct')fields.push(['Prelude / recurrent / coda',`${shown(model.prelude_layers)} / ${shown(model.recurrent_layers)} / ${shown(model.coda_layers)}`],['循环次数',shown(model.loop_iters)]);
   if(model.model_architecture==='linear')fields.push(['完整注意力间隔',shown(model.full_attention_interval)],['线性 K / V 维度',`${shown(model.linear_key_head_dim)} / ${shown(model.linear_value_head_dim)}`]);
   $('#trainingModelTitle').textContent='缓存模型配置'+(cached.preset?' · '+cached.preset:'');
   const summary=$('#trainingModelSummary');summary.replaceChildren();

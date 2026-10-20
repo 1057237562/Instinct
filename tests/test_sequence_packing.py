@@ -16,7 +16,7 @@ from scripts.data_loader.sequence_bucket import (
     packing_preprocess_workers,
 )
 from model.model_instinct import InstinctConfig, InstinctForCausalLM
-from model.model_instinct_loop import (
+from model.model_recurrsive_instinct import (
     InstinctConfig as LoopConfig, InstinctForCausalLM as LoopForCausalLM,
 )
 from model.sequence_packing import (
@@ -715,7 +715,7 @@ def test_dense_packed_segment_matches_standalone_forward(flash_attn):
     torch.testing.assert_close(packed_logits, standalone_logits, rtol=1e-5, atol=1e-6)
 
 
-def test_looped_packed_segment_matches_standalone_forward():
+def test_recurrsive_instinct_packed_segment_matches_standalone_forward():
     torch.manual_seed(123)
     config = LoopConfig(
         vocab_size=64, hidden_size=32, num_hidden_layers=4,

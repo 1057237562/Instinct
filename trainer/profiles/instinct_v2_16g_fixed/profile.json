@@ -1,0 +1,177 @@
+{
+  "schema": 1,
+  "status": "manual",
+  "trainer": "pretrain",
+  "validation": {
+    "performed": false,
+    "reason": "User requested fixed settings without further search."
+  },
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 5070 Ti",
+    "capability": [
+      12,
+      0
+    ],
+    "vram_bytes": 17066033152,
+    "sm_count": 70,
+    "os": "Windows",
+    "os_release": "11",
+    "cpu": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+    "logical_cpus": 32,
+    "python": "3.12.8",
+    "torch": "2.13.0+cu132",
+    "cuda": "13.2",
+    "driver": "616.56",
+    "triton": "3.4.0.post20",
+    "torchao": "0.18.0",
+    "source": "2c923f2fd7f6eddd41c311d829766a352a0f51e0cb6f40b42c34a4a6ca612103"
+  },
+  "contract": {
+    "model": {
+      "transformers_version": "5.16.1",
+      "architectures": null,
+      "output_hidden_states": false,
+      "return_dict": true,
+      "dtype": null,
+      "chunk_size_feed_forward": 0,
+      "is_encoder_decoder": false,
+      "id2label": {
+        "0": "LABEL_0",
+        "1": "LABEL_1"
+      },
+      "label2id": {
+        "LABEL_0": 0,
+        "LABEL_1": 1
+      },
+      "problem_type": null,
+      "_name_or_path": "",
+      "vocab_size": 6400,
+      "dropout": 0.0,
+      "hidden_act": "silu",
+      "tie_word_embeddings": true,
+      "num_attention_heads": 16,
+      "num_key_value_heads": 4,
+      "max_position_embeddings": 4096,
+      "rope_theta": 1000000.0,
+      "inference_rope_scaling": false,
+      "rms_norm_eps": 1e-06,
+      "flash_attn": true,
+      "intermediate_size": 5504,
+      "residual_type": "standard",
+      "head_dim": 96,
+      "model_architecture": "standard",
+      "param_dtype": "bf16",
+      "kv_cache_dtype": "fp8_e5m2",
+      "hidden_size": 1536,
+      "num_hidden_layers": 32,
+      "use_moe": false,
+      "bos_token_id": 1,
+      "eos_token_id": 2,
+      "pad_token_id": 0,
+      "initializer_range": 0.02,
+      "rope_parameters": null,
+      "early_exit_layers": [
+        4,
+        5,
+        6,
+        7
+      ],
+      "early_exit_loss_weight": 0.3,
+      "num_experts": 4,
+      "num_experts_per_tok": 1,
+      "moe_intermediate_size": 5504,
+      "norm_topk_prob": true,
+      "router_aux_loss_coef": 0.0005,
+      "hc_mult": 4,
+      "hc_sinkhorn_iters": 20,
+      "hc_eps": 1e-06,
+      "mhc_init_std": 0.02,
+      "attnres_variant": "block",
+      "attnres_block_size": 8,
+      "model_type": "instinct",
+      "output_attentions": false
+    },
+    "arguments": {
+      "dtype": "bfloat16",
+      "param_dtype": "bf16",
+      "fp8_training": "tensorwise",
+      "fp8_filter": "auto",
+      "optimizer": "muon",
+      "accumulation_steps": 8,
+      "grad_clip": 1.0,
+      "learning_rate": 0.0005,
+      "epochs": 1,
+      "warmup_steps": 0,
+      "warmup_ratio": 0.0,
+      "min_lr_ratio": 0.1,
+      "sequence_packing": 1,
+      "sequence_packing_mode": "bucket",
+      "seq_bucket": 2,
+      "bucket_max_seq_len": 4096,
+      "bucket_large_threshold": 4096,
+      "packing_batch_size": 1000,
+      "max_seq_len": 2048,
+      "dataset_streaming": "on",
+      "streaming_chunk_mb": 1024,
+      "streaming_prefetch_chunks": 1,
+      "cache_build_mode": "inline",
+      "packing_num_proc": 4,
+      "num_workers": 0,
+      "bucket_loader_workers": 0,
+      "data_cache_max_gb": 5.0,
+      "moe_router_top_k": null,
+      "moe_router_norm_topk_prob": null
+    },
+    "context_env": {
+      "INSTINCT_CAUSAL_ATTENTION_BACKEND": null,
+      "INSTINCT_FLEX_AUTOTUNE": null,
+      "INSTINCT_GROUPED_MM_BACKEND": null,
+      "INSTINCT_MOE_DIRECT_WEIGHTS": null,
+      "INSTINCT_MOE_FUSED_PACK": null,
+      "INSTINCT_MOE_FUSED_ROUTING": null,
+      "INSTINCT_MOE_FUSED_SWIGLU": null,
+      "INSTINCT_MOE_TRANSPOSED_DW": null,
+      "INSTINCT_MUON_BACKEND": null,
+      "INSTINCT_MUON_FUSED_UPDATES": null,
+      "INSTINCT_MUON_MANTISSA": "1",
+      "INSTINCT_MUON_MOMENTUM_DTYPE": "bf16",
+      "INSTINCT_MUON_NS_BACKEND": null,
+      "INSTINCT_PACKED_ATTENTION_BACKEND": null,
+      "PYTORCH_ALLOC_CONF": null,
+      "PYTORCH_CUDA_ALLOC_CONF": null
+    }
+  },
+  "source": {
+    "sha256": "3977600ae7f0b519222669000304b4401e8c10f1f15554ac0c0ba8191912c1f6",
+    "size": 26698602763,
+    "mtime_ns": 1792345357420826600
+  },
+  "settings": {
+    "args": {
+      "bucket_token_budget": 5344,
+      "bucket_gpu_memory_gb": 16.0,
+      "use_grad_checkpoint": 2,
+      "use_compile": 1,
+      "compile_mode": "max-autotune-no-cudagraphs"
+    },
+    "env": {
+      "INSTINCT_MUON_WORKSPACE_MB": "256",
+      "INSTINCT_MUON_BATCH_SIZE": "16"
+    }
+  },
+  "evidence": {
+    "failed_token_budget": 10706,
+    "allocated_gib_at_oom": 13.11,
+    "unallocated_reserved_gib_at_oom": 1.26,
+    "allocator_limit_gib": 14.37,
+    "muon_v2_fastpath": {
+      "source": "2c923f2fd7f6eddd41c311d829766a352a0f51e0cb6f40b42c34a4a6ca612103",
+      "reports": [
+        "experiments/muon_v2_validation.json",
+        "experiments/muon_v2_fp8_compiled_validation.json"
+      ],
+      "scope": "Exact optimizer-state and full-model update parity; isolated optimizer timing. Fixed batch recipe remains manual, not autotune-validated."
+    }
+  },
+  "limitation": "Manual fixed recipe. No measured throughput, memory peak or quality acceptance claim."
+}

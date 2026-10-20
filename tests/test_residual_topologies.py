@@ -23,9 +23,9 @@ from model.model_instinct_linear import (
     InstinctConfig as LinearInstinctConfig,
     InstinctForCausalLM as LinearInstinctForCausalLM,
 )
-from model.model_instinct_loop import (
-    InstinctConfig as LoopedInstinctConfig,
-    InstinctForCausalLM as LoopedInstinctForCausalLM,
+from model.model_recurrsive_instinct import (
+    InstinctConfig as RecurrsiveInstinctConfig,
+    InstinctForCausalLM as RecurrsiveInstinctForCausalLM,
 )
 from trainer.trainer_cli import build_trainer_parser
 from trainer.trainer_utils import (
@@ -85,11 +85,11 @@ def tiny_model(architecture, residual_type, **extra):
             **common, full_attention_interval=2, linear_conv_kernel_dim=2, **extra
         )
         return LinearInstinctForCausalLM(config)
-    config = LoopedInstinctConfig(
+    config = RecurrsiveInstinctConfig(
         **common, prelude_layers=1, recurrent_layers=1, loop_iters=2,
         coda_layers=1, state_init_std=0.0, recurrence_sampling="fixed", **extra
     )
-    return LoopedInstinctForCausalLM(config)
+    return RecurrsiveInstinctForCausalLM(config)
 
 
 def test_standard_residual_keeps_legacy_parameter_graph():
@@ -174,7 +174,7 @@ def test_invalid_residual_config_is_rejected(field, value):
 
 
 @pytest.mark.parametrize(
-    "config_cls", [InstinctConfig, LinearInstinctConfig, LoopedInstinctConfig]
+    "config_cls", [InstinctConfig, LinearInstinctConfig, RecurrsiveInstinctConfig]
 )
 @pytest.mark.parametrize("kv_heads", [16, 3])
 def test_invalid_gqa_head_geometry_is_rejected(config_cls, kv_heads):
@@ -203,7 +203,7 @@ def test_shared_trainer_cli_threads_residual_options(arguments, expected):
     [
         ("standard", InstinctConfig, InstinctForCausalLM),
         ("linear", LinearInstinctConfig, LinearInstinctForCausalLM),
-        ("looped", LoopedInstinctConfig, LoopedInstinctForCausalLM),
+        ("recurrsive_instinct", RecurrsiveInstinctConfig, RecurrsiveInstinctForCausalLM),
     ],
 )
 def test_trainer_dispatches_every_backbone_with_residuals(
@@ -242,7 +242,7 @@ def test_trainer_dispatches_every_backbone_with_residuals(
     [
         ({"model_architecture": "standard", "residual_type": "standard"}, ""),
         ({"model_architecture": "linear", "residual_type": "standard"}, "_linear"),
-        ({"model_architecture": "looped", "residual_type": "mhc"}, "_looped_mhc"),
+        ({"model_architecture": "recurrsive_instinct", "residual_type": "mhc"}, "_recurrsive_instinct_mhc"),
         ({"model_architecture": "standard", "residual_type": "attnres", "attnres_variant": "full"}, "_attnres_full"),
         ({"model_architecture": "linear", "residual_type": "attnres", "attnres_variant": "block", "attnres_block_size": 3}, "_linear_attnres_block3"),
     ],
@@ -257,12 +257,12 @@ def test_standard_weight_discovery_rejects_other_topologies():
     assert matches("pretrain_20260828_120000", "")
     for prefix in (
         "pretrain_20260828_120000_linear",
-        "pretrain_20260828_120000_looped",
+        "pretrain_20260828_120000_recurrsive_instinct",
         "pretrain_20260828_120000_mhc",
-        "pretrain_20260828_120000_looped_attnres_block2",
+        "pretrain_20260828_120000_recurrsive_instinct_attnres_block2",
     ):
         assert not matches(prefix, "")
-    assert matches("pretrain_20260828_120000_looped_mhc", "_looped_mhc")
+    assert matches("pretrain_20260828_120000_recurrsive_instinct_mhc", "_recurrsive_instinct_mhc")
 
 
 def test_dense_trainer_import_does_not_load_linear_backbone():
@@ -327,7 +327,7 @@ def test_attnres_training_compile_uses_dynamic_shapes(script_name):
     assert "'residual_type', 'standard') == 'attnres'" in source
 
 
-@pytest.mark.parametrize("architecture", ["dense", "linear", "looped"])
+@pytest.mark.parametrize("architecture", ["dense", "linear", "recurrsive_instinct"])
 @pytest.mark.parametrize(
     ("residual_type", "extra"),
     [
@@ -346,7 +346,7 @@ def test_resume_rebuilds_checkpoint_topology_before_strict_load(
     model_cls = {
         "standard": InstinctForCausalLM,
         "linear": LinearInstinctForCausalLM,
-        "looped": LoopedInstinctForCausalLM,
+        "recurrsive_instinct": RecurrsiveInstinctForCausalLM,
     }[restored_config.model_architecture]
     restored_model = model_cls(restored_config)
     restored_model.load_state_dict(saved_model.state_dict(), strict=True)
@@ -424,7 +424,7 @@ def test_legacy_distillation_teacher_inherits_saved_topology_only():
     assert restored.hc_mult == 3
 
 
-@pytest.mark.parametrize("architecture", ["dense", "linear", "looped"])
+@pytest.mark.parametrize("architecture", ["dense", "linear", "recurrsive_instinct"])
 @pytest.mark.parametrize(
     ("residual_type", "extra"),
     [
@@ -451,7 +451,7 @@ def test_every_backbone_weight_roundtrip(architecture, residual_type, extra):
     torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.parametrize("architecture", ["linear", "looped"])
+@pytest.mark.parametrize("architecture", ["linear", "recurrsive_instinct"])
 @pytest.mark.parametrize(
     ("residual_type", "extra"),
     [

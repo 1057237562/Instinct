@@ -1,5 +1,7 @@
 """Configuration templates preserve recipes without replaying live actions."""
 
+import json
+
 import pytest
 
 from scripts.config_templates import (
@@ -73,7 +75,7 @@ def test_defaults_seed_once_without_overwriting_custom_templates(tmp_path):
     save_template('custom', {'batch_size': 9}, path=path)
     initialize_default_templates(path)
     templates = load_templates(path)
-    assert len(templates) == 7
+    assert len(templates) == 8
     assert templates['Instinct V1'] == {'batch_size': 7}
     assert templates['custom'] == {'batch_size': 9}
     moe = templates['Instinct V1 MoE']
@@ -83,8 +85,83 @@ def test_defaults_seed_once_without_overwriting_custom_templates(tmp_path):
     assert all(key in moe for key in ('data_path_pretrain', 'learning_rate_pretrain',
                                       'epochs_full_sft', 'pipeline_stages'))
     save_template('Instinct V1 MoE', {'batch_size': 3}, overwrite=True, path=path)
-    delete_template('Instinct V2', path)
+    delete_template('RecurrsiveInstinct', path)
     initialize_default_templates(path)
     templates = load_templates(path)
-    assert 'Instinct V2' not in templates
+    assert 'RecurrsiveInstinct' not in templates
     assert templates['Instinct V1 MoE'] == {'batch_size': 3}
+
+
+def test_legacy_library_receives_v2_without_restoring_deleted_defaults(tmp_path):
+    path = tmp_path / 'templates.json'
+    path.write_text(json.dumps({
+        'version': 1, 'defaults_initialized': True,
+        'templates': {'Instinct V1': {'batch_size': 7}, 'custom': {'batch_size': 9}},
+    }), encoding='utf-8')
+
+    initialize_default_templates(path)
+    templates = load_templates(path)
+    assert set(templates) == {'Instinct V1', 'custom', 'Instinct V2'}
+    assert templates['Instinct V1'] == {'batch_size': 7}
+    assert templates['custom'] == {'batch_size': 9}
+    v2 = templates['Instinct V2']
+    assert (v2['hidden_size'], v2['num_hidden_layers'], v2['intermediate_size']) == (1536, 32, 5504)
+    assert v2['param_dtype'] == 'bf16' and v2['muon_mantissa'] is True
+    assert v2['muon_momentum_dtype'] == 'bf16' and v2['use_grad_checkpoint'] == 2
+    delete_template('Instinct V2', path)
+    initialize_default_templates(path)
+    assert 'Instinct V2' not in load_templates(path)
+
+
+def test_default_updates_preserve_customizations_and_deletions(tmp_path, monkeypatch):
+    from scripts import config_templates
+
+    defaults_path = tmp_path / 'defaults.json'
+    monkeypatch.setattr(config_templates, 'DEFAULT_TEMPLATES_FILE', defaults_path)
+    defaults = {name: {'hidden_size': 512} for name in ('untouched', 'edited', 'deleted')}
+    defaults_path.write_text(json.dumps({'version': 1, 'templates': defaults}), encoding='utf-8')
+    path = tmp_path / 'templates.json'
+    initialize_default_templates(path)
+    save_template('edited', {'hidden_size': 640}, overwrite=True, path=path)
+    delete_template('deleted', path)
+    for config in defaults.values():
+        config['hidden_size'] = 768
+    defaults['new'] = {'hidden_size': 1024}
+    defaults_path.write_text(json.dumps({'version': 1, 'templates': defaults}), encoding='utf-8')
+
+    initialize_default_templates(path)
+    assert load_templates(path) == {
+        'untouched': {'hidden_size': 768}, 'edited': {'hidden_size': 640},
+        'new': {'hidden_size': 1024},
+    }
+    previous = path.read_bytes()
+    initialize_default_templates(path)
+    assert path.read_bytes() == previous
+
+
+def test_catalog_change_reaches_templates_presets_and_relay_without_python_edits(tmp_path, monkeypatch):
+    from scripts import config_templates
+    from data_relay.generate_training_schema import presets as relay_presets
+
+    catalog = json.loads(config_templates.DEFAULT_TEMPLATES_FILE.read_text(encoding='utf-8'))
+    catalog['presets']['Instinct V2']['intermediate_size'] = 5632
+    catalog['presets']['New Dense'] = dict(catalog['presets']['Instinct V2'], num_hidden_layers=16)
+    catalog['templates']['New Dense'] = {'batch_size': 2}
+    catalog['preset_training_keys']['New Dense'] = ['batch_size']
+    path = tmp_path / 'catalog.json'
+    path.write_text(json.dumps(catalog), encoding='utf-8')
+    monkeypatch.setattr(config_templates, 'DEFAULT_TEMPLATES_FILE', path)
+
+    assert config_templates.load_model_presets()['Instinct V2']['intermediate_size'] == 5632
+    templates = config_templates.load_default_templates()
+    assert templates['Instinct V2']['intermediate_size'] == 5632
+    assert templates['New Dense']['num_hidden_layers'] == 16
+    assert templates['New Dense']['batch_size'] == 2
+    initial = config_templates.preset_initial_state('New Dense')
+    assert initial['num_hidden_layers'] == 16 and initial['batch_size'] == 2
+    relay = relay_presets()
+    assert relay['Instinct V2']['intermediate_size'] == 5632
+    assert relay['New Dense']['num_hidden_layers'] == 16
+    assert relay['New Dense']['batch_size'] == 2
+    initialize_default_templates(tmp_path / 'library.json')
+    assert 'New Dense' in load_templates(tmp_path / 'library.json')

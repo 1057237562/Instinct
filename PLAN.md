@@ -667,7 +667,7 @@ git HEAD 与核心源码 hash。结果目录按仓库规则忽略，不上传大
 - 将 causal mask 与 packing segment mask 的合并从每层 attention 中移到模型入口。
 - 将合并结果一次性转换为 attention 计算精度的 `0/-inf` bias，并按 64 元素对齐行存储。
   仅共享布尔 mask 不够：SDPA 仍会逐层转换和保存浮点 bias。
-- Dense/MoE 主干和 Looped 主干的 packed SDPA 路径共享同一只读 bias；不改变普通
+- Dense/MoE 主干和 RecurrsiveInstinct 主干的 packed SDPA 路径共享同一只读 bias；不改变普通
   0/1 mask 接口、非 packed 快路径或 KV-cache 路径，不添加参数或持久化缓存。
 - 验收：packing 隔离、前向/梯度、checkpoint、CUDA eager/compile 存储复用检查通过。
 - RTX 5070 Ti，32 次 compiled SDPA，`4×2928`、16 Q heads / 4 KV heads、head_dim=32、BF16：
@@ -686,7 +686,7 @@ git HEAD 与核心源码 hash。结果目录按仓库规则忽略，不上传大
 - Packed CUDA BF16、无 dropout 的输入默认采用 FlexAttention Triton `BlockMask`；
   每个 batch 构建一次并跨层共享，跳过完全屏蔽的块，K/V 保持紧凑 GQA。
 - 保持文档隔离、因果、padding 和位置语义；显式额外 mask、CPU、其他精度继续使用 SDPA。
-- 输出/梯度、MoE checkpoint 模式 1/2、Looped、连续不同分段的 compiled batch 检查通过。
+- 输出/梯度、MoE checkpoint 模式 1/2、RecurrsiveInstinct、连续不同分段的 compiled batch 检查通过。
 - RTX 5070 Ti 单层合成基准（4×2928、4 等长文档、Q/KV=16/4、D=32）：
   前反向 13.33 → 1.73 ms；不是端到端训练提速承诺。
 - 恢复训练后预热两个桶再比较 tokens/s；可通过

@@ -147,13 +147,13 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(repeated['id'],job['id'])
         self.assertEqual(training.dispatch(dict(self.opts,action='lookup_operation',operation_id=self.request['operation_id']))['job']['id'],job['id'])
 
-    def test_selected_config_is_snapshotted_and_does_not_inherit_looped_cache_flag(self):
+    def test_selected_config_is_snapshotted_and_does_not_inherit_recurrsive_instinct_cache_flag(self):
         self.request.pop('audit_path')
         self.request.pop('identity_reviewed')
-        self.request['args']['use_looped'] = True
+        self.request['args']['use_recurrsive'] = True
         with patch.object(training,'gpu_check'), patch.object(training,'spawn_supervisor',side_effect=lambda root,job,resume:job):
             job=training.start(self.root,self.opts,self.request)
-        self.assertEqual(job['args']['use_looped'],0)
+        self.assertEqual(job['args']['use_recurrsive'],0)
         source=self.root/'trainer/config_instinct_v1_moe.json'
         original=Path(job['config_path']).read_text()
         source.write_text('{}')

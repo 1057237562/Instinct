@@ -30,7 +30,11 @@ function panelControl(field,value,extra=false){
   if(select){
     const choices=field.choices||(field.type==='bool'?[true,false]:[]);
     if(extra){const option=new Option('默认'+(field.default==null?'':`（${field.default}）`),'');input.append(option);}
-    for(const value of choices)input.append(new Option(typeof value==='boolean'?(value?'开启':'关闭'):String(value),String(value)));
+    for(const value of choices){
+      const text=typeof value==='boolean'?(value?'开启':'关闭'):
+        field.key==='model_architecture'&&value==='recurrsive_instinct'?'RecurrsiveInstinct':String(value);
+      input.append(new Option(text,String(value)));
+    }
     if(field.type==='bool'&&(value===0||value===1))value=Boolean(value);
     if(value!==undefined&&!choices.some(v=>String(v)===String(value)))input.append(new Option(String(value),String(value)));
     input.value=value===undefined?'':String(value);

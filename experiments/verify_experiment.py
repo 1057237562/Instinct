@@ -6,10 +6,10 @@ Compares two network structures on the SAME synthetic dataset, starting from
 the SAME pretrained weights (out/pretrain_768.pth, 64M Instinct Dense):
 
   A) Standard Instinct       (InstinctForCausalLM)        — fixed 8-layer pass
-  B) Looped Instinct         (LoopedInstinctForCausalLM)  — dynamic loop + reward-driven exit
+  B) RecurrsiveInstinct         (RecurrsiveInstinctForCausalLM)  — dynamic loop + reward-driven exit
 
 Verified claims (paper §4.2/§4.3):
-  1. Looped model: average loop steps decrease from ~cap towards 1.0 as
+  1. RecurrsiveInstinct model: average loop steps decrease from ~cap towards 1.0 as
      training proceeds (emergent early exit), while total loss converges.
   2. Both structures reach comparable prediction quality on the synthetic set.
   3. The depth-reward term is differentiable: q_head params receive gradient.
@@ -27,7 +27,7 @@ from torch import nn
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model.model_instinct import InstinctConfig, InstinctForCausalLM
-from model.model_looped_instinct import LoopedInstinctConfig, LoopedInstinctForCausalLM
+from model.model_recurrsive_instinct import RecurrsiveInstinctConfig, RecurrsiveInstinctForCausalLM
 
 from transformers import AutoTokenizer
 
@@ -38,7 +38,7 @@ BATCH = 8
 ITERS = 80
 LR = 2e-4
 
-# ── paper §4.1 looped config ──
+# ── paper §4.1 recurrsive_instinct config ──
 CAP = 10
 Q_THRESHOLD = 0.75
 N_SUPERVISION = 5
@@ -89,8 +89,8 @@ def build_standard():
     return model
 
 
-def build_looped():
-    cfg = LoopedInstinctConfig(
+def build_recurrsive_instinct():
+    cfg = RecurrsiveInstinctConfig(
         hidden_size=768, num_hidden_layers=8, vocab_size=6400,
         flash_attn=False, inference_rope_scaling=False,
         loop_encoder_layers=[0, 1],
@@ -100,7 +100,7 @@ def build_looped():
         exit_in_training=True, n_supervision=N_SUPERVISION,
         beta=BETA, depth_reward=DEPTH_REWARD,
     )
-    model = LoopedInstinctForCausalLM(cfg).to(DEVICE)
+    model = RecurrsiveInstinctForCausalLM(cfg).to(DEVICE)
     sd = torch.load("out/pretrain_768.pth", map_location=DEVICE)
     if "model_state_dict" in sd:
         sd = sd["model_state_dict"]
@@ -148,7 +148,7 @@ def train_standard(model, ids, seed, tag):
     return hist
 
 
-def train_looped(model, ids, seed, tag):
+def train_recurrsive_instinct(model, ids, seed, tag):
     rng = random.Random(seed)
     torch.manual_seed(seed); np.random.seed(seed)
     opt = torch.optim.AdamW(model.parameters(), lr=LR)
@@ -196,7 +196,7 @@ def eval_ppl_standard(model, ids, seed):
     return math.exp(total_ll / total_tok)
 
 
-def eval_looped(model, ids, seed):
+def eval_recurrsive_instinct(model, ids, seed):
     """Returns (ppl, avg_steps) under pure inference behavior (dynamic loop)."""
     model.eval()
     rng = random.Random(seed + 999)
@@ -258,7 +258,7 @@ def check_depth_reward_grad(model, ids):
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     print("=" * 70)
-    print("Verification: Standard Instinct vs Looped Instinct")
+    print("Verification: Standard Instinct vs RecurrsiveInstinct")
     print(f"device={DEVICE}, seeds={SEEDS}, iters={ITERS}, lr={LR}, "
           f"cap={CAP}, q_th={Q_THRESHOLD}, n_sup={N_SUPERVISION}, "
           f"beta={BETA}, depth_reward={DEPTH_REWARD}")
@@ -268,9 +268,9 @@ def main():
 
     # ── model size + depth-reward differentiability (paper §4.3) ──
     tmp_std = build_standard()
-    tmp_loop = build_looped()
+    tmp_loop = build_recurrsive_instinct()
     n_std, n_loop = param_count(tmp_std), param_count(tmp_loop)
-    print(f"params: standard={n_std/1e6:.2f}M  looped={n_loop/1e6:.2f}M  "
+    print(f"params: standard={n_std/1e6:.2f}M  recurrsive_instinct={n_loop/1e6:.2f}M  "
           f"(+{(n_loop-n_std)/1e3:.1f}k gate+q_head)")
     print("\n[Depth-Reward Differentiability Check]")
     grad_check = check_depth_reward_grad(tmp_loop, ids)
@@ -286,16 +286,16 @@ def main():
     for seed in SEEDS:
         print(f"\n--- seed {seed} ---")
         std_model = build_standard()
-        looped_model = build_looped()
+        recurrsive_instinct_model = build_recurrsive_instinct()
 
         # paper §4.2 iter-0: steps of the untrained loaded model (baseline)
-        init_steps = eval_initial_steps(looped_model, ids, seed)
-        print(f"  [iter-0 baseline] looped infer steps (untrained) = {init_steps:.2f}")
+        init_steps = eval_initial_steps(recurrsive_instinct_model, ids, seed)
+        print(f"  [iter-0 baseline] recurrsive_instinct infer steps (untrained) = {init_steps:.2f}")
 
         print("[training standard]")
         h_std = train_standard(std_model, ids, seed, "std")
-        print("[training looped  ]")
-        h_loop = train_looped(looped_model, ids, seed, "loop")
+        print("[training recurrsive_instinct  ]")
+        h_loop = train_recurrsive_instinct(recurrsive_instinct_model, ids, seed, "loop")
 
         for k in std_hist:
             std_hist[k].append(h_std[k])
@@ -304,7 +304,7 @@ def main():
 
         # eval (pure inference)
         ppl_std = eval_ppl_standard(std_model, ids, seed)
-        ppl_loop, steps_loop = eval_looped(looped_model, ids, seed)
+        ppl_loop, steps_loop = eval_recurrsive_instinct(recurrsive_instinct_model, ids, seed)
         print(f"  eval: std_ppl={ppl_std:.3f}  loop_ppl={ppl_loop:.3f}  "
               f"loop_infer_steps={steps_loop:.2f}")
         eval_rows.append({
@@ -312,7 +312,7 @@ def main():
             "std_ppl": ppl_std, "loop_ppl": ppl_loop,
             "loop_infer_steps": steps_loop,
         })
-        del std_model, looped_model
+        del std_model, recurrsive_instinct_model
         if DEVICE == "cuda":
             torch.cuda.empty_cache()
 
@@ -360,7 +360,7 @@ def main():
             "n_supervision": N_SUPERVISION, "beta": BETA, "depth_reward": DEPTH_REWARD,
             "seeds": SEEDS,
         },
-        "params": {"standard_M": round(n_std/1e6, 2), "looped_M": round(n_loop/1e6, 2),
+        "params": {"standard_M": round(n_std/1e6, 2), "recurrsive_instinct_M": round(n_loop/1e6, 2),
                    "extra_k": round((n_loop-n_std)/1e3, 1)},
         "grad_check": grad_check,
         "curves": {

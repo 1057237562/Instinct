@@ -85,6 +85,36 @@
           ]
         },
         {
+          "key": "muon_mantissa",
+          "label": "Muon BF16+uint16 补偿权重（需参数 bf16）",
+          "default": false,
+          "type": "bool"
+        },
+        {
+          "key": "muon_momentum_dtype",
+          "label": "Muon 动量存储精度（补偿权重模式）",
+          "default": "fp32",
+          "type": "text",
+          "choices": [
+            "fp32",
+            "bf16"
+          ]
+        },
+        {
+          "key": "muon_batch_size",
+          "label": "Muon 每块矩阵数上限（0 自动）",
+          "default": 0,
+          "type": "int",
+          "min": 0
+        },
+        {
+          "key": "muon_workspace_mb",
+          "label": "Muon 工作区 MiB（0 自动，16矩阵可选272）",
+          "default": 0.0,
+          "type": "float",
+          "min": 0
+        },
+        {
           "key": "kv_cache_dtype",
           "label": "KV Cache 精度",
           "default": "fp32",
@@ -280,7 +310,7 @@
           "choices": [
             "standard",
             "linear",
-            "looped"
+            "recurrsive_instinct"
           ]
         },
         {
@@ -579,7 +609,7 @@
       ]
     },
     {
-      "title": "Linear / Looped 结构",
+      "title": "Linear / RecurrsiveInstinct 结构",
       "fields": [
         {
           "key": "full_attention_interval",
@@ -765,7 +795,7 @@
     }
   ],
   "presets": {
-    "Instinct V2": {
+    "RecurrsiveInstinct": {
       "residual_type": "standard",
       "intermediate_size": 4224,
       "qk_bias": true,
@@ -790,7 +820,7 @@
       "rms_norm_eps": 1e-06,
       "flash_attn": true,
       "use_grad_checkpoint": 2,
-      "model_architecture": "looped",
+      "model_architecture": "recurrsive_instinct",
       "prelude_layers": 2,
       "recurrent_layers": 4,
       "coda_layers": 2,
@@ -802,9 +832,9 @@
       "state_init_std": 0.6324555320336759,
       "embedding_scale": 35.32704346531139,
       "use_input_injection": true,
-      "preset": "Instinct V2"
+      "preset": "RecurrsiveInstinct"
     },
-    "Instinct V2 MoE": {
+    "RecurrsiveInstinct MoE": {
       "residual_type": "standard",
       "intermediate_size": 2432,
       "qk_bias": true,
@@ -833,7 +863,7 @@
       "router_aux_loss_coef": 0.0005,
       "rms_norm_eps": 1e-06,
       "flash_attn": true,
-      "model_architecture": "looped",
+      "model_architecture": "recurrsive_instinct",
       "prelude_layers": 2,
       "recurrent_layers": 4,
       "coda_layers": 2,
@@ -845,9 +875,9 @@
       "state_init_std": 0.6324555320336759,
       "embedding_scale": 27.712812921102035,
       "use_input_injection": true,
-      "preset": "Instinct V2 MoE"
+      "preset": "RecurrsiveInstinct MoE"
     },
-    "Instinct V2 Small": {
+    "RecurrsiveInstinct Small": {
       "residual_type": "standard",
       "intermediate_size": 1664,
       "qk_bias": true,
@@ -876,7 +906,7 @@
       "router_aux_loss_coef": 0.0005,
       "rms_norm_eps": 1e-06,
       "flash_attn": true,
-      "model_architecture": "looped",
+      "model_architecture": "recurrsive_instinct",
       "prelude_layers": 2,
       "recurrent_layers": 4,
       "coda_layers": 2,
@@ -888,7 +918,7 @@
       "state_init_std": 0.6324555320336759,
       "embedding_scale": 22.627416997969522,
       "use_input_injection": true,
-      "preset": "Instinct V2 Small"
+      "preset": "RecurrsiveInstinct Small"
     },
     "Instinct V1": {
       "residual_type": "standard",
@@ -1004,6 +1034,45 @@
       "compile_mode": "max-autotune-no-cudagraphs",
       "preset": "Instinct V1 MoE"
     },
+    "Instinct V2": {
+      "residual_type": "standard",
+      "intermediate_size": 5504,
+      "qk_bias": false,
+      "qk_norm": true,
+      "hidden_size": 1536,
+      "num_hidden_layers": 32,
+      "vocab_size": 6400,
+      "dropout": 0.0,
+      "hidden_act": "silu",
+      "tie_word_embeddings": true,
+      "num_attention_heads": 16,
+      "num_key_value_heads": 4,
+      "max_position_embeddings": 4096,
+      "rope_theta": 1000000.0,
+      "inference_rope_scaling": false,
+      "rope_scaling_type": "none",
+      "use_moe": false,
+      "rms_norm_eps": 1e-06,
+      "flash_attn": true,
+      "use_grad_checkpoint": 2,
+      "param_dtype": "bf16",
+      "model_architecture": "standard",
+      "batch_size": 1,
+      "accumulation_steps": 8,
+      "max_seq_len": 2048,
+      "optimizer": "muon",
+      "activation_dtype": "bfloat16",
+      "muon_mantissa": true,
+      "muon_momentum_dtype": "bf16",
+      "muon_workspace_mb": 128.0,
+      "use_compile": false,
+      "fp8_training": "off",
+      "epochs_pretrain": 1,
+      "learning_rate_pretrain": 0.0003,
+      "warmup_ratio_pretrain": 0.02,
+      "num_workers": 0,
+      "preset": "Instinct V2"
+    },
     "instinct-linear": {
       "residual_type": "standard",
       "intermediate_size": 2432,
@@ -1077,13 +1146,13 @@
       },
       "depth_reward": {
         "key": "depth_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
       "distill_weight": {
         "key": "distill_weight",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
@@ -1105,13 +1174,13 @@
       },
       "depth_gain_reward": {
         "key": "depth_gain_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": 0.0,
         "type": "float"
       },
       "exit_in_training": {
         "key": "exit_in_training",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1,
         "type": "int",
         "choices": [
@@ -1194,13 +1263,13 @@
       },
       "depth_reward": {
         "key": "depth_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
       "distill_weight": {
         "key": "distill_weight",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
@@ -1222,13 +1291,13 @@
       },
       "depth_gain_reward": {
         "key": "depth_gain_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": 0.0,
         "type": "float"
       },
       "exit_in_training": {
         "key": "exit_in_training",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1,
         "type": "int",
         "choices": [
@@ -1311,13 +1380,13 @@
       },
       "depth_reward": {
         "key": "depth_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
       "distill_weight": {
         "key": "distill_weight",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
@@ -1339,13 +1408,13 @@
       },
       "depth_gain_reward": {
         "key": "depth_gain_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": 0.0,
         "type": "float"
       },
       "exit_in_training": {
         "key": "exit_in_training",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1,
         "type": "int",
         "choices": [
@@ -1428,13 +1497,13 @@
       },
       "depth_reward": {
         "key": "depth_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
       "distill_weight": {
         "key": "distill_weight",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
@@ -1456,13 +1525,13 @@
       },
       "depth_gain_reward": {
         "key": "depth_gain_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": 0.0,
         "type": "float"
       },
       "exit_in_training": {
         "key": "exit_in_training",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1,
         "type": "int",
         "choices": [
@@ -1545,13 +1614,13 @@
       },
       "depth_reward": {
         "key": "depth_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
       "distill_weight": {
         "key": "distill_weight",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
@@ -1573,13 +1642,13 @@
       },
       "depth_gain_reward": {
         "key": "depth_gain_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": 0.0,
         "type": "float"
       },
       "exit_in_training": {
         "key": "exit_in_training",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1,
         "type": "int",
         "choices": [
@@ -1668,13 +1737,13 @@
       },
       "depth_reward": {
         "key": "depth_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
       "distill_weight": {
         "key": "distill_weight",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
@@ -1696,13 +1765,13 @@
       },
       "depth_gain_reward": {
         "key": "depth_gain_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": 0.0,
         "type": "float"
       },
       "exit_in_training": {
         "key": "exit_in_training",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1,
         "type": "int",
         "choices": [
@@ -1903,13 +1972,13 @@
       },
       "depth_reward": {
         "key": "depth_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
       "distill_weight": {
         "key": "distill_weight",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
@@ -1931,13 +2000,13 @@
       },
       "depth_gain_reward": {
         "key": "depth_gain_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": 0.0,
         "type": "float"
       },
       "exit_in_training": {
         "key": "exit_in_training",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1,
         "type": "int",
         "choices": [
@@ -2112,13 +2181,13 @@
       },
       "depth_reward": {
         "key": "depth_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
       "distill_weight": {
         "key": "distill_weight",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
@@ -2140,13 +2209,13 @@
       },
       "depth_gain_reward": {
         "key": "depth_gain_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": 0.0,
         "type": "float"
       },
       "exit_in_training": {
         "key": "exit_in_training",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1,
         "type": "int",
         "choices": [
@@ -2327,13 +2396,13 @@
       },
       "depth_reward": {
         "key": "depth_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
       "distill_weight": {
         "key": "distill_weight",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1.0,
         "type": "float"
       },
@@ -2355,13 +2424,13 @@
       },
       "depth_gain_reward": {
         "key": "depth_gain_reward",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": 0.0,
         "type": "float"
       },
       "exit_in_training": {
         "key": "exit_in_training",
-        "label": "已弃用的LoopUS参数；Instinct V2忽略",
+        "label": "已弃用的LoopUS参数；RecurrsiveInstinct忽略",
         "default": -1,
         "type": "int",
         "choices": [

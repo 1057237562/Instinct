@@ -5,7 +5,7 @@ Architecture-level and inference-level survey, mapped onto **Project Instinct**
 SM120 · Triton 3.4). Model under study: **Instinct V1 MoE** (678.7 M total /
 106.2 M active params, hidden 512, 32 layers, 16 Q / 4 KV GQA, head_dim 32,
 8 experts top-1, vocab 6400, max_pos 32768). A 152.4 M dense variant and an
-Instinct V2 latent-recurrent (looped) variant also ship in the repo.
+RecurrsiveInstinct latent-recurrent variant also ship in the repo.
 
 ## Classification legend
 
@@ -22,7 +22,7 @@ Instinct V2 latent-recurrent (looped) variant also ship in the repo.
 - Triton device-offset grouped MoE GEMM — `docs/grouped_moe_gemm.md`
 - Preallocated static KV cache + CUDA-graph decode capture
 - FP8 KV-cache config (`--kv_cache_dtype`) and TorchAO FP8 training (`--fp8_training`)
-- Early exit (`--early_exit`), V2 looped test-time compute (`--num_steps`)
+- Early exit (`--early_exit`), RecurrsiveInstinct test-time compute (`--num_steps`)
 - Sequence packing (fixed + adaptive Bucket), selective gradient checkpointing
 
 ---
@@ -74,7 +74,7 @@ a v2.
 ## (c) Linear / SSM / hybrid attention
 
 Most relevant if Instinct trains a new backbone — the repo already ships
-`model_instinct_linear.py` and the V2 looped core.
+`model_instinct_linear.py` and the RecurrsiveInstinct core.
 
 | Technique | Venue / Year | Mechanism | Reported savings | Code | Class |
 |---|---|---|---|---|---|
@@ -161,10 +161,10 @@ per-expert quantization; attention/norm layers stay higher precision.
 | **LayerSkip** | ACL 2024 | Layer dropout + early-exit loss + self-speculative decode | 2.16× CNN/DM; 1.82× coding; 2.0× TOPv2 | `facebookresearch/LayerSkip` | F |
 | **CALM** | NeurIPS 2022 | Confidence-based early exit with calibration | 2–3× compute | GitHub | I/F |
 | **Mixture-of-Depths** | arXiv 2404.02258 (2024) | Router skips layers per token | Up to ~50% FLOPs at parity | GitHub | R/F |
-| **Latent recurrent scaling** | arXiv 2502.05171 (2025) | Add test-time compute via recurrent depth | ✅ Instinct V2 `--num_steps` | — | R |
+| **Latent recurrent scaling** | arXiv 2502.05171 (2025) | Add test-time compute via recurrent depth | ✅ RecurrsiveInstinct `--num_steps` | — | R |
 
 **For Instinct.** Both directions are already covered (early exit for *less*
-compute, V2 looped for *more*). LayerSkip is the natural upgrade if you want
+compute, RecurrsiveInstinct for *more*). LayerSkip is the natural upgrade if you want
 trainable early exits with self-speculation.
 
 ---

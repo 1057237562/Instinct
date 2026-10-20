@@ -26,6 +26,15 @@ docs/           # Design docs: training_pipeline.md, compact_dataset_cache.md, g
 
 ## Essential commands
 
+### Implementation selection: multithreaded Rust by default
+
+- Default to **multithreaded Rust** when selecting or building tools for CPU/I/O-intensive work, especially dataset collection, cleaning, merging, global shuffling, deduplication, format conversion, hashing, and large-file processing.
+- **Inspect and reuse existing repository tools first.** Do not create duplicate Python scripts or wrappers for capabilities already provided by a Rust tool. In particular, JSONL-to-Parquet compilation, inspection, and verification must use the existing `dataset_compiler` CLI directly, with its supported thread controls; do not implement another Python conversion pipeline.
+- Do not choose a single-threaded Python implementation merely because a reusable script already exists. Inspect the data size and bottleneck before launching a large job, and use bounded-memory Rust workers with an appropriate thread count.
+- Verify actual parallelism in the hot path using active worker CPU time and throughput. A `--threads N` flag or an N-thread pool alone does not establish end-to-end parallel execution; identify serial compression/writing stages and report their limits accurately.
+- Python may orchestrate native tools or provide interfaces that require Python. Keep existing pure-PyTorch model/training algorithms in their established stack; move standalone data-processing hot paths into multithreaded Rust.
+- Preserve complete records and metadata, make random seeds reproducible, validate row/token conservation and file integrity, and retain progress logs. When replacing a slow running implementation, reuse validated intermediate files where possible.
+
 ### Training (all run from repo root)
 ```bash
 # Single GPU
@@ -359,12 +368,16 @@ cargo clippy
 
 ## Architecture and config
 
+- **Model configuration updates must reach Config WebUI.** `scripts/config_template_defaults.json` is the single catalog for built-in model presets and training recipes: `presets` holds model parameters, `defaults` holds shared recipe fields, `templates` holds per-model overrides, and `preset_training_keys` selects training fields applied during named-preset initialization. Config WebUI and the relay share the CPU-only loaders in `scripts/config_templates.py`; do not reintroduce model dictionaries or model-name-specific training branches in Python. When adding/changing a model, update the catalog and matching `trainer/config_*.json` / CLI launcher together. A standalone JSON or launcher is insufficient: the model must appear in **配置模板 → 已保存模板**, and loading it must apply the intended topology, precision, optimizer, checkpointing and batch settings. Account for CLI defaults that override model JSON fields.
+- **Migrate existing template libraries.** New shipped templates must be added to already initialized `trainer/webui_templates.json` libraries on reload. Use default fingerprints to refresh only unchanged shipped templates; preserve custom templates, manual edits and intentional deletions. Do not reset the active `trainer/webui_state.json` or replace a user's saved recipe to expose a new model.
+- **Verify all configuration surfaces.** Check the UI parameter count against the model, JSON/preset/template parity, template migration, and an actual Streamlit AppTest load plus generated-command check. Regenerate the relay schema with `python data_relay/generate_training_schema.py` and verify it with `--check` after changing presets or trainer arguments. Report where to select the model in Config WebUI; distinguish estimated memory from GPU measurements.
+- **Instinct V2 Dense**: 32 layers, hidden=1536, FFN=5504, 16 Q heads / 4 KV heads, head_dim=96, tied embeddings, vocab=6400; 1,010,277,888 total / active parameters. Native context 4096, RoPE theta=1e6, no inference scaling. `trainer/config_instinct_v2.json` and Config WebUI template **Instinct V2**. Local 16 GiB starting recipe: BF16 parameters/compute, Muon mantissa compensation with BF16 momentum, 128 MiB workspace, full-layer checkpointing (2), sequence length 2048, batch 1, accumulation 8, compile/FP8 off. Full GPU training memory/throughput is not yet measured.
 - **Instinct V1 Dense**: 20 layers, hidden=768, FFN intermediate size 2432, 8 q-heads / 4 kv-heads, head_dim=96, tied embeddings; 152,406,528 total / active parameters (about 152.4M). Verified against `checkpoints/pretrain_20260912_180004_768.json`, used by the `instinct-v1-0914` evaluation. Vocab 6400, max_pos 32768, SwiGLU, RMSNorm, RoPE θ=1e6.
 - **Dense legacy/default config**: 8 layers, hidden=768, 8 q-heads / 4 kv-heads. This is the old `instinct-3` / constructor default, NOT the trained Instinct V1 Dense configuration. Historical 8-layer experiment reports describe their own baselines.
 - **InstinctV1Moe**: hidden=512, 32 layers, 16 q-heads / 4 kv-heads, 8 experts, top-2 routing with `norm_topk_prob=true`, MoE intermediate size 1664 (678,726,144 total / 187,992,576 active parameters; see `trainer/config_instinct_v1_moe.json`). Historical top-1 checkpoints and MFU experiments have 106,203,648 active parameters; use their saved routing configuration when loading or comparing them.
 - Config in `model/model_instinct.py` → `InstinctConfig`. Defaults: `hidden_size=768`, `num_hidden_layers=8`, `use_moe=False`
 - **V1 comparison context**: the user reports that V1 MoE was trained on a 34GB dataset, while V1 Dense used two mini datasets for pretraining and SFT. File size does not establish consumed token count or code-token coverage. Compare checkpoint configs and actual training/evaluation records; do not infer that MoE saw less total data, or equate its 678.7M total parameters with dense per-token capacity (V1 Dense: 152.4M active; V1 MoE: 106.2M active).
-- **Alternate topologies**: `model/model_instinct_loop.py` (looped) and `model/model_instinct_linear.py` (linear attention). Run trainers through the wrappers `python run_loop.py trainer/train_x.py` / `python run_linear.py trainer/train_x.py`, which swap `sys.modules["model.model_instinct"]` — don't edit `model_instinct.py` to switch topology
+- **Alternate topologies**: `model/model_recurrsive_instinct.py` (RecurrsiveInstinct) and `model/model_instinct_linear.py` (linear attention). Run trainers through the wrappers `python run_recurrsive.py trainer/train_x.py` / `python run_linear.py trainer/train_x.py`, which swap `sys.modules["model.model_instinct"]` — don't edit `model_instinct.py` to switch topology
 - Aligned to Qwen3 ecosystem — compatible with `transformers`, `llama.cpp`, `vllm`, `ollama`
 
 ## Training pipeline (must respect order)
@@ -407,6 +420,8 @@ Nearby smaller batches still compete on throughput, and nonmonotonic evidence
 disables pruning. There is no required or hardcoded throughput target.
 Production accepts `--autotune_profile PATH`; explicit
 conflicts or changed fingerprints fail, and resume retains its saved batch cursor.
+Search is bounded by trial count only, with no total or per-trial timeouts;
+manual cancellation still stops the owned process tree.
 Current scope is single-GPU standard Dense/MoE from-scratch bucket-streaming
 pretraining; not SFT/RL/DDP. See `docs/training_autotune.md` for budgets, supported
 search axes and cache behavior. Tests: `python -m pytest tests/test_autotune.py`.

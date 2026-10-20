@@ -1,6 +1,6 @@
 # Instinct
 
-从零训练小型语言模型,同一套纯 PyTorch 代码覆盖 Dense、MoE 与 Instinct V2 latent
+从零训练小型语言模型,同一套纯 PyTorch 代码覆盖 Dense、MoE 与 RecurrsiveInstinct latent
 recurrent-depth 三种架构。当前仓库配置已在单张 RTX 5070 Ti 16GB、Windows 11 环境
 完成预训练、SFT、断点续训与推理验证。
 
@@ -13,8 +13,8 @@ recurrent-depth 三种架构。当前仓库配置已在单张 RTX 5070 Ti 16GB�
 - **单卡训练**: V1 MoE 当前 top-2 配置为 678.7M 总参数 / 188.0M 激活参数（hidden 512, 32 层）；历史 top-1 配置为 106.2M 激活参数
 - **纯原生实现**: 无第三方训练框架抽象,从零手写 Transformer、LoRA、RL 算法
 - **完整训练链路**: 预训练 → CPT → SFT → LoRA → DPO → PPO / GRPO / CISPO → Agentic RL → 蒸馏
-- **多架构**: Dense、MoE 与 Instinct V2 recurrent depth；V1 MoE 为 8 experts / top-2 路由，开启 top-k 概率归一化
-- **Instinct V2 循环深度**: Prelude / latent recurrent core / Coda，在测试时用 `num_steps` 扩展隐空间推理计算
+- **多架构**: Dense、MoE 与 RecurrsiveInstinct recurrent depth；V1 MoE 为 8 experts / top-2 路由，开启 top-k 概率归一化
+- **RecurrsiveInstinct 循环深度**: Prelude / latent recurrent core / Coda，在测试时用 `num_steps` 扩展隐空间推理计算
 - **推理快路径**: 静态 KV cache + 解码步 CUDA graph + 融合 RMSNorm/SwiGLU 内核；MoE 分组 GEMM 按平台自动选择 native / triton / cached 后端
 - **自适应 Sequence Buckets**: 实验性按长度分桶 packing，使用 wall-time DP、显存感知 batch、确定性混排与持久化编译缓存降低 padding 和训练耗时
 - **双格式语料**: JSONL 与 Parquet 均可直接训练,配套 Rust 编译器(约 3 倍体积缩减),流式分块跨格式精确对齐
@@ -174,8 +174,8 @@ python eval_llm.py --weight full_sft --early_exit 1
 # 逐层 Top-k 预测(logit lens)
 python eval_llm.py --load_from ./instinct-3 --logit_lens 1
 
-# Instinct V2 循环深度:增加隐空间推理计算
-python eval_llm.py --model_architecture looped --num_steps 32
+# RecurrsiveInstinct 循环深度:增加隐空间推理计算
+python eval_llm.py --model_architecture recurrsive_instinct --num_steps 32
 ```
 
 推理默认走 `--inference_compile auto` 档(融合内核 + 静态 KV cache + 解码 CUDA graph),
@@ -372,7 +372,7 @@ packing/流式加载、自动调优设置及流水线快照。选择模板后点
 | `--use_compile 0\|1` | 启用 `torch.compile`；编译产物默认持久化在 `./.cache/torch_compile/` |
 | `--compile_mode` | `default` / `reduce-overhead` / `max-autotune` / `max-autotune-no-cudagraphs` |
 | `--use_moe 1` | 启用 MoE 架构 |
-| `--use_looped 1` | 启用 Instinct V2 latent recurrent-depth 架构 |
+| `--use_recurrsive 1` | 启用 RecurrsiveInstinct latent recurrent-depth 架构 |
 | `--loop_iters` / `--mean_backprop_depth` | 目标平均递归次数 / 保留梯度的最后递归次数 |
 | `--use_grad_checkpoint 0\|1\|2` | 梯度检查点(0=关闭, 1=选择性重算注意力QKᵀ/FFN, 2=整层checkpoint) |
 | `--hidden_size` / `--num_hidden_layers` | 模型宽度 / 深度 |
@@ -387,7 +387,7 @@ packing/流式加载、自动调优设置及流水线快照。选择模板后点
 ## 项目结构
 
 ```text
-model/                # InstinctConfig / InstinctForCausalLM / LoRA / looped / linear 架构
+model/                # InstinctConfig / InstinctForCausalLM / LoRA / RecurrsiveInstinct / linear 架构
                       #   + 推理运行时(inference_runtime, static_cache, grouped_mm, kv_cache_quant) + tokenizer 文件
 trainer/              # 全部训练脚本(pretrain, SFT, LoRA, DPO, PPO, GRPO, Agent RL, KD, tokenizer)
                       #   + trainer_cli.py 共享 CLI / training_pipeline.py 流水线 / training_profiler.py
@@ -415,17 +415,17 @@ experiments/          # 性能/研究实验脚本(lambda sweep、分组 GEMM 基
 | 配置文件 | 架构 | 关键参数 |
 |----------|------|----------|
 | `config_pretrain.json` / `config_instinct_v1_moe.json` | Instinct V1 MoE | hidden 512、32 层、8 个 FFN=1664 专家 top-2 路由、norm_topk_prob=True、16Q/4KV GQA(head_dim 32)、RoPE θ=1e6 + LongRoPE factor 8.0(原始 4096)、max_position 32768、tied embeddings |
-| `config_full_sft.json`(= `config_instinct_v2.json` / `config_dpo.json`) | Instinct V2 looped | hidden 1248、物理层 (Prelude 2 / Core 4 / Coda 2)、13Q/13KV MHA(head_dim 96)、FFN 4224、`loop_iters 32`、`mean_backprop_depth 8`、RoPE θ=5e4 |
+| `config_full_sft.json`(= `config_recurrsive_instinct.json` / `config_dpo.json`) | RecurrsiveInstinct | hidden 1248、物理层 (Prelude 2 / Core 4 / Coda 2)、13Q/13KV MHA(head_dim 96)、FFN 4224、`loop_iters 32`、`mean_backprop_depth 8`、RoPE θ=5e4 |
 
 | 模型 | 参数量 | 说明 |
 |------|--------|------|
 | Instinct V1 | 152.4M | Dense，dim 768，20 层，8Q/4KV GQA；见 [architecture-v1.html](architecture-v1.html) |
 | Instinct V1 MoE | 678.7M-A188.0M | deep-thin：hidden 512、32 层、16Q/4KV、8 个 FFN=1664 专家，top-2，开启归一化；[历史 top-1 结构图](architecture-v1-moe.html) |
-| Instinct V2 | 187.5M | latent recurrent depth，物理层 `(2,4,2)`，平均有效深度 132；见 [architecture.html](architecture.html) |
+| RecurrsiveInstinct | 187.5M | latent recurrent depth，物理层 `(2,4,2)`，平均有效深度 132；见 [architecture.html](architecture.html) |
 
 Instinct V1 Dense 的总参数和每 token 激活参数均为 152,406,528（约 152.4M）；V1 MoE 当前 top-2 配置为 678,726,144 总参数 / 187,992,576 激活参数，历史 top-1 配置为 106,203,648 激活参数。V1 Dense 使用 20 层、hidden=768、FFN=2432，不能与 `InstinctConfig` 默认的 8 层旧版 `instinct-3` 混淆；加载和评测应以权重对应的配置为准。按训练者提供的信息，V1 MoE 使用了 34GB 数据集，V1 Dense 则使用两个 mini 数据集分别进行预训练和 SFT；文件大小不等于实际训练 token 数或代码数据量。
 
-Instinct V2 参考 [Scaling up Test-Time Compute with Latent Reasoning](https://arxiv.org/abs/2502.05171)：Prelude 将 token 映射到隐空间，共享的多层 recurrent core 每轮通过 `Linear([state; input])` 重新注入输入，Coda 解码最终状态。训练时递归次数使用 log-normal Poisson 采样，并只对最后 `k` 轮反传；推理可用 `eval_llm.py --model_architecture looped --num_steps 32` 增加隐空间计算。200M 级 V2 默认为 187,521,984 参数：`hidden=1248`、13 个 96 维 MHA heads、`FFN=4224`、物理层 `(Prelude, Core, Coda)=(2,4,2)`，平均递归 32 次（平均有效深度 132），只对最后 8 次递归保留梯度。另有 linear attention 主干(`model/model_instinct_linear.py`,经 `run_linear.py` 包装训练)。
+RecurrsiveInstinct 参考 [Scaling up Test-Time Compute with Latent Reasoning](https://arxiv.org/abs/2502.05171)：Prelude 将 token 映射到隐空间，共享的多层 recurrent core 每轮通过 `Linear([state; input])` 重新注入输入，Coda 解码最终状态。训练时递归次数使用 log-normal Poisson 采样，并只对最后 `k` 轮反传；推理可用 `eval_llm.py --model_architecture recurrsive_instinct --num_steps 32` 增加隐空间计算。200M 级 RecurrsiveInstinct 默认为 187,521,984 参数：`hidden=1248`、13 个 96 维 MHA heads、`FFN=4224`、物理层 `(Prelude, Core, Coda)=(2,4,2)`，平均递归 32 次（平均有效深度 132），只对最后 8 次递归保留梯度。另有 linear attention 主干(`model/model_instinct_linear.py`,经 `run_linear.py` 包装训练)。
 
 ---
 

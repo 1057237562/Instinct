@@ -27,6 +27,13 @@ def test_snapshot_preserves_training_arguments_and_isolates_output(tmp_path):
     assert 'search' not in spec
 
 
+def test_snapshot_does_not_require_or_invent_reports(tmp_path):
+    spec = panel.make_spec(['--from_weight', 'none', '--data_path', 'data.parquet'],
+                           tmp_path / 'model.json')
+    assert spec['args']['data_path'] == 'data.parquet'
+    assert 'audit' not in spec and 'provenance' not in spec
+
+
 @pytest.mark.parametrize('from_weight,resume', [('out/pretrain.pth', '0'), ('none', '1')])
 def test_no_existing_weight_calibration(from_weight, resume):
     with pytest.raises(ValueError):
@@ -40,6 +47,41 @@ def test_optional_target_is_not_a_machine_default():
     assert '--max-trials' in command
     assert '--target-tokens-per-second' in panel.tuning_command('s', 'o', {'autotune_target_tokens_per_second': 25081})
     assert '--plan-only' in panel.tuning_command('s', 'o', {}, plan_only=True)
+
+
+def test_webui_removes_saved_deadlines_and_launches_plan_without_time_limits(tmp_path):
+    from streamlit.testing.v1 import AppTest
+
+    def app():
+        import streamlit as st
+        from scripts.autotune_panel import render
+        render(st, {}, lambda *a: {}, False)
+
+    old_state = dict(autotune_time_limit=1, autotune_trial_timeout=1, autotune_baseline_timeout=1)
+    view = AppTest.from_function(app)
+    for key, value in old_state.items():
+        view.session_state[key] = value
+    view.run()
+    assert not view.exception
+    assert not any(item.key in old_state for item in view.number_input)
+    assert all(key not in view.session_state for key in old_state)
+    view.number_input(key='autotune_max_trials').set_value(12).run()
+    assert not view.exception
+    assert any('--max-trials 12' in item.value for item in view.code)
+    assert all('--time-limit' not in item.value and '-timeout' not in item.value for item in view.code)
+    spec = tmp_path / 'spec.json'
+    panel.write_json(spec, {'args': {'from_weight': 'none', 'sequence_packing': 1,
+                                   'sequence_packing_mode': 'bucket'}})
+    state = dict(old_state, autotune_max_trials=view.session_state['autotune_max_trials'])
+    command = panel.tuning_command(spec, tmp_path, state, plan_only=True)
+    assert not {'--time-limit', '--trial-timeout', '--baseline-timeout'}.intersection(command)
+    result = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True,
+                            encoding='utf-8', timeout=20, env=dict(os.environ, PYTHONUTF8='1'))
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    assert plan['max_trials'] == 12
+    assert plan['time_limit_seconds'] is None
+    assert plan['saves_formal_weights'] is False
 
 
 def test_profile_removes_performance_conflicts_preserves_math(tmp_path, monkeypatch):
@@ -71,6 +113,39 @@ def test_unvalidated_and_other_trainer_profiles_rejected(tmp_path):
         panel.profile_command([], profile, 'pretrain', {})
     with pytest.raises(ValueError, match='预训练'):
         panel.profile_command([], profile, 'full_sft', {})
+
+
+def test_manual_profile_loads_without_fabricated_measurements(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    from trainer import autotune_config
+
+    monkeypatch.setattr(autotune_config, 'source_fingerprint', lambda: 'current')
+    profile = tmp_path / 'manual' / 'profile.json'
+    profile.parent.mkdir()
+    panel.write_json(profile, dict(schema=1, status='manual', hardware={'source': 'current'},
+        validation={'performed': False}, settings={
+            'args': {'bucket_token_budget': 5344},
+            'env': {'INSTINCT_MUON_WORKSPACE_MB': '256', 'INSTINCT_MUON_BATCH_SIZE': '16'},
+        }))
+    command = panel.profile_command(['python', 'train_pretrain.py',
+        '--muon_workspace_mb', '256', '--muon_batch_size', '16'], profile, 'pretrain', {})
+    assert '--muon_workspace_mb' not in command and '--muon_batch_size' not in command
+    assert command[-2:] == ['--autotune_profile', str(profile)]
+
+    def app():
+        import streamlit as st
+        from scripts.autotune_panel import render
+        render(st, {}, lambda *a: {}, False)
+
+    view = AppTest.from_function(app)
+    view.session_state['autotune_output'] = str(tmp_path / 'other_cache')
+    view.session_state['autotune_profile_path'] = str(profile)
+    view.session_state['autotune_use_profile'] = True
+    view.run()
+    assert not view.exception
+    assert any('手动固定配置' in item.value for item in view.info)
+    assert not view.error
+    assert not any('tokens/s' in item.label for item in view.metric)
 
 
 def test_pipeline_keeps_pretrain_profile_without_leaking_into_sft(tmp_path, monkeypatch):
@@ -121,6 +196,89 @@ def test_pid_reuse_is_not_recovered_as_owned_job(tmp_path, monkeypatch):
     monkeypatch.setattr(psutil, 'Process', lambda pid: SimpleNamespace(create_time=lambda: 2., cmdline=lambda: ['autotune_webui_worker.py']))
     assert panel.run_status(tmp_path)['status'] == 'interrupted'
     assert not panel.active({'autotune_run_dir': str(tmp_path)})
+
+
+def test_trial_log_follows_last_launch_including_paths_with_spaces(tmp_path):
+    probe = tmp_path / 'probe' / 'trial.log'
+    trial = tmp_path / 'cache with spaces' / 'candidate' / 'trial.log'
+    controller = (f'[Autotune] first-probe: {{}}; log={probe}\r\n'
+                  '[Autotune] probe, useful tokens/s=None\r\n'
+                  f'[Autotune] candidate: {{}}; log={trial}\r\n')
+    assert panel.current_trial_log(controller) == trial
+    assert panel.current_trial_log('waiting for environment\n') is None
+
+
+def test_log_tail_is_bounded_and_preserves_recent_unicode(tmp_path):
+    log = tmp_path / 'trial.log'
+    log.write_text('old line\n' * 10000 + '编译完成\n', encoding='utf-8')
+    tail = panel.read_log_tail(log, limit=128)
+    assert len(tail.encode('utf-8')) <= 128
+    assert tail.splitlines()[-1] == '编译完成'
+    assert '\ufffd' not in tail
+
+
+def test_trial_log_contents_follow_running_job_and_candidate_changes(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    def app():
+        import streamlit as st
+        from scripts.autotune_panel import render
+        render(st, {}, lambda *a: {}, False)
+
+    monkeypatch.setattr(panel, 'run_status', lambda run_dir:
+                        {'status': 'running'} if run_dir else {})
+    run_dir = tmp_path / 'run'
+    run_dir.mkdir()
+    probe = tmp_path / 'probe' / 'trial.log'
+    probe.parent.mkdir()
+    probe.write_text('old probe contents\n', encoding='utf-8')
+    trial = tmp_path / 'candidate one' / 'trial.log'
+    trial.parent.mkdir()
+    trial.write_text('SingleProcess AUTOTUNE benchmarking\n', encoding='utf-8')
+    panel.write_json(trial.parent / 'result.json', {'status': 'running'})
+    panel.write_json(trial.parent / 'memory.json', {
+        'trial_peak_reserved_gib': 9., 'samples': [{
+            'phase': 'initial_validation_after_cache_release',
+            'allocated_gib': 2., 'reserved_gib': 3., 'unallocated_reserved_gib': 1.,
+            'inactive_split_gib': .25, 'released_reserved_gib': 5.,
+        }],
+    })
+    controller = run_dir / 'controller.log'
+    controller.write_text(f'[Autotune] probe: {{}}; log={probe}\n'
+                          f'[Autotune] candidate: {{}}; log={trial}\n', encoding='utf-8')
+    view = AppTest.from_function(app)
+    view.session_state['autotune_run_dir'] = str(run_dir)
+    view.session_state['autotune_output'] = str(tmp_path)
+    view.run()
+    assert not view.exception
+    assert any('SingleProcess AUTOTUNE' in item.value for item in view.code)
+    assert all('old probe contents' not in item.value for item in view.code)
+    assert any('每 2 秒自动刷新' in item.value for item in view.caption)
+    assert next(item for item in view.metric if item.label == '实际分配').value == '2.00 GiB'
+    assert next(item for item in view.metric if item.label == '全程预留峰值').value == '9.00 GiB'
+    assert view.button(key='btn_autotune_stop')
+
+    trial.write_text('Epoch:[1/1](20/60), loss: 2.1\n', encoding='utf-8')
+    view.button(key='btn_autotune_progress').click().run()
+    assert not view.exception
+    assert any('Epoch:[1/1](20/60)' in item.value for item in view.code)
+
+    next_trial = tmp_path / 'candidate two' / 'trial.log'
+    next_trial.parent.mkdir()
+    # The controller announces a candidate before its log file is created.
+    with controller.open('a', encoding='utf-8') as handle:
+        handle.write(f'[Autotune] next: {{}}; log={next_trial}\n')
+    view.run()
+    assert not view.exception
+    assert any('等待子进程写入日志' in item.value for item in view.info)
+    assert all('Epoch:[1/1](20/60)' not in item.value for item in view.code)
+    next_trial.write_text('Traceback: simulated failure\n', encoding='utf-8')
+    panel.write_json(next_trial.parent / 'result.json',
+                     {'status': 'process_error', 'error': 'simulated failure'})
+    view.run()
+    assert not view.exception
+    assert any('Traceback: simulated failure' in item.value for item in view.code)
+    assert any('simulated failure' in item.value for item in view.error)
 
 
 def test_supervisor_runs_and_records_success_without_training(tmp_path):

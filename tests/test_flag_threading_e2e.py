@@ -44,7 +44,7 @@ def make_args(**kw):
         hidden_size=64,
         num_hidden_layers=2,
         use_moe=0,
-        use_looped=0,
+        use_recurrsive=0,
         config_path="",
     )
     base.update(kw)

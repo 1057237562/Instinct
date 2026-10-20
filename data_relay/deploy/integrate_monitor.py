@@ -10,9 +10,9 @@ if 'createRelayProxy' not in code:
     anchor="const app = express();"
     code=code.replace(anchor,"const { createRelayProxy, isPull } = require('./src/relay-proxy.cjs');\n"+anchor,1)
     anchor='// 其余请求才解析请求体。'
-    block="""// Instinct relay shares the existing admin session and CSRF guard.
+    block=r"""// Instinct relay shares the existing admin session and CSRF guard.
 const relayProxy = createRelayProxy();
-app.get('/relay', (req,res)=>res.redirect(308,'/relay/'));
+app.get(/^\/relay$/, (req,res)=>res.redirect(308,'/relay/'));
 app.use('/relay', csrfOriginGuard, (req,res,next)=> {
   if(isPull(req))return next();
   adminAuthGuard(req,res,next);
@@ -21,6 +21,7 @@ app.use('/relay', csrfOriginGuard, (req,res,next)=> {
 """
     if anchor not in code:raise SystemExit('Monitor proxy anchor changed; review server.js')
     code=code.replace(anchor,block+anchor,1)
+code=code.replace("app.get('/relay', (req,res)=>res.redirect(308,'/relay/'));", "app.get(/^\\/relay$/, (req,res)=>res.redirect(308,'/relay/'));")
 server.write_text(code,encoding='utf-8')
 shutil.copy2(assets/'monitor-relay-proxy.cjs',root/'src/relay-proxy.cjs')
 
@@ -36,6 +37,9 @@ if 'data-view="relay"' not in code:
     marker='    <main class="layout log-layout" id="log-view" hidden>'
     if marker not in code:raise SystemExit('Monitor view anchor changed')
     code=code.replace(marker,'    <main id="relay-view" hidden><iframe id="relay-frame" title="Instinct 数据与训练" allow="clipboard-write"></iframe></main>\n\n'+marker,1)
+if 'id="connect-relay"' not in code:
+    code=code.replace('<div class="default-note" id="default-note" hidden></div>',
+        '<div class="default-note" id="default-note" hidden></div>\n      <button type="button" class="btn primary block" id="connect-relay">数据与训练</button>',1)
 page.write_text(code,encoding='utf-8')
 
 app=root/'public/app.js';code=app.read_text(encoding='utf-8')
@@ -65,5 +69,9 @@ window.addEventListener('message',event=>{
     marker='  const intent = state.loginIntent;\n  state.loginIntent = null;'
     if marker not in code:raise SystemExit('Monitor login continuation anchor changed')
     code=code.replace(marker,marker+"\n  if(intent==='relay'){if(el.loginView)el.loginView.hidden=true;showRelayView();return;}",1)
+if "getElementById('connect-relay').addEventListener" not in code:
+    code+="\ndocument.getElementById('connect-relay').addEventListener('click',showRelayView);\n"
 app.write_text(code,encoding='utf-8')
+from integrate_selection import integrate
+integrate(root, assets)
 print('Integrated monitor relay proxy, shared login and data/training view')

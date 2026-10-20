@@ -8,6 +8,7 @@ epoch-final checkpoint. Ordinary periodic logging/saving remains enabled.
 """
 import argparse
 from collections import Counter
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -24,6 +25,7 @@ os.environ.setdefault('HF_HOME', str(Path(__file__).resolve().parents[1]
 import datasets  # Windows DLL order
 import torch
 import trainer.training_profiler as profiler_module
+import trainer.trainer_utils as trainer_utils
 from trainer.streaming_pretrain import ChunkedPackedEpochLoader
 
 
@@ -38,9 +40,30 @@ def describe(values):
                 maximum=max(values))
 
 
+def _save_attention_contexts():
+    """Experimental SAC policy; retain Flex results, recompute other operations."""
+    from torch.utils.checkpoint import CheckpointPolicy, create_selective_checkpoint_contexts
+    from torch._higher_order_ops.flex_attention import flex_attention
+
+    def policy(ctx, op, *args, **kwargs):
+        return (CheckpointPolicy.MUST_SAVE if op == flex_attention
+                else CheckpointPolicy.PREFER_RECOMPUTE)
+
+    return create_selective_checkpoint_contexts(policy)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--steps', type=int, default=100)
+    parser.add_argument('--launch-record', type=Path,
+                        help='Captured production command/environment JSON, preserving its model and recipe')
+    parser.add_argument('--resume-checkpoint', type=Path,
+                        help='Read an immutable full checkpoint; all checkpoint writes are blocked')
+    parser.add_argument('--cold-attention-probe', action='store_true',
+                        help='Reference only: reproduce optional FA4 import inside first compiled forward')
+    parser.add_argument('--validation-cache', type=Path,
+                        help='Packed source-chunk-2 cache for held-out validation')
+    parser.add_argument('--validation-count', type=int, default=32)
     parser.add_argument('--warmup', type=int, default=20)
     parser.add_argument('--data-path', default='dataset/pretrain_coder_12b.parquet')
     parser.add_argument('--output', type=Path,
@@ -48,8 +71,10 @@ def main():
     parser.add_argument('--memory-gb', type=float, default=15.5)
     parser.add_argument('--token-budget', type=int, default=0,
                         help='Explicit production bucket token budget; changes batch sizes and training trajectory')
-    parser.add_argument('--checkpoint-mode', type=int, choices=[1,2], default=1,
+    parser.add_argument('--checkpoint-mode', type=int, choices=[1,2], default=None,
                         help='Keep checkpointing enabled: FFN selective (1) or whole block (2)')
+    parser.add_argument('--selective-save-attention', action='store_true',
+                        help='Experimental: cache FlexAttention results inside full-layer checkpoints')
     parser.add_argument('--prefetch', type=int, choices=[0, 1], default=1)
     parser.add_argument('--threads', type=int, default=0)
     parser.add_argument('--trace-last-step', action='store_true',
@@ -59,6 +84,22 @@ def main():
     parser.add_argument('--quality-batch-change', action='store_true',
                         help='Use equal-update non-regression gates for an authorized batch/packing change')
     options = parser.parse_args()
+    launch = json.loads(options.launch_record.read_text(encoding='utf-8')) if options.launch_record else None
+    if not launch and options.checkpoint_mode is None:
+        options.checkpoint_mode = 1
+    if options.selective_save_attention and (not launch or options.checkpoint_mode == 1):
+        parser.error('selective-save-attention requires a full-layer-checkpoint launch record')
+    if options.resume_checkpoint and not launch:
+        parser.error('resume-checkpoint requires launch-record')
+    if launch and options.quality and not options.validation_cache:
+        parser.error('launch-record quality validation requires its held-out validation-cache')
+    if options.validation_count < 1:
+        parser.error('validation-count must be positive')
+    if launch:
+        for key, value in launch.get('environment', {}).items():
+            if key.startswith(('INSTINCT_', 'TORCH', 'PYTORCH_', 'TRITON_')) or key in ('PYTHONUTF8', 'HF_HOME'):
+                os.environ.setdefault(key, value)
+        options.data_path = launch['command'][launch['command'].index('--data_path') + 1]
     if options.steps < 1 or options.warmup < 1:
         parser.error('positive steps and warmup required')
     if not torch.cuda.is_available():
@@ -76,8 +117,19 @@ def main():
     # Bind the chosen container to its compiler audit and original corpus.
     compiler_audit = json.loads(corpus.with_suffix('.parquet.report.json').read_text())
     corpus_audit = json.loads(corpus.with_suffix('.report.json').read_text())
-    with corpus.open('rb') as handle:
-        source_hash = hashlib.file_digest(handle, 'sha256').hexdigest()
+    cached_source = {}
+    if launch and '--autotune_profile' in launch['command']:
+        profile_path = launch['command'][launch['command'].index('--autotune_profile') + 1]
+        cached_source = json.loads(Path(profile_path).read_text(encoding='utf-8')).get('source', {})
+    source_stat = corpus.stat()
+    if (cached_source.get('size') == source_stat.st_size
+            and cached_source.get('mtime_ns') == source_stat.st_mtime_ns):
+        source_hash = cached_source['sha256']
+        source_verification = 'reuse verified launch-profile SHA-256 with unchanged size/mtime and compiler audit'
+    else:
+        with corpus.open('rb') as handle:
+            source_hash = hashlib.file_digest(handle, 'sha256').hexdigest()
+        source_verification = 'fresh SHA-256 and compiler audit'
     if source_hash != compiler_audit['output']['sha256']:
         raise RuntimeError('Parquet audit SHA-256 mismatch')
     print(f'[BENCH] audited container={corpus}, sha256={source_hash}', flush=True)
@@ -97,6 +149,32 @@ def main():
             windows_memory[label] = query_budgets()
     original_profiler = profiler_module.TrainingProfiler
     original_iterator = ChunkedPackedEpochLoader.__iter__
+    original_checkpoint = trainer_utils.lm_checkpoint
+    original_activation_checkpoint = torch.utils.checkpoint.checkpoint
+    if options.selective_save_attention:
+        from model.model_instinct import FeedForward, InstinctBlock
+
+        def experimental_checkpoint(function, *args, **kwargs):
+            if isinstance(function, InstinctBlock) and isinstance(function.mlp, FeedForward):
+                kwargs['context_fn'] = _save_attention_contexts
+            return original_activation_checkpoint(function, *args, **kwargs)
+
+        torch.utils.checkpoint.checkpoint = experimental_checkpoint
+    import importlib
+    flash_module = importlib.import_module('model.flash_attn_4')
+    original_resolve = flash_module.resolve_flash_attn
+    if options.cold_attention_probe:
+        flash_module.resolve_flash_attn = lambda: None
+        flash_module._tried_import = False
+        flash_module._flash_attn_4_func = None
+
+    def isolated_checkpoint(*args, **kwargs):
+        if kwargs.get('model') is not None or len(args) > 2:
+            raise RuntimeError('Benchmark checkpoint writes are forbidden')
+        state = torch.load(options.resume_checkpoint, map_location='cpu', weights_only=False)
+        if state.get('world_size', 1) != 1:
+            raise ValueError('Benchmark resume requires a single-GPU checkpoint')
+        return state
 
     class RecordingProfiler(original_profiler):
         def __init__(self, args, **kwargs):
@@ -107,9 +185,20 @@ def main():
             super().__init__(args, **kwargs)
             instances.append(self)
 
+        @contextmanager
+        def phase(self, name):
+            if options.trace_last_step:
+                with torch.profiler.record_function(f'train::{name}'):
+                    with super().phase(name):
+                        yield
+            else:
+                with super().phase(name):
+                    yield
+
         def end_step(self):
             if options.quality:
-                losses.append(sys._getframe(1).f_locals['loss'].detach())
+                losses.append((sys._getframe(1).f_locals['loss'].detach()
+                               * self.production_globals['args'].accumulation_steps).clone())
             sample = self._current
             result = super().end_step()
             if sample is not None:
@@ -128,7 +217,7 @@ def main():
         namespace = instances[0].production_globals
         raw = getattr(namespace['model'], '_orig_mod', namespace['model'])
         if 'validation_batches' not in quality:
-            cache = Path('.cache/huggingface/datasets/instinct-packed/'
+            cache = options.validation_cache or Path('.cache/huggingface/datasets/instinct-packed/'
                          'aabc28cfe809fb49f5620398e5d3cd8b30df144ec4e90b4502cdcd3cb3bf35a6')
             manifest = json.loads((cache/'manifest.json').read_text(encoding='utf-8'))
             assert manifest['identity']['source'] == source_hash
@@ -138,15 +227,16 @@ def main():
             dataset.samples = packed
             dataset.tokenizer = namespace['tokenizer']
             indices = []
-            for bucket, count in zip(manifest['bucket_ranges'], (24, 8)):
+            small = max(1, options.validation_count * 3 // 4)
+            for bucket, count in zip(manifest['bucket_ranges'], (small, options.validation_count-small)):
                 indices.extend(int(bucket['start']) + 97 + 997*i for i in range(count))
             quality['validation_batches'] = [tuple(t.unsqueeze(0) for t in dataset[i]) for i in indices]
             quality['validation_indices'] = indices
             quality['validation_cache'] = str(cache.resolve())
-            quality['validation_scope'] = '32 fixed sequences from source chunk 2; training remains in source chunk 1'
+            quality['validation_scope'] = f'{len(indices)} fixed sequences from source chunk 2; training remains in source chunk 1'
             h=hashlib.sha256()
             for name, parameter in raw.named_parameters():
-                h.update(name.encode()); h.update(parameter.detach().cpu().contiguous().numpy().tobytes())
+                h.update(name.encode()); h.update(parameter.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes())
             quality['initial_parameter_sha256'] = h.hexdigest()
         raw.eval()
         metrics=[]
@@ -179,10 +269,14 @@ def main():
                 namespace = instances[0].production_globals
                 config = namespace['lm_config']
                 assert config.num_hidden_layers == 32
-                assert config.num_experts_per_tok == 2 and config.norm_topk_prob
-                assert config.use_grad_checkpoint == options.checkpoint_mode
+                if not launch:
+                    assert config.num_experts_per_tok == 2 and config.norm_topk_prob
+                    assert config.use_grad_checkpoint == options.checkpoint_mode
                 if options.quality:
                     validate_model('initial')
+                    if options.cold_attention_probe:
+                        flash_module._tried_import = False
+                        flash_module._flash_attn_4_func = None
             record = dict(step=index + 1, batch_size=int(batch[0].shape[0]),
                           sequence_length=int(batch[0].shape[1]),
                           loader_next_ms=1000 * (fetch_end - fetch_start))
@@ -191,7 +285,8 @@ def main():
             # iterator, to avoid adding CPU work to the production hot path.
             if options.trace_last_step and index == options.warmup + options.steps - 1:
                 with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
-                                                       torch.profiler.ProfilerActivity.CUDA]) as trace:
+                                                       torch.profiler.ProfilerActivity.CUDA],
+                                            record_shapes=True) as trace:
                     yield batch
                     torch.cuda.synchronize()
                 trace.export_chrome_trace(str(options.output.with_suffix('.trace.json')))
@@ -259,9 +354,41 @@ def main():
         '--save_dir', str(options.output.parent / 'isolated_weights'),
         '--pause_file', str(options.output.parent / 'nonexistent_benchmark_pause'),
     ]
+    if launch:
+        command = launch['command']
+        script = next(i for i, value in enumerate(command) if Path(value).name == 'train_pretrain.py')
+        argv = command[script:]
+
+        def option(name, value=None):
+            while name in argv:
+                index = argv.index(name)
+                del argv[index:index + 2]
+            if value is not None:
+                argv.extend([name, str(value)])
+
+        if '--autotune_profile' in argv:
+            profile_path = argv[argv.index('--autotune_profile') + 1]
+            profile = json.loads(Path(profile_path).read_text(encoding='utf-8'))
+            option('--autotune_profile')
+            for key, value in profile['settings']['args'].items():
+                option('--' + key, value)
+            for key, value in profile['settings']['env'].items():
+                os.environ.setdefault(key, value)
+        for key, value in {
+            '--from_resume': int(options.resume_checkpoint is not None),
+            '--profile': 'timing', '--profile_warmup': options.warmup,
+            '--profile_interval': options.steps, '--save_interval': 2147483647,
+            '--save_dir': options.output.parent / 'isolated_weights',
+            '--pause_file': options.output.parent / 'nonexistent_benchmark_pause',
+        }.items():
+            option(key, value)
+        if options.checkpoint_mode is not None:
+            option('--use_grad_checkpoint', options.checkpoint_mode)
     previous_argv = sys.argv
     profiler_module.TrainingProfiler = RecordingProfiler
     ChunkedPackedEpochLoader.__iter__ = measured_iterator
+    if options.resume_checkpoint:
+        trainer_utils.lm_checkpoint = isolated_checkpoint
     sys.argv = argv
     try:
         runpy.run_path('trainer/train_pretrain.py', run_name='__main__')
@@ -272,6 +399,9 @@ def main():
         sys.argv = previous_argv
         profiler_module.TrainingProfiler = original_profiler
         ChunkedPackedEpochLoader.__iter__ = original_iterator
+        trainer_utils.lm_checkpoint = original_checkpoint
+        torch.utils.checkpoint.checkpoint = original_activation_checkpoint
+        flash_module.resolve_flash_attn = original_resolve
     instance = instances[0]
     instance.finish()
     namespace = instance.production_globals
@@ -308,10 +438,13 @@ def main():
                   by_shape=by_shape, observations=observed, profiler_windows=instance.windows,
                   config=namespace['lm_config'].to_dict(), args=vars(namespace['args']),
                   cli=argv, corpus_sha256=source_hash,
+                  corpus_verification=source_verification,
                   corpus_jsonl_sha256=corpus_audit['output_sha256'],
                   data_config=namespace['data_config'],
                   cpu_threads=torch.get_num_threads(),
                   trace_diagnostic=options.trace_last_step,
+                  cold_attention_probe=options.cold_attention_probe,
+                  selective_save_attention=options.selective_save_attention,
                   quality=quality,
                   windows_gpu_memory=windows_memory,
                   source_sha256=source_sha256,
@@ -334,6 +467,9 @@ def main():
                   f'{options.steps} measured steps after {options.warmup} warmup steps; '
                   'epoch-final checkpoint omitted',
                   weights_saved=False)
+    if options.resume_checkpoint:
+        report['resume_checkpoint'] = str(options.resume_checkpoint.resolve())
+        report['resume_step'] = namespace['ckp_data']['step']
     options.output.write_text(json.dumps(report, indent=2), encoding='utf-8')
     print('[BENCH RESULT] ' + json.dumps({key: value for key, value in report.items()
                                         if key not in ('config', 'args', 'cli', 'data_config',

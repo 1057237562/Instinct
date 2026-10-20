@@ -50,7 +50,7 @@ for folder in ['trainer','model','scripts']:
             if not allowed:continue
             if src.is_symlink() or src.stat().st_size>32*1024**2:raise ValueError('Unsafe code asset: '+str(rel))
             out=workspace/rel;out.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(src,out);count+=1
-for name in ['run_loop.py','run_linear.py','eval_llm.py','requirements.txt','requirements-fp8.txt','start_config_webui.bat']:
+for name in ['run_recurrsive.py','run_linear.py','eval_llm.py','requirements.txt','requirements-fp8.txt','start_config_webui.bat']:
     src=repo/name
     if src.is_file():shutil.copy2(src,workspace/name);count+=1
 def portable(value):

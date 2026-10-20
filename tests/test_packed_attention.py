@@ -141,7 +141,7 @@ def test_flex_eligibility_and_explicit_mask_dropout_fallback(monkeypatch):
 @pytest.mark.gpu
 @pytest.mark.parametrize('variant,checkpoint', [('standard', 1), ('standard', 2), ('loop', 1)])
 def test_model_shares_block_mask_and_matches_sdpa_gradients(monkeypatch, variant, checkpoint):
-    module = importlib.import_module('model.model_instinct_loop' if variant == 'loop'
+    module = importlib.import_module('model.model_recurrsive_instinct' if variant == 'loop'
                                      else 'model.model_instinct')
     cfg = module.InstinctConfig(
         vocab_size=128, hidden_size=64, num_hidden_layers=3,

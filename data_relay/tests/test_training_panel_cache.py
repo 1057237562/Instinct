@@ -49,7 +49,7 @@ class PanelCacheTests(unittest.TestCase):
         base = {'hidden_size': 512, 'num_hidden_layers': 32, 'num_attention_heads': 16, 'use_moe': True,
                 'num_experts': 8, 'moe_intermediate_size': 1664, 'rope_scaling_type': 'longrope',
                 'longrope_short_factors': json.dumps([1.0]*16), 'longrope_long_factors': json.dumps([8.0]*16)}
-        for architecture, residual in [('standard','standard'), ('linear','mhc'), ('looped','attnres')]:
+        for architecture, residual in [('standard','standard'), ('linear','mhc'), ('recurrsive_instinct','attnres')]:
             with self.subTest(architecture=architecture, residual=residual):
                 state = dict(base, model_architecture=architecture, residual_type=residual,
                              loop_iters=12, early_exit_enabled=True, early_exit_layers=[4, 8])

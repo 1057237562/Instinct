@@ -295,8 +295,8 @@ def prepare(root, opts, request):
             else: args.setdefault(key, model[key])
     if imported and 'model_architecture' in args:
         args['model_architecture'] = model.get('model_architecture', 'standard')
-    if 'use_looped' in args or model.get('model_architecture') == 'looped':
-        args['use_looped'] = int(model.get('model_architecture') == 'looped')
+    if 'use_recurrsive' in args or model.get('model_architecture') == 'recurrsive_instinct':
+        args['use_recurrsive'] = int(model.get('model_architecture') == 'recurrsive_instinct')
     if 'early_exit' in args or model.get('early_exit_layers'):
         args['early_exit'] = int(bool(model.get('early_exit_layers')))
     if trainer == 'distillation':
@@ -340,8 +340,8 @@ def command(root, job, resume=False):
     script = TRAINERS[job['trainer']]
     architecture = job['model_config'].get('model_architecture', 'standard')
     files = [script]
-    if architecture in {'looped', 'linear'}:
-        files.insert(0, 'run_loop.py' if architecture == 'looped' else 'run_linear.py')
+    if architecture in {'recurrsive_instinct', 'linear'}:
+        files.insert(0, 'run_recurrsive.py' if architecture == 'recurrsive_instinct' else 'run_linear.py')
     argv = [job['settings']['python']]
     if job['nproc'] > 1:
         argv += ['-m', 'torch.distributed.run', '--nproc_per_node', str(job['nproc']), '--master_port', str(job['master_port'])]

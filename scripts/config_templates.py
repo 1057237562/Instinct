@@ -1,6 +1,8 @@
 """Complete Config WebUI snapshots and an atomic, local template library."""
 
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -75,13 +77,74 @@ def load_templates(path=None):
     return _read_library(path)['templates']
 
 
-def write_templates(templates, path=None, *, defaults_initialized=None):
+def load_model_presets():
+    """Read model definitions from the same catalog used by template recipes."""
+    return _read_library(DEFAULT_TEMPLATES_FILE)['presets']
+
+
+def load_legacy_preset_names():
+    return _read_library(DEFAULT_TEMPLATES_FILE).get('legacy_preset_names', {})
+
+
+def _expand_default_templates(catalog):
+    presets = catalog.get('presets', {})
+    defaults = catalog.get('defaults', {})
+    return {
+        name: defaults | presets.get(name, {})
+        | ({'preset': name} if name in presets else {}) | overrides
+        for name, overrides in catalog['templates'].items()
+    }
+
+
+def load_default_templates():
+    """Expand shared defaults, model parameters and per-template overrides."""
+    return _expand_default_templates(_read_library(DEFAULT_TEMPLATES_FILE))
+
+
+def preset_initial_state(name):
+    """CPU-only preset initialization shared by Config WebUI and relay export."""
+    catalog = _read_library(DEFAULT_TEMPLATES_FILE)
+    name = catalog.get('legacy_preset_names', {}).get(name, name)
+    model = catalog.get('presets', {}).get(name)
+    if model is None:
+        return None
+    intermediate = math.ceil(model['hidden_size'] * math.pi / 64) * 64
+    recurrent = model.get('model_architecture') == 'recurrsive_instinct'
+    state = dict(
+        residual_type='standard',
+        intermediate_size=model.get('intermediate_size', intermediate),
+        qk_bias=model.get('qk_bias', recurrent),
+        qk_norm=model.get('qk_norm', not recurrent),
+        _override_moe_int=bool(model.get('use_moe')
+                              and model.get('moe_intermediate_size', intermediate) != intermediate),
+    )
+    state.update(model)
+    if model.get('rope_scaling_type') == 'longrope':
+        state.update(
+            longrope_short_factors=json.dumps(model['short_factor']),
+            longrope_long_factors=json.dumps(model['long_factor']),
+            longrope_short_retained_tokens=model.get('short_retained_start_tokens', 0),
+            longrope_long_retained_tokens=model.get('long_retained_start_tokens', 0),
+            longrope_short_attention_factor=float(model.get('short_attention_factor', model.get('attention_factor', 1.0))),
+            longrope_long_attention_factor=float(model.get('long_attention_factor', model.get('attention_factor', 0.0))),
+        )
+    training_keys = catalog.get('preset_training_keys', {}).get(name, ())
+    if training_keys:
+        recipe = _expand_default_templates(catalog)[name]
+        state.update({key: recipe[key] for key in training_keys})
+    return state
+
+
+def write_templates(templates, path=None, *, defaults_initialized=None,
+                    default_template_fingerprints=None):
     path = Path(path) if path is not None else TEMPLATES_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     library = _read_library(path)
     library['templates'] = templates
     if defaults_initialized is not None:
         library['defaults_initialized'] = defaults_initialized
+    if default_template_fingerprints is not None:
+        library['default_template_fingerprints'] = default_template_fingerprints
     payload = json.dumps(library, ensure_ascii=False,
                          indent=2, allow_nan=False)
     temporary = None
@@ -97,12 +160,25 @@ def write_templates(templates, path=None, *, defaults_initialized=None):
 
 
 def initialize_default_templates(path=None):
-    """Import the former presets once; retain edits, names and later deletions."""
+    """Add new defaults and refresh untouched ones; retain edits and deletions."""
     library = _read_library(path)
-    if library.get('defaults_initialized'):
-        return
-    defaults = load_templates(DEFAULT_TEMPLATES_FILE)
-    templates = library['templates']
+    catalog = _read_library(DEFAULT_TEMPLATES_FILE)
+    defaults = _expand_default_templates(catalog)
+    templates = dict(library['templates'])
+    fingerprints = library.get('default_template_fingerprints')
+    if fingerprints is None:
+        fingerprints = (
+            # Missing entries from the pre-fingerprint catalog are intentional deletions.
+            dict.fromkeys(catalog.get('legacy_default_template_names', ()))
+            if library.get('defaults_initialized') else {}
+        )
+    else:
+        fingerprints = dict(fingerprints)
+
+    def fingerprint(config):
+        payload = json.dumps(config, sort_keys=True, ensure_ascii=False, allow_nan=False)
+        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
     repo_root = Path(__file__).resolve().parents[1]
     for name, config in defaults.items():
         config = snapshot_config(config)
@@ -113,8 +189,16 @@ def initialize_default_templates(path=None):
                 dataset_path = Path(value)
                 if not dataset_path.is_absolute():
                     config[key] = str(repo_root / dataset_path)
-        templates.setdefault(name, config)
-    write_templates(templates, path, defaults_initialized=True)
+        if name not in fingerprints:
+            templates.setdefault(name, config)
+        elif name in templates and fingerprint(templates[name]) == fingerprints[name]:
+            templates[name] = config
+        fingerprints[name] = fingerprint(config)
+    if (templates != library['templates']
+            or fingerprints != library.get('default_template_fingerprints')
+            or not library.get('defaults_initialized')):
+        write_templates(templates, path, defaults_initialized=True,
+                        default_template_fingerprints=fingerprints)
 
 
 def save_template(name, state, *, overwrite=False, path=None):

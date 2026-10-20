@@ -1,0 +1,84 @@
+{
+  "gpu": "NVIDIA GeForce RTX 5070 Ti",
+  "torch": "2.13.0+cu132",
+  "cuda": "13.2",
+  "revision": "49a06d5472a1a4caba70c541e1c23121325be824",
+  "source_sha256": {
+    "trainer/batched_muon.py": "c0043847c394ef14632ba8a5b70b8d82514631c993e2962accbdb8ef111b02dc",
+    "trainer/muon_kernels.py": "9adcc34e8990e47d28571c377ea835ab55de7282bb8cef386f77d1f1eeecbb86",
+    "trainer/trainer_utils.py": "8cd7b0cd8ce0e2eab060e2c3089e85954503d661ab21a52e3dbf17c60f373a7a",
+    "experiments/validate_muon_mantissa_fusion.py": "f5682737df8695d8761d839b3d9f4689219b2d7cf1070ede366bc95a65488ce8"
+  },
+  "protocol": {
+    "sections": "isolated,shared",
+    "steps": 50,
+    "shared_steps": 100,
+    "batch": 1,
+    "seq": 256,
+    "performance_only": false,
+    "output": "experiments\\muon_mantissa_fusion_validation.json"
+  },
+  "deterministic": true,
+  "isolated": [
+    {
+      "trial": 0,
+      "mode": "reference",
+      "median_ms": 16.001488208770752,
+      "median_wall_ms": 16.033249999964028,
+      "peak_bytes": 544167936,
+      "persistent_bytes": 501700608,
+      "cuda_events": 1859,
+      "cuda_time_us": 28928.11699999999,
+      "cpu_operator_events": 4012
+    },
+    {
+      "trial": 0,
+      "mode": "fused",
+      "median_ms": 8.397392272949219,
+      "median_wall_ms": 8.44720000009147,
+      "peak_bytes": 474044416,
+      "persistent_bytes": 468932608,
+      "cuda_events": 793,
+      "cuda_time_us": 16167.28599999999,
+      "cpu_operator_events": 399
+    },
+    {
+      "trial": 1,
+      "mode": "fused",
+      "median_ms": 8.532623767852783,
+      "median_wall_ms": 8.668100000249979,
+      "peak_bytes": 474044416,
+      "persistent_bytes": 468932608
+    },
+    {
+      "trial": 1,
+      "mode": "reference",
+      "median_ms": 16.25926399230957,
+      "median_wall_ms": 16.284299999824725,
+      "peak_bytes": 510613504,
+      "persistent_bytes": 468146176
+    },
+    {
+      "trial": 2,
+      "mode": "reference",
+      "median_ms": 16.51188850402832,
+      "median_wall_ms": 16.533150000213936,
+      "peak_bytes": 510613504,
+      "persistent_bytes": 468146176
+    },
+    {
+      "trial": 2,
+      "mode": "fused",
+      "median_ms": 8.33289623260498,
+      "median_wall_ms": 8.394200000111596,
+      "peak_bytes": 474044416,
+      "persistent_bytes": 468932608
+    }
+  ],
+  "shared": {
+    "steps": 100,
+    "matrices": 58,
+    "elements": 42213376,
+    "every_step_bitwise_equal": true
+  }
+}

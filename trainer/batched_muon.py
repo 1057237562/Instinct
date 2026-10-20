@@ -9,9 +9,11 @@ parameter holds the high 16 bits of its fp32 value and a parallel uint16 buffer
 holds the low 16 bits. The split is a truncating bit split, so split-then-
 reconstruct is a bitwise identity, and every optimizer update accumulates on the
 reconstructed fp32 value before being split back. This costs four fp32
-momentum bytes plus two uint16 mantissa bytes per element (the persistent-byte
-estimator is kept in sync). Mantissa mode is opt-in and never checkpointed: the
-caller must enable it again when resuming.
+momentum bytes (or two with ``momentum_dtype='bf16'``) plus two uint16 low bytes per element (the persistent-byte
+estimator is kept in sync). Mantissa mode is opt-in. Checkpoints record the bit
+layout and reject a resume that would discard it. The forward weight is truncated
+toward zero, unlike the round-to-nearest weight produced by BF16 autocast; exact
+optimizer arithmetic with identical gradients does not imply identical training.
 """
 
 from __future__ import annotations
@@ -23,7 +25,28 @@ import torch
 
 
 _NS_COEFFICIENTS = (3.4445, -4.7750, 2.0315)
-_VALIDATED_SHAPES = {(512, 512), (128, 512), (1664, 512), (512, 1664)}
+_V2_SHAPES = {(1536, 1536), (384, 1536), (5504, 1536), (1536, 5504)}
+_VALIDATED_SHAPES = {(512, 512), (128, 512), (1664, 512), (512, 1664)} | _V2_SHAPES
+_MANTISSA_FORMAT = 'bf16_uint16_truncate_v1'
+_MANTISSA_BF16_MOMENTUM_FORMAT = 'bf16_uint16_truncate_bf16_momentum_v1'
+
+
+def has_mantissa_state(state_dict):
+    """Recognize both versioned and original, unversioned mantissa checkpoints."""
+    return (state_dict.get('muon_precision') is not None
+            or any(isinstance(entry, dict) and 'mantissa' in entry
+                   for entry in state_dict.get('state', {}).values())
+            or any(has_mantissa_state(sd) for sd in state_dict.get('optimizers', [])))
+
+
+def reject_mantissa_state(optimizer, state_dict):
+    """Load pre-hook for optimizers that cannot interpret split weight storage."""
+    if has_mantissa_state(state_dict):
+        raise ValueError(
+            'Muon mantissa checkpoint requires BatchedMuon(use_mantissa=True), '
+            'INSTINCT_MUON_BACKEND=batched and INSTINCT_MUON_MANTISSA=1; '
+            'refusing to discard the saved uint16 low bits.'
+        )
 
 
 def _ns_backend(update):
@@ -32,8 +55,12 @@ def _ns_backend(update):
         raise ValueError('INSTINCT_MUON_NS_BACKEND must be torch, triton, triton_graph or auto')
     if backend == 'auto':
         from model.cuda_fastpath import blackwell_training_kernels
-        backend = ('triton_graph' if tuple(update.shape[-2:]) in _VALIDATED_SHAPES
-                   and blackwell_training_kernels(update.device) else 'torch')
+        shape = tuple(update.shape[-2:])
+        backend = 'torch'
+        if shape in _VALIDATED_SHAPES and blackwell_training_kernels(update.device):
+            # V2's large matrices already amortize launches; retaining separate
+            # graph pools for their chunks costs activation/checkpoint headroom.
+            backend = 'triton' if shape in _V2_SHAPES else 'triton_graph'
     return backend
 
 
@@ -96,7 +123,7 @@ class BatchedMuon(torch.optim.Optimizer):
         self, params, lr=1e-3, weight_decay=0.1, momentum=0.95,
         nesterov=True, ns_coefficients=_NS_COEFFICIENTS, ns_steps=5,
         eps=1e-7, adjust_lr_fn=None, *, batch_size=16, workspace_mb=64,
-        use_mantissa=False,
+        use_mantissa=False, momentum_dtype='fp32',
     ):
         if not 0 <= lr:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -119,6 +146,11 @@ class BatchedMuon(torch.optim.Optimizer):
         self.batch_size = int(batch_size)
         self.workspace_bytes = int(workspace_mb * 2**20)
         self.use_mantissa = bool(use_mantissa)
+        if momentum_dtype not in ('fp32', 'bf16'):
+            raise ValueError('momentum_dtype must be fp32 or bf16')
+        if momentum_dtype == 'bf16' and not self.use_mantissa:
+            raise ValueError('Explicit BF16 momentum requires use_mantissa=True')
+        self.momentum_dtype = torch.bfloat16 if momentum_dtype == 'bf16' else torch.float32
         super().__init__(params, dict(
             lr=lr, weight_decay=weight_decay, momentum=momentum,
             nesterov=nesterov, ns_coefficients=tuple(ns_coefficients),
@@ -135,6 +167,7 @@ class BatchedMuon(torch.optim.Optimizer):
 
     def __setstate__(self, state):
         super().__setstate__(state)
+        self.__dict__.setdefault('momentum_dtype', torch.float32)
         # The pure NS cache contains no optimizer state. Drop device allocations
         # on load and rebuild lazily for the restored runtime/device.
         self.__dict__.pop('_ns_graph_cache', None)
@@ -147,7 +180,7 @@ class BatchedMuon(torch.optim.Optimizer):
         """Allocate optimizer state before activation buffers fragment the pool.
 
         Does not take a step, create gradients, apply decay, or replace restored
-        state. Mantissa mode reserves its FP32 momentum and uint16 low bits too.
+        state. Mantissa mode reserves the selected momentum dtype and uint16 low bits.
         Parameters with grad=None still skip every update in step().
         """
         allocated = 0
@@ -157,48 +190,86 @@ class BatchedMuon(torch.optim.Optimizer):
                     continue
                 state = self.state[p]
                 if 'momentum_buffer' not in state:
-                    dtype = torch.float32 if self.use_mantissa else p.dtype
+                    dtype = self.momentum_dtype if self.use_mantissa else p.dtype
                     state['momentum_buffer'] = torch.zeros_like(p, dtype=dtype)
                     allocated += p.numel() * state['momentum_buffer'].element_size()
-                elif self.use_mantissa and state['momentum_buffer'].dtype != torch.float32:
-                    state['momentum_buffer'] = state['momentum_buffer'].to(torch.float32)
+                elif self.use_mantissa and state['momentum_buffer'].dtype != self.momentum_dtype:
+                    state['momentum_buffer'] = state['momentum_buffer'].to(self.momentum_dtype)
                     allocated += p.numel() * state['momentum_buffer'].element_size()
                 if self.use_mantissa and 'mantissa' not in state:
                     state['mantissa'] = torch.zeros_like(p, dtype=torch.uint16)
                     allocated += p.numel() * state['mantissa'].element_size()
         return allocated
 
+    def state_dict(self):
+        state = super().state_dict()
+        if self.use_mantissa:
+            state['muon_precision'] = (_MANTISSA_BF16_MOMENTUM_FORMAT
+                                      if self.momentum_dtype == torch.bfloat16 else _MANTISSA_FORMAT)
+        return state
+
     def load_state_dict(self, state_dict):
         # The base loader casts every floating state tensor to the bf16 param
-        # dtype. In mantissa mode momentum must stay fp32 and the uint16 mantissa
-        # must keep its exact bit pattern, so restore both after the base load.
+        # dtype. Keep the selected momentum precision and exact uint16 low bits.
+        if not self.use_mantissa:
+            reject_mantissa_state(self, state_dict)
+        precision = state_dict.get('muon_precision')
+        if precision is not None and precision not in (_MANTISSA_FORMAT, _MANTISSA_BF16_MOMENTUM_FORMAT):
+            raise ValueError(f'Unsupported Muon mantissa checkpoint format: {precision!r}')
+        saved_momentum_dtype = (torch.bfloat16 if precision == _MANTISSA_BF16_MOMENTUM_FORMAT
+                                else torch.float32)
+        if precision is not None and saved_momentum_dtype != self.momentum_dtype:
+            raise ValueError('Muon momentum dtype changed on resume; select the saved momentum_dtype '
+                             '(INSTINCT_MUON_MOMENTUM_DTYPE), or start a new stage from weights.')
+        saved_ids = [pid for group in state_dict['param_groups'] for pid in group['params']]
+        current = [p for group in self.param_groups for p in group['params']]
+        index_map = dict(zip(saved_ids, current))
         saved = {}
+        cleaned = dict(state_dict)
+        cleaned['state'] = dict(state_dict.get('state', {}))
+        split_weights = has_mantissa_state(state_dict)
         if self.use_mantissa:
             for index, entry in state_dict.get('state', {}).items():
                 if not isinstance(entry, dict):
                     continue
+                param = index_map.get(index)
+                if param is None:
+                    raise ValueError('Muon checkpoint contains state for an unknown parameter')
+                if split_weights and entry and 'mantissa' not in entry:
+                    raise ValueError('Muon mantissa checkpoint is missing uint16 low bits')
                 picked = {
                     key: entry[key]
                     for key in ('momentum_buffer', 'mantissa')
                     if key in entry
                 }
+                for key, tensor in picked.items():
+                    if not isinstance(tensor, torch.Tensor) or tensor.shape != param.shape:
+                        raise ValueError(f'Invalid Muon {key} tensor shape')
+                    if key == 'mantissa' and tensor.dtype != torch.uint16:
+                        raise ValueError('Muon mantissa must be uint16; refusing corrupted low bits')
+                    if key == 'momentum_buffer' and tensor.dtype not in (torch.float32, torch.bfloat16):
+                        raise ValueError('Muon mantissa momentum must be float32 or legacy bfloat16')
+                    if key == 'momentum_buffer':
+                        if precision is not None and tensor.dtype != saved_momentum_dtype:
+                            raise ValueError('Muon checkpoint momentum dtype disagrees with its precision format')
+                        if self.momentum_dtype == torch.bfloat16 and tensor.dtype != torch.bfloat16:
+                            raise ValueError('Muon momentum dtype changed on resume; refusing implicit BF16 quantization')
+                        if precision is None and split_weights and tensor.dtype != self.momentum_dtype:
+                            raise ValueError('Muon momentum dtype changed on resume from unversioned split state')
                 if picked:
                     saved[index] = picked
-        super().load_state_dict(state_dict)
+                    # Avoid a temporary, lossy BF16 copy of both saved tensors.
+                    cleaned['state'][index] = {k: v for k, v in entry.items() if k not in picked}
+        super().load_state_dict(cleaned)
         if not saved:
             return
-        saved_ids = [
-            pid for group in state_dict['param_groups'] for pid in group['params']
-        ]
-        current = [p for group in self.param_groups for p in group['params']]
-        index_map = dict(zip(saved_ids, current))
         for index, entry in saved.items():
             param = index_map.get(index)
             if param is None or param not in self.state:
                 continue
             state = self.state[param]
             for key, tensor in entry.items():
-                # Keep the saved dtype (fp32 momentum / uint16 mantissa).
+                # Keep saved FP32/BF16 momentum and raw uint16 low bits.
                 state[key] = tensor.to(device=param.device)
 
     @staticmethod
@@ -218,19 +289,17 @@ class BatchedMuon(torch.optim.Optimizer):
 
     def _step_chunk(self, params, group):
         grads = [p.grad for p in params]
-        if self.use_mantissa:
-            # Promote once so momentum and the update accumulate in fp32.
-            grads = [g.to(torch.float32) for g in grads]
         buffers = []
         mantissas = []
         for i, p in enumerate(params):
             state = self.state[p]
             if 'momentum_buffer' not in state:
-                state['momentum_buffer'] = torch.zeros_like(grads[i])
-            if self.use_mantissa and state['momentum_buffer'].dtype != torch.float32:
+                state['momentum_buffer'] = torch.zeros_like(
+                    grads[i], dtype=self.momentum_dtype if self.use_mantissa else grads[i].dtype)
+            if self.use_mantissa and state['momentum_buffer'].dtype != self.momentum_dtype:
                 # A legacy (non-mantissa) checkpoint stores bf16 momentum; promote
                 # it once so the fp32 lerp path stays uniform with promoted grads.
-                state['momentum_buffer'] = state['momentum_buffer'].to(torch.float32)
+                state['momentum_buffer'] = state['momentum_buffer'].to(self.momentum_dtype)
             buffers.append(state['momentum_buffer'])
             if self.use_mantissa:
                 if 'mantissa' not in state:
@@ -245,8 +314,18 @@ class BatchedMuon(torch.optim.Optimizer):
         fused = ((fused_setting == '1' or (fused_setting == 'auto'
                   and tuple(params[0].shape) in _VALIDATED_SHAPES
                   and blackwell_training_kernels(params[0].device)))
-                 and params[0].is_cuda and params[0].dtype == torch.float32
-                 and all(t.is_contiguous() for t in (*params, *grads, *buffers)))
+                 and params[0].is_cuda
+                 and (params[0].dtype == torch.float32 or self.use_mantissa)
+                 and all(t.is_contiguous() for t in (*params, *grads, *buffers, *mantissas)))
+        if self.use_mantissa and not fused:
+            # The reference foreach path needs actual FP32 tensors. Fused CUDA
+            # promotes in registers, avoiding one full-size copy per gradient.
+            grads = [g.to(torch.float32) for g in grads]
+        stored_buffers = buffers
+        if self.use_mantissa and self.momentum_dtype == torch.bfloat16 and not fused:
+            # Reference path: compute the EMA/Nesterov in FP32, then round only
+            # the persistent EMA. Fused CUDA performs this promotion in registers.
+            buffers = [b.float() for b in buffers]
         if fused:
             from trainer.muon_kernels import prepare_update
             stacked = prepare_update(grads, buffers, momentum=momentum, nesterov=group['nesterov'])
@@ -258,6 +337,10 @@ class BatchedMuon(torch.optim.Optimizer):
         else:
             torch._foreach_lerp_(buffers, grads, 1 - momentum)
             stacked = torch.stack(buffers).to(torch.bfloat16)
+        if buffers is not stored_buffers:
+            for stored, precise in zip(stored_buffers, buffers):
+                stored.copy_(precise)
+            del buffers, precise
         ns_function = _batched_zeropower
         if (_ns_backend(stacked) == 'triton_graph'
                 and stacked.is_cuda and min(stacked.shape[-2:]) >= 128):
@@ -278,6 +361,11 @@ class BatchedMuon(torch.optim.Optimizer):
         else:
             adjusted_lr = lr * math.sqrt(max(1.0, rows / cols))
         if self.use_mantissa:
+            if fused:
+                from trainer.muon_kernels import apply_mantissa_update
+                apply_mantissa_update(params, mantissas, update,
+                                      decay=1 - lr * group['weight_decay'], alpha=-adjusted_lr)
+                return
             # Reconstruct the exact fp32 value, apply decay/update there, then split
             # back. p.copy_ preserves the Parameter identity for the model.
             precises = [_reconstruct_precise(p, m) for p, m in zip(params, mantissas)]

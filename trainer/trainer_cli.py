@@ -88,7 +88,7 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     """
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument('--autotune_profile', default=None,
-                        help='经过验证的本机 pretrain 自动调优 profile.json')
+                        help='本机 pretrain profile.json（实测验收或手动固定配置）')
     parser.add_argument('--autotune_trial', default=None, help=argparse.SUPPRESS)
     parser.add_argument("--save_dir", type=str, default="./out", help="模型保存目录")
     parser.add_argument('--save_weight', default='pretrain', type=str, help="保存权重的前缀名")
@@ -108,6 +108,14 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
         help="余弦衰减末端 LR / peak LR（默认 0.1）",
     )
     parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "adafactor", "muon"], help="优化器类型（adamw / adafactor / muon）")
+    parser.add_argument('--muon_mantissa', type=int, choices=[0, 1], default=None,
+                        help='可选 Muon BF16+uint16 补偿权重；需 param_dtype=bf16；省略时沿用环境变量')
+    parser.add_argument('--muon_momentum_dtype', choices=['fp32', 'bf16'], default=None,
+                        help='补偿权重模式的动量存储精度；默认 FP32，BF16 为可选项')
+    parser.add_argument('--muon_batch_size', type=int, default=None,
+                        help='Muon 每块矩阵数上限；0 或省略沿用环境变量/默认 16')
+    parser.add_argument('--muon_workspace_mb', type=float, default=None,
+                        help='Muon 临时工作区预算 MiB；0 或省略沿用环境变量/平台默认')
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
     parser.add_argument("--dtype", type=str, default="bfloat16", help="激活层计算精度（bfloat16/float16/fp32）")
     parser.add_argument("--param_dtype", type=str, default="fp32", choices=["fp32", "bf16", "fp16"], help="模型参数精度（fp32=主权重，bf16/fp16=训练时权重直接 cast）")
@@ -192,8 +200,8 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
         help='Arrow/packing 构建方式：inline=当前进程串行构建（Windows安全默认）；spawn=独立子进程',
     )
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
-    parser.add_argument('--use_looped', default=0, type=int, choices=[0, 1], help="是否使用Instinct V2 latent recurrent-depth架构（0=否，1=是）")
-    parser.add_argument('--model_architecture', default=None, choices=['standard', 'linear', 'looped'], help="模型主干（默认读取config；--use_looped 1切换V2循环深度主干）")
+    parser.add_argument('--use_recurrsive', default=0, type=int, choices=[0, 1], help="是否使用RecurrsiveInstinct latent recurrent-depth架构（0=否，1=是）")
+    parser.add_argument('--model_architecture', default=None, choices=['standard', 'linear', 'recurrsive_instinct'], help="模型主干（默认读取config；--use_recurrsive 1启用RecurrsiveInstinct）")
     parser.add_argument('--loop_iters', default=None, type=int, help="推理默认/训练目标平均递归次数 r-bar")
     parser.add_argument('--recurrent_layers', default=None, type=int, help="共享 recurrent core 内的 Transformer 层数")
     parser.add_argument('--prelude_layers', default=None, type=int, help="Prelude 独立层数")
@@ -211,12 +219,12 @@ def build_trainer_parser(description: str, *, defaults: dict | None = None) -> a
     parser.add_argument('--hc_eps', default=None, type=float, help="mHC数值稳定项")
     parser.add_argument('--attnres_variant', default=None, choices=['full', 'block'], help="Attention Residuals变体")
     parser.add_argument('--attnres_block_size', default=None, type=int, help="Block AttnRes块大小（按Attention/MLP子层计）")
-    parser.add_argument('--depth_reward', default=-1.0, type=float, help="已弃用的LoopUS参数；Instinct V2忽略")
-    parser.add_argument('--distill_weight', default=-1.0, type=float, help="已弃用的LoopUS参数；Instinct V2忽略")
+    parser.add_argument('--depth_reward', default=-1.0, type=float, help="已弃用的LoopUS参数；RecurrsiveInstinct忽略")
+    parser.add_argument('--distill_weight', default=-1.0, type=float, help="已弃用的LoopUS参数；RecurrsiveInstinct忽略")
     parser.add_argument('--distill_temperature', default=2.0, type=float, help="自蒸馏温度T（软化教师/学生分布）")
     parser.add_argument('--teacher_stop_grad', default=1, type=int, choices=[0, 1], help="教师logits是否stop-grad（1=是，0=否）")
-    parser.add_argument('--depth_gain_reward', default=0.0, type=float, help="已弃用的LoopUS参数；Instinct V2忽略")
-    parser.add_argument('--exit_in_training', default=-1, type=int, choices=[-1, 0, 1], help="已弃用的LoopUS参数；Instinct V2忽略")
+    parser.add_argument('--depth_gain_reward', default=0.0, type=float, help="已弃用的LoopUS参数；RecurrsiveInstinct忽略")
+    parser.add_argument('--exit_in_training', default=-1, type=int, choices=[-1, 0, 1], help="已弃用的LoopUS参数；RecurrsiveInstinct忽略")
     parser.add_argument('--n_supervision', default=-1, type=int, help="已弃用的LoopUS参数；请使用--mean_backprop_depth")
     parser.add_argument('--early_exit', default=0, type=int, choices=[0, 1], help="启用Early Exit训练（0=否，1=是）")
     parser.add_argument('--from_weight', default='none', type=str, help="基于哪个权重训练，为none则从头开始")
@@ -307,6 +315,8 @@ def setup_dist_and_seed(args) -> int:
         先 init_distributed_mode() 初始化进程组；已初始化时把 args.device 指向当前卡；
         随机种子 = 42 + 全局 rank，保证各进程采样一致。
     """
+    from scripts.muon_controls import apply_cli_options
+    apply_cli_options(args)
     from trainer.autotune_config import apply_profile
     apply_profile(args)
     if getattr(args, 'autotune_trial', None):

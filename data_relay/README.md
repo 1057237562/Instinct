@@ -396,7 +396,7 @@ numpy，或 pip/conda 混装）。这是固定的环境状态问题，不会自�
 不需要 GitHub 连通或 Git 提交。比较会创建不可变的本地快照；同步安装的是比较时的内容。
 
 - 代码范围：`trainer/**/*.py`、`model/**/*.py`、`scripts/*.py`、
-  `scripts/data_loader/**/*.py`、`run_loop.py`、`run_linear.py`、`eval_llm.py`、
+  `scripts/data_loader/**/*.py`、`run_recurrsive.py`、`run_linear.py`、`eval_llm.py`、
   Config WebUI 启动器和训练关机脚本。可选包含训练配置模板、tokenizer 文本资产和 requirements。
 - 排除 `trainer/webui_state.json`、数据、权重、检查点、缓存、日志和 relay 凭据。
   不删除远端额外文件，不自动安装 Python 依赖。缺少本地文件的目录不会被当成镜像删除。
@@ -470,7 +470,7 @@ gpu_retry_secs = 60
 使用可能过时的 `pipeline_stages` 快照覆盖当前设置。精度、优化器、FP8、编译、
 packing、streaming、profiling 和模型拓扑（含 RoPE/残差/循环主干）一起读取。
 本机仓库内的 Windows 数据路径转换为服务器仓库相对路径，保留原扩展名。
-页面提供训练超参数、精度与计算、Packing/流式加载、模型结构、RoPE、Linear/Looped、
+页面提供训练超参数、精度与计算、Packing/流式加载、模型结构、RoPE、Linear/RecurrsiveInstinct、
 性能分析，以及每个 trainer 的专用参数。模型预设来自 Config WebUI，专用参数的类型和
 选项来自 trainer argparse。修改自动保存到 `<server.data_dir>/training/panel.json`，
 各阶段分别保留数据、基座、检查点、学习率、轮数和专用参数；公共模型与计算设置共享。

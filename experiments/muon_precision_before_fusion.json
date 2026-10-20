@@ -1,0 +1,411 @@
+{
+  "torch": "2.13.0+cu132",
+  "cuda": "13.2",
+  "device": "NVIDIA GeForce RTX 5070 Ti",
+  "revision": "49a06d5472a1a4caba70c541e1c23121325be824",
+  "source_sha256": {
+    "trainer/batched_muon.py": "402953872e0dbf40328cae59e6fb3219692336523623464dd338c2c05842b4ef",
+    "trainer/trainer_utils.py": "8cd7b0cd8ce0e2eab060e2c3089e85954503d661ab21a52e3dbf17c60f373a7a",
+    "experiments/audit_muon_precision.py": "82dbe01d81b179c35ea8987731afaf5a1bde5dba5c5ffa3097236b70515c510f"
+  },
+  "protocol": {
+    "sections": "storage,trajectory",
+    "steps": 100,
+    "warmup": 20,
+    "iters": 50,
+    "workspace_mb": 64,
+    "seed": 11,
+    "output": "experiments\\muon_precision_before_fusion.json"
+  },
+  "env": {
+    "INSTINCT_MUON_BACKEND": "batched",
+    "INSTINCT_MUON_MANTISSA": "0"
+  },
+  "synthetic_data": "period-8 numeric token IDs; no external text; held-out batches use same distribution",
+  "storage": {
+    "shapes": [
+      [
+        512,
+        512
+      ],
+      [
+        128,
+        512
+      ],
+      [
+        128,
+        512
+      ],
+      [
+        512,
+        512
+      ],
+      [
+        8,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        512
+      ],
+      [
+        128,
+        512
+      ],
+      [
+        128,
+        512
+      ],
+      [
+        512,
+        512
+      ],
+      [
+        8,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        1664,
+        512
+      ],
+      [
+        512,
+        1664
+      ],
+      [
+        1664,
+        512
+      ]
+    ],
+    "v1_model": {
+      "muon_elements": 675414016,
+      "adamw_elements": 3312128,
+      "total_elements": 678726144,
+      "persistent_bytes_including_gradients": {
+        "fp32": 8157962240,
+        "mantissa_fp32mom": 6807134208,
+        "mantissa_bf16mom": 5456306176
+      }
+    },
+    "measurements": [
+      {
+        "arm": "fp32",
+        "elements": 42213376,
+        "tensor_bytes": {
+          "parameters": 168853504,
+          "gradients": 168853504,
+          "optimizer": 168853504
+        },
+        "bytes_per_element": 12.0,
+        "cuda_persistent_bytes": 587304960,
+        "cuda_step_peak_bytes": 594120704,
+        "cuda_peak_reserved_bytes": 689963008,
+        "median_ms": 7.321552038192749,
+        "workspace_mb": 64,
+        "momentum_dtypes": [
+          "torch.float32"
+        ]
+      },
+      {
+        "arm": "mantissa_fp32mom",
+        "elements": 42213376,
+        "tensor_bytes": {
+          "parameters": 84426752,
+          "gradients": 84426752,
+          "optimizer": 253280256
+        },
+        "bytes_per_element": 10.0,
+        "cuda_persistent_bytes": 468146176,
+        "cuda_step_peak_bytes": 510613504,
+        "cuda_peak_reserved_bytes": 683671552,
+        "median_ms": 13.053103923797607,
+        "workspace_mb": 64,
+        "momentum_dtypes": [
+          "torch.float32"
+        ]
+      },
+      {
+        "arm": "mantissa_bf16mom",
+        "elements": 42213376,
+        "tensor_bytes": {
+          "parameters": 84426752,
+          "gradients": 84426752,
+          "optimizer": 168853504
+        },
+        "bytes_per_element": 8.0,
+        "cuda_persistent_bytes": 381097984,
+        "cuda_step_peak_bytes": 428677120,
+        "cuda_peak_reserved_bytes": 622854144,
+        "median_ms": 14.633952140808105,
+        "workspace_mb": 64,
+        "momentum_dtypes": [
+          "torch.bfloat16"
+        ]
+      },
+      {
+        "arm": "naive_bf16",
+        "elements": 42213376,
+        "tensor_bytes": {
+          "parameters": 84426752,
+          "gradients": 84426752,
+          "optimizer": 84426752
+        },
+        "bytes_per_element": 6.0,
+        "cuda_persistent_bytes": 327604224,
+        "cuda_step_peak_bytes": 348575744,
+        "cuda_peak_reserved_bytes": 543162368,
+        "median_ms": 6.7707200050354,
+        "workspace_mb": 64,
+        "momentum_dtypes": [
+          "torch.bfloat16"
+        ]
+      }
+    ]
+  },
+  "trajectory": [
+    {
+      "lr": 0.0005,
+      "arm": "fp32",
+      "exact_step_fraction": 1.0,
+      "relative_to_ref_displacement": 0.0,
+      "cosine": 1.0000000000000002,
+      "max_abs": 0.0
+    },
+    {
+      "lr": 0.0005,
+      "arm": "mantissa_fp32mom",
+      "exact_step_fraction": 1.0,
+      "relative_to_ref_displacement": 0.0,
+      "cosine": 1.0000000000000002,
+      "max_abs": 0.0
+    },
+    {
+      "lr": 0.0005,
+      "arm": "mantissa_bf16mom",
+      "exact_step_fraction": 0.01,
+      "relative_to_ref_displacement": 0.005867659687714648,
+      "cosine": 0.9999827880688582,
+      "max_abs": 0.00010997243225574493
+    },
+    {
+      "lr": 0.0005,
+      "arm": "naive_bf16",
+      "exact_step_fraction": 0.0,
+      "relative_to_ref_displacement": 0.12178635037281964,
+      "cosine": 0.9925701121328758,
+      "max_abs": 0.008902691304683685
+    },
+    {
+      "lr": 2e-05,
+      "arm": "fp32",
+      "exact_step_fraction": 1.0,
+      "relative_to_ref_displacement": 0.0,
+      "cosine": 0.9999999999999999,
+      "max_abs": 0.0
+    },
+    {
+      "lr": 2e-05,
+      "arm": "mantissa_fp32mom",
+      "exact_step_fraction": 1.0,
+      "relative_to_ref_displacement": 0.0,
+      "cosine": 0.9999999999999999,
+      "max_abs": 0.0
+    },
+    {
+      "lr": 2e-05,
+      "arm": "mantissa_bf16mom",
+      "exact_step_fraction": 0.01,
+      "relative_to_ref_displacement": 0.005866461689039188,
+      "cosine": 0.9999827951394181,
+      "max_abs": 4.4014304876327515e-06
+    },
+    {
+      "lr": 2e-05,
+      "arm": "naive_bf16",
+      "exact_step_fraction": 0.0,
+      "relative_to_ref_displacement": 1.0218783232543887,
+      "cosine": 0.2181401954308591,
+      "max_abs": 0.0007330775260925293
+    }
+  ]
+}

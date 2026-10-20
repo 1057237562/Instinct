@@ -1,4 +1,4 @@
-"""Instinct V2 latent recurrent-depth Transformer.
+"""RecurrsiveInstinct latent recurrent-depth Transformer.
 
 This backbone follows Geiping et al., *Scaling up Test-Time Compute with Latent
 Reasoning* (arXiv:2502.05171):
@@ -13,7 +13,7 @@ autograd graph.  At inference ``num_steps`` directly scales latent compute.
 
 The public Instinct config/model/generation interfaces stay compatible with the
 other backbones so all trainers can select this implementation with
-``--use_looped 1`` or ``model_architecture=looped``.
+``--use_recurrsive 1`` or ``model_architecture=recurrsive_instinct``.
 """
 import math
 import warnings
@@ -38,10 +38,10 @@ from model.rope import (
 from model.moe_dispatch import routed_moe_forward
 
 # ═══════════════════════════════════════════════════════════════
-# Instinct Loop Config
+# RecurrsiveInstinct Config
 # ═══════════════════════════════════════════════════════════════
-class InstinctConfig(PretrainedConfig):
-    """Configuration for the Instinct V2 recurrent-depth backbone."""
+class RecurrsiveInstinctConfig(PretrainedConfig):
+    """Configuration for the RecurrsiveInstinct recurrent-depth backbone."""
     model_type = "instinct"
     def __init__(self, hidden_size: int = 768, num_hidden_layers: int = 8, use_moe: bool = False, **kwargs):
         """初始化配置:全部可选字段经 kwargs 传入。"""
@@ -51,7 +51,7 @@ class InstinctConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.use_moe = use_moe
-        self.model_architecture = kwargs.get("model_architecture", "looped")
+        self.model_architecture = kwargs.get("model_architecture", "recurrsive_instinct")
         self.recurrent_architecture_version = 2
         self.dropout = kwargs.get("dropout", 0.0)
         self.vocab_size = kwargs.get("vocab_size", 6400)
@@ -212,7 +212,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     return (x[:, :, :, None, :].expand(bs, slen, num_key_value_heads, n_rep, head_dim).reshape(bs, slen, num_key_value_heads * n_rep, head_dim))
 
 class Attention(nn.Module):
-    def __init__(self, config: InstinctConfig):
+    def __init__(self, config: RecurrsiveInstinctConfig):
         super().__init__()
         self.num_key_value_heads = config.num_attention_heads if config.num_key_value_heads is None else config.num_key_value_heads
         self.n_local_heads = config.num_attention_heads
@@ -285,7 +285,7 @@ class Attention(nn.Module):
         return output, past_kv
 
 class FeedForward(nn.Module):
-    def __init__(self, config: InstinctConfig, intermediate_size: int = None):
+    def __init__(self, config: RecurrsiveInstinctConfig, intermediate_size: int = None):
         super().__init__()
         intermediate_size = intermediate_size or config.intermediate_size
         self.gate_proj = nn.Linear(config.hidden_size, intermediate_size, bias=False)
@@ -300,7 +300,7 @@ class FeedForward(nn.Module):
         return self.down_proj(self.act_fn(gate) * up)
 
 class MOEFeedForward(nn.Module):
-    def __init__(self, config: InstinctConfig):
+    def __init__(self, config: RecurrsiveInstinctConfig):
         super().__init__()
         self.config = config
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
@@ -328,7 +328,7 @@ class MOEFeedForward(nn.Module):
 
 class InstinctBlock(nn.Module):
     """Transformer layer with the paper's four-norm sandwich layout."""
-    def __init__(self, layer_id: int, config: InstinctConfig):
+    def __init__(self, layer_id: int, config: RecurrsiveInstinctConfig):
         super().__init__()
         self.self_attn = Attention(config)
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -443,7 +443,7 @@ class InstinctBlock(nn.Module):
         mlp_output = self._run_mlp(self.post_attention_layernorm(hidden_states))
         return self._block_residual(source_bank, partial_count, mlp_output), present_key_value
 
-class _LegacyInstinctLoopModel(nn.Module):
+class _LegacyRecurrsiveInstinctModel(nn.Module):
     """
     Loop Transformer model with prelude → shared loop block → coda architecture.
 
@@ -462,7 +462,7 @@ class _LegacyInstinctLoopModel(nn.Module):
     Total effective depth = prelude_layers + loop_iters + coda_layers
     Unique transformer blocks = prelude_layers + 1 + coda_layers
     """
-    def __init__(self, config: InstinctConfig):
+    def __init__(self, config: RecurrsiveInstinctConfig):
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
@@ -702,10 +702,10 @@ class _LegacyInstinctLoopModel(nn.Module):
             return hidden_states, presents, aux_loss, intermediates
         return hidden_states, presents, aux_loss
 
-class InstinctLoopModel(nn.Module):
-    """Prelude -> recurrent latent core -> coda implementation for Instinct V2."""
+class RecurrsiveInstinctModel(nn.Module):
+    """Prelude -> recurrent latent core -> coda implementation for RecurrsiveInstinct."""
 
-    def __init__(self, config: InstinctConfig):
+    def __init__(self, config: RecurrsiveInstinctConfig):
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
@@ -1131,8 +1131,8 @@ def _make_loop_output(**kwargs):
     return MoeCausalLMOutputWithPast(**kwargs)
 
 
-class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
-    config_class = InstinctConfig
+class RecurrsiveInstinctForCausalLM(PreTrainedModel, GenerationMixin):
+    config_class = RecurrsiveInstinctConfig
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
     def _init_weights(self, module):
@@ -1156,10 +1156,10 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                 nn.init.ones_(module.weight)
 
 
-    def __init__(self, config: InstinctConfig = None):
-        self.config = config or InstinctConfig()
+    def __init__(self, config: RecurrsiveInstinctConfig = None):
+        self.config = config or RecurrsiveInstinctConfig()
         super().__init__(self.config)
-        self.model = InstinctLoopModel(self.config)
+        self.model = RecurrsiveInstinctModel(self.config)
         self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
         if self.config.tie_word_embeddings:
             self.model.embed_tokens.weight = self.lm_head.weight
@@ -1185,7 +1185,7 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                 )
 
     def load_pretrained_weights(self, weights):
-        """Load V2 weights or migrate Dense/legacy-loop weights as initialization.
+        """Load RecurrsiveInstinct weights or migrate Dense/legacy-loop weights as initialization.
 
         Dense layers are partitioned in order into Prelude, recurrent core and
         Coda.  A former one-layer LoopUS core is copied into every layer of the
@@ -1244,7 +1244,7 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         ]
         if significant_missing or significant_unexpected:
             warnings.warn(
-                "Partial Instinct V2 weight migration; missing="
+                "Partial RecurrsiveInstinct weight migration; missing="
                 f"{significant_missing[:8]}, unexpected={significant_unexpected[:8]}",
                 RuntimeWarning,
             )
@@ -1358,3 +1358,8 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         if kwargs.get("return_kv"):
             return {'generated_ids': input_ids, 'past_kv': past_key_values}
         return input_ids
+
+
+# Shared interface used by all trainer backbones.
+InstinctConfig = RecurrsiveInstinctConfig
+InstinctForCausalLM = RecurrsiveInstinctForCausalLM

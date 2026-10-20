@@ -74,7 +74,7 @@ def test_sdpa_forward_and_gradients_match_boolean_path(mask_kind):
 ])
 def test_model_reuses_bias_and_matches_old_gradients(monkeypatch, variant, moe, checkpoint):
     module = importlib.import_module(
-        'model.model_instinct_loop' if variant == 'loop' else 'model.model_instinct'
+        'model.model_recurrsive_instinct' if variant == 'loop' else 'model.model_instinct'
     )
     config = module.InstinctConfig(
         vocab_size=64, hidden_size=32, num_hidden_layers=3,

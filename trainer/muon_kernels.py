@@ -26,10 +26,13 @@ def _prepare(G, V, U, NUMEL: tl.constexpr, MOM: tl.constexpr,
     weight = tl.full((), 1. - MOM, tl.float32)
     for i in tl.static_range(len(G)):
         if matrix == i:
-            grad = tl.load(G[i] + index, index < NUMEL, 0)
-            buf = tl.load(V[i] + index, index < NUMEL, 0)
+            # BF16 gradients/momentum storage still use FP32 EMA/Nesterov math.
+            grad = tl.load(G[i] + index, index < NUMEL, 0).to(tl.float32)
+            buf = tl.load(V[i] + index, index < NUMEL, 0).to(tl.float32)
             buf = _lerp(buf, grad, weight)
             tl.store(V[i] + index, buf, index < NUMEL)
+            # Consume the unrounded FP32 EMA for THIS Nesterov update, even
+            # when the persistent buffer above is rounded to BF16 for next step.
             update = _lerp(grad, buf, momentum) if NEST else buf
             tl.store(U + i*NUMEL + index, update, index < NUMEL)
 
@@ -64,6 +67,40 @@ def apply_update(params, update, *, decay, alpha):
     rows,cols=params[0].shape
     _apply[(triton.cdiv(rows*cols,1024),len(params))](tuple(params),update,rows,cols,
         *update.stride(),decay,alpha,1024,enable_fp_fusion=False)
+
+
+@triton.jit
+def _apply_mantissa(P, LOW, U, ROWS: tl.constexpr, COLS: tl.constexpr,
+                    U0: tl.constexpr, U1: tl.constexpr, U2: tl.constexpr,
+                    DECAY, ALPHA, BLOCK: tl.constexpr):
+    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    matrix = tl.program_id(1)
+    mask = index < ROWS * COLS
+    update = tl.load(U + matrix*U0 + (index//COLS)*U1 + (index%COLS)*U2, mask, 0).to(tl.float32)
+    for i in tl.static_range(len(P)):
+        if matrix == i:
+            high = tl.load(P[i] + index, mask, 0).to(tl.uint16, bitcast=True).to(tl.uint32)
+            low = tl.load(LOW[i] + index, mask, 0).to(tl.uint32)
+            value = ((high << 16) | low).to(tl.float32, bitcast=True)
+            # Match foreach mul_ followed by add_: decay rounds separately,
+            # while the scaled addition is an FMA. No BF16 numeric cast here.
+            value = value * DECAY
+            value = tl.fma(update, ALPHA, value)
+            bits = value.to(tl.uint32, bitcast=True)
+            high = (bits >> 16).to(tl.uint16).to(tl.bfloat16, bitcast=True)
+            tl.store(P[i] + index, high, mask)
+            tl.store(LOW[i] + index, (bits & 0xffff).to(tl.uint16), mask)
+
+
+def apply_mantissa_update(params, mantissas, update, *, decay, alpha):
+    """Reconstruct/update/split in registers; preserve each Parameter/storage."""
+    rows, cols = params[0].shape
+    _apply_mantissa[(triton.cdiv(rows*cols, 1024), len(params))](
+        tuple(params), tuple(mantissas), update, rows, cols, *update.stride(),
+        decay, alpha, 1024, enable_fp_fusion=False)
+    # Raw CUDA stores bypass Tensor.copy_'s version bump. Weight-stack caches
+    # and saved-tensor mutation checks must still see this in-place update.
+    torch.autograd.graph.increment_version((*params, *mantissas))
 
 
 @triton.jit
@@ -131,7 +168,14 @@ def zeropower(update, *, ns_coefficients, ns_steps, eps):
     x = x / torch.linalg.vector_norm(x, dim=(-2, -1), keepdim=True).clamp(min=eps)
     a, b, c = ns_coefficients
     for iteration in range(ns_steps):
-        gram = baddbmm(x, x, x.transpose(-2, -1), symmetric=True)
+        # V2 FFN's long K and the single-matrix KV tail use different cuBLAS
+        # reduction orders. Replacing these Gram products with the triangular
+        # kernel changes BF16 results across NS iterations. Keep their reference
+        # products; polynomial/update still use fused Triton epilogues.
+        gram = (torch.bmm(x, x.transpose(-2, -1))
+                if (tuple(x.shape[-2:]) == (1536, 5504)
+                    or tuple(x.shape) == (1, 384, 1536))
+                else baddbmm(x, x, x.transpose(-2, -1), symmetric=True))
         polynomial = baddbmm(gram, gram, gram, alpha=c, beta=b, symmetric=True)
         x = baddbmm(x, polynomial, x, beta=a,
                    transpose_output=transposed and iteration == ns_steps-1)

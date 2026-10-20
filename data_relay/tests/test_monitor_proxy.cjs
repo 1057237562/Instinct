@@ -20,11 +20,14 @@ const listen=server=>new Promise(resolve=>server.listen(0,'127.0.0.1',()=>resolv
   req.on('end',()=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({path:req.url,sha256:hash.digest('hex')}));});
  });
  const upstreamPort=await listen(upstream),app=express();
- app.use('/relay',(req,res,next)=>{if(isPull(req)||req.headers.cookie==='fixture-admin')next();else res.status(401).end();},createRelayProxy({resolve:()=>({port:upstreamPort,token:secret})}));
+ app.use('/relay',(req,res,next)=>{if(isPull(req)||req.headers.cookie==='fixture-admin')next();else res.status(401).end();},createRelayProxy({resolve:()=>({port:upstreamPort,token:secret}),onConfig:async patch=>({instance_uuid:patch.instance_uuid,shared:true})}));
  app.use(express.json({limit:'1kb'}));const server=http.createServer(app);const port=await listen(server);
  const base=`http://127.0.0.1:${port}`;
  try{
   assert.equal((await fetch(base+'/relay/api/config')).status,401);
+  for(const name of ['integration','%69ntegration'])assert.equal((await fetch(base+`/relay/api/${name}/ssh-target`,{method:'POST',headers:{cookie:'fixture-admin'}})).status,404);
+  const config=await fetch(base+'/relay/api/config',{method:'PUT',headers:{cookie:'fixture-admin','content-type':'application/json'},body:JSON.stringify({instance_uuid:'fixture'})});
+  assert.deepEqual(await config.json(),{instance_uuid:'fixture',shared:true});
   const bytes=Buffer.alloc(20*1024*1024,17);
   const response=await fetch(base+'/relay/api/chunks/0',{method:'PUT',headers:{cookie:'fixture-admin',authorization:'attacker-token','content-type':'application/octet-stream'},body:bytes});
   assert.equal(response.status,200);const data=await response.json();assert.equal(data.path,'/api/chunks/0');

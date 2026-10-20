@@ -7,6 +7,7 @@ the reconstructed trajectory.
 """
 
 import copy
+import io
 import types
 
 import pytest
@@ -35,8 +36,6 @@ def _mantissa_pair(shapes, device='cpu'):
     for p in reference:
         high, low = _split_precise(p.detach().clone())
         param = torch.nn.Parameter(high.clone())
-        # Allow the identical fp32 gradients used by the reference arm.
-        param.grad_dtype = None
         precise.append(param)
         mantissas.append(low)
     return reference, precise, mantissas
@@ -55,11 +54,12 @@ def _run_trajectory(device, *, nesterov, steps=6):
     results = []
     torch.manual_seed(99)
     for _ in range(steps):
-        grads = [torch.randn_like(p) for p in reference]
+        # Identical values with real BF16 .grad storage on the mantissa arm.
+        grads = [torch.randn_like(p).bfloat16().float() for p in reference]
         for p, g in zip(reference, grads):
             p.grad = g.clone()
         for p, g in zip(precise, grads):
-            p.grad = g.clone()
+            p.grad = g.bfloat16()
         ref_opt.step()
         man_opt.step()
         for pa, pb in zip(reference, precise):
@@ -115,7 +115,7 @@ def test_naive_bf16_params_lose_updates():
 
     torch.manual_seed(99)
     for _ in range(8):
-        grads = [torch.randn_like(p) for p in reference]
+        grads = [torch.randn_like(p).bfloat16().float() for p in reference]
         for p, g in zip(reference, grads):
             p.grad = g.clone()
         for p, g in zip(naive, grads):
@@ -213,6 +213,7 @@ def test_default_off_and_factory_env(monkeypatch):
         CombinedOptimizer,
         _is_muon_hidden_matrix,
         build_optimizer,
+        cast_training_parameters,
         estimate_training_persistent_bytes,
     )
 
@@ -226,7 +227,7 @@ def test_default_off_and_factory_env(monkeypatch):
 
     monkeypatch.setenv('INSTINCT_MUON_MANTISSA', '1')
     monkeypatch.setenv('INSTINCT_MUON_BACKEND', 'batched')
-    model = torch.nn.Linear(8, 12).to(torch.bfloat16)
+    model = cast_training_parameters(torch.nn.Linear(8, 12), 'bf16')
     opt = build_optimizer(model.named_parameters(), lr=5e-4, optimizer='muon')
     assert isinstance(opt, CombinedOptimizer)
     assert isinstance(opt.optimizers[0], BatchedMuon)
@@ -251,6 +252,116 @@ def test_default_off_and_factory_env(monkeypatch):
     assert on - off == expected_delta
 
 
+@pytest.mark.parametrize('versioned', [False, True])
+def test_resume_rejects_discarding_mantissa(versioned):
+    p = torch.nn.Parameter(torch.ones(4, 4, dtype=torch.bfloat16))
+    opt = BatchedMuon([p], use_mantissa=True)
+    p.grad = torch.ones_like(p)
+    opt.step()
+    saved = copy.deepcopy(opt.state_dict())
+    if not versioned:
+        saved.pop('muon_precision')
+    for dtype in (torch.bfloat16, torch.float32):
+        q = torch.nn.Parameter(p.detach().to(dtype))
+        target = BatchedMuon([q])
+        with pytest.raises(ValueError, match='refusing to discard'):
+            target.load_state_dict(saved)
+        assert not target.state
+
+
+def test_fresh_mantissa_checkpoint_also_records_mode():
+    p = torch.nn.Parameter(torch.ones(4, 4, dtype=torch.bfloat16))
+    saved = BatchedMuon([p], use_mantissa=True).state_dict()
+    with pytest.raises(ValueError, match='refusing to discard'):
+        BatchedMuon([p]).load_state_dict(saved)
+
+
+@pytest.mark.parametrize('corruption', ['dtype', 'shape', 'missing', 'format'])
+def test_resume_rejects_corrupt_mantissa(corruption):
+    p = torch.nn.Parameter(torch.ones(4, 4, dtype=torch.bfloat16))
+    opt = BatchedMuon([p], use_mantissa=True)
+    opt.reserve_momentum()
+    saved = copy.deepcopy(opt.state_dict())
+    if corruption == 'dtype':
+        saved['state'][0]['mantissa'] = saved['state'][0]['mantissa'].to(torch.bfloat16)
+    elif corruption == 'shape':
+        saved['state'][0]['mantissa'] = torch.zeros(1, dtype=torch.uint16)
+    elif corruption == 'missing':
+        del saved['state'][0]['mantissa']
+    else:
+        saved['muon_precision'] = 'unknown'
+    with pytest.raises(ValueError):
+        BatchedMuon([p], use_mantissa=True).load_state_dict(saved)
+
+
+def test_serialized_resume_preserves_bits_and_missing_gradients():
+    torch.manual_seed(19)
+    params = [torch.nn.Parameter(torch.randn(8, 4).bfloat16()) for _ in range(2)]
+    opt = BatchedMuon(params, use_mantissa=True)
+    assert opt.reserve_momentum() == sum(p.numel() * 6 for p in params)
+    for p in params:
+        p.grad = torch.randn_like(p)
+    opt.step()
+    stream = io.BytesIO()
+    torch.save({'weights': [p.detach().clone() for p in params], 'opt': opt.state_dict()}, stream)
+    stream.seek(0)
+    saved = torch.load(stream, weights_only=True)
+    copies = [torch.nn.Parameter(p.clone()) for p in saved['weights']]
+    restored = BatchedMuon(copies, use_mantissa=True)
+    restored.load_state_dict(saved['opt'])
+    assert restored.reserve_momentum() == 0
+    before = copies[1].detach().clone()
+    for i, (p, q) in enumerate(zip(params, copies)):
+        p.grad = torch.randn_like(p) if i == 0 else None
+        q.grad = None if p.grad is None else p.grad.clone()
+    opt.step()
+    restored.step()
+    for p, q in zip(params, copies):
+        assert torch.equal(p, q)
+        for key in ('mantissa', 'momentum_buffer'):
+            assert torch.equal(opt.state[p][key], restored.state[q][key])
+            assert opt.state[p][key].dtype == restored.state[q][key].dtype
+    assert torch.equal(copies[1], before)
+
+
+def test_factory_protects_auxiliary_params_and_small_lr(monkeypatch):
+    from trainer.trainer_utils import build_optimizer, cast_training_parameters
+    monkeypatch.setenv('INSTINCT_MUON_MANTISSA', '1')
+    model = torch.nn.Linear(8, 8).bfloat16()
+    with pytest.raises(ValueError, match='AdamW parameters'):
+        build_optimizer(model.named_parameters(), lr=5e-4, optimizer='muon')
+    model = cast_training_parameters(torch.nn.Linear(8, 8), 'bf16')
+    assert model.weight.dtype == torch.bfloat16
+    assert model.bias.dtype == torch.float32
+    opt = build_optimizer(model.named_parameters(), lr=1e-6, optimizer='muon')
+    assert opt.optimizers[0].use_mantissa
+    monkeypatch.setenv('INSTINCT_MUON_BACKEND', 'native')
+    with pytest.raises(ValueError, match='BACKEND=batched'):
+        build_optimizer(model.named_parameters(), lr=5e-4, optimizer='muon')
+    monkeypatch.setenv('INSTINCT_MUON_MANTISSA', 'typo')
+    with pytest.raises(ValueError, match='must be 0 or 1'):
+        build_optimizer(model.named_parameters(), lr=5e-4, optimizer='muon')
+
+
+def test_combined_and_native_resume_reject_mantissa(monkeypatch):
+    from trainer.trainer_utils import build_optimizer, cast_training_parameters
+    monkeypatch.setenv('INSTINCT_MUON_MANTISSA', '1')
+    model = cast_training_parameters(torch.nn.Linear(8, 8), 'bf16')
+    saved = build_optimizer(model.named_parameters(), lr=5e-4, optimizer='muon').state_dict()
+    monkeypatch.setenv('INSTINCT_MUON_MANTISSA', '0')
+    for backend in ('batched', 'native'):
+        monkeypatch.setenv('INSTINCT_MUON_BACKEND', backend)
+        target = build_optimizer(torch.nn.Linear(8, 8).named_parameters(), lr=5e-4, optimizer='muon')
+        with pytest.raises(ValueError, match='refusing to discard'):
+            target.load_state_dict(saved)
+        with pytest.raises(ValueError, match='refusing to discard'):
+            target.optimizers[0].load_state_dict(saved['optimizers'][0])
+        changed = copy.deepcopy(saved)
+        changed['optimizers'][0]['param_groups'][0]['params'].append(99)
+        with pytest.raises(ValueError, match='parameter groups changed'):
+            target.load_state_dict(changed)
+
+
 @pytest.mark.gpu
 @pytest.mark.parametrize('nesterov', [True, False])
 def test_mantissa_tracks_fp32_reference_bit_exact_cuda(nesterov):
@@ -272,11 +383,11 @@ def test_real_expert_shapes_cuda_under_autocast():
 
     torch.manual_seed(211)
     for _ in range(3):
-        grads = [torch.randn_like(p) for p in reference]
+        grads = [torch.randn_like(p).bfloat16().float() for p in reference]
         for p, g in zip(reference, grads):
             p.grad = g.clone()
         for p, g in zip(precise, grads):
-            p.grad = g.clone()
+            p.grad = g.bfloat16()
         ref_opt.step()
         with torch.autocast('cuda', dtype=torch.bfloat16):
             man_opt.step()
@@ -288,3 +399,40 @@ def test_real_expert_shapes_cuda_under_autocast():
             # safety net if a future backend reorders reductions.
             if not torch.equal(reconstructed, pa):
                 torch.testing.assert_close(reconstructed, pa, rtol=1e-6, atol=0)
+
+
+def test_experimental_bf16_momentum_matches_value_only_simulation():
+    from experiments.audit_muon_precision import BF16MomentumMuon
+    torch.manual_seed(41)
+    p = torch.nn.Parameter(torch.randn(8, 4).bfloat16())
+    q = torch.nn.Parameter(p.detach().clone())
+    simulated = BatchedMuon([p], use_mantissa=True)
+    actual = BF16MomentumMuon([q])
+    for _ in range(6):
+        p.grad = torch.randn_like(p)
+        q.grad = p.grad.clone()
+        simulated.step()
+        actual.step()
+        momentum = simulated.state[p]['momentum_buffer']
+        momentum.copy_(momentum.bfloat16())
+        assert torch.equal(p, q)
+        assert torch.equal(simulated.state[p]['mantissa'], actual.state[q]['mantissa'])
+        assert torch.equal(momentum, actual.state[q]['momentum_buffer'].float())
+        assert actual.state[q]['momentum_buffer'].dtype == torch.bfloat16
+    # Research momentum checkpoints must not silently change precision on resume.
+    with pytest.raises(ValueError, match='Unsupported Muon mantissa'):
+        BatchedMuon([q], use_mantissa=True).load_state_dict(actual.state_dict())
+
+
+def test_mixed_parameter_cast_preserves_tied_fp32_weights(monkeypatch):
+    from trainer.trainer_utils import cast_training_parameters
+    from model.model_instinct import InstinctForCausalLM
+    from tests.helpers import make_tiny_config
+    model = InstinctForCausalLM(make_tiny_config())
+    before = model.model.embed_tokens.weight.detach().clone()
+    monkeypatch.setenv('INSTINCT_MUON_MANTISSA', '1')
+    cast_training_parameters(model, 'bf16')
+    assert model.model.embed_tokens.weight is model.lm_head.weight
+    assert model.lm_head.weight.dtype == torch.float32
+    assert torch.equal(model.lm_head.weight, before)
+    assert model.model.layers[0].self_attn.q_proj.weight.dtype == torch.bfloat16

@@ -4,7 +4,7 @@
 在纯文本语料（pretrain_t2t(_mini).jsonl）上做自回归 next-token 预测，
 输出 {save_weight}_{hidden_size}.pth 权重，作为后续 SFT / LoRA / RL 等阶段的基座。
 支持 DDP、梯度累积、混合精度（autocast + GradScaler）、断点续训，
-以及 Looped 循环架构的可选深度奖励 / 自蒸馏。
+以及 RecurrsiveInstinct 循环架构的可选深度奖励 / 自蒸馏。
 """
 import os
 import sys
@@ -95,6 +95,20 @@ def _recompiled_resume_note(saved_data_config, streaming_plan, data_path):
         'is replayed or skipped.  Resuming at an epoch boundary has no drift, and '
         'compiling with --align-chunk-bytes makes the cursor exact.'
     )
+
+
+def _pause_after_update(epoch, step, wandb):
+    """Save only after pending accumulated gradients have been applied."""
+    if not pause_requested(args):
+        return
+    clear_pause_request(args)
+    profiler.finish()
+    if is_main_process():
+        pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model,
+                              optimizer=optimizer, scaler=scaler, epoch=epoch,
+                              step=step, wandb=wandb, data_config=data_config)
+    Logger('[PAUSED] Training paused — resume checkpoint saved.')
+    sys.exit(PAUSE_EXIT_CODE)
 
 
 def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
@@ -230,16 +244,14 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
                 f'epoch={epoch + 1}, completed buckets >{args.bucket_large_threshold} tokens'
             )
 
-        # 暂停分支：检测到暂停请求标记时，清标记并保存检查点后以 42 退出（WebUI 据此识别“已暂停”）。
-        if pause_requested(args):
-            clear_pause_request(args)
-            profiler.finish()
-            if is_main_process():
-                pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, data_config=data_config)
-            Logger('[PAUSED] Training paused — resume checkpoint saved.')
-            sys.exit(PAUSE_EXIT_CODE)
+        # Resume states do not contain pending gradients. Honor pause only at
+        # an optimizer boundary, leaving the request armed while accumulating.
+        if step % args.accumulation_steps == 0:
+            _pause_after_update(epoch, step, wandb)
 
     flush_remaining_grad(scaler, optimizer, model.parameters(), args.grad_clip, last_step, start_step, args.accumulation_steps)
+    if last_step > start_step:
+        _pause_after_update(epoch, last_step, wandb)
     return last_step
 
 
@@ -313,9 +325,9 @@ if __name__ == "__main__":
     verify_profile_model(lm_config, args)
     configure_bucket_memory_budget(model, args, checkpoint_data=ckp_data)
     data_config = packing_data_config(args)
-    if getattr(lm_config, 'model_architecture', '') == 'looped':
+    if getattr(lm_config, 'model_architecture', '') == 'recurrsive_instinct':
         Logger(
-            '[Instinct V2 recurrent-depth] '
+            '[RecurrsiveInstinct recurrent-depth] '
             f'P/R/C=({lm_config.prelude_layers}/{lm_config.recurrent_layers}/'
             f'{lm_config.coda_layers}), mean recurrence={lm_config.loop_iters}, '
             f'backprop depth={lm_config.mean_backprop_depth}, '
@@ -324,7 +336,7 @@ if __name__ == "__main__":
         if any((args.depth_reward >= 0, args.distill_weight >= 0,
                 args.exit_in_training >= 0, args.n_supervision > 0)):
             Logger(
-                '[Instinct V2] LoopUS depth-reward/self-distillation flags are '
+                '[RecurrsiveInstinct] LoopUS depth-reward/self-distillation flags are '
                 'deprecated and ignored; recurrence is trained with randomized '
                 'unrolling and truncated backpropagation.'
             )

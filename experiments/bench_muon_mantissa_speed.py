@@ -52,7 +52,7 @@ import torch  # noqa: E402
 from model.model_instinct import InstinctForCausalLM  # noqa: E402
 from tests.helpers import make_tiny_config  # noqa: E402
 from trainer.batched_muon import BatchedMuon, _reconstruct_precise  # noqa: E402
-from trainer.trainer_utils import build_optimizer  # noqa: E402
+from trainer.trainer_utils import build_optimizer, cast_training_parameters  # noqa: E402
 
 MIB = 2 ** 20
 GIB = 2 ** 30
@@ -196,6 +196,7 @@ def bench_isolated(tag, shapes, expected_dtype, use_mantissa, device,
         assert recon_changed, (
             f"{tag}: optimizer step did not mutate the reconstructed parameter"
         )
+        del recon_after
     else:
         changed_probe = sum(
             0 if _tensors_equal(bb, p.detach()) else 1 for bb, p in before
@@ -254,6 +255,7 @@ def _forward_backward_step(model, opt, tokens, autocast_ctx):
 
 def bench_e2e(device, seq, micro_batch, warmup, iters, seed):
     """Forward + backward + opt.step() on a tiny dense model, A vs B."""
+    os.environ['INSTINCT_MUON_MOMENTUM_DTYPE'] = 'fp32'
     results = []
     for tag, use_mantissa, param_dtype in (
         ("A_mantissa", True, torch.bfloat16),
@@ -265,10 +267,10 @@ def bench_e2e(device, seq, micro_batch, warmup, iters, seed):
         torch.manual_seed(seed)
 
         config = make_tiny_config(use_moe=False)
-        model = InstinctForCausalLM(config).to(dtype=param_dtype).to(device)
-        model.train()
-
         os.environ["INSTINCT_MUON_MANTISSA"] = "1" if use_mantissa else "0"
+        model = cast_training_parameters(
+            InstinctForCausalLM(config), 'bf16' if use_mantissa else 'fp32'
+        ).to(device).train()
         opt = build_optimizer(
             list(model.named_parameters()), lr=5e-4, optimizer="muon"
         )

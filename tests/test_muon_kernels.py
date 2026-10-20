@@ -128,3 +128,128 @@ def test_fused_update_preserves_lerp_and_decay_rounding(momentum,nesterov):
     apply_update(params,actual,decay=0.99995,alpha=-0.0012345)
     for a,e in zip(params,reference):
         torch.testing.assert_close(a,e,rtol=0,atol=0)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize('momentum', [0., 0.5, 0.8, 0.95, 1.])
+@pytest.mark.parametrize('nesterov', [True, False])
+def test_fused_bf16_grad_fp32_momentum_bitwise(momentum, nesterov):
+    from trainer.muon_kernels import prepare_update
+    torch.manual_seed(127)
+    # Non-block-aligned size tests masked tail loads/stores too.
+    grads = [torch.randn(19, 71, device='cuda', dtype=torch.bfloat16) for _ in range(3)]
+    buffers = [torch.randn_like(g, dtype=torch.float32) for g in grads]
+    expected = [b.clone() for b in buffers]
+    promoted = [g.float() for g in grads]
+    torch._foreach_lerp_(expected, promoted, 1-momentum)
+    update = torch.stack(torch._foreach_lerp(promoted, expected, momentum) if nesterov else expected).bfloat16()
+    actual = prepare_update(grads, buffers, momentum=momentum, nesterov=nesterov)
+    assert torch.equal(actual, update)
+    for a, b in zip(buffers, expected):
+        assert torch.equal(a.view(torch.int32), b.view(torch.int32))
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize('transposed', [False, True])
+@pytest.mark.parametrize('decay,alpha', [(0.99995, -0.0012345), (1., 0.), (0., -1.)])
+def test_fused_mantissa_preserves_raw_bits(transposed, decay, alpha):
+    from trainer.batched_muon import _split_precise, _reconstruct_precise
+    from trainer.muon_kernels import apply_mantissa_update
+    torch.manual_seed(59)
+    # Cover signs, exponent range, subnormals and both signed zeros. Exclude
+    # NaN/Inf from arithmetic equality, whose payload is unspecified.
+    bits = torch.randint(-(2**31), 2**31-1, (2, 131, 257), device='cuda', dtype=torch.int32)
+    values = bits.view(torch.float32)
+    values = torch.where(torch.isfinite(values), values, 0.)
+    values.view(-1)[:6] = torch.tensor([0., -0., 1e-44, -1e-44, 1e-37, -1e-37], device='cuda')
+    pairs = [_split_precise(v) for v in values.unbind()]
+    params, lows = [v[0] for v in pairs], [v[1] for v in pairs]
+    update = (torch.randn(2, 257, 131, device='cuda', dtype=torch.bfloat16).transpose(1, 2)
+              if transposed else torch.randn_like(values, dtype=torch.bfloat16))
+    reference = [v.clone() for v in values.unbind()]
+    torch._foreach_mul_(reference, decay)
+    torch._foreach_add_(reference, list(update.float().unbind()), alpha=alpha)
+    versions = [p._version for p in (*params, *lows)]
+    apply_mantissa_update(params, lows, update, decay=decay, alpha=alpha)
+    assert [p._version for p in (*params, *lows)] == [v+1 for v in versions]
+    for p, low, expected in zip(params, lows, reference):
+        actual = _reconstruct_precise(p, low)
+        assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize('nesterov', [True, False])
+def test_mantissa_fused_trajectory_resume_and_grad_none(monkeypatch, nesterov):
+    from trainer.batched_muon import _split_precise
+    torch.manual_seed(137)
+    shapes = [(1664,512), (512,1664), (512,512), (128,512), (8,512)]
+    shapes = shapes * 2
+    originals = [_split_precise(torch.randn(s, device='cuda') * .02) for s in shapes]
+    params = [torch.nn.Parameter(x[0].clone()) for x in originals]
+    copies = [torch.nn.Parameter(p.detach().clone()) for p in params]
+    ref = BatchedMuon(params, use_mantissa=True, nesterov=nesterov, batch_size=3)
+    opt = BatchedMuon(copies, use_mantissa=True, nesterov=nesterov, batch_size=3)
+    for p, q, (_, low) in zip(params, copies, originals):
+        ref.state[p]['mantissa'] = low.clone()
+        opt.state[q]['mantissa'] = low.clone()
+    pointers = [p.data_ptr() for p in copies]
+    for step in range(12):
+        for i, (p, q) in enumerate(zip(params, copies)):
+            p.grad = None if step % 4 == i % 4 else torch.randn_like(p)
+            q.grad = p.grad.clone() if p.grad is not None else None
+        for instance in (ref, opt):
+            instance.param_groups[0]['lr'] = [0., 5e-4, 1e-6][step % 3]
+        monkeypatch.setenv('INSTINCT_MUON_FUSED_UPDATES', '0')
+        ref.step()
+        monkeypatch.setenv('INSTINCT_MUON_FUSED_UPDATES', '1')
+        with torch.autocast('cuda', dtype=torch.bfloat16):
+            opt.step()
+        assert pointers == [p.data_ptr() for p in copies]
+        for p, q in zip(params, copies):
+            assert torch.equal(p.view(torch.int16), q.view(torch.int16))
+            for key, value in ref.state[p].items():
+                assert torch.equal(value, opt.state[q][key])
+        if step == 5:
+            opt.load_state_dict(copy.deepcopy(opt.state_dict()))
+            opt.reserve_momentum()
+
+
+@pytest.mark.gpu
+def test_mantissa_noncontiguous_falls_back(monkeypatch):
+    torch.manual_seed(139)
+    p = torch.nn.Parameter(torch.randn(64, 128, device='cuda').bfloat16().T)
+    q = torch.nn.Parameter(p.detach().clone())
+    assert not p.is_contiguous()
+    ref, opt = BatchedMuon([p], use_mantissa=True), BatchedMuon([q], use_mantissa=True)
+    for _ in range(3):
+        p.grad = torch.randn_like(p)
+        q.grad = p.grad.clone()
+        monkeypatch.setenv('INSTINCT_MUON_FUSED_UPDATES', '0')
+        ref.step()
+        monkeypatch.setenv('INSTINCT_MUON_FUSED_UPDATES', '1')
+        opt.step()
+        assert torch.equal(p, q)
+        for key, value in ref.state[p].items():
+            assert torch.equal(value, opt.state[q][key])
+
+
+@pytest.mark.gpu
+def test_fused_mantissa_invalidates_inference_weight_stack(monkeypatch):
+    from model.moe_dispatch import _stacked_expert_weights
+    experts = torch.nn.ModuleList([torch.nn.Module() for _ in range(2)])
+    for expert in experts:
+        expert.gate_proj = torch.nn.Linear(16, 8, bias=False, device='cuda', dtype=torch.bfloat16)
+    experts._inference_stack_cache = {}
+    params = [e.gate_proj.weight for e in experts]
+    with torch.no_grad():
+        cached = _stacked_expert_weights(experts, 'gate_proj', torch.bfloat16)
+    opt = BatchedMuon(params, use_mantissa=True, lr=.1, ns_steps=0)
+    for p in params:
+        p.grad = torch.ones_like(p)
+    monkeypatch.setenv('INSTINCT_MUON_FUSED_UPDATES', '1')
+    opt.step()
+    with torch.no_grad():
+        fresh = _stacked_expert_weights(experts, 'gate_proj', torch.bfloat16)
+    assert fresh is not cached
+    assert not torch.equal(cached, fresh)
+    assert torch.equal(fresh, torch.stack(params).transpose(1, 2))

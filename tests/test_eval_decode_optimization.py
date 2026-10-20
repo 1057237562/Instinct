@@ -6,7 +6,7 @@ import pytest
 import torch
 
 
-@pytest.mark.parametrize('name', ['model_instinct', 'model_instinct_loop', 'model_instinct_linear'])
+@pytest.mark.parametrize('name', ['model_instinct', 'model_recurrsive_instinct', 'model_instinct_linear'])
 def test_cached_decode_matches_eager_and_prefill_projects_one_token(name):
     module = importlib.import_module('model.' + name)
     config = module.InstinctConfig(hidden_size=32, num_hidden_layers=2, vocab_size=64,

@@ -34,6 +34,8 @@ ENV_TILES = {'INSTINCT_GROUPED_MM_FWD_TILE', 'INSTINCT_GROUPED_MM_DW_TILE'}
 PERF_ENV = set(ENV_CHOICES) | ENV_POSITIVE | ENV_TILES
 # These switches affect compatibility but are not automatically changed.
 CONTEXT_ENV = {
+    'INSTINCT_MUON_MANTISSA',
+    'INSTINCT_MUON_MOMENTUM_DTYPE',
     'INSTINCT_MUON_NS_BACKEND', 'INSTINCT_MUON_BACKEND', 'INSTINCT_MUON_FUSED_UPDATES',
     'INSTINCT_MOE_FUSED_PACK', 'INSTINCT_MOE_FUSED_SWIGLU', 'INSTINCT_MOE_FUSED_ROUTING',
     'INSTINCT_MOE_TRANSPOSED_DW', 'INSTINCT_MOE_DIRECT_WEIGHTS', 'INSTINCT_GROUPED_MM_BACKEND',
@@ -130,6 +132,7 @@ def source_fingerprint():
         path = ROOT / 'model' / name
         if path.exists():
             hashes['model/' + name] = file_digest(path)
+    hashes['scripts/muon_controls.py'] = file_digest(ROOT / 'scripts/muon_controls.py')
     return digest(hashes)
 
 
@@ -162,6 +165,8 @@ def training_contract(args):
     config.pop('use_grad_checkpoint', None)
     contract = dict(model=config, arguments={k: getattr(args, k, None) for k in CONTRACT_ARGS},
                     context_env={k: os.environ.get(k) for k in sorted(CONTEXT_ENV)})
+    from scripts.muon_controls import precision_environment
+    contract['context_env'].update(precision_environment())
     # PretrainedConfig contains integer id2label keys. Compare the persisted
     # JSON representation consistently in parent, worker and production.
     return json.loads(json.dumps(contract, allow_nan=False))
@@ -179,27 +184,29 @@ def verify_profile_model(config, args):
         raise ValueError('restored model differs from the autotune calibration; retune this topology')
 
 
-def audit_source(path, audit_path, provenance_path=None):
-    """Bind an existing reviewed audit to the exact corpus; does not clean data."""
+def audit_source(path, audit_path=None, provenance_path=None):
+    """Fingerprint the corpus and verify any explicitly supplied reports."""
     path = Path(path)
     if path.suffix.lower() not in ('.jsonl', '.parquet') or not path.is_file():
-        raise ValueError('autotune currently accepts one audited JSONL or Parquet file')
-    audit = read_json(audit_path)
-    expected = audit.get('output_sha256') or (audit.get('output') or {}).get('sha256')
+        raise ValueError('autotune currently accepts one JSONL or Parquet file')
     actual = file_digest(path)
-    if not expected or actual != expected:
-        raise ValueError('corpus audit SHA-256 mismatch or missing output hash')
-    # Compiled Parquet needs its cleaning/provenance sidecar as well as the
-    # container hash. Human review remains a prerequisite, not a keyword test.
-    provenance = read_json(provenance_path or audit_path)
-    if not provenance.get('output_sha256'):
-        raise ValueError('provide the reviewed cleaning/provenance report with output_sha256')
-    return dict(sha256=actual, size=path.stat().st_size, mtime_ns=path.stat().st_mtime_ns,
-                audit_sha256=file_digest(audit_path), provenance_sha256=file_digest(provenance_path or audit_path))
+    result = dict(sha256=actual, size=path.stat().st_size, mtime_ns=path.stat().st_mtime_ns)
+    if audit_path:
+        audit = read_json(audit_path)
+        expected = audit.get('output_sha256') or (audit.get('output') or {}).get('sha256')
+        if not expected or actual != expected:
+            raise ValueError('corpus audit SHA-256 mismatch or missing output hash')
+        result['audit_sha256'] = file_digest(audit_path)
+    if provenance_path:
+        provenance = read_json(provenance_path)
+        if not provenance.get('output_sha256'):
+            raise ValueError('provide the cleaning/provenance report with output_sha256')
+        result['provenance_sha256'] = file_digest(provenance_path)
+    return result
 
 
 def apply_profile(args):
-    """Apply a validated pretrain profile before CUDA allocator/model setup."""
+    """Apply a measured or explicitly manual profile before model setup."""
     path = getattr(args, 'autotune_profile', None)
     if not path:
         return
@@ -210,8 +217,8 @@ def apply_profile(args):
     if not args.from_resume and args.from_weight != 'none':
         raise ValueError('this calibration is for from-scratch pretraining; use from_weight=none')
     profile = read_json(path)
-    if profile.get('schema') != SCHEMA or profile.get('status') != 'validated':
-        raise ValueError('autotune profile is not validated')
+    if profile.get('schema') != SCHEMA or profile.get('status') not in ('validated', 'manual'):
+        raise ValueError('autotune profile is not validated or explicitly manual')
     settings = validate_settings(profile['settings'])
     if hardware_fingerprint(args.device) != profile['hardware']:
         raise ValueError('autotune hardware/software/source fingerprint changed; retune this machine')
@@ -224,13 +231,14 @@ def apply_profile(args):
         if key == 'bucket_token_budget' and args.from_resume:
             continue  # configure_bucket_memory_budget inherits the saved cursor's budget.
         if '--' + key in supplied and getattr(args, key) != value:
-            raise ValueError(f'explicit --{key} conflicts with validated autotune profile')
+            raise ValueError(f'explicit --{key} conflicts with autotune profile')
         setattr(args, key, value)
     for key, value in settings['env'].items():
         if key in os.environ and os.environ[key] != value:
-            raise ValueError(f'{key} conflicts with validated autotune profile')
+            raise ValueError(f'{key} conflicts with autotune profile')
         os.environ[key] = value
-    print(f'[Autotune] loaded {path}; resume keeps its saved batch budget', flush=True)
+    kind = 'manual fixed settings (not benchmark-validated)' if profile['status'] == 'manual' else 'validated settings'
+    print(f'[Autotune] loaded {kind}: {path}; resume keeps its saved batch budget', flush=True)
 
 
 def quality_gate(reference, candidate, *, loss_limit=.02, validation_limit=.01):

@@ -183,7 +183,7 @@ fn model(state: &Value) -> anyhow::Result<Value> {
                 result[key] = get(state, key, json!(default));
             }
         }
-        "looped" => {
+        "recurrsive_instinct" => {
             result["recurrent_architecture_version"] = json!(2);
             for (key, default) in [
                 ("qk_bias", json!(true)),
@@ -309,6 +309,26 @@ pub(crate) fn profile(
     ] {
         args.insert(key.into(), get(state, key, default));
     }
+    let muon = args["optimizer"] == "muon";
+    let split = muon && enabled(state, "muon_mantissa", false);
+    if split && args["param_dtype"] != "bf16" {
+        bail!("Muon 补偿权重需要将参数精度设为 bf16");
+    }
+    let momentum = if split { get(state, "muon_momentum_dtype", json!("fp32")) } else { json!("fp32") };
+    if momentum != "fp32" && momentum != "bf16" {
+        bail!("Muon 动量精度必须为 fp32 或 bf16");
+    }
+    args.insert("muon_mantissa".into(), json!(u8::from(split)));
+    args.insert("muon_momentum_dtype".into(), momentum);
+    for key in ["muon_batch_size", "muon_workspace_mb"] {
+        let value = if muon { get(state, key, json!(0)) } else { json!(0) };
+        let number = value.as_f64().filter(|n| n.is_finite() && *n >= 0.0)
+            .with_context(|| format!("{key} 必须为非负数"))?;
+        if key == "muon_batch_size" && number.fract() != 0.0 {
+            bail!("Muon 每块矩阵数必须是整数");
+        }
+        args.insert(key.into(), value);
+    }
     args.insert(
         "dtype".into(),
         get(state, "activation_dtype", json!("bfloat16")),
@@ -366,8 +386,8 @@ pub(crate) fn profile(
                 && enabled(state, "sequence_packing", false)
         ),
     );
-    if model["model_architecture"] == "looped" {
-        args.insert("use_looped".into(), json!(true));
+    if model["model_architecture"] == "recurrsive_instinct" {
+        args.insert("use_recurrsive".into(), json!(true));
     }
     if model.get("early_exit_layers").is_some() {
         args.insert("early_exit".into(), json!(true));
@@ -518,7 +538,7 @@ mod tests {
     #[test]
     fn rope_and_architecture_follow_the_current_panel() {
         let state = json!({"hidden_size":512,"num_hidden_layers":32,"num_attention_heads":16,"rope_scaling_type":"longrope",
-            "longrope_short_factors":vec![1.0;16],"longrope_long_factors":vec![8.0;16],"model_architecture":"looped","loop_iters":12});
+            "longrope_short_factors":vec![1.0;16],"longrope_long_factors":vec![8.0;16],"model_architecture":"recurrsive_instinct","loop_iters":12});
         let cached = model(&state).unwrap();
         assert_eq!(cached["rope_scaling"]["long_factor"][0], 8.0);
         assert_eq!(cached["head_dim"], 32);

@@ -41,7 +41,5 @@
     "min_lr_ratio": 0.1,
     "log_interval": 100
   },
-  "audit": "dataset/pretrain_coder_12b.parquet.report.json",
-  "provenance": "dataset/pretrain_coder_12b.report.json",
   "environment": {}
 }

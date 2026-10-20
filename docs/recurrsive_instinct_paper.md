@@ -202,4 +202,4 @@ $$
 
 ---
 
-*注：本论文基于 Instinct 仓库中 model/model_looped_instinct.py 的实际实现撰写；§4.2 实验结果来自真实预训练权重（pretrain_768.pth）上的微调验证，可复现。*
+*注：本论文基于 Instinct 仓库中 model/model_recurrsive_instinct.py 的实际实现撰写；§4.2 实验结果来自真实预训练权重（pretrain_768.pth）上的微调验证，可复现。*

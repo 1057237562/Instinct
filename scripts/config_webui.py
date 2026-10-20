@@ -29,9 +29,11 @@ try:
     from scripts.sft_profiles import _apply_state_value
     from scripts.config_templates import (
         snapshot_config, restore_config, load_templates, save_template, delete_template,
-        initialize_default_templates,
+        initialize_default_templates, load_model_presets, load_legacy_preset_names,
+        preset_initial_state,
     )
     from scripts.autotune_panel import active as autotune_active
+    from scripts.muon_controls import panel_arguments as muon_panel_arguments, use_chunk16
 except ModuleNotFoundError:
     from moe_router_controls import migration_args as moe_router_migration_args
     from cpt_defaults import apply_cpt_defaults
@@ -39,9 +41,11 @@ except ModuleNotFoundError:
     from sft_profiles import _apply_state_value
     from config_templates import (
         snapshot_config, restore_config, load_templates, save_template, delete_template,
-        initialize_default_templates,
+        initialize_default_templates, load_model_presets, load_legacy_preset_names,
+        preset_initial_state,
     )
     from autotune_panel import active as autotune_active
+    from muon_controls import panel_arguments as muon_panel_arguments, use_chunk16
 
 # ═══════════════════════════════════════════════════════════════
 # Page config
@@ -100,218 +104,7 @@ def _packing_preprocess_workers(value=None, *, platform_name=None, cpu_count=Non
 # ═══════════════════════════════════════════════════════════════
 # Preset definitions
 # ═══════════════════════════════════════════════════════════════
-PRESETS = {
-    "Instinct V2": {
-        # Largest paper-proportional width below the 200M parameter budget:
-        # 13 heads x the paper's 96-dimensional attention head.
-        "hidden_size": 1248,
-        "intermediate_size": 4224,
-        "num_hidden_layers": 8,
-        "vocab_size": 6400,
-        "dropout": 0.0,
-        "hidden_act": "silu",
-        "tie_word_embeddings": True,
-        "num_attention_heads": 13,
-        "num_key_value_heads": 13,
-        "max_position_embeddings": 32768,
-        "rope_theta": 50000.0,
-        "inference_rope_scaling": False,
-        "rope_scaling_type": "none",
-        "use_moe": False,
-        "num_experts": 4,
-        "num_experts_per_tok": 1,
-        "norm_topk_prob": True,
-        "router_aux_loss_coef": 5e-4,
-        "rms_norm_eps": 1e-6,
-        "flash_attn": True,
-        "use_grad_checkpoint": 2,
-        "model_architecture": "looped",
-        "qk_bias": True,
-        "qk_norm": False,
-        "prelude_layers": 2,
-        "recurrent_layers": 4,
-        "coda_layers": 2,
-        "loop_iters": 32,
-        "mean_backprop_depth": 8,
-        "recurrence_sampling": "lognormal_poisson",
-        "recurrence_log_normal_sigma": 1.0,
-        "max_recurrence": 256,
-        "state_init_std": 0.6324555320336759,
-        "embedding_scale": 35.32704346531139,
-        "use_input_injection": True,
-    },
-    "Instinct V2 MoE": {
-        "hidden_size": 768,
-        "num_hidden_layers": 8,
-        "vocab_size": 6400,
-        "dropout": 0.0,
-        "hidden_act": "silu",
-        "tie_word_embeddings": True,
-        "num_attention_heads": 8,
-        "num_key_value_heads": 4,
-        "max_position_embeddings": 32768,
-        "rope_theta": 1e6,
-        "inference_rope_scaling": False,
-        "rope_scaling_type": "none",
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "factor": 16,
-        "original_max_position_embeddings": 2048,
-        "attention_factor": 1.0,
-        "use_moe": True,
-        "num_experts": 4,
-        "num_experts_per_tok": 1,
-        "norm_topk_prob": False,
-        "router_aux_loss_coef": 5e-4,
-        "rms_norm_eps": 1e-6,
-        "flash_attn": True,
-        "model_architecture": "looped",
-        "prelude_layers": 2,
-        "recurrent_layers": 4,
-        "coda_layers": 2,
-        "loop_iters": 8,
-        "mean_backprop_depth": 4,
-        "recurrence_sampling": "lognormal_poisson",
-        "recurrence_log_normal_sigma": 0.5,
-        "max_recurrence": 32,
-        "state_init_std": 0.6324555320336759,
-        "embedding_scale": 27.712812921102035,
-        "use_input_injection": True,
-    },
-    "Instinct V2 Small": {
-        "hidden_size": 512,
-        "num_hidden_layers": 8,
-        "vocab_size": 6400,
-        "dropout": 0.0,
-        "hidden_act": "silu",
-        "tie_word_embeddings": True,
-        "num_attention_heads": 8,
-        "num_key_value_heads": 2,
-        "max_position_embeddings": 32768,
-        "rope_theta": 1e6,
-        "inference_rope_scaling": False,
-        "rope_scaling_type": "none",
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "factor": 16,
-        "original_max_position_embeddings": 2048,
-        "attention_factor": 1.0,
-        "use_moe": False,
-        "num_experts": 4,
-        "num_experts_per_tok": 1,
-        "norm_topk_prob": True,
-        "router_aux_loss_coef": 5e-4,
-        "rms_norm_eps": 1e-6,
-        "flash_attn": True,
-        "model_architecture": "looped",
-        "prelude_layers": 2,
-        "recurrent_layers": 4,
-        "coda_layers": 2,
-        "loop_iters": 8,
-        "mean_backprop_depth": 4,
-        "recurrence_sampling": "lognormal_poisson",
-        "recurrence_log_normal_sigma": 0.5,
-        "max_recurrence": 32,
-        "state_init_std": 0.6324555320336759,
-        "embedding_scale": 22.627416997969522,
-        "use_input_injection": True,
-    },
-    "Instinct V1": {
-        "hidden_size": 768,
-        "num_hidden_layers": 20,
-        "vocab_size": 6400,
-        "dropout": 0.0,
-        "hidden_act": "silu",
-        "tie_word_embeddings": True,
-        "num_attention_heads": 8,
-        "num_key_value_heads": 4,
-        "max_position_embeddings": 32768,
-        "rope_theta": 1e6,
-        "inference_rope_scaling": True,
-        "rope_scaling_type": "yarn",
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "factor": 4.0,
-        "original_max_position_embeddings": 4096.0,
-        "attention_factor": 1.1385,
-        "use_moe": False,
-        "num_experts": 4,
-        "num_experts_per_tok": 1,
-        "norm_topk_prob": True,
-        "router_aux_loss_coef": 5e-4,
-        "rms_norm_eps": 1e-6,
-        "flash_attn": True,
-        "model_architecture": "standard",
-    },
-    "Instinct V1 MoE": {
-        # Deep-thin V1 MoE. MobileLLM-style depth/width sizing,
-        # 16 query heads with GQA, and normalized full-width top-2 experts.
-        "hidden_size": 512,
-        "intermediate_size": 1664,
-        "num_hidden_layers": 32,
-        "vocab_size": 6400,
-        "dropout": 0.0,
-        "hidden_act": "silu",
-        "tie_word_embeddings": True,
-        "num_attention_heads": 16,
-        "num_key_value_heads": 4,
-        "max_position_embeddings": 32768,
-        "rope_theta": 1e6,
-        "inference_rope_scaling": True,
-        "rope_scaling_type": "longrope",
-        "factor": 8.0,
-        "original_max_position_embeddings": 4096.0,
-        "short_factor": [1.0] * 16,
-        # Paper PI seed only. Replace it with the checkpoint-specific search result.
-        "long_factor": [8.0] * 16,
-        "short_attention_factor": 1.0,
-        "short_retained_start_tokens": 0,
-        "long_retained_start_tokens": 0,
-        "use_moe": True,
-        "num_experts": 8,
-        "num_experts_per_tok": 2,
-        "moe_intermediate_size": 1664,
-        "norm_topk_prob": True,
-        "router_aux_loss_coef": 5e-4,
-        "rms_norm_eps": 1e-6,
-        "flash_attn": True,
-        "use_grad_checkpoint": 1,
-        "model_architecture": "standard",
-    },
-    "instinct-linear": {
-        "hidden_size": 768,
-        "num_hidden_layers": 8,
-        "vocab_size": 6400,
-        "dropout": 0.0,
-        "hidden_act": "silu",
-        "tie_word_embeddings": True,
-        "num_attention_heads": 8,
-        "num_key_value_heads": 4,
-        "max_position_embeddings": 32768,
-        "rope_theta": 1e6,
-        "inference_rope_scaling": False,
-        "rope_scaling_type": "none",
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "factor": 16,
-        "original_max_position_embeddings": 2048,
-        "attention_factor": 1.0,
-        "use_moe": False,
-        "num_experts": 4,
-        "num_experts_per_tok": 1,
-        "norm_topk_prob": True,
-        "router_aux_loss_coef": 5e-4,
-        "rms_norm_eps": 1e-6,
-        "flash_attn": True,
-        "model_architecture": "linear",
-        "full_attention_interval": 4,
-        "linear_conv_kernel_dim": 4,
-        "linear_key_head_dim": 96,
-        "linear_value_head_dim": 96,
-        "linear_num_key_heads": 8,
-        "linear_num_value_heads": 8,
-    },
-}
+PRESETS = load_model_presets()
 
 # ═══════════════════════════════════════════════════════════════
 # CSS — dark theme, clean modern look
@@ -494,8 +287,8 @@ def calc_params(config: dict) -> dict:
     moe_int_size = config.get("moe_intermediate_size", int_size)
     arch = config.get("model_architecture", "standard")
     residual_type = config.get("residual_type", "standard")
-    qk_bias_enabled = config.get("qk_bias", arch == "looped")
-    qk_norm_enabled = config.get("qk_norm", arch != "looped")
+    qk_bias_enabled = config.get("qk_bias", arch == "recurrsive_instinct")
+    qk_norm_enabled = config.get("qk_norm", arch != "recurrsive_instinct")
 
     # ---- Embedding ----
     embedding = vocab * h
@@ -558,7 +351,7 @@ def calc_params(config: dict) -> dict:
         linear_attn_per_layer = 0
         lin_attn_formula = ""
         num_full = n_layers
-        if arch == "looped":
+        if arch == "recurrsive_instinct":
             num_full = (
                 config.get("prelude_layers", 2)
                 + config.get("recurrent_layers", 4)
@@ -594,7 +387,7 @@ def calc_params(config: dict) -> dict:
         active_ffn_detail = ffn_detail
 
     # ---- Norms per layer ----
-    norm_count = 4 if arch == "looped" else 2
+    norm_count = 4 if arch == "recurrsive_instinct" else 2
     norms_per_layer = norm_count * h
 
     # ---- Layer totals (per type) ----
@@ -608,21 +401,21 @@ def calc_params(config: dict) -> dict:
         linear_active_layer_total = 0
 
     # ---- Final norm ----
-    final_norm = h * (2 if arch == "looped" else 1)
+    final_norm = h * (2 if arch == "recurrsive_instinct" else 1)
 
     # ---- LM Head ----
     lm_head = 0 if tie_word else vocab * h
 
-    # ---- Instinct V2 recurrent input adapter [state || prelude] -> state ----
+    # ---- RecurrsiveInstinct recurrent input adapter [state || prelude] -> state ----
     recurrent_adapter = 0
-    if arch == "looped":
+    if arch == "recurrsive_instinct":
         recurrent_adapter = 2 * h * h
 
     # ---- Residual topology ----
     residual_params = 0
     residual_formula = ""
     residual_layers = n_layers
-    if arch == "looped":
+    if arch == "recurrsive_instinct":
         residual_layers = (
             config.get("prelude_layers", 2)
             + config.get("recurrent_layers", 4)
@@ -690,7 +483,7 @@ def calc_params(config: dict) -> dict:
             },
             "Final Norm": {
                 "value": final_norm,
-                "formula": f"{2 if arch == 'looped' else 1}x RMSNorm({h})",
+                "formula": f"{2 if arch == 'recurrsive_instinct' else 1}x RMSNorm({h})",
             },
             "LM Head": {
                 "value": lm_head,
@@ -727,7 +520,7 @@ def calc_params(config: dict) -> dict:
             },
             "Final Norm": {
                 "value": final_norm,
-                "formula": f"{2 if arch == 'looped' else 1}x RMSNorm({h})",
+                "formula": f"{2 if arch == 'recurrsive_instinct' else 1}x RMSNorm({h})",
             },
             "LM Head": {
                 "value": lm_head,
@@ -747,7 +540,7 @@ def calc_params(config: dict) -> dict:
         }
         breakdown["Total Params"] = total_row
 
-    if arch == "looped":
+    if arch == "recurrsive_instinct":
         breakdown["Recurrent Input Adapter"] = {
             "value": recurrent_adapter,
             "formula": f"Linear(2x{h}, {h}, bias=False)",
@@ -783,15 +576,44 @@ def calc_params(config: dict) -> dict:
 def estimate_bucket_vram_plan(
     config: dict, *, target_gb: float, bucket_count: int,
     optimizer: str, param_dtype: str, use_compile: bool, compile_mode: str,
+    muon_mantissa: bool = False, muon_momentum_dtype: str = 'fp32',
 ) -> dict:
     """Mirror the trainer's conservative per-card bucket budget for the UI."""
-    total_params = calc_params(config)["Total Params"]["value"]
+    breakdown = calc_params(config)
+    total_params = breakdown["Total Params"]["value"]
     element_bytes = 4 if str(param_dtype) == "fp32" else 2
     optimizer = str(optimizer).lower()
     # parameter + gradient + optimizer state. Muon has one momentum tensor;
     # AdamW has two moments. This intentionally uses total MoE parameters.
     tensors_per_param = 3 if optimizer in {"muon", "adafactor", "adafactory"} else 4
     persistent_gb = total_params * element_bytes * tensors_per_param / 1024 ** 3
+    if optimizer == 'muon' and param_dtype == 'bf16' and muon_mantissa:
+        # Mixed initialization keeps non-Muon tensors in FP32 AdamW. Include
+        # uint16 low bits and the selected momentum instead of counting three
+        # BF16 tensors. This remains a planning estimate, not a peak measurement.
+        h, layers = config['hidden_size'], config['num_hidden_layers']
+        arch = config.get('model_architecture', 'standard')
+        if arch == 'recurrsive_instinct':
+            layers = sum(config.get(k, d) for k, d in
+                         [('prelude_layers', 2), ('recurrent_layers', 4), ('coda_layers', 2)])
+        q, kv = config['num_attention_heads'], config['num_key_value_heads']
+        dim = config.get('head_dim', compute_head_dim(h, q))
+        interval = config.get('full_attention_interval', 4)
+        full = layers // interval if arch == 'linear' and interval > 0 else layers
+        auxiliary = sum(breakdown[k]['value'] for k in ('Embedding', 'LM Head', 'Final Norm'))
+        auxiliary += layers * breakdown['Per-Layer Norms']['value']
+        auxiliary += full * ((q + kv) * dim if config.get('qk_bias', arch == 'recurrsive_instinct') else 0)
+        auxiliary += full * (2 * dim if config.get('qk_norm', arch != 'recurrsive_instinct') else 0)
+        if arch == 'linear':
+            kd, vd = config.get('linear_key_head_dim', dim), config.get('linear_value_head_dim', dim)
+            nk, nv = config.get('linear_num_key_heads', q), config.get('linear_num_value_heads', q)
+            auxiliary += (layers - full) * ((2 * kd * nk + vd * nv)
+                          * config.get('linear_conv_kernel_dim', 4) + 2 * nv + vd)
+        # Conservatively count custom residual parameters as FP32 AdamW.
+        auxiliary += sum(v['value'] for k, v in breakdown.items() if k.startswith('Residual ('))
+        auxiliary = min(auxiliary, total_params)
+        matrix_bytes = 8 if muon_momentum_dtype == 'bf16' else 10
+        persistent_gb = ((total_params - auxiliary) * matrix_bytes + auxiliary * 16) / 1024 ** 3
     bucket_count = max(1, int(bucket_count))
     graph_per_extra = (
         0.50
@@ -943,8 +765,8 @@ def build_config_dict() -> dict:
         d["linear_num_key_heads"] = st.session_state.get("linear_num_key_heads", q_heads)
         d["linear_num_value_heads"] = st.session_state.get("linear_num_value_heads", q_heads)
 
-    # Instinct V2 latent recurrent-depth params
-    if d["model_architecture"] == "looped":
+    # RecurrsiveInstinct latent recurrent-depth params
+    if d["model_architecture"] == "recurrsive_instinct":
         d["recurrent_architecture_version"] = 2
         d["qk_bias"] = bool(st.session_state.get("qk_bias", True))
         d["qk_norm"] = bool(st.session_state.get("qk_norm", False))
@@ -997,10 +819,10 @@ def build_config_dict() -> dict:
 def gen_python_code(cfg: dict) -> str:
     """Generate InstinctConfig instantiation code."""
     is_linear = cfg.get("model_architecture") == "linear"
-    is_looped = cfg.get("model_architecture") == "looped"
-    if is_looped:
-        module = "model.model_instinct_loop"
-        cls = "InstinctConfig"
+    is_recurrsive_instinct = cfg.get("model_architecture") == "recurrsive_instinct"
+    if is_recurrsive_instinct:
+        module = "model.model_recurrsive_instinct"
+        cls = "RecurrsiveInstinctConfig"
     else:
         module = "model.model_instinct_linear" if is_linear else "model.model_instinct"
         cls = "InstinctConfig"
@@ -1053,7 +875,7 @@ def gen_python_code(cfg: dict) -> str:
         params.append(("linear_num_key_heads", cfg.get("linear_num_key_heads", cfg["num_attention_heads"])))
         params.append(("linear_num_value_heads", cfg.get("linear_num_value_heads", cfg["num_attention_heads"])))
 
-    if cfg.get("model_architecture") == "looped":
+    if cfg.get("model_architecture") == "recurrsive_instinct":
         params.extend([
             ("qk_bias", str(cfg.get("qk_bias", True))),
             ("qk_norm", str(cfg.get("qk_norm", False))),
@@ -1137,7 +959,7 @@ def gen_config_json(cfg: dict) -> str:
                    "linear_num_key_heads", "linear_num_value_heads"]:
             out[k] = cfg.get(k)
 
-    if cfg.get("model_architecture") == "looped":
+    if cfg.get("model_architecture") == "recurrsive_instinct":
         for k in ["recurrent_architecture_version", "qk_bias", "qk_norm",
                   "prelude_layers", "recurrent_layers", "coda_layers",
                   "loop_iters", "mean_backprop_depth", "recurrence_sampling",
@@ -1161,12 +983,7 @@ _ROPE_PRESET_KEYS = {
     "long_attention_factor",
 }
 
-_LEGACY_PRESET_NAMES = {
-    "instinct-3": "Instinct V2",
-    "instinct-3-moe": "Instinct V2 MoE",
-    "instinct2-small": "Instinct V2 Small",
-    "instinct2": "Instinct V1",
-}
+_LEGACY_PRESET_NAMES = load_legacy_preset_names()
 _OPTIONAL_PRESET_DEFAULTS = {
     "num_experts": 4,
     "num_experts_per_tok": 1,
@@ -1312,8 +1129,8 @@ def load_config_to_session(config_dict: dict):
         st.session_state.linear_num_key_heads = config_dict.get("linear_num_key_heads", st.session_state.num_attention_heads)
         st.session_state.linear_num_value_heads = config_dict.get("linear_num_value_heads", st.session_state.num_attention_heads)
 
-    # Instinct V2 recurrent-depth arch
-    if arch == "looped":
+    # RecurrsiveInstinct recurrent-depth arch
+    if arch == "recurrsive_instinct":
         st.session_state.qk_bias = config_dict.get("qk_bias", True)
         st.session_state.qk_norm = config_dict.get("qk_norm", False)
         st.session_state.prelude_layers = config_dict.get("prelude_layers", 2)
@@ -1382,6 +1199,7 @@ def parse_training_metrics(log_text):
 def render_log_metrics_charts(metrics):
     """Render loss, learning rate and epoch time separately for one log."""
     if not metrics:
+        st.info("Waiting for training metrics…")
         return
 
     loss_keys = sorted({
@@ -1452,9 +1270,9 @@ def arch_diagram(cfg: dict) -> str:
     blocks.append(_block("Embedding", emb_detail, "#0f3b5e", "#1d6fa5"))
     blocks.append(_arrow())
 
-    # Instinct V2 is a recurrent graph, not an eight-layer sequential stack.
+    # RecurrsiveInstinct is a recurrent graph, not an eight-layer sequential stack.
     # Render the shared core once and make recurrence/input injection explicit.
-    if arch == "looped":
+    if arch == "recurrsive_instinct":
         h = cfg["hidden_size"]
         q_heads = cfg["num_attention_heads"]
         kv_heads = cfg["num_key_value_heads"]
@@ -1594,7 +1412,7 @@ def arch_diagram(cfg: dict) -> str:
         if cfg.get("early_exit_layers") and (i + 1) in cfg["early_exit_layers"]:
             layer_detail += " · EE"
 
-        if arch == "looped":
+        if arch == "recurrsive_instinct":
             loop_color_s, loop_color_e = "#4a1d5e", "#9d4edd"
             p = cfg.get("prelude_layers", 2)
             r = cfg.get("recurrent_layers", 4)
@@ -1637,64 +1455,19 @@ def arch_diagram(cfg: dict) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 def init_from_preset(preset_name: str):
-    """Load preset values into session_state."""
-    preset_name = _LEGACY_PRESET_NAMES.get(preset_name, preset_name)
-    if preset_name == "Custom":
-        return
-    data = PRESETS.get(preset_name)
+    """Apply the catalog's shared preset state before rendering widgets."""
+    data = preset_initial_state(preset_name)
     if data is None:
         return
-    # Presets predate the optional residual topologies; selecting one resets to
-    # the exact historical Standard Transformer graph.
-    st.session_state.residual_type = "standard"
     st.session_state.pop("_residual_radio", None)
     st.session_state.pop("_arch_radio", None)
     st.session_state._sync_arch_radio = True
-    st.session_state.intermediate_size = data.get(
-        "intermediate_size", compute_intermediate_size(data["hidden_size"])
-    )
-    st.session_state.qk_bias = data.get(
-        "qk_bias", data.get("model_architecture") == "looped"
-    )
-    st.session_state.qk_norm = data.get(
-        "qk_norm", data.get("model_architecture") != "looped"
-    )
-    auto_moe_size = compute_intermediate_size(data["hidden_size"])
-    st.session_state._override_moe_int = bool(
-        data.get("use_moe")
-        and data.get("moe_intermediate_size", auto_moe_size) != auto_moe_size
-    )
-    for k, v in data.items():
-        st.session_state[k] = v
-    if data.get("rope_scaling_type") == "longrope":
-        st.session_state.longrope_short_factors = json.dumps(data["short_factor"])
-        st.session_state.longrope_long_factors = json.dumps(data["long_factor"])
-        st.session_state.longrope_short_retained_tokens = data.get(
-            "short_retained_start_tokens", 0
-        )
-        st.session_state.longrope_long_retained_tokens = data.get(
-            "long_retained_start_tokens", 0
-        )
-        st.session_state.longrope_short_attention_factor = float(
-            data.get("short_attention_factor", data.get("attention_factor", 1.0))
-        )
-        st.session_state.longrope_long_attention_factor = float(
-            data.get("long_attention_factor", data.get("attention_factor", 0.0))
-        )
-    if preset_name == "Instinct V1 MoE":
-        # Keep optimizer steps one-to-one with micro-batches by default. Users
-        # can still opt into accumulation when a larger effective batch is needed.
-        st.session_state.batch_size = 1
-        st.session_state.accumulation_steps = 1
-        st.session_state.max_seq_len = 4096
-        st.session_state.optimizer = "muon"
-        st.session_state.use_compile = True
-        st.session_state.compile_mode = "max-autotune-no-cudagraphs"
+    st.session_state.update(data)
 
 
 if "preset" not in st.session_state:
-    st.session_state.preset = "Instinct V2"
-    init_from_preset("Instinct V2")
+    st.session_state.preset = "RecurrsiveInstinct"
+    init_from_preset("RecurrsiveInstinct")
 
 if "model_architecture" not in st.session_state:
     st.session_state.model_architecture = "standard"
@@ -1746,7 +1519,7 @@ if not st.session_state.get("_config_auto_loaded"):
         if os.path.exists(default_config):
             with open(default_config, "r", encoding="utf-8") as f:
                 load_config_to_session(json.load(f))
-            if st.session_state.preset != "Instinct V2":
+            if st.session_state.preset != "RecurrsiveInstinct":
                 st.rerun()
 
 # Handle deferred config load from button click (must run before any widget with the same key)
@@ -1797,6 +1570,11 @@ def _find_running_train_process():
     # and avoids WMIC quoting/encoding differences across Windows releases.
     try:
         import psutil
+        try:
+            from scripts.training_control import local_training_process
+        except ModuleNotFoundError:
+            from training_control import local_training_process
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
         for process in psutil.process_iter(['pid', 'name', 'cmdline']):
             name = (process.info.get('name') or '').lower()
             if name not in ('python', 'python.exe'):
@@ -1806,8 +1584,15 @@ def _find_running_train_process():
                 continue
             script = _training_mode_from_argv(process.info.get('cmdline'))
             if script:
+                try:
+                    local_training_process(int(process.info['pid']), repo_root)
+                except (psutil.Error, ValueError):
+                    continue
                 return int(process.info['pid']), script
-    except (ImportError, OSError):
+        return None, None
+    except ImportError:
+        pass
+    except (OSError, psutil.Error):
         pass
 
     try:
@@ -2002,7 +1787,7 @@ def _dataset_option_label(path):
 
 def _arch_tag():
     architecture = st.session_state.get("model_architecture", "standard")
-    tag = {"standard": "", "linear": "_linear", "looped": "_looped"}.get(
+    tag = {"standard": "", "linear": "_linear", "recurrsive_instinct": "_recurrsive_instinct"}.get(
         architecture, f"_{architecture}"
     )
     residual_type = st.session_state.get("residual_type", "standard")
@@ -2021,7 +1806,7 @@ def _matches_arch_tag(prefix, arch_tag):
     if arch_tag:
         return prefix.endswith(arch_tag)
     return not (
-        prefix.endswith(("_linear", "_looped", "_mhc", "_attnres_full"))
+        prefix.endswith(("_linear", "_recurrsive_instinct", "_mhc", "_attnres_full"))
         or re.search(r"_attnres_block\d+$", prefix) is not None
     )
 
@@ -2030,7 +1815,8 @@ def _persist_panel_state(trainer_dir):
     """把训练面板参数（含训练超参）写入 webui_state.json，刷新/重启后自动恢复。"""
     state = snapshot_config(st.session_state)
     # Panel reloads resume monitoring; reusable templates never restore job IDs.
-    for key in ('autotune_run_dir', 'autotune_result', 'pipeline_run_dir', 'history_log_select'):
+    for key in ('autotune_run_dir', 'autotune_result', 'pipeline_run_dir', 'history_log_select',
+                'train_log_path'):
         if isinstance(st.session_state.get(key), str):
             state[key] = st.session_state[key]
     state["config_template"] = st.session_state.get("config_template", "")
@@ -2268,8 +2054,8 @@ def _sync_panel_from_base_config(base_cfg):
     arch = base_cfg.get("model_architecture", "standard")
     if arch == "linear":
         _apply_state_value(st.session_state, "_arch_radio", "GatedDeltaNet (Linear)")
-    elif arch == "looped":
-        _apply_state_value(st.session_state, "_arch_radio", "Instinct V2 Recurrent Depth")
+    elif arch == "recurrsive_instinct":
+        _apply_state_value(st.session_state, "_arch_radio", "RecurrsiveInstinct")
     elif base_cfg.get("use_moe", False):
         _apply_state_value(st.session_state, "_arch_radio", "MoE Transformer")
     else:
@@ -2309,6 +2095,10 @@ def _build_training_command(train_type, cfg, save_prefix, from_resume,
     命令预览与 Start Training 的实际启动共用这一份实现，保证展示与执行
     永远一致。返回 dict：cmd 及日志头需要的派生值。
     """
+    try:
+        from scripts.muon_controls import panel_arguments as muon_panel_arguments
+    except ModuleNotFoundError:
+        from muon_controls import panel_arguments as muon_panel_arguments
     trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
     script_path = os.path.join(trainer_dir, f"train_{_trainer_name(train_type)}.py")
     if cfg.get("model_architecture") == "linear":
@@ -2389,6 +2179,8 @@ def _build_training_command(train_type, cfg, save_prefix, from_resume,
     )])
     cmd.extend(["--accumulation_steps", str(st.session_state.get("accumulation_steps", 1))])
     cmd.extend(["--optimizer", st.session_state.get("optimizer", "adamw")])
+    for key, value in muon_panel_arguments(st.session_state).items():
+        cmd.extend(['--' + key, str(value)])
     cmd.extend(["--learning_rate", str(st.session_state.get(
         f"learning_rate_{train_type}", _default_learning_rate(train_type)
     ))])
@@ -2415,8 +2207,8 @@ def _build_training_command(train_type, cfg, save_prefix, from_resume,
         cmd.extend(["--lora_name", save_prefix])
     else:
         cmd.extend(["--save_weight", save_prefix])
-    if cfg.get("model_architecture") == "looped":
-        cmd.extend(["--use_looped", "1"])
+    if cfg.get("model_architecture") == "recurrsive_instinct":
+        cmd.extend(["--use_recurrsive", "1"])
     if cfg.get("early_exit_layers") and st.session_state.get("early_exit_enabled", False):
         cmd.extend(["--early_exit", "1"])
     if from_resume:
@@ -2581,11 +2373,47 @@ def _completed_checkpoint_exists(log_path):
     return False
 
 
+def _pause_checkpoint_saved(log_path, paused_state=None):
+    """A pause request alone does not prove that the trainer saved and exited."""
+    if not log_path:
+        return False
+    log_name = os.path.basename(log_path)
+    if not (log_name.startswith('train_') and log_name.endswith('.log')):
+        return False
+    prefix = log_name[len('train_'):-len('.log')]
+    weight = paused_state.get('weight') if isinstance(paused_state, dict) else None
+    if weight and prefix != weight and not re.fullmatch(re.escape(weight) + r'_[2-9]\d*', prefix):
+        # An unrelated historical request cannot establish this run's status.
+        weight = None
+    prefixes = [weight or prefix]
+    collision = re.fullmatch(r'(.*)_([2-9]\d*)', prefix)
+    if not weight and collision:
+        prefixes.append(collision.group(1))
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as log_file:
+            # Resumes append to the log; ignore confirmations from prior launches.
+            latest_launch = log_file.read().rsplit('# epochs:', 1)[-1]
+        if not re.search(r'^\[PAUSED\] Training paused .*checkpoint saved\.$',
+                         latest_launch, re.MULTILINE):
+            return False
+        return any(
+            any(re.fullmatch(re.escape(candidate) + r'_\d+(?:_moe)?_resume\.pth', name)
+                for candidate in prefixes)
+            and os.path.isfile(os.path.join(_checkpoints_dir(), name))
+            and os.path.getsize(os.path.join(_checkpoints_dir(), name)) > 0
+            for name in os.listdir(_checkpoints_dir())
+        )
+    except OSError:
+        return False
+
+
 def _detached_training_status(log_path, process_found, paused_state, now=None):
     """Resolve a recovered run for which this WebUI has no ``Popen`` object."""
     if process_found:
         return "running"
-    if paused_state is not None:
+    if _training_log_is_stopped(log_path):
+        return "stopped"
+    if _pause_checkpoint_saved(log_path, paused_state):
         return "paused"
     if _training_log_is_complete(log_path) and _completed_checkpoint_exists(log_path):
         return "success"
@@ -2596,6 +2424,60 @@ def _detached_training_status(log_path, process_found, paused_state, now=None):
     # A process scan can transiently fail.  Keep polling while the log is fresh;
     # once it becomes stale, an incomplete run is treated as failed.
     return "running" if age < 60 else "failed"
+
+
+def _training_log_is_stopped(log_path):
+    """A user stop belongs only to the latest launch in an appended resume log."""
+    try:
+        with open(log_path, 'rb') as log:
+            log.seek(max(0, log.seek(0, os.SEEK_END) - 65536))
+            tail = log.read().decode('utf-8', errors='replace')
+        return '[STOPPED] Training terminated by user.' in tail.rsplit('# epochs:', 1)[-1]
+    except (OSError, TypeError):
+        return False
+
+
+def _request_stop():
+    try:
+        from scripts.training_control import stop_training_process
+    except ModuleNotFoundError:
+        from training_control import stop_training_process
+    proc = st.session_state.get('train_proc')
+    pid = proc.pid if proc is not None and proc.poll() is None else st.session_state.get('_train_pid')
+    if pid is None:
+        raise RuntimeError('未找到当前训练进程，请刷新页面后重试。')
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+    if not stop_training_process(pid, repo_root):
+        return
+    st.session_state.train_status = 'stopped'
+    st.session_state.train_proc = None
+    st.session_state.train_triggered = False
+    st.session_state.pop('_train_pid', None)
+    _clear_pause_markers()
+    log_path = st.session_state.get('train_log_path')
+    if log_path:
+        with open(log_path, 'a', encoding='utf-8') as log:
+            log.write('\n[STOPPED] Training terminated by user. No additional checkpoint saved.\n')
+
+
+def _render_training_controls(suffix=''):
+    pause_column, stop_column = st.columns(2)
+    with pause_column:
+        if st.button('暂停并保存', width='stretch', key='btn_pause_train' + suffix,
+                     icon=':material/pause:',
+                     help='在下一个 step 边界保存模型和完整续训状态后退出。'):
+            _request_pause(st.session_state.get('train_type', 'pretrain'))
+            st.rerun()
+    with stop_column:
+        if st.button('终止训练（不保存）', width='stretch', key='btn_stop_train' + suffix,
+                     icon=':material/stop_circle:',
+                     help='立即结束训练及其子进程，不保存当前进度；保留已有检查点。'):
+            try:
+                _request_stop()
+            except (OSError, RuntimeError, ValueError) as exc:
+                st.error(str(exc))
+            else:
+                st.rerun()
 
 
 def _pause_flag_path():
@@ -2618,6 +2500,7 @@ def _request_pause(train_type):
         "paused_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "epoch": None,  # 点击时 epoch 未知，真实进度以训练进程保存的检查点为准
         "weight": st.session_state.get(f"save_prefix_{train_type}") or None,
+        "log_path": st.session_state.get("train_log_path"),
     }
     with open(_paused_state_path(), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
@@ -2633,13 +2516,19 @@ def _clear_pause_markers():
 
 
 def _read_paused_state():
-    """读取暂停状态记录；文件不存在或内容损坏时返回 None（不抛出，避免拖垮整页）。"""
+    """Read an identified pause request; legacy records without a run are ignored."""
     path = _paused_state_path()
     if not os.path.exists(path):
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            state = json.load(f)
+        if not isinstance(state, dict) or not isinstance(state.get('weight'), str):
+            return None
+        weight = state['weight']
+        if not weight or weight in ('.', '..') or '/' in weight or '\\' in weight:
+            return None
+        return state
     except Exception:
         return None
 
@@ -2836,24 +2725,51 @@ def _try_recover_training_state():
     pid, script = _find_running_train_process()
     if pid is not None:
         st.session_state.train_status = "running"
+        st.session_state._train_pid = pid
         if log_path is not None:
             st.session_state.train_log_path = log_path
         if script:
             st.session_state.train_type = script.removeprefix("train_")
         return
 
-    if "train_status" in st.session_state:
-        return
-
-    if log_path is None:
-        return
-
     paused_state = _read_paused_state()
+    if "train_status" in st.session_state:
+        if st.session_state.train_status != "paused":
+            return
+        proc = st.session_state.get('train_proc')
+        if proc is not None and proc.poll() == PAUSE_EXIT_CODE:
+            return
+        if _pause_checkpoint_saved(st.session_state.get('train_log_path'), paused_state):
+            return
+        # Revalidate paused sessions retained across a source-code reload too.
+        st.session_state.pop('train_status', None)
+        st.session_state.pop('train_log_path', None)
+
+    # Only restore an explicitly tracked run. The newest file in logs/ may
+    # belong to an old model, a different stage, or a copied remote workspace.
+    log_path = st.session_state.get('train_log_path')
+    if not log_path and paused_state is not None:
+        train_type = st.session_state.get('train_type', 'pretrain')
+        cfg = build_config_dict()
+        weight = paused_state['weight']
+        if (paused_state.get('train_type') == train_type
+                and _matches_arch_tag(weight, _arch_tag())
+                and _resume_checkpoint_exists(weight, cfg['hidden_size'], cfg['use_moe'])):
+            candidate = paused_state.get('log_path') or os.path.join(
+                trainer_dir, 'logs', f'train_{weight}.log',
+            )
+            if _pause_checkpoint_saved(candidate, paused_state):
+                log_path = candidate
+    if not log_path:
+        return
+
     st.session_state.train_status = _detached_training_status(
         log_path, False, paused_state
     )
     st.session_state.train_log_path = log_path
-    if paused_state is not None:
+    if (st.session_state.train_status == "paused" and paused_state is not None
+            and re.fullmatch(r'train_' + re.escape(paused_state['weight'])
+                             + r'(?:_[2-9]\d*)?\.log', os.path.basename(log_path))):
         train_type = paused_state.get("train_type") or st.session_state.get("train_type", "pretrain")
         st.session_state.train_type = train_type
         if paused_state.get("weight"):
@@ -2951,12 +2867,12 @@ with st.sidebar:
 
     # ── Model Architecture ──
     with _ui["model_left"].expander("模型类型", expanded=True):
-        arch_options = ["Standard Transformer", "MoE Transformer", "GatedDeltaNet (Linear)", "Instinct V2 Recurrent Depth"]
+        arch_options = ["Standard Transformer", "MoE Transformer", "GatedDeltaNet (Linear)", "RecurrsiveInstinct"]
         current_arch = st.session_state.get("model_architecture", "standard")
         if current_arch == "standard":
             arch_index = 1 if st.session_state.get("use_moe", False) else 0
         else:
-            arch_index = {"linear": 2, "looped": 3}.get(current_arch, 0)
+            arch_index = {"linear": 2, "recurrsive_instinct": 3}.get(current_arch, 0)
         if st.session_state.pop("_sync_arch_radio", False):
             st.session_state._arch_radio = arch_options[arch_index]
         chosen_arch = _radio(
@@ -2971,12 +2887,12 @@ with st.sidebar:
             "Standard Transformer": "standard",
             "MoE Transformer": "standard",
             "GatedDeltaNet (Linear)": "linear",
-            "Instinct V2 Recurrent Depth": "looped",
+            "RecurrsiveInstinct": "recurrsive_instinct",
         }
         mapped = arch_map[chosen_arch]
         desired_moe = (
             True if chosen_arch == "MoE Transformer"
-            else st.session_state.get("use_moe", False) if mapped == "looped"
+            else st.session_state.get("use_moe", False) if mapped == "recurrsive_instinct"
             else False
         )
         if (
@@ -3007,7 +2923,7 @@ with st.sidebar:
             ),
             step=64,
             key="intermediate_size",
-            help="SwiGLU FFN width; the paper-scaled Instinct V2 preset uses 4224.",
+            help="SwiGLU FFN width; the paper-scaled RecurrsiveInstinct preset uses 4224.",
         )
         _slider(
             "num_hidden_layers",
@@ -3218,9 +3134,9 @@ with st.sidebar:
                 step=1, key="linear_num_value_heads",
             )
 
-    # ── Instinct V2 latent recurrent-depth Config ──
-    if st.session_state.get("model_architecture") == "looped":
-        with _ui["model_right"].expander("V2 循环深度", expanded=True):
+    # ── RecurrsiveInstinct latent recurrent-depth Config ──
+    if st.session_state.get("model_architecture") == "recurrsive_instinct":
+        with _ui["model_right"].expander("RecurrsiveInstinct 循环深度", expanded=True):
             _n_layers = st.session_state.get("num_hidden_layers", 8)
             _number_input(
                 "Prelude layers",
@@ -3246,7 +3162,7 @@ with st.sidebar:
             st.caption(
                 f"Materialized layers: "
                 f"{st.session_state.get('prelude_layers', 2) + st.session_state.get('recurrent_layers', 4) + st.session_state.get('coda_layers', 2)} "
-                f"/ configured V2 layer budget: {_n_layers}"
+                f"/ configured RecurrsiveInstinct layer budget: {_n_layers}"
             )
             _number_input(
                 "Mean recurrence (r-bar)",
@@ -3890,6 +3806,8 @@ with st.sidebar:
                 param_dtype=st.session_state.get("param_dtype", "fp32"),
                 use_compile=bool(st.session_state.get("use_compile", True)),
                 compile_mode=st.session_state.get("compile_mode", "default"),
+                muon_mantissa=bool(st.session_state.get('muon_mantissa', False)),
+                muon_momentum_dtype=st.session_state.get('muon_momentum_dtype', 'fp32'),
             )
             if _vram_plan["token_budget"] > 0:
                 _batch_4096 = max(1, _vram_plan["token_budget"] // 4096)
@@ -4130,6 +4048,58 @@ with st.sidebar:
             key="activation_dtype",
             help="激活层计算精度：bfloat16(推荐) / float16 / fp32(纯精度，慢)",
         )
+        st.markdown('**Muon 精度与分块（可选）**')
+        _is_muon = st.session_state.get('optimizer', 'adamw') == 'muon'
+        _checkbox(
+            'Muon BF16 补偿权重（BF16 + uint16）',
+            value=st.session_state.get('muon_mantissa', False), key='muon_mantissa',
+            disabled=not _is_muon,
+            help='需参数精度 bf16。Muon 矩阵保存 BF16 高位和 uint16 低位，累积 FP32 更新；'
+                 '嵌入、输出头、归一化和偏置保持 FP32。默认关闭。',
+        )
+        _muon_split = _is_muon and st.session_state.get('muon_mantissa', False)
+        _selectbox(
+            'Muon 动量存储精度', ['fp32', 'bf16'],
+            index=['fp32', 'bf16'].index(st.session_state.get('muon_momentum_dtype', 'fp32')),
+            key='muon_momentum_dtype', disabled=not _muon_split,
+            help='FP32 为默认；BF16 每个 Muon 元素再省 2 字节，更新算术仍使用 FP32。'
+                 '完整续训须保持检查点的动量精度。',
+        )
+        _number_input(
+            'Muon 每块矩阵数上限（0=自动）', min_value=0, max_value=256,
+            value=int(st.session_state.get('muon_batch_size', 0)), step=1,
+            key='muon_batch_size', disabled=not _is_muon,
+            help='0 沿用环境变量或默认 16。实际分块还受工作区预算和矩阵形状限制。',
+        )
+        _number_input(
+            'Muon 工作区预算（MiB，0=自动）', min_value=0.0, max_value=8192.0,
+            value=float(st.session_state.get('muon_workspace_mb', 0)), step=16.0,
+            key='muon_workspace_mb', disabled=not _is_muon,
+            help='0 沿用环境变量或平台默认：低精度 64 MiB，已验证的 FP32 CUDA 路径 256 MiB。'
+                 '预算不包含模型、优化器状态和各形状保留的 CUDA 图。',
+        )
+        st.button('使用 16 矩阵 / 272 MiB 分块', key='btn_muon_chunk16',
+                  disabled=not _is_muon, on_click=use_chunk16, args=(st.session_state,),
+                  help='仅调整分块；本机 V1 专家矩阵实测有效，不会开启低精度。')
+        _muon_invalid = False
+        try:
+            muon_panel_arguments(st.session_state)
+        except ValueError as _muon_error:
+            _muon_invalid = True
+            st.error(str(_muon_error))
+        if _muon_split:
+            st.caption('补偿权重使用截断后的 BF16 做前向；BF16 动量也会改变训练轨迹。'
+                       '短程实验已验证实现，长期预训练质量仍需评估。续训保持原精度设置。')
+            _muon_config = build_config_dict()
+            if (_muon_config.get('use_moe') and not _muon_invalid
+                    and st.session_state.get('muon_batch_size', 0) > 0
+                    and st.session_state.get('muon_workspace_mb', 0) > 0):
+                _rows = _muon_config.get('moe_intermediate_size') or compute_intermediate_size(_muon_config['hidden_size'])
+                _cols = _muon_config['hidden_size']
+                _matrix_bytes = 18 * _rows * _cols + 8 * min(_rows, _cols) ** 2
+                _chunk = max(1, min(int(st.session_state.muon_batch_size),
+                    int(st.session_state.muon_workspace_mb * 2**20 // _matrix_bytes)))
+                st.caption(f'当前 {_rows}×{_cols} 专家矩阵按预算最多每块 {_chunk} 个；不足一块时按实际数量处理。')
         _selectbox(
             "TorchAO FP8 training",
             ["off", "tensorwise", "rowwise", "rowwise_with_gw_hp"],
@@ -4170,6 +4140,7 @@ with st.sidebar:
         _low_precision_floor = {"bf16": 1e-4, "fp16": 1e-5}.get(_selected_param_dtype)
         _low_precision_invalid = (
             _low_precision_floor is not None and _selected_lr <= _low_precision_floor
+            and not (_muon_split and not _muon_invalid)
         )
         if _low_precision_invalid:
             st.error(
@@ -4267,33 +4238,37 @@ with st.sidebar:
             if st.button(
                 "开始训练", width="stretch", key="btn_start_train", type="primary",
                 disabled=(
-                    _compile_invalid or _fp8_invalid or _low_precision_invalid
+                    _compile_invalid or _fp8_invalid or _low_precision_invalid or _muon_invalid
                     or _dataset_missing or _base_missing
+                    or st.session_state.get('train_status') == 'running'
                     or autotune_active(st.session_state)
                     or _autotune_profile_invalid
                 ),
             ):
                 st.session_state.train_triggered = True
         if st.session_state.get("train_status") == "running":
-            if st.button("暂停并保存", width="stretch", key="btn_pause_train",
-                         icon=":material/pause:",
-                         help="写入 checkpoints/.pause_request，训练进程在下一个 step 边界保存检查点并退出(码42)"):
-                _request_pause(st.session_state.get("train_type", "pretrain"))
-                st.rerun()
-            log_path = st.session_state.get("train_log_path")
-            if log_path and os.path.exists(log_path):
-                with open(log_path, "r", encoding="utf-8") as f:
-                    log = f.read()
-                progress = _training_progress_from_log(log)
-                if progress:
-                    st.progress(progress['fraction'])
-                    st.caption(progress['caption'])
+            _render_training_controls()
+
+            @st.fragment(run_every=2)
+            def _render_launch_progress():
+                log_path = st.session_state.get("train_log_path")
+                if log_path and os.path.exists(log_path):
+                    with open(log_path, "r", encoding="utf-8") as f:
+                        log = f.read()
+                    progress = _training_progress_from_log(log)
+                    if progress:
+                        st.progress(progress['fraction'])
+                        st.caption(progress['caption'])
+                    else:
+                        st.info(_training_activity_from_log(log))
                 else:
-                    st.info(_training_activity_from_log(log))
-            else:
-                st.info("Training in progress...")
+                    st.info("Training in progress...")
+
+            _render_launch_progress()
         elif st.session_state.get("train_status") == "success":
             st.success("Training completed")
+        elif st.session_state.get("train_status") == "stopped":
+            st.warning('训练已终止，未额外保存当前进度。可从已有检查点续训。')
         elif st.session_state.get("train_status") == "failed":
             st.error("Training process exited with an error")
             _failed_log_path = st.session_state.get("train_log_path")
@@ -4451,29 +4426,49 @@ if st.session_state.get("train_triggered", False):
         except Exception:
             st.session_state.train_status = "failed"
 
-if st.session_state.get("train_status") == "running":
-    proc = st.session_state.get("train_proc")
-    if proc is not None:
-        rc = proc.poll()
-        if rc is not None:
-            if rc == PAUSE_EXIT_CODE:
-                st.session_state.train_status = "paused"
-            elif rc == 0:
-                st.session_state.train_status = "success"
+
+def _refresh_training_status():
+    """Poll jobs from the activity fragment; refresh other controls only on a transition."""
+    previous = (st.session_state.get("train_status"),
+                st.session_state.get("_pipeline_running", False))
+    if st.session_state.get("train_status") == "running":
+        proc = st.session_state.get("train_proc")
+        if proc is not None:
+            rc = proc.poll()
+            if rc is not None:
+                if _training_log_is_stopped(st.session_state.get('train_log_path')):
+                    st.session_state.train_status = 'stopped'
+                elif rc == PAUSE_EXIT_CODE:
+                    st.session_state.train_status = "paused"
+                elif rc == 0:
+                    st.session_state.train_status = "success"
+                    _trigger_auto_shutdown()
+                else:
+                    st.session_state.train_status = "failed"
+        else:
+            # Reloaded sessions have no Popen object, so keep checking the OS.
+            recovered_pid, _ = _find_running_train_process()
+            st.session_state.train_status = _detached_training_status(
+                st.session_state.get("train_log_path"),
+                recovered_pid is not None,
+                _read_paused_state(),
+            )
+            if st.session_state.train_status == "success":
                 _trigger_auto_shutdown()
-            else:
-                st.session_state.train_status = "failed"
-    else:
-        # After a page reload the original Popen object is gone.  Re-scan on
-        # every auto-refresh so a recovered session can observe process exit.
-        recovered_pid, _ = _find_running_train_process()
-        st.session_state.train_status = _detached_training_status(
-            st.session_state.get("train_log_path"),
-            recovered_pid is not None,
-            _read_paused_state(),
-        )
-        if st.session_state.train_status == "success":
+
+    # Pipeline exit 0 means every stage succeeded; pause/failure must not shut down.
+    pipeline_proc = st.session_state.get('_pipeline_proc')
+    if pipeline_proc is not None:
+        pipeline_rc = pipeline_proc.poll()
+        if pipeline_rc is None:
+            st.session_state._pipeline_running = True
+        elif st.session_state.pop("_pipeline_running", False) and pipeline_rc == 0:
             _trigger_auto_shutdown()
+    return previous != (st.session_state.get("train_status"),
+                        st.session_state.get("_pipeline_running", False))
+
+
+_refresh_training_status()
 
 cfg = build_config_dict()
 try:
@@ -4484,60 +4479,67 @@ with _ui["pipeline"]:
     render_pipeline_panel(st, cfg, st.session_state.get('train_status') == 'running' or autotune_active(st.session_state),
                           arm_shutdown_monitor=_maybe_arm_shutdown_monitor)
 
-# 流水线在本会话内从 running 转为退出：training_pipeline.py 以 0 退出表示
-# 全部阶段成功（暂停/失败返回 1），此时与单次训练一样触发自动关机。
-_pipeline_proc = st.session_state.get('_pipeline_proc')
-if _pipeline_proc is not None:
-    _pipeline_rc = _pipeline_proc.poll()
-    if _pipeline_rc is None:
-        st.session_state._pipeline_running = True
-    elif st.session_state.pop("_pipeline_running", False):
-        if _pipeline_rc == 0:
-            _trigger_auto_shutdown()
 breakdown = calc_params(cfg)
 total_params = breakdown["Total Params"]["value"]
 
 with _ui["summary"]:
     render_summary(st, cfg, breakdown)
-_status_labels = {"running": "训练运行中", "paused": "训练已暂停", "success": "训练已完成", "failed": "训练失败"}
+_status_labels = {"running": "训练运行中", "paused": "训练已暂停", "stopped": "训练已终止", "success": "训练已完成", "failed": "训练失败"}
 _sidebar_status.info("自动调优运行中" if autotune_active(st.session_state) else
                      _status_labels.get(st.session_state.get("train_status"), "就绪 · 等待启动"))
 
-with _ui["activity"]:
-    # ── Training progress bar (prominent, top of page) ──
-    if st.session_state.get("train_status") == "running":
-        log_path = st.session_state.get("train_log_path")
-        if log_path and os.path.exists(log_path):
-            with open(log_path, "r", encoding="utf-8") as f:
-                log = f.read()
-            progress = _training_progress_from_log(log)
-            if progress:
-                st.progress(progress['fraction'], text=f"Training — {progress['caption']}")
-            else:
-                st.info(_training_activity_from_log(log), icon=":material/hourglass_top:")
-        else:
-            st.info("Training started...", icon=":material/hourglass_top:")
-    elif st.session_state.get("train_status") == "paused":
-        tt = st.session_state.get("train_type", "pretrain")
-        cfg_local = build_config_dict()
-        ckpt_prefix = _latest_checkpoint_prefix(tt, cfg_local["hidden_size"], cfg_local["use_moe"], _arch_tag())
-        st.warning(f"Training paused. Resume checkpoint: checkpoints/{ckpt_prefix}_{cfg_local['hidden_size']}_resume.pth" if ckpt_prefix else "Training paused. Resume via 'Resume from checkpoint' + Start Training.",
-                   icon=":material/pause_circle:")
 
-    # ── Auto-shutdown countdown ──
-    if st.session_state.get("shutdown_deadline") is not None:
-        _shutdown_remaining = int(st.session_state["shutdown_deadline"] - time.time())
-        if _shutdown_remaining > 0:
-            st.warning(
-                f"训练已完成 — 系统将在约 {_shutdown_remaining} 秒后自动关机。"
-                "如需继续使用这台机器，请立即取消。",
-                icon=":material/power_settings_new:",
-            )
-            if st.button("取消自动关机", key="btn_cancel_shutdown", type="primary"):
-                _cancel_auto_shutdown()
-                st.rerun()
-        else:
-            st.session_state.pop("shutdown_deadline", None)
+@st.fragment(run_every=2 if (
+    st.session_state.get("train_status") == "running"
+    or st.session_state.get("_pipeline_running", False)
+    or st.session_state.get("shutdown_deadline") is not None
+) else None)
+def _render_training_activity():
+    if _refresh_training_status():
+        # A single app rerun updates launch controls, sidebar status and timers.
+        st.rerun()
+    activity = st.empty()
+    if (st.session_state.get("train_status") in ("running", "paused")
+            or st.session_state.get("shutdown_deadline") is not None):
+        with activity.container():
+            # ── Training progress bar (prominent, top of page) ──
+            if st.session_state.get("train_status") == "running":
+                log_path = st.session_state.get("train_log_path")
+                if log_path and os.path.exists(log_path):
+                    with open(log_path, "r", encoding="utf-8") as f:
+                        log = f.read()
+                    progress = _training_progress_from_log(log)
+                    if progress:
+                        st.progress(progress['fraction'], text=f"Training — {progress['caption']}")
+                    else:
+                        st.info(_training_activity_from_log(log), icon=":material/hourglass_top:")
+                else:
+                    st.info("Training started...", icon=":material/hourglass_top:")
+            elif st.session_state.get("train_status") == "paused":
+                tt = st.session_state.get("train_type", "pretrain")
+                cfg_local = build_config_dict()
+                ckpt_prefix = _latest_checkpoint_prefix(tt, cfg_local["hidden_size"], cfg_local["use_moe"], _arch_tag())
+                st.warning(f"Training paused. Resume checkpoint: checkpoints/{ckpt_prefix}_{cfg_local['hidden_size']}_resume.pth" if ckpt_prefix else "Training paused. Resume via 'Resume from checkpoint' + Start Training.",
+                           icon=":material/pause_circle:")
+
+            # ── Auto-shutdown countdown ──
+            if st.session_state.get("shutdown_deadline") is not None:
+                _shutdown_remaining = int(st.session_state["shutdown_deadline"] - time.time())
+                if _shutdown_remaining > 0:
+                    st.warning(
+                        f"训练已完成 — 系统将在约 {_shutdown_remaining} 秒后自动关机。"
+                        "如需继续使用这台机器，请立即取消。",
+                        icon=":material/power_settings_new:",
+                    )
+                    if st.button("取消自动关机", key="btn_cancel_shutdown", type="primary"):
+                        _cancel_auto_shutdown()
+                        st.rerun()
+                else:
+                    st.session_state.pop("shutdown_deadline", None)
+                    st.rerun()
+
+with _ui["activity"]:
+    _render_training_activity()
 
 
 with _ui["diagram"]:
@@ -4545,8 +4547,8 @@ with _ui["diagram"]:
 
     # ═══ Architecture diagram ──
     architecture_title = (
-        "Instinct V2 Recurrent Architecture"
-        if cfg.get("model_architecture") == "looped"
+        "RecurrsiveInstinct Architecture"
+        if cfg.get("model_architecture") == "recurrsive_instinct"
         else "Architecture"
     )
     st.markdown(
@@ -4561,7 +4563,7 @@ with _ui["diagram"]:
     # Additional architecture info
     int_size = cfg.get("intermediate_size", compute_intermediate_size(cfg["hidden_size"]))
     loop_badges = ""
-    if cfg.get("model_architecture") == "looped":
+    if cfg.get("model_architecture") == "recurrsive_instinct":
         physical_depth = (
             cfg.get("prelude_layers", 2)
             + cfg.get("recurrent_layers", 4)
@@ -4685,143 +4687,157 @@ with _ui["monitor"]:
         '<rect x="12" y="1" width="3" height="14" rx="1"/>'
         "</svg>"
     )
+    # Clear the controls slot explicitly when running transitions to a terminal state.
+    _monitor_controls = st.empty()
     if st.session_state.get("train_status") == "running":
-        st.markdown(
-            f'<div class="section-title">{_CHART_SVG}Training Monitor</div>',
-            unsafe_allow_html=True,
-        )
-        c1, c2, c3 = st.columns([1, 1, 1])
-        with c1:
-            _auto_refresh_training_log = _checkbox(
-                "Auto-refresh 2s", value=True, key="auto_refresh_log"
+        with _monitor_controls.container():
+            st.markdown(
+                f'<div class="section-title">{_CHART_SVG}Training Monitor</div>',
+                unsafe_allow_html=True,
             )
-        with c2:
-            if st.button("Clear Log", key="btn_clear_train_log"):
-                log_path = st.session_state.get("train_log_path")
-                if log_path and os.path.exists(log_path):
-                    open(log_path, "w").close()
-                    st.rerun()
-        with c3:
-            current_log = st.session_state.get("train_log_path")
-            st.caption(f"log: {os.path.basename(current_log) if current_log else '-'}")
-        log_path = st.session_state.get("train_log_path")
-        if log_path and os.path.exists(log_path):
-            with open(log_path, "r", encoding="utf-8") as f:
-                log = f.read()
-            metrics = parse_training_metrics(log)
-            with st.expander("Raw Log", expanded=len(metrics) == 0, icon=":material/description:"):
-                st.code(log[-10000:] if len(log) > 10000 else log or "(empty)", language="text", line_numbers=False)
-    elif st.session_state.get("train_status") == "paused":
-        tt = st.session_state.get("train_type", "pretrain")
-        cfg_local = build_config_dict()
-        ckpt_prefix = _latest_checkpoint_prefix(tt, cfg_local["hidden_size"], cfg_local["use_moe"], _arch_tag())
-        st.warning(f"Training paused. Resume checkpoint: checkpoints/{ckpt_prefix}_{cfg_local['hidden_size']}_resume.pth" if ckpt_prefix else "Training paused. Resume via 'Resume from checkpoint' + Start Training.",
-                   icon=":material/pause_circle:")
-        st.caption("暂停时已保存模型权重和完整续训状态。")
-    elif st.session_state.get("train_status") == "success":
-        st.success("Training completed successfully")
-        log_path = st.session_state.get("train_log_path")
-        if log_path and os.path.exists(log_path):
-            with open(log_path, "r", encoding="utf-8") as f:
-                log = f.read()
-            with st.expander("Training Log", expanded=False, icon=":material/description:"):
-                st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
-    elif st.session_state.get("train_status") == "failed":
-        st.error("Training stopped or failed (see log below)")
-        log_path = st.session_state.get("train_log_path")
-        if log_path and os.path.exists(log_path):
-            with open(log_path, "r", encoding="utf-8") as f:
-                log = f.read()
-            if log.strip():
-                with st.expander("Error Log", expanded=True, icon=":material/description:"):
-                    st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
-
-    # ── Training Data: exactly one historical log + the current log ──
-    trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
-    logs_dir = os.path.join(trainer_dir, "logs")
-    current_log_path = st.session_state.get("train_log_path")
-    if not current_log_path or not os.path.exists(current_log_path):
-        current_log_path = None
-
-    log_candidates = []
-    if os.path.isdir(logs_dir):
-        log_candidates.extend(
-            os.path.join(logs_dir, filename)
-            for filename in os.listdir(logs_dir)
-            if filename.endswith(".log")
-        )
-    legacy_log = os.path.join(trainer_dir, "train_output.log")
-    if os.path.exists(legacy_log):
-        log_candidates.append(legacy_log)
-
-    current_log_key = (
-        os.path.normcase(os.path.abspath(current_log_path)) if current_log_path else None
-    )
-    history_logs = sorted(
-        (
-            path for path in log_candidates
-            if os.path.normcase(os.path.abspath(path)) != current_log_key
-        ),
-        key=os.path.getmtime,
-        reverse=True,
-    )
-
-    # Failed/compile-only logs have no Epoch metrics and should not occupy the one
-    # historical comparison slot.
-    history_data = {}
-    for history_path in history_logs:
-        with open(history_path, "r", encoding="utf-8", errors="replace") as history_file:
-            history_content = history_file.read()
-        history_metrics = parse_training_metrics(history_content)
-        if history_metrics:
-            history_data[history_path] = (history_content, history_metrics)
-
-    current_content, current_metrics = "", []
-    if current_log_path:
-        with open(current_log_path, "r", encoding="utf-8", errors="replace") as current_file:
-            current_content = current_file.read()
-        current_metrics = parse_training_metrics(current_content)
-
-    if history_data or current_log_path:
-        st.markdown(
-            f'<div class="section-title">{_CHART_SVG}Training Data</div>',
-            unsafe_allow_html=True,
-        )
-        history_column, current_column = st.columns(2)
-
-        with history_column:
-            st.markdown("#### Historical log")
-            if history_data:
-                if st.session_state.get("history_log_select") not in history_data:
-                    st.session_state.history_log_select = next(iter(history_data))
-                selected_history = _selectbox(
-                    "Compare against",
-                    list(history_data),
-                    format_func=os.path.basename,
-                    key="history_log_select",
+            _render_training_controls('_monitor')
+            c1, c2, c3 = st.columns([1, 1, 1])
+            with c1:
+                _auto_refresh_training_log = _checkbox(
+                    "Auto-refresh 2s", value=True, key="auto_refresh_log"
                 )
-                historical_content, historical_metrics = history_data[selected_history]
-                st.caption(os.path.basename(selected_history))
-                render_log_metrics_charts(historical_metrics)
-                with st.expander("Historical raw log", expanded=False, icon=":material/description:"):
-                    st.code(
-                        historical_content[-5000:] if len(historical_content) > 5000 else historical_content,
-                        language="text", line_numbers=False,
+            with c2:
+                if st.button("Clear Log", key="btn_clear_train_log"):
+                    log_path = st.session_state.get("train_log_path")
+                    if log_path and os.path.exists(log_path):
+                        open(log_path, "w").close()
+                        st.rerun()
+            with c3:
+                current_log = st.session_state.get("train_log_path")
+                st.caption(f"log: {os.path.basename(current_log) if current_log else '-'}")
+
+    # Let each scheduled run finish so Streamlit can remove stale elements.
+    @st.fragment(run_every=2 if _auto_refresh_training_log else None)
+    def _render_training_log():
+        if st.session_state.get("train_status") == "running":
+            log_path = st.session_state.get("train_log_path")
+            if log_path and os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8") as f:
+                    log = f.read()
+                metrics = parse_training_metrics(log)
+                with st.expander("Raw Log", expanded=len(metrics) == 0, icon=":material/description:"):
+                    st.code(log[-10000:] if len(log) > 10000 else log or "(empty)", language="text", line_numbers=False)
+        elif st.session_state.get("train_status") == "paused":
+            tt = st.session_state.get("train_type", "pretrain")
+            cfg_local = build_config_dict()
+            ckpt_prefix = _latest_checkpoint_prefix(tt, cfg_local["hidden_size"], cfg_local["use_moe"], _arch_tag())
+            st.warning(f"Training paused. Resume checkpoint: checkpoints/{ckpt_prefix}_{cfg_local['hidden_size']}_resume.pth" if ckpt_prefix else "Training paused. Resume via 'Resume from checkpoint' + Start Training.",
+                       icon=":material/pause_circle:")
+            st.caption("暂停时已保存模型权重和完整续训状态。")
+        elif st.session_state.get("train_status") == "stopped":
+            st.warning('训练已终止，未额外保存当前进度；已有检查点保留。')
+        elif st.session_state.get("train_status") == "success":
+            st.success("Training completed successfully")
+            log_path = st.session_state.get("train_log_path")
+            if log_path and os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8") as f:
+                    log = f.read()
+                with st.expander("Training Log", expanded=False, icon=":material/description:"):
+                    st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
+        elif st.session_state.get("train_status") == "failed":
+            st.error("Training stopped or failed (see log below)")
+            log_path = st.session_state.get("train_log_path")
+            if log_path and os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8") as f:
+                    log = f.read()
+                if log.strip():
+                    with st.expander("Error Log", expanded=True, icon=":material/description:"):
+                        st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
+
+        # ── Training Data: exactly one historical log + the current log ──
+        trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
+        logs_dir = os.path.join(trainer_dir, "logs")
+        current_log_path = st.session_state.get("train_log_path")
+        if not current_log_path or not os.path.exists(current_log_path):
+            current_log_path = None
+
+        log_candidates = []
+        if os.path.isdir(logs_dir):
+            log_candidates.extend(
+                os.path.join(logs_dir, filename)
+                for filename in os.listdir(logs_dir)
+                if filename.endswith(".log")
+            )
+        legacy_log = os.path.join(trainer_dir, "train_output.log")
+        if os.path.exists(legacy_log):
+            log_candidates.append(legacy_log)
+
+        current_log_key = (
+            os.path.normcase(os.path.abspath(current_log_path)) if current_log_path else None
+        )
+        history_logs = sorted(
+            (
+                path for path in log_candidates
+                if os.path.normcase(os.path.abspath(path)) != current_log_key
+            ),
+            key=os.path.getmtime,
+            reverse=True,
+        )
+
+        # Failed/compile-only logs have no Epoch metrics and should not occupy the one
+        # historical comparison slot.
+        history_data = {}
+        for history_path in history_logs:
+            with open(history_path, "r", encoding="utf-8", errors="replace") as history_file:
+                history_content = history_file.read()
+            history_metrics = parse_training_metrics(history_content)
+            if history_metrics:
+                history_data[history_path] = (history_content, history_metrics)
+
+        current_content, current_metrics = "", []
+        if current_log_path:
+            with open(current_log_path, "r", encoding="utf-8", errors="replace") as current_file:
+                current_content = current_file.read()
+            current_metrics = parse_training_metrics(current_content)
+
+        if history_data or current_log_path:
+            st.markdown(
+                f'<div class="section-title">{_CHART_SVG}Training Data</div>',
+                unsafe_allow_html=True,
+            )
+            history_column, current_column = st.columns(2)
+
+            with history_column:
+                st.markdown("#### Historical log")
+                if history_data:
+                    if st.session_state.get("history_log_select") not in history_data:
+                        st.session_state.history_log_select = next(iter(history_data))
+                    selected_history = _selectbox(
+                        "Compare against",
+                        list(history_data),
+                        format_func=os.path.basename,
+                        key="history_log_select",
                     )
-            else:
-                st.info("No earlier log with training metrics is available.")
+                    historical_content, historical_metrics = history_data[selected_history]
+                    st.caption(os.path.basename(selected_history))
+                    render_log_metrics_charts(historical_metrics)
+                    with st.expander("Historical raw log", expanded=False, icon=":material/description:"):
+                        st.code(
+                            historical_content[-5000:] if len(historical_content) > 5000 else historical_content,
+                            language="text", line_numbers=False,
+                        )
+                else:
+                    st.info("No earlier log with training metrics is available.")
 
-        with current_column:
-            st.markdown("#### Current training")
-            if current_log_path:
-                st.caption(os.path.basename(current_log_path))
-                render_log_metrics_charts(current_metrics)
-            else:
-                st.info("No current training log is selected.")
+            with current_column:
+                st.markdown("#### Current training")
+                if current_log_path:
+                    st.caption(os.path.basename(current_log_path))
+                    render_log_metrics_charts(current_metrics)
+                else:
+                    st.info("No current training log is selected.")
 
-    if not history_data and not current_log_path:
-        st.info("还没有训练日志。启动训练后，这里会显示进度、loss 与吞吐曲线。")
+        if not history_data and not current_log_path:
+            st.info("还没有训练日志。启动训练后，这里会显示进度、loss 与吞吐曲线。")
 
+        _persist_panel_state(trainer_dir)
+
+    _render_training_log()
 
 # Footer
 st.markdown(
@@ -4847,13 +4863,3 @@ if "_template_save" in st.session_state:
         with st.sidebar:
             st.error(f"无法保存模板：{exc}")
 _persist_panel_state(_trainer_dir)
-
-if _auto_refresh_training_log or autotune_active(st.session_state):
-    time.sleep(2)
-    st.rerun()
-
-if (st.session_state.get("shutdown_deadline") is not None
-        and time.time() < st.session_state["shutdown_deadline"]):
-    # 关机倒计时进行中：保持页面自动刷新，让倒计时走动、取消按钮保持可点。
-    time.sleep(2)
-    st.rerun()

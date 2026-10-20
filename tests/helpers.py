@@ -7,8 +7,8 @@ def make_tiny_config(use_moe=False, variant="dense"):
     """Return a tiny InstinctConfig for fast CPU tests.
 
     Each model file defines its own ``InstinctConfig`` class with an identical
-    interface (``model_instinct.py`` / ``model_instinct_loop.py`` /
-    ``model_instinct_linear.py``). ``model_instinct_loop`` and
+    interface (``model_instinct.py`` / ``model_recurrsive_instinct.py`` /
+    ``model_instinct_linear.py``). ``model_recurrsive_instinct`` and
     ``model_instinct_linear`` are standalone top-level modules (no ``sys.modules``
     aliasing required), so a plain import is sufficient here. ``flash_attn=False``
     keeps tests on CPU-friendly math-attention. ``head_dim`` resolves
@@ -22,7 +22,7 @@ def make_tiny_config(use_moe=False, variant="dense"):
     if variant == "dense":
         from model.model_instinct import InstinctConfig
     elif variant == "loop":
-        from model.model_instinct_loop import InstinctConfig
+        from model.model_recurrsive_instinct import InstinctConfig
     elif variant == "linear":
         from model.model_instinct_linear import InstinctConfig
     else:

@@ -21,7 +21,7 @@ def allowed(relative, assets=True):
     if name.endswith('.py'):
         return (parts[0] in {'model', 'trainer'} and len(parts) > 1
                 or parts[0] == 'scripts' and (len(parts) == 2 or parts[1] == 'data_loader')
-                or relative in {'run_loop.py', 'run_linear.py', 'eval_llm.py'})
+                or relative in {'run_recurrsive.py', 'run_linear.py', 'eval_llm.py'})
     if relative in {'start_config_webui.bat', 'scripts/monitor_training_shutdown.ps1'}:
         return True
     if not assets:

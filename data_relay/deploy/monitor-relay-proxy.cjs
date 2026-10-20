@@ -13,6 +13,23 @@ function isPull(req) {
 function createRelayProxy(options={}) {
   const resolve = options.resolve || (()=>JSON.parse(fs.readFileSync(process.env.SSHBROWSE_RELAY_CONFIG || '/etc/instinct-relay/proxy.json','utf8')));
   return function relayProxy(req,res) {
+    let pathname;
+    try {pathname=decodeURIComponent(new URL(req.url,'http://localhost').pathname);}catch {res.status(400).end();return;}
+    // Credentials are only consumed by the monitor backend, never by a browser.
+    if(pathname.toLowerCase().startsWith('/api/integration/')) {res.status(404).end();return;}
+    if(options.onConfig && req.method==='PUT' && pathname.replace(/\/+$/,'')==='/api/config') {
+      let size=0;const chunks=[];
+      req.on('data',chunk=>{size+=chunk.length;if(size<=65536)chunks.push(chunk);});
+      req.on('end',async()=>{
+        if(size>65536){res.status(413).json({error:'配置请求过大'});return;}
+        try {
+          const patch=JSON.parse(Buffer.concat(chunks));
+          if(!patch || typeof patch!=='object' || Array.isArray(patch))throw Error('配置格式无效');
+          res.json(await options.onConfig(patch));
+        }catch(error){res.status(400).json({error:error.message});}
+      });
+      return;
+    }
     let config;
     try {config=resolve();if(!config.token)throw new Error('not configured');}
     catch {res.status(503).json({error:'数据中继尚未就绪，请稍后刷新'});return;}
@@ -30,7 +47,7 @@ function createRelayProxy(options={}) {
       outgoing['x-content-type-options']='nosniff';
       outgoing['x-frame-options']='SAMEORIGIN';
       outgoing['referrer-policy']='no-referrer';
-      outgoing['content-security-policy']="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-ancestors 'self'; object-src 'none'; base-uri 'self'";
+      outgoing['content-security-policy']="default-src 'self'; script-src 'self' 'unsafe-inline'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-ancestors 'self'; object-src 'none'; base-uri 'self'";
       res.writeHead(incoming.statusCode,outgoing);incoming.pipe(res);
     });
     upstream.setTimeout(600000,()=>upstream.destroy(new Error('timeout')));

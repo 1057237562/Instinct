@@ -10,6 +10,11 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.config_templates import load_model_presets, preset_initial_state
+
 TARGET = ROOT / 'data_relay/src/training_schema.json'
 STAGES = ['pretrain', 'cpt', 'full_sft', 'lora', 'dpo', 'ppo', 'grpo', 'agent', 'distillation']
 
@@ -22,25 +27,11 @@ def field(key, label, default=None, choices=None, kind=None, **extra):
 
 
 def presets():
-    tree = ast.parse((ROOT / 'scripts/config_webui.py').read_text(encoding='utf-8'))
-    names = {'PRESETS', '_LEGACY_PRESET_NAMES'}
-    funcs = {'compute_intermediate_size', 'init_from_preset'}
-    nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in funcs or
-             isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in names for t in n.targets)]
-    class State(dict):
-        __getattr__ = dict.__getitem__
-        __setattr__ = dict.__setitem__
-    class UI:
-        session_state = State()
-    env = dict(st=UI, math=math, json=json)
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), '<preset definitions>', 'exec'), env)
-    result = {}
-    for name in env['PRESETS']:
-        UI.session_state = State()
-        env['init_from_preset'](name)
-        result[name] = {k: v for k, v in UI.session_state.items() if not k.startswith('_')}
-        result[name]['preset'] = name
-    return result
+    return {
+        name: {key: value for key, value in preset_initial_state(name).items()
+               if not key.startswith('_')} | {'preset': name}
+        for name in load_model_presets()
+    }
 
 
 def arguments(path):
@@ -72,6 +63,10 @@ def schema():
     ]), dict(title='精度与计算', fields=[
         f('activation_dtype', '激活精度', 'bfloat16', ['bfloat16', 'float16', 'fp32']),
         f('param_dtype', '参数精度', 'fp32', ['fp32', 'bf16', 'fp16']),
+        f('muon_mantissa', 'Muon BF16+uint16 补偿权重（需参数 bf16）', False),
+        f('muon_momentum_dtype', 'Muon 动量存储精度（补偿权重模式）', 'fp32', ['fp32', 'bf16']),
+        f('muon_batch_size', 'Muon 每块矩阵数上限（0 自动）', 0, min=0),
+        f('muon_workspace_mb', 'Muon 工作区 MiB（0 自动，16矩阵可选272）', 0.0, min=0),
         f('kv_cache_dtype', 'KV Cache 精度', 'fp32', ['fp32', 'bf16', 'fp16', 'fp8_e4m3', 'fp8_e5m2']),
         f('fp8_training', 'FP8 训练', 'off', ['off', 'tensorwise', 'rowwise', 'rowwise_with_gw_hp']),
         f('fp8_filter', 'FP8 层筛选', 'auto', ['auto', 'eligible']),
@@ -87,7 +82,7 @@ def schema():
         f('dataset_streaming', '流式加载', 'auto', ['auto', 'on', 'off']), f('streaming_chunk_mb', '流式分块（MiB）', 1024, min=1),
         f('streaming_prefetch_chunks', '预取下一块', True), f('cache_build_mode', '缓存构建', 'inline', ['inline', 'background']),
     ]), dict(title='模型结构', fields=[
-        f('model_architecture', '模型主干', 'standard', ['standard', 'linear', 'looped']),
+        f('model_architecture', '模型主干', 'standard', ['standard', 'linear', 'recurrsive_instinct']),
         f('hidden_size', '隐藏维度', 512, min=1), f('num_hidden_layers', '层数', 32, min=1),
         f('intermediate_size', 'FFN 中间维度（空为自动）', None, kind='int', min=1),
         f('vocab_size', '词表大小', 6400, min=1), f('num_attention_heads', 'Q 头数', 8, min=1),
@@ -113,7 +108,7 @@ def schema():
         f('attnres_variant', 'AttnRes 类型', 'block', ['block', 'full']), f('attnres_block_size', 'AttnRes 块大小（空为自动）', None, kind='int', min=1),
         f('early_exit_enabled', 'Early exit 训练', False), f('early_exit_layers', 'Early exit 层索引（JSON 数组）', [4,5,6,7], kind='json'),
         f('early_exit_loss_weight', 'Early exit loss 权重', 0.3, min=0),
-    ]), dict(title='Linear / Looped 结构', fields=[
+    ]), dict(title='Linear / RecurrsiveInstinct 结构', fields=[
         *[f(k, label, value, min=1) for k, label, value in [
             ('full_attention_interval','完整注意力间隔',4), ('linear_conv_kernel_dim','线性卷积核',4),
             ('prelude_layers','Prelude 层数',2),('recurrent_layers','Recurrent 层数',4),('coda_layers','Coda 层数',2),
@@ -137,7 +132,7 @@ def schema():
             if item['type'] != 'bool' and common.get(cli_key, {}).get('choices'):
                 item['choices'] = common[cli_key]['choices']
     reserved = {'save_dir','save_weight','lora_name','pause_file','config_path','from_resume','data_path','from_weight',
-                'hidden_size','num_hidden_layers','use_moe','device','use_looped','early_exit','autotune_profile','autotune_trial'}
+                'hidden_size','num_hidden_layers','use_moe','device','use_recurrsive','early_exit','autotune_profile','autotune_trial'}
     mapped = {f['key'].replace('_{stage}', '') for g in groups for f in g['fields']} | {'dtype','num_workers'}
     extra = {}
     for stage in STAGES:

@@ -38,7 +38,7 @@
 </div>
 
 Train small language models from scratch: one pure-PyTorch codebase covering
-Dense, MoE, and the Instinct V2 latent recurrent-depth architectures. The
+Dense, MoE, and the RecurrsiveInstinct latent recurrent-depth architectures. The
 current repository configuration has completed pretraining, SFT, resume-from-
 checkpoint training, and inference validation on a single RTX 5070 Ti 16GB
 under Windows 11.
@@ -52,8 +52,8 @@ All core algorithms (Pretrain / SFT / LoRA / DPO / PPO / GRPO / CISPO / Agentic 
 - **Single-GPU training**: the V1 MoE 16GB + Muon configuration totals 678.7M parameters with 106.2M active per token (hidden 512, 32 layers)
 - **Pure native implementation**: no third-party training framework abstractions — Transformer, LoRA and the RL family are hand-written
 - **Complete training pipeline**: Pretrain → CPT → SFT → LoRA → DPO → PPO / GRPO / CISPO → Agentic RL → Distillation
-- **Multiple architectures**: Dense, MoE, and Instinct V2 recurrent depth; V1 MoE uses 8 experts with top-1 routing
-- **Instinct V2 recurrent depth**: Prelude / latent recurrent core / Coda — extend latent-space inference compute at test time with `num_steps`
+- **Multiple architectures**: Dense, MoE, and RecurrsiveInstinct recurrent depth; V1 MoE uses 8 experts with top-1 routing
+- **RecurrsiveInstinct recurrent depth**: Prelude / latent recurrent core / Coda — extend latent-space inference compute at test time with `num_steps`
 - **Inference fast path**: static KV cache + decode-step CUDA graph + fused RMSNorm/SwiGLU kernels; the MoE grouped GEMM auto-selects a native / triton / cached backend per platform
 - **Adaptive sequence buckets**: experimental length-bucketed packing driven by a wall-time DP, memory-aware batching, deterministic shuffling, and a persistent compile cache
 - **Dual corpus formats**: train directly from JSONL or Parquet, with a Rust compiler (~3x size reduction) whose streaming chunks stay aligned across formats
@@ -233,8 +233,8 @@ python eval_llm.py --weight full_sft --early_exit 1
 # Per-layer top-k predictions (logit lens)
 python eval_llm.py --load_from ./instinct-3 --logit_lens 1
 
-# Instinct V2 recurrent depth: extend latent-space compute
-python eval_llm.py --model_architecture looped --num_steps 32
+# RecurrsiveInstinct recurrent depth: extend latent-space compute
+python eval_llm.py --model_architecture recurrsive_instinct --num_steps 32
 ```
 
 Inference defaults to the `--inference_compile auto` tier (fused kernels +
@@ -439,7 +439,7 @@ after a clean exit (code 0) while keeping it on for pause (42) or failure.
 | `--use_compile 0\|1` | Enable `torch.compile`; artifacts persist in `./.cache/torch_compile/` |
 | `--compile_mode` | `default` / `reduce-overhead` / `max-autotune` / `max-autotune-no-cudagraphs` |
 | `--use_moe 1` | Enable the MoE architecture |
-| `--use_looped 1` | Enable the Instinct V2 latent recurrent-depth architecture |
+| `--use_recurrsive 1` | Enable the RecurrsiveInstinct latent recurrent-depth architecture |
 | `--loop_iters` / `--mean_backprop_depth` | Target mean recurrence count / trailing recurrences keeping gradients |
 | `--use_grad_checkpoint 0\|1\|2` | Gradient checkpointing (0=off, 1=selective attention QKᵀ/FFN recompute, 2=full-layer) |
 | `--hidden_size` / `--num_hidden_layers` | Model width / depth |
@@ -454,7 +454,7 @@ after a clean exit (code 0) while keeping it on for pause (42) or failure.
 ## Project layout
 
 ```text
-model/                # InstinctConfig / InstinctForCausalLM / LoRA / looped / linear architectures
+model/                # InstinctConfig / InstinctForCausalLM / LoRA / RecurrsiveInstinct / linear architectures
                       #   + inference runtime (inference_runtime, static_cache, grouped_mm, kv_cache_quant) + tokenizer files
 trainer/              # All training scripts (pretrain, SFT, LoRA, DPO, PPO, GRPO, Agent RL, KD, tokenizer)
                       #   + trainer_cli.py shared CLI / training_pipeline.py / training_profiler.py
@@ -482,13 +482,13 @@ The shipped trainer configs (`trainer/*.json`) are currently:
 | Config file | Architecture | Key parameters |
 |----------|------|----------|
 | `config_pretrain.json` / `config_instinct_v1_moe.json` | Instinct V1 MoE | hidden 512, 32 layers, 8 FFN=1664 experts with top-1 routing, 16Q/4KV GQA (head_dim 32), RoPE θ=1e6 + LongRoPE factor 8.0 (original 4096), max_position 32768, tied embeddings |
-| `config_full_sft.json` (= `config_instinct_v2.json` / `config_dpo.json`) | Instinct V2 looped | hidden 1248, physical layers (Prelude 2 / Core 4 / Coda 2), 13Q/13KV MHA (head_dim 96), FFN 4224, `loop_iters 32`, `mean_backprop_depth 8`, RoPE θ=5e4 |
+| `config_full_sft.json` (= `config_recurrsive_instinct.json` / `config_dpo.json`) | RecurrsiveInstinct | hidden 1248, physical layers (Prelude 2 / Core 4 / Coda 2), 13Q/13KV MHA (head_dim 96), FFN 4224, `loop_iters 32`, `mean_backprop_depth 8`, RoPE θ=5e4 |
 
 | Model | Parameters | Notes |
 |------|--------|------|
 | Instinct V1 | 152.4M | Dense, dim 768, 20 layers, 8Q/4KV GQA; see [architecture-v1.html](architecture-v1.html) |
 | Instinct V1 MoE | 678.7M-A106.2M | 16GB + Muon deep-thin: hidden 512, 32 layers, 16Q/4KV, 8 FFN=1664 experts, top-1; see [architecture-v1-moe.html](architecture-v1-moe.html) |
-| Instinct V2 | 187.5M | latent recurrent depth, physical layers `(2,4,2)`, mean effective depth 132; see [architecture.html](architecture.html) |
+| RecurrsiveInstinct | 187.5M | latent recurrent depth, physical layers `(2,4,2)`, mean effective depth 132; see [architecture.html](architecture.html) |
 
 Instinct V1 Dense totals 152,406,528 parameters (~152.4M) and activates all of
 them per token; V1 MoE totals 678,726,144 with 106,203,648 active per token.
@@ -499,13 +499,13 @@ trainer's notes, V1 MoE consumed a 34GB dataset while V1 Dense used two mini
 datasets for pretraining and SFT; file size does not establish the consumed
 token count or code-token coverage.
 
-Instinct V2 follows [Scaling up Test-Time Compute with Latent Reasoning](https://arxiv.org/abs/2502.05171):
+RecurrsiveInstinct follows [Scaling up Test-Time Compute with Latent Reasoning](https://arxiv.org/abs/2502.05171):
 the Prelude maps tokens into latent space, the shared multi-layer recurrent
 core re-injects the input each round via `Linear([state; input])`, and the
 Coda decodes the final state. Recurrence counts use log-normal Poisson
 sampling during training and only the last `k` rounds backpropagate; at
-inference, `eval_llm.py --model_architecture looped --num_steps 32` extends
-latent compute. The 200M-class V2 defaults to 187,521,984 parameters:
+inference, `eval_llm.py --model_architecture recurrsive_instinct --num_steps 32` extends
+latent compute. The 200M-class RecurrsiveInstinct defaults to 187,521,984 parameters:
 `hidden=1248`, 13 96-dim MHA heads, `FFN=4224`, physical layers
 `(Prelude, Core, Coda)=(2,4,2)`, 32 mean recurrences (mean effective depth
 132), gradients kept for the last 8 recurrences only. A linear-attention

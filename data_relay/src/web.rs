@@ -47,6 +47,8 @@ pub fn router(state: Arc<Relay>) -> Router {
         .route("/api/data/uploads/{id}/complete", post(complete_data_upload))
         .route("/api/autodl/status", get(autodl_status))
         .route("/api/autodl/instances", get(list_instances))
+        // Service-to-service only; the public monitor proxy blocks this namespace.
+        .route("/api/integration/ssh-target", post(integration_ssh_target))
         .route("/api/autodl/boot_no_gpu", post(boot_no_gpu))
         .route("/api/autodl/power_off", post(power_off))
         .route("/api/autodl/wx_start", post(wx_login_start))
@@ -376,6 +378,36 @@ async fn list_instances(State(relay): State<Arc<Relay>>) -> Response {
         Ok(v) => Json(v).into_response(),
         Err(e) => err_response(e),
     }
+}
+
+async fn integration_ssh_target(State(relay): State<Arc<Relay>>, Json(input): Json<Value>) -> Response {
+    let uuid = input["instance_uuid"].as_str().unwrap_or("").trim();
+    if uuid.is_empty() {
+        return err_response(anyhow::anyhow!("请选择实例"));
+    }
+    let cfg = relay.config();
+    let result = async {
+        let client = crate::autodl::AutoDl::new(&cfg.autodl)?;
+        let info = client.instance(uuid).await?;
+        anyhow::ensure!(info.uuid == uuid, "实例响应与选择不符");
+        let target = info.ssh.map(|ssh| {
+            // An override belongs to the current selection, never a different server.
+            let password = if uuid == cfg.autodl.instance_uuid && !cfg.autodl.ssh_password.is_empty() {
+                cfg.autodl.ssh_password.clone()
+            } else { ssh.password };
+            json!({"host":ssh.host,"port":ssh.port,"username":cfg.autodl.ssh_user,
+                "authType":"password","password":password})
+        });
+        Ok::<_, anyhow::Error>(json!({"instance_uuid":uuid,"selected_instance_uuid":cfg.autodl.instance_uuid,
+            "name":info.name,"status":info.status,"target":target}))
+    }.await;
+    // Do not return raw AutoDL errors here: upstream responses may contain credentials.
+    let mut response = match result {
+        Ok(value) => Json(value).into_response(),
+        Err(_) => (StatusCode::BAD_REQUEST, Json(json!({"error":"无法读取实例 SSH 信息，请刷新 AutoDL 登录或检查实例状态"}))).into_response(),
+    };
+    response.headers_mut().insert("cache-control", HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn autodl_status(State(relay): State<Arc<Relay>>) -> Response {
@@ -787,7 +819,7 @@ mod training_route_tests {
             ("POST", "/api/training/operations/op_123/cancel"),
             ("POST", "/api/training/jobs"),("POST", "/api/training/jobs/r_123/pause"),
             ("POST", "/api/training/jobs/r_123/resume"),("POST", "/api/training/jobs/r_123/stop"),
-            ("POST", "/api/training/boot_gpu")] {
+            ("POST", "/api/training/boot_gpu"),("POST", "/api/integration/ssh-target")] {
             let response = app.clone().oneshot(Request::builder().method(method).uri(path)
                 .header("Content-Type", "application/json").body(Body::from("{}")).unwrap()).await.unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
