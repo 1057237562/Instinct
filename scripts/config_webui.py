@@ -1168,19 +1168,71 @@ def load_config_to_session(config_dict: dict):
 def parse_training_metrics(log_text):
     """Extract training metrics from log for charting. Returns list of dicts.
 
-    Resume appends every new run (each starting with its own ``# epochs:``
-    header) to the same file.  Charting the whole file interleaves runs whose
-    global step numbers restart at 1, which draws sawtooth curves, so parse
-    only the final run segment — the same slice the progress bar reads.
+    Keep history when a launch explicitly resumes the same saved run. New or
+    unidentified launches start a new curve. ETA windows reset on every launch;
+    lifecycle status still uses only the latest launch's log segment.
     """
-    if "# epochs:" in log_text:
-        log_text = log_text.rsplit("# epochs:", 1)[-1]
+    try:
+        from trainer.training_eta import RecentThroughputETA
+    except ModuleNotFoundError as exc:
+        if exc.name != 'trainer':
+            raise
+        # Streamlit is also launched directly with scripts/ as its cwd.
+        import sys
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from trainer.training_eta import RecentThroughputETA
+
     rows = []
+    eta_estimator = RecentThroughputETA()
+    eta_epoch = None
+    command = ''
+    run_weight = None
+    first_metric = True
+
+    def command_value(names):
+        match = re.search(
+            r'(?:^|\s)--(?:' + names + r')(?:=|\s+)(?:"([^"]+)"|\'([^\']+)\'|(\S+))',
+            command,
+        )
+        return next((value for value in match.groups() if value is not None), None) if match else None
+
     for line in log_text.strip().split("\n"):
+        if line.startswith('# command:'):
+            command = line[len('# command:'):].strip()
+            continue
+        if line.startswith('# epochs:'):
+            weight = command_value('save_weight|lora_name')
+            if not (weight and weight == run_weight and command_value('from_resume') == '1'):
+                rows.clear()
+            run_weight = weight
+            command = ''
+            eta_estimator = RecentThroughputETA()
+            eta_epoch = None
+            first_metric = True
+            continue
+        resume = re.search(r"Epoch \[(\d+)/\d+\]:.*(?:resume global step (\d+)|跳过前(\d+)个step)", line)
+        if resume:
+            epoch = int(resume.group(1))
+            next_step = int(resume.group(2)) if resume.group(2) else int(resume.group(3)) + 1
+            # A periodic checkpoint can predate the last logged step. Discard
+            # only the abandoned suffix before plotting the replayed work.
+            rows = [row for row in rows if (row['_epoch'], row['_epoch_step']) < (epoch, next_step)]
+            eta_estimator = RecentThroughputETA()
+            first_metric = True
         ep = re.search(r"Epoch:\[(\d+)/(\d+)\]\((\d+)/~?(\d+)\)", line)
-        if not ep or 'loss:' not in line:
+        completed_epoch = (
+            'Streaming epoch complete' in line
+            and re.search(r'\bcheckpoint_saved:\s*1\b', line) is not None
+        )
+        if not ep or ('loss:' not in line and not completed_epoch):
             continue
         epoch, _epochs, epoch_step, epoch_steps = map(int, ep.groups())
+        if first_metric:
+            rows = [row for row in rows if (row['_epoch'], row['_epoch_step']) < (epoch, epoch_step)]
+            first_metric = False
+        if epoch != eta_epoch:
+            eta_estimator = RecentThroughputETA()
+            eta_epoch = epoch
         row = {
             "_epoch": epoch,
             "_epoch_step": epoch_step,
@@ -1191,9 +1243,55 @@ def parse_training_metrics(log_text):
                 row[m.group(1)] = float(m.group(2))
             except ValueError:
                 pass
+        # New trainers report synchronized window ETA directly. Recompute
+        # legacy logs for the chart without changing the file or running job.
+        if 'eta_basis: recent_' not in line:
+            elapsed = row.get('elapsed_seconds')
+            if elapsed is None and 'elapsed_time' in row:
+                elapsed = row['elapsed_time'] * 60
+            tokens = re.search(r"\btokens:\s*(\d+)/(\d+)", line)
+            if elapsed is not None:
+                completed, total = map(int, tokens.groups()) if tokens else (epoch_step, epoch_steps)
+                eta = eta_estimator.update(completed, elapsed, total)
+                row.pop('epoch_time', None)
+                if eta is not None:
+                    row['epoch_time'] = eta
         if row:
             rows.append(row)
     return rows
+
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def _training_log_snapshot(path, mtime_ns, size):
+    """Cache contents and parsed metrics for one version of a log file."""
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        content = handle.read()
+    return content, parse_training_metrics(content)
+
+
+def _read_training_log(path):
+    if not path:
+        return "", []
+    try:
+        version = os.stat(path)
+        return _training_log_snapshot(path, version.st_mtime_ns, version.st_size)
+    except OSError:
+        return "", []
+
+
+def _format_training_duration(minutes):
+    """Format minute-valued log metrics with normalized days/hours/minutes."""
+    if not math.isfinite(minutes):
+        return "estimating"
+    days, remainder = divmod(max(0, round(minutes * 10)), 14400)
+    hours, tenths = divmod(remainder, 600)
+    parts = []
+    if days:
+        parts.append(f"{days} d")
+    if days or hours:
+        parts.append(f"{hours} h")
+    parts.append(f"{tenths / 10:g} min")
+    return " ".join(parts)
 
 
 def render_log_metrics_charts(metrics):
@@ -1201,6 +1299,19 @@ def render_log_metrics_charts(metrics):
     if not metrics:
         st.info("Waiting for training metrics…")
         return
+
+    latest = metrics[-1]
+    durations = []
+    elapsed = (latest["elapsed_seconds"] / 60 if "elapsed_seconds" in latest
+               else latest.get("elapsed_time"))
+    if elapsed is not None:
+        durations.append(f"Elapsed: {_format_training_duration(elapsed)}")
+    if "epoch_time" in latest:
+        durations.append(f"Epoch Remaining: {_format_training_duration(latest['epoch_time'])}")
+    elif elapsed is not None:
+        durations.append("Epoch Remaining: estimating")
+    if durations:
+        st.caption(" · ".join(durations))
 
     loss_keys = sorted({
         key for metric in metrics for key in metric
@@ -1214,7 +1325,7 @@ def render_log_metrics_charts(metrics):
     chart_groups = [
         ("Loss", loss_keys),
         ("Learning Rate", lr_keys[:1]),
-        ("Epoch Time (min)", time_keys),
+        ("Epoch Remaining", time_keys),
     ]
 
     rendered = False
@@ -1230,7 +1341,33 @@ def render_log_metrics_charts(metrics):
             }
             for index, metric in enumerate(metrics)
         ]
-        st.line_chart(chart_data, x="step", width="stretch")
+        if keys == ["epoch_time"]:
+            for point in chart_data:
+                if "epoch_time" in point:
+                    point["duration"] = _format_training_duration(point["epoch_time"])
+            # Keep the numeric minute scale; format axis labels and hover text.
+            tenths = "round(datum.value * 10)"
+            axis_duration = (
+                f"({tenths} >= 14400 ? floor({tenths} / 14400) + ' d ' : '') + "
+                f"({tenths} >= 600 ? floor(({tenths} % 14400) / 600) + ' h ' : '') + "
+                f"format(({tenths} % 600) / 10, '~g') + ' min'"
+            )
+            st.vega_lite_chart(chart_data, {
+                "mark": {"type": "line", "point": True},
+                "encoding": {
+                    "x": {"field": "step", "type": "quantitative", "title": "Step"},
+                    "y": {
+                        "field": "epoch_time", "type": "quantitative", "title": title,
+                        "axis": {"labelExpr": axis_duration},
+                    },
+                    "tooltip": [
+                        {"field": "step", "type": "quantitative", "title": "Step"},
+                        {"field": "duration", "type": "nominal", "title": title},
+                    ],
+                },
+            }, width="stretch")
+        else:
+            st.line_chart(chart_data, x="step", width="stretch")
 
     if not rendered:
         st.info("This log has no plottable training metrics yet.")
@@ -2405,6 +2542,67 @@ def _pause_checkpoint_saved(log_path, paused_state=None):
         )
     except OSError:
         return False
+
+
+def _paused_resume_prefix(train_type, cfg):
+    """Identify the paused run itself, never an unrelated newest checkpoint."""
+    if st.session_state.get('train_status') != 'paused':
+        return None
+    log_path = st.session_state.get('train_log_path')
+    paused = _read_paused_state()
+    if not _pause_checkpoint_saved(log_path, paused):
+        return None
+    prefix = os.path.basename(log_path)[len('train_'):-len('.log')]
+    candidates = [prefix]
+    if paused and paused.get('train_type') == train_type:
+        weight = paused.get('weight')
+        if weight and re.fullmatch(re.escape(weight) + r'(?:_[2-9]\d*)?', prefix):
+            candidates.insert(0, weight)
+    # CLI pauses have no .paused.json. The launch header also disambiguates
+    # collision-suffixed log names without scanning unrelated checkpoints.
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as handle:
+            commands = re.findall(r'^# command: (.+)$', handle.read(), re.MULTILINE)
+        if commands:
+            match = re.search(
+                r'(?:^|\s)--(?:save_weight|lora_name)(?:=|\s+)(?:"([^"]+)"|\'([^\']+)\'|(\S+))',
+                commands[-1],
+            )
+            if match:
+                weight = next(value for value in match.groups() if value is not None)
+                if re.fullmatch(re.escape(weight) + r'(?:_[2-9]\d*)?', prefix):
+                    candidates.insert(0, weight)
+    except OSError:
+        return None
+    for weight in candidates:
+        if (re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', weight)
+                and weight.startswith(_default_weight_prefix(train_type) + '_')
+                and _matches_arch_tag(weight, _arch_tag())
+                and _resume_checkpoint_exists(weight, cfg['hidden_size'], cfg['use_moe'])):
+            return weight
+    return None
+
+
+def _request_resume(train_type, weight):
+    """A button callback selects resume before Streamlit rebuilds its widgets."""
+    if (st.session_state.get('train_type', 'pretrain') != train_type
+            or _paused_resume_prefix(train_type, build_config_dict()) != weight):
+        st.session_state['_resume_action_error'] = '暂停断点已变化，请刷新并重新选择。'
+        return
+    pid, _ = _find_running_train_process()
+    if pid is not None:
+        st.session_state['_resume_action_error'] = '已有训练进程运行，未重复启动。'
+        return
+    st.session_state.pop('_resume_action_error', None)
+    st.session_state.from_resume = True
+    if train_type == 'full_sft':
+        st.session_state.sft_start_mode = 'resume'
+    st.session_state[f'save_prefix_{train_type}'] = weight
+    st.session_state['_paused_resume_target'] = {
+        'train_type': train_type, 'weight': weight,
+        'log_path': st.session_state.get('train_log_path'),
+    }
+    st.session_state.train_triggered = True
 
 
 def _detached_training_status(log_path, process_found, paused_state, now=None):
@@ -4027,12 +4225,13 @@ with st.sidebar:
         if st.session_state.get("profile", "off") == "torch":
             st.warning("算子 trace 会明显拖慢采集窗口，只建议短时诊断；其余训练会继续正常运行。")
         _selectbox(
-            "梯度检查点模式（0关闭/1选择性/2整层）",
+            "梯度检查点模式（0关闭/1仅Attention/2整层）",
             [0, 1, 2],
             index=st.session_state.get("use_grad_checkpoint", 0),
             key="use_grad_checkpoint",
-            help="Gradient checkpointing mode: 0 = off, 1 = selectively recompute "
-                 "attention/FFN activations, 2 = full-layer checkpointing.",
+            help="0 = off; 1 = Attention-only: recompute the attention core, "
+                 "keeping QKV/O projections and FFN activations; 2 = full-layer checkpointing. "
+                 "Mode 1 retains more activations than the previous FFN-checkpoint implementation.",
         )
         _selectbox(
             "参数精度 (param_dtype)",
@@ -4235,17 +4434,30 @@ with st.sidebar:
                 if _cmd_error:
                     st.error(_cmd_error)
         with _launch_action:
+            _launch_disabled = (
+                _compile_invalid or _fp8_invalid or _low_precision_invalid or _muon_invalid
+                or _dataset_missing or _base_missing
+                or st.session_state.get('train_status') == 'running'
+                or autotune_active(st.session_state) or _autotune_profile_invalid
+            )
+            if st.session_state.get('train_status') == 'paused':
+                _resume_type = st.session_state.get('train_type', 'pretrain')
+                _resume_prefix = _paused_resume_prefix(_resume_type, build_config_dict())
+                st.button(
+                    '继续训练', width='stretch', key='btn_resume_train', type='primary',
+                    disabled=_launch_disabled or _resume_prefix is None,
+                    on_click=_request_resume, args=(_resume_type, _resume_prefix),
+                    help='恢复当前暂停轮次的模型、优化器和数据进度，自动选择从检查点续训。',
+                )
+                if _resume_prefix is None:
+                    st.caption('未找到与当前模型匹配的暂停断点，请检查模型和训练阶段。')
             if st.button(
                 "开始训练", width="stretch", key="btn_start_train", type="primary",
-                disabled=(
-                    _compile_invalid or _fp8_invalid or _low_precision_invalid or _muon_invalid
-                    or _dataset_missing or _base_missing
-                    or st.session_state.get('train_status') == 'running'
-                    or autotune_active(st.session_state)
-                    or _autotune_profile_invalid
-                ),
+                disabled=_launch_disabled,
             ):
                 st.session_state.train_triggered = True
+            if st.session_state.get('_resume_action_error'):
+                st.error(st.session_state['_resume_action_error'])
         if st.session_state.get("train_status") == "running":
             _render_training_controls()
 
@@ -4289,7 +4501,7 @@ with st.sidebar:
                 with st.expander("Failure log (last 80 lines)", expanded=True):
                     st.code(_failed_tail, language="text")
         elif st.session_state.get("train_status") == "paused":
-            st.warning("训练已暂停并保存。如需继续，请勾选「从检查点续训」后点击「开始训练」。",
+            st.warning("训练已暂停并保存。点击「继续训练」可恢复本轮断点。",
                        icon=":material/pause_circle:")
             st.caption("暂停时已保存模型权重和完整续训状态。")
 
@@ -4300,16 +4512,19 @@ with st.sidebar:
 if st.session_state.get("train_triggered", False):
     if autotune_active(st.session_state):
         st.session_state.train_triggered = False
+        st.session_state.pop('_paused_resume_target', None)
         st.warning('自动调优正在运行，请先停止调优。')
 
 if st.session_state.get("train_triggered", False):
     _pipeline_process = st.session_state.get('_pipeline_proc')
     if _pipeline_process is not None and _pipeline_process.poll() is None:
         st.session_state.train_triggered = False
+        st.session_state.pop('_paused_resume_target', None)
         st.warning('训练流水线正在运行，请先暂停流水线。')
 
 if st.session_state.get("train_triggered", False):
     st.session_state.train_triggered = False
+    _paused_resume_target = st.session_state.pop('_paused_resume_target', None)
     proc = st.session_state.get("train_proc")
     if proc is not None:
         if proc.poll() is None:
@@ -4339,8 +4554,13 @@ if st.session_state.get("train_triggered", False):
                 )
                 continue_completed_sft = train_type == "full_sft" and sft_start_mode == "continue"
                 stamp = time.strftime("%Y%m%d_%H%M%S")
-                save_prefix = _resolve_save_prefix(train_type, cfg["hidden_size"], cfg["use_moe"],
-                                                   from_resume, stamp)
+                if _paused_resume_target is not None:
+                    if _paused_resume_target['train_type'] != train_type or not from_resume:
+                        raise ValueError('暂停续训目标与当前训练模式不一致。')
+                    save_prefix = _paused_resume_target['weight']
+                else:
+                    save_prefix = _resolve_save_prefix(train_type, cfg["hidden_size"], cfg["use_moe"],
+                                                       from_resume, stamp)
                 _launch_ok = True
                 if from_resume and (save_prefix is None or not _resume_checkpoint_exists(
                         save_prefix, cfg["hidden_size"], cfg["use_moe"])):
@@ -4371,6 +4591,12 @@ if st.session_state.get("train_triggered", False):
                     logs_dir = os.path.join(trainer_dir, "logs")
                     os.makedirs(logs_dir, exist_ok=True)
                     log_path = os.path.join(logs_dir, f"train_{save_prefix}.log")
+                    if from_resume and _paused_resume_target is not None:
+                        # Preserve the exact paused log, including a collision
+                        # suffix such as _2; the callback verified its run.
+                        paused_log = _paused_resume_target.get('log_path')
+                        if paused_log and os.path.isfile(paused_log):
+                            log_path = paused_log
                     if not from_resume:
                         seq = 1
                         while os.path.exists(log_path):
@@ -4423,6 +4649,8 @@ if st.session_state.get("train_triggered", False):
                     )
                     st.session_state.train_status = "running"
                     _maybe_arm_shutdown_monitor(st.session_state.train_proc.pid)
+                    if _paused_resume_target is not None:
+                        st.rerun()  # Replace paused controls with the running controls.
         except Exception:
             st.session_state.train_status = "failed"
 
@@ -4518,8 +4746,8 @@ def _render_training_activity():
             elif st.session_state.get("train_status") == "paused":
                 tt = st.session_state.get("train_type", "pretrain")
                 cfg_local = build_config_dict()
-                ckpt_prefix = _latest_checkpoint_prefix(tt, cfg_local["hidden_size"], cfg_local["use_moe"], _arch_tag())
-                st.warning(f"Training paused. Resume checkpoint: checkpoints/{ckpt_prefix}_{cfg_local['hidden_size']}_resume.pth" if ckpt_prefix else "Training paused. Resume via 'Resume from checkpoint' + Start Training.",
+                ckpt_prefix = _paused_resume_prefix(tt, cfg_local)
+                st.warning(f"训练已暂停。点击「继续训练」恢复 {ckpt_prefix}。" if ckpt_prefix else "训练已暂停，当前模型未匹配到本轮续训断点。",
                            icon=":material/pause_circle:")
 
             # ── Auto-shutdown countdown ──
@@ -4714,130 +4942,127 @@ with _ui["monitor"]:
     # Let each scheduled run finish so Streamlit can remove stale elements.
     @st.fragment(run_every=2 if _auto_refresh_training_log else None)
     def _render_training_log():
+        current_log_path = st.session_state.get("train_log_path")
+        current_content, current_metrics = _read_training_log(current_log_path)
         if st.session_state.get("train_status") == "running":
             log_path = st.session_state.get("train_log_path")
             if log_path and os.path.exists(log_path):
-                with open(log_path, "r", encoding="utf-8") as f:
-                    log = f.read()
-                metrics = parse_training_metrics(log)
+                log, metrics = current_content, current_metrics
                 with st.expander("Raw Log", expanded=len(metrics) == 0, icon=":material/description:"):
                     st.code(log[-10000:] if len(log) > 10000 else log or "(empty)", language="text", line_numbers=False)
         elif st.session_state.get("train_status") == "paused":
             tt = st.session_state.get("train_type", "pretrain")
             cfg_local = build_config_dict()
-            ckpt_prefix = _latest_checkpoint_prefix(tt, cfg_local["hidden_size"], cfg_local["use_moe"], _arch_tag())
-            st.warning(f"Training paused. Resume checkpoint: checkpoints/{ckpt_prefix}_{cfg_local['hidden_size']}_resume.pth" if ckpt_prefix else "Training paused. Resume via 'Resume from checkpoint' + Start Training.",
+            ckpt_prefix = _paused_resume_prefix(tt, cfg_local)
+            st.warning(f"训练已暂停。可继续本轮断点 {ckpt_prefix}。" if ckpt_prefix else "训练已暂停，当前模型未匹配到本轮续训断点。",
                        icon=":material/pause_circle:")
             st.caption("暂停时已保存模型权重和完整续训状态。")
+            if st.button(
+                '继续训练', key='btn_resume_train_monitor', type='primary',
+                disabled=_launch_disabled or ckpt_prefix is None,
+                on_click=_request_resume, args=(tt, ckpt_prefix),
+            ):
+                # The monitor runs as a fragment; dispatch the shared launcher
+                # on a full app run after the callback selects the saved run.
+                st.rerun(scope='app')
         elif st.session_state.get("train_status") == "stopped":
             st.warning('训练已终止，未额外保存当前进度；已有检查点保留。')
         elif st.session_state.get("train_status") == "success":
             st.success("Training completed successfully")
             log_path = st.session_state.get("train_log_path")
             if log_path and os.path.exists(log_path):
-                with open(log_path, "r", encoding="utf-8") as f:
-                    log = f.read()
+                log = current_content
                 with st.expander("Training Log", expanded=False, icon=":material/description:"):
                     st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
         elif st.session_state.get("train_status") == "failed":
             st.error("Training stopped or failed (see log below)")
             log_path = st.session_state.get("train_log_path")
             if log_path and os.path.exists(log_path):
-                with open(log_path, "r", encoding="utf-8") as f:
-                    log = f.read()
+                log = current_content
                 if log.strip():
                     with st.expander("Error Log", expanded=True, icon=":material/description:"):
                         st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
 
-        # ── Training Data: exactly one historical log + the current log ──
-        trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
-        logs_dir = os.path.join(trainer_dir, "logs")
-        current_log_path = st.session_state.get("train_log_path")
-        if not current_log_path or not os.path.exists(current_log_path):
-            current_log_path = None
+        st.markdown("#### Current training")
+        if current_log_path and os.path.exists(current_log_path):
+            st.caption(os.path.basename(current_log_path))
+            render_log_metrics_charts(current_metrics)
+        else:
+            st.info("No current training log is selected.")
 
-        log_candidates = []
-        if os.path.isdir(logs_dir):
-            log_candidates.extend(
-                os.path.join(logs_dir, filename)
-                for filename in os.listdir(logs_dir)
-                if filename.endswith(".log")
-            )
-        legacy_log = os.path.join(trainer_dir, "train_output.log")
-        if os.path.exists(legacy_log):
-            log_candidates.append(legacy_log)
+    # History is discovered only on a full page run, outside the live fragment.
+    # Unchanged files reuse their parsed snapshot across page interactions.
+    trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
+    logs_dir = os.path.join(trainer_dir, "logs")
+    current_log_path = st.session_state.get("train_log_path")
+    if not current_log_path or not os.path.exists(current_log_path):
+        current_log_path = None
 
-        current_log_key = (
-            os.path.normcase(os.path.abspath(current_log_path)) if current_log_path else None
+    log_candidates = []
+    if os.path.isdir(logs_dir):
+        log_candidates.extend(
+            os.path.join(logs_dir, filename)
+            for filename in os.listdir(logs_dir)
+            if filename.endswith(".log")
         )
-        history_logs = sorted(
-            (
-                path for path in log_candidates
-                if os.path.normcase(os.path.abspath(path)) != current_log_key
-            ),
-            key=os.path.getmtime,
-            reverse=True,
+    legacy_log = os.path.join(trainer_dir, "train_output.log")
+    if os.path.exists(legacy_log):
+        log_candidates.append(legacy_log)
+
+    current_log_key = (
+        os.path.normcase(os.path.abspath(current_log_path)) if current_log_path else None
+    )
+    history_logs = sorted(
+        (
+            path for path in log_candidates
+            if os.path.normcase(os.path.abspath(path)) != current_log_key
+        ),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+
+    # Failed/compile-only logs have no Epoch metrics and should not occupy the one
+    # historical comparison slot.
+    history_data = {}
+    for history_path in history_logs:
+        history_content, history_metrics = _read_training_log(history_path)
+        if history_metrics:
+            history_data[history_path] = (history_content, history_metrics)
+
+    if history_data or current_log_path:
+        st.markdown(
+            f'<div class="section-title">{_CHART_SVG}Training Data</div>',
+            unsafe_allow_html=True,
         )
+        history_column, current_column = st.columns(2)
 
-        # Failed/compile-only logs have no Epoch metrics and should not occupy the one
-        # historical comparison slot.
-        history_data = {}
-        for history_path in history_logs:
-            with open(history_path, "r", encoding="utf-8", errors="replace") as history_file:
-                history_content = history_file.read()
-            history_metrics = parse_training_metrics(history_content)
-            if history_metrics:
-                history_data[history_path] = (history_content, history_metrics)
-
-        current_content, current_metrics = "", []
-        if current_log_path:
-            with open(current_log_path, "r", encoding="utf-8", errors="replace") as current_file:
-                current_content = current_file.read()
-            current_metrics = parse_training_metrics(current_content)
-
-        if history_data or current_log_path:
-            st.markdown(
-                f'<div class="section-title">{_CHART_SVG}Training Data</div>',
-                unsafe_allow_html=True,
-            )
-            history_column, current_column = st.columns(2)
-
-            with history_column:
-                st.markdown("#### Historical log")
-                if history_data:
-                    if st.session_state.get("history_log_select") not in history_data:
-                        st.session_state.history_log_select = next(iter(history_data))
-                    selected_history = _selectbox(
-                        "Compare against",
-                        list(history_data),
-                        format_func=os.path.basename,
-                        key="history_log_select",
+        with history_column:
+            st.markdown("#### Historical log")
+            if history_data:
+                if st.session_state.get("history_log_select") not in history_data:
+                    st.session_state.history_log_select = next(iter(history_data))
+                selected_history = _selectbox(
+                    "Compare against",
+                    list(history_data),
+                    format_func=os.path.basename,
+                    key="history_log_select",
+                )
+                historical_content, historical_metrics = history_data[selected_history]
+                st.caption(os.path.basename(selected_history))
+                render_log_metrics_charts(historical_metrics)
+                with st.expander("Historical raw log", expanded=False, icon=":material/description:"):
+                    st.code(
+                        historical_content[-5000:] if len(historical_content) > 5000 else historical_content,
+                        language="text", line_numbers=False,
                     )
-                    historical_content, historical_metrics = history_data[selected_history]
-                    st.caption(os.path.basename(selected_history))
-                    render_log_metrics_charts(historical_metrics)
-                    with st.expander("Historical raw log", expanded=False, icon=":material/description:"):
-                        st.code(
-                            historical_content[-5000:] if len(historical_content) > 5000 else historical_content,
-                            language="text", line_numbers=False,
-                        )
-                else:
-                    st.info("No earlier log with training metrics is available.")
+            else:
+                st.info("No earlier log with training metrics is available.")
 
-            with current_column:
-                st.markdown("#### Current training")
-                if current_log_path:
-                    st.caption(os.path.basename(current_log_path))
-                    render_log_metrics_charts(current_metrics)
-                else:
-                    st.info("No current training log is selected.")
+        with current_column:
+            _render_training_log()
+    else:
+        _render_training_log()
 
-        if not history_data and not current_log_path:
-            st.info("还没有训练日志。启动训练后，这里会显示进度、loss 与吞吐曲线。")
-
-        _persist_panel_state(trainer_dir)
-
-    _render_training_log()
 
 # Footer
 st.markdown(

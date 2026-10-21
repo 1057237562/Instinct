@@ -26,7 +26,7 @@ from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from model.flash_attn_4 import flash_attention
 from model.kv_cache_quant import parse_cache, make_cache
-from model.checkpointing import recompute_attention, checkpoint_ffn
+from model.checkpointing import recompute_attention
 from model.attention_mask import apply_attention_mask, prepare_sdpa_attention_bias
 from model.packed_attention import maybe_prepare_flex_mask
 from model.sequence_packing import merge_packed_attention_mask, positions_from_sequence_ids
@@ -263,11 +263,20 @@ class Attention(nn.Module):
             output = output.reshape(bsz, seq_len, -1)
         elif (self.flash and (seq_len > 1)
                 and (not self.is_causal or past_key_value is None)):
-            # Keep packed attention fused; mode 1 checkpoints the FFN only.
-            output = flash_attention(
-                xq, xk, xv, dropout_p=self.dropout if self.training else 0.0,
-                is_causal=self.is_causal, attention_mask=attention_mask,
-            )
+            if self.use_grad_checkpoint == 1 and self.training and past_key_value is None:
+                # Checkpoint only the parameter-free attention core. Keep QKV/O
+                # projections, norms and the FFN outside this boundary.
+                output = torch.utils.checkpoint.checkpoint(
+                    flash_attention, xq, xk, xv,
+                    dropout_p=self.dropout, is_causal=self.is_causal,
+                    attention_mask=attention_mask,
+                    use_reentrant=False, preserve_rng_state=True,
+                )
+            else:
+                output = flash_attention(
+                    xq, xk, xv, dropout_p=self.dropout if self.training else 0.0,
+                    is_causal=self.is_causal, attention_mask=attention_mask,
+                )
             output = output.reshape(bsz, seq_len, -1)
         else:
             if self.use_grad_checkpoint == 1 and self.training and past_key_value is None:
@@ -365,25 +374,12 @@ class InstinctBlock(nn.Module):
             hidden_states + residual
         )
         normed = self.post_attention_layernorm(hidden_states)
-        if self.use_grad_checkpoint == 1 and self.training:
-            ffn_out, aux = checkpoint_ffn(self.mlp, normed)
-            if aux is not None:
-                self.mlp.aux_loss = aux
-            hidden_states = self.post_mlp_residual_layernorm(
-                hidden_states + ffn_out
-            )
-        else:
-            hidden_states = self.post_mlp_residual_layernorm(
-                hidden_states + self.mlp(normed)
-            )
+        hidden_states = self.post_mlp_residual_layernorm(
+            hidden_states + self.mlp(normed)
+        )
         return hidden_states, present_key_value
 
     def _run_mlp(self, hidden_states):
-        if self.use_grad_checkpoint == 1 and self.training:
-            ffn_out, aux = checkpoint_ffn(self.mlp, hidden_states)
-            if aux is not None:
-                self.mlp.aux_loss = aux
-            return ffn_out
         return self.mlp(hidden_states)
 
     def _forward_mhc(self, hidden_states, position_embeddings, past_key_value=None,

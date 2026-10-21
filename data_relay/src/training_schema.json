@@ -151,7 +151,7 @@
         },
         {
           "key": "use_grad_checkpoint",
-          "label": "梯度检查点（0 关闭）",
+          "label": "梯度检查点（0 关闭 / 1 仅 Attention / 2 整层）",
           "default": 0,
           "type": "int",
           "min": 0,

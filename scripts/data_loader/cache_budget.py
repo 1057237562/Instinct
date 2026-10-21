@@ -18,6 +18,7 @@ import sys
 import time
 
 from filelock import FileLock
+import psutil
 
 
 GIB = 1024 ** 3
@@ -105,12 +106,14 @@ def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     try:
-        os.kill(pid, 0)
-        return True
-    except PermissionError:
-        return True
-    except OSError:
+        # On Windows os.kill(pid, 0) can call TerminateProcess: it is not
+        # a read-only existence probe. psutil uses the native process query.
+        return psutil.pid_exists(pid)
+    except (psutil.NoSuchProcess, OverflowError, ValueError):
         return False
+    except (psutil.Error, OSError):
+        # An inaccessible process may still own a live mmap. Keep its lease.
+        return True
 
 
 def _lease_dir(root: Path) -> Path:

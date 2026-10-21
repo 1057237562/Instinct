@@ -22,10 +22,10 @@ from trainer.packing_transition import build_dataset_with_cache_barrier
 from trainer.trainer_utils import Logger
 
 
-def streaming_token_progress(completed, start_tokens, epoch_tokens, epoch, elapsed_seconds):
-    """Epoch-local token progress and ETA measured only since this launch."""
+def streaming_token_progress(completed, epoch_tokens, epoch, elapsed_seconds, *, estimator):
+    """Current-epoch progress and ETA from recent valid-token throughput."""
     done = min(epoch_tokens, max(0, completed - epoch * epoch_tokens))
-    eta_minutes = elapsed_seconds * (epoch_tokens - done) / max(completed - start_tokens, 1) / 60
+    eta_minutes = estimator.update(completed, elapsed_seconds, (epoch + 1) * epoch_tokens)
     return done, eta_minutes
 
 

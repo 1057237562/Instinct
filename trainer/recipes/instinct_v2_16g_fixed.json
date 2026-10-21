@@ -61,7 +61,7 @@
   "dropout": 0.0,
   "epochs_agent": 1,
   "autotune_refresh": false,
-  "bucket_token_budget": 5344,
+  "bucket_token_budget": 8193,
   "residual_type": "standard",
   "sequence_packing": true,
   "warmup_ratio_pretrain": 0.0,

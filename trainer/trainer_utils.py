@@ -48,10 +48,15 @@ def prepare_lm_batch(batch, device):
             sequence_ids = None
     else:
         raise ValueError(f"expected an LM batch with 2 or 3 tensors, got {len(batch)}")
-    input_ids = input_ids.to(device)
-    labels = labels.to(device)
+    # DataLoaders pin CPU inputs. Enqueue their copies on the current CUDA
+    # stream without waiting for the preceding training step after each tensor.
+    # Stream ordering keeps model reads after the copies. CPU destinations must
+    # remain blocking so callers can immediately inspect the returned tensors.
+    non_blocking = torch.device(device).type == 'cuda'
+    input_ids = input_ids.to(device, non_blocking=non_blocking)
+    labels = labels.to(device, non_blocking=non_blocking)
     if sequence_ids is not None:
-        sequence_ids = sequence_ids.to(device)
+        sequence_ids = sequence_ids.to(device, non_blocking=non_blocking)
     return input_ids, labels, sequence_ids
 
 def get_model_params(model: torch.nn.Module, config) -> None:
@@ -792,50 +797,14 @@ def estimate_training_persistent_bytes(model: torch.nn.Module, args, *, extra_mo
 
 
 def _validated_bucket_memory_profile(model, args, extra_models=()):
-    """Select only the exact local topology/execution path measured in PLAN.md."""
-    if sys.platform != 'win32':
-        return None  # Linux must be calibrated independently of Windows/WDDM.
-    config = getattr(model, 'config', None)
-    if config is None or extra_models or (dist.is_initialized() and dist.get_world_size() > 1):
-        return None
-    topology = dict(hidden_size=512, num_hidden_layers=32, num_attention_heads=16,
-                    num_key_value_heads=4, head_dim=32, num_experts=8,
-                    num_experts_per_tok=2, moe_intermediate_size=1664, vocab_size=6400,
-                    use_grad_checkpoint=1, use_moe=True, norm_topk_prob=True,
-                    hidden_act='silu', dropout=0.0, tie_word_embeddings=True)
-    if any(getattr(config, key, None) != value for key, value in topology.items()):
-        return None
-    if (getattr(args, 'optimizer', '') != 'muon' or getattr(args, 'dtype', '') != 'bfloat16'
-            or getattr(args, 'param_dtype', 'fp32') != 'fp32'
-            or int(getattr(args, 'accumulation_steps', 1)) != 1
-            or int(getattr(args, 'use_compile', 0)) != 1
-            or getattr(args, 'compile_mode', '') != 'max-autotune-no-cudagraphs'
-            or not 1 <= int(getattr(args, 'bucket_max_seq_len', 0)) <= 4096
-            or getattr(config, 'model_architecture', 'standard') != 'standard'
-            or (getattr(args, 'fp8_training', 'off') != 'off'
-                and (getattr(args, 'fp8_training', '') != 'tensorwise'
-                     or getattr(args, 'fp8_filter', 'auto') != 'auto'))
-            or os.environ.get('INSTINCT_MOE_INNER_CHECKPOINT', '0') != '0'
-            or os.environ.get('INSTINCT_MOE_SELECTIVE_CHECKPOINT', '0') != '0'
-            or os.environ.get('INSTINCT_MOE_DIRECT_WEIGHTS', '0') != '0'
-            or os.environ.get('INSTINCT_MUON_BACKEND', 'batched') != 'batched'
-            or float(os.environ.get('INSTINCT_MUON_WORKSPACE_MB', '256')) > 256
-            or os.environ.get('INSTINCT_GROUPED_MM_BACKEND', 'auto') not in ('auto', 'triton')
-            or any(os.environ.get(name, 'auto') == '0' for name in (
-                'INSTINCT_MOE_FUSED_PACK', 'INSTINCT_MOE_FUSED_SWIGLU', 'INSTINCT_MOE_FUSED_ROUTING'))
-            or os.environ.get('INSTINCT_PACKED_ATTENTION_BACKEND', 'auto') == 'sdpa'
-            or os.environ.get('INSTINCT_CAUSAL_ATTENTION_BACKEND', 'auto') == 'sdpa'):
-        return None
-    params = list(model.parameters())
-    if (not params or any(p.dtype != torch.float32 or not p.requires_grad for p in params)
-            or sum(p.numel() for p in params) != 678726144):
-        return None
-    from model.cuda_fastpath import blackwell_training_kernels
-    if (not blackwell_training_kernels(params[0].device)
-            or torch.cuda.get_device_name(params[0].device) != 'NVIDIA GeForce RTX 5070 Ti'):
-        return None
-    from scripts.data_loader.sequence_bucket import V1_MOE_TRAINING_MEMORY_PROFILE
-    return V1_MOE_TRAINING_MEMORY_PROFILE
+    """No measured memory curve currently covers Attention-only mode 1.
+
+    The historical V1 MoE profile was measured with FFN checkpointing. Reusing
+    it after mode 1 stops replaying the FFN can overestimate the safe batch.
+    Keep the curve available for historical analysis, but never auto-select it
+    for the new execution path until it has been calibrated independently.
+    """
+    return None
 
 
 def configure_bucket_memory_budget(

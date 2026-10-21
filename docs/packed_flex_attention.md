@@ -19,10 +19,13 @@ in the current PyTorch 2.13 / Triton 3.4 environment.
   are not promised to be bitwise identical.
 
 The model-entry selector is shared by the standard Dense/MoE and RecurrsiveInstinct backbones.
-Unpacked attention and KV-cache generation continue through the previous path.
+KV-cache generation continues through the previous path. V2's standard-residual
+training also prepares a plain causal mask for eligible single-document batches.
 Arbitrary explicit caller masks, nonzero attention dropout, non-BF16 compute,
 CPU, and unsupported head dimensions retain the shared-bias SDPA implementation.
-Supported fast-path head dimensions are 16, 32, 64 and 128.
+Supported packed fast-path head dimensions are 16, 32, 64 and 128. Native head
+dimension 96 is additionally enabled for V2's 16 Q / 4 KV heads on the validated
+PyTorch 2.13 / Blackwell SM12 stack; explicit `flex` can select its packed path.
 
 ## Selection and rollback
 
@@ -39,10 +42,11 @@ environment, choose `sdpa` and resume the existing checkpoint. Already running
 processes do not hot-reload this change. Initial calls compile mask and attention
 kernels; compare throughput after both buckets have warmed up.
 
-Flex kernels and block-mask construction are compiled independently and called
-from small compiler-disabled entry points. This avoids coupling their higher-order
-operators to the outer model's MoE graph breaks while keeping compiled forward and
-backward. Block metadata is per batch, not a cache of previous sequence IDs.
+Block-mask construction runs outside checkpointed layers. The V1 attention
+region compiles independently; V2's 96-wide attention stays traceable inside the
+outer compiled checkpoint, keeping attention, FP8 projections and recomputation
+in the compiled trunk. Document block metadata is per batch, not a cache of
+previous sequence IDs.
 
 ## Local validation
 
@@ -79,5 +83,65 @@ of 81.03 MiB vs 21.00 MiB. Both current bucket shapes passed gradient checks.
 In these runs, relative L2 error was 0.09–0.12% for output and 0.27–0.41% for
 gradients. This is an attention microbenchmark, not a whole-model speedup claim;
 real document lengths, optimizer time, compiler overhead and other GPU workloads
-affect training throughput. Unpacked single-document batches are not switched by
-this optimization even though the explicit-mask benchmark measures that case.
+affect training throughput. Those V1 explicit-mask measurements do not measure
+the V2 single-document training path described below.
+
+## V2 single-document training
+
+`prepare_lm_batch` intentionally drops `sequence_ids` when a batch contains only
+one document per row. The 4096-by-1 bucket therefore bypasses the packed selector.
+The older layer-local causal selector only enabled V1's 32-wide heads, leaving
+V2's 96-wide heads on memory-efficient SDPA even with packed Flex enabled.
+
+The standard model now calls `maybe_prepare_causal_flex_mask` at model entry for
+training without a KV cache or explicit caller mask. It uses the existing
+`INSTINCT_CAUSAL_ATTENTION_BACKEND=auto|flex|sdpa` control. Automatic selection
+requires BF16 compute, zero attention dropout, 16 Q / 4 KV heads of dimension 96,
+PyTorch 2.13 and Blackwell SM12. Other residual layouts and inference keep their
+previous dispatch.
+
+The shared mask is the original plain causal predicate `query >= key`, with
+batch/head-independent metadata cached by sequence length and device. It does
+not introduce document boundaries or change padding/label/RoPE semantics.
+Mask preparation occurs before the transformer loop; placing a disabled mask
+builder inside a checkpointed layer would prevent compiling that whole layer.
+The prepared mask reuses the traceable 96-wide Flex implementation.
+
+Validation: `tests/test_causal_attention_v2.py` covers the real loader's
+single-document branch, output/dQ/dK/dV at lengths 137 and 4096, future isolation,
+eligibility/fallback controls, mask cache reuse, inference/cache/residual
+exclusions, and compiled BF16/FP8 training with two full-layer checkpoints.
+Real-data performance and quality reports belong in
+`experiments/results/v2_causal96/`; these are finite-window comparisons, not
+long-run convergence guarantees.
+
+### Local V2 result (2026-10-20)
+
+RTX 5070 Ti, the fixed 5344-token recipe, FP8 tensorwise projections, BF16
+parameters/momentum, Muon and full-layer checkpointing. Both runs start from the
+same saved step 2152 and consume identical batches: 16 warmup + 128 measured
+microsteps (581,408 useful tokens in the measured window). The control keeps
+packed Flex enabled and sets only the causal backend to `sdpa`; the candidate
+uses `auto` for both. A repeated control uses the same source revision as the
+candidate, including the concurrent ETA logging update.
+
+| Warm whole-model measurement | Causal SDPA control | Causal Flex fix |
+|---|---:|---:|
+| Wall time per microstep | 1165.39 ms | 472.34 ms |
+| Useful tokens/s | 3,897.63 | 9,616.52 |
+| Mixed FP8/BF16 useful MFU | 16.56% | 40.86% |
+| Peak allocated memory | 11.93 GiB | 10.20 GiB |
+| Peak reserved memory | 13.48 GiB | 11.81 GiB |
+
+Whole-model speedup was 2.47x. Both the attention kernels and peak memory
+footprint change in this comparison, so it does not isolate either contribution.
+The two 64-step candidate halves measured 469.15 and 475.40 ms per GPU step.
+MFU uses the same nominal non-sparse FP32-accumulation peaks as prior reports:
+175.8 TF/s FP8 and 87.9 TF/s BF16. It excludes padding, checkpoint recomputation
+and optimizer work. Cold compilation is excluded from the throughput window.
+
+Across 144 microsteps / 18 optimizer updates and 8 held-out sequences, finite
+training-loss windows and the validation gate passed. Final held-out NLL was
+3.13889267 for the control and 3.13891494 for the candidate (+0.00071%).
+The focused regression run passed 34 tests, skipping two optional slow tests.
+See `experiments/results/v2_causal96/summary.json` and its paired raw reports.

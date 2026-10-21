@@ -231,9 +231,8 @@ def test_webui_state_restore_keeps_tweaks_for_unchanged_presets():
     assert 'init_from_preset(restored_preset)' in source
 
 
-def test_training_metrics_parse_only_latest_resume_segment():
-    """续训向同一日志追加新一轮（各自 `# epochs:` 开头），两轮的 global step
-    都从 1 重新计数；图表若混用整份日志会画成锯齿，必须只解析最后一轮。"""
+def test_training_metrics_parse_only_latest_unidentified_launch():
+    """无命令头的旧日志无法确认属于同次续训，只保留最后一轮，避免混合重新计数的曲线。"""
     module = ast.parse(SOURCE.read_text(encoding="utf-8"))
     fn = [node for node in module.body
           if isinstance(node, ast.FunctionDef) and node.name == "parse_training_metrics"]
@@ -250,7 +249,7 @@ def test_training_metrics_parse_only_latest_resume_segment():
         "Epoch:[2/2](2/2) loss: 2.8 lr: 0.0001 checkpoint_saved: 1\n"
     )
     rows = parse(resumed_log)
-    # 续训前的一段不再混入；global step 跨 epoch 连续（ep2 的第 2 步 = 全局第 4 步）。
+    # 未确认属于同次续训的旧段不混入；ep2 的第 2 步 = 全局第 4 步。
     assert [row["_global_step"] for row in rows] == [1, 4]
     assert [row["loss"] for row in rows] == [3.0, 2.8]
 

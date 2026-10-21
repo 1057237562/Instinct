@@ -30,6 +30,10 @@ LRU 顺序清理可重建内容：未完成 build、下载缓存、普通 Arrow�
 packed cache。训练进程会为正在 mmap 的 Arrow 发布 PID 租约，其他进程不能淘汰这些文件；
 异常退出留下的租约会在下次检查时自动回收。设为 `0` 可关闭配额。
 
+PID 存活检查使用 `psutil.pid_exists`，查询失败时保留租约。Windows 下
+`os.kill(pid, 0)` 可能调用 `TerminateProcess`，不能用作只读检查；否则既可能
+触发 WinError 87/SystemError，也可能终止另一个正在使用缓存的进程。
+
 ## 大型 JSONL 的有界流式展开
 
 当单个预训练 JSONL 的整库 Arrow 预估超过缓存预算时，`--dataset_streaming auto`

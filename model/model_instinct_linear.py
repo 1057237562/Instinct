@@ -21,7 +21,7 @@ from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from model.flash_attn_4 import flash_attention
 from model.kv_cache_quant import parse_cache, make_cache
-from model.checkpointing import recompute_attention, checkpoint_ffn
+from model.checkpointing import recompute_attention
 from model.attention_mask import apply_attention_mask
 from model.model_instinct import AttentionResidual, ManifoldHyperConnection, ManifoldHyperHead
 from model.rope import (
@@ -260,6 +260,7 @@ class GatedDeltaNet(nn.Module):
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.conv_kernel_size = config.linear_conv_kernel_dim
         self.layer_idx = layer_idx
+        self.use_grad_checkpoint = getattr(config, 'use_grad_checkpoint', 0)
         self.conv_dim = self.key_dim * 2 + self.value_dim
         self.conv1d = nn.Conv1d(self.conv_dim, self.conv_dim, bias=False, kernel_size=self.conv_kernel_size, groups=self.conv_dim, padding=self.conv_kernel_size - 1)
         self.dt_bias = nn.Parameter(torch.ones(self.num_v_heads))
@@ -329,18 +330,31 @@ class GatedDeltaNet(nn.Module):
                 recurrent_state = recurrent_state + k_t.unsqueeze(-1) * ((v_t - kv_mem) * beta.squeeze(1).unsqueeze(-1)).unsqueeze(-2)
                 out = (recurrent_state * q_t.unsqueeze(-1)).sum(dim=-2).unsqueeze(1)
         else:
-            if chunk_gated_delta_rule is not None and q.is_cuda:
-                try:
-                    out, recurrent_state = chunk_gated_delta_rule(q, k, v, g=g, beta=beta, initial_state=None, output_final_state=use_cache)
-                except Exception as e:
-                    logger.warning_once(f"FLA chunk kernel failed: {e}, falling back to torch.")
-                    out, recurrent_state = torch_chunk_gated_delta_rule(q, k, v, g=g, beta=beta, initial_state=None, output_final_state=use_cache)
+            if self.use_grad_checkpoint == 1 and self.training and not use_cache:
+                out, recurrent_state = torch.utils.checkpoint.checkpoint(
+                    self._chunk_core, q, k, v, g, beta, False,
+                    use_reentrant=False, preserve_rng_state=True,
+                )
             else:
-                out, recurrent_state = torch_chunk_gated_delta_rule(q, k, v, g=g, beta=beta, initial_state=None, output_final_state=use_cache)
+                out, recurrent_state = self._chunk_core(q, k, v, g, beta, use_cache)
         out = self.norm(out.reshape(-1, self.head_v_dim), z.reshape(-1, self.head_v_dim))
         out = self.out_proj(out.reshape(B, T, -1))
         if out.dtype != input_dtype: out = out.to(input_dtype)
         return out, (conv_state, recurrent_state) if use_cache else None
+
+    @staticmethod
+    def _chunk_core(q, k, v, g, beta, use_cache):
+        """Parameter-free attention core; projections/convolution stay outside."""
+        if chunk_gated_delta_rule is not None and q.is_cuda:
+            try:
+                return chunk_gated_delta_rule(q, k, v, g=g, beta=beta,
+                                             initial_state=None, output_final_state=use_cache)
+            except torch.utils.checkpoint._StopRecomputationError:
+                raise
+            except Exception as e:
+                logger.warning_once(f"FLA chunk kernel failed: {e}, falling back to torch.")
+        return torch_chunk_gated_delta_rule(q, k, v, g=g, beta=beta,
+                                           initial_state=None, output_final_state=use_cache)
 
 def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, unsqueeze_dim: int = 1):
     """对 q/k 施加旋转位置编码（rotate_half 拼接实现）。"""
@@ -408,11 +422,20 @@ class Attention(nn.Module):
                                      is_causal=False, attention_mask=attention_mask)
             output = output.reshape(bsz, seq_len, -1)
         elif self.flash and (seq_len > 1) and (past_key_value is None):
-            # Keep packed attention fused; mode 1 checkpoints the FFN only.
-            output = flash_attention(
-                xq, xk, xv, dropout_p=self.dropout if self.training else 0.0,
-                is_causal=True, attention_mask=attention_mask,
-            )
+            if self.use_grad_checkpoint == 1 and self.training and past_key_value is None:
+                # Checkpoint only the parameter-free attention core. Keep QKV/O
+                # projections, norms and the FFN outside this boundary.
+                output = torch.utils.checkpoint.checkpoint(
+                    flash_attention, xq, xk, xv,
+                    dropout_p=self.dropout, is_causal=True,
+                    attention_mask=attention_mask,
+                    use_reentrant=False, preserve_rng_state=True,
+                )
+            else:
+                output = flash_attention(
+                    xq, xk, xv, dropout_p=self.dropout if self.training else 0.0,
+                    is_causal=True, attention_mask=attention_mask,
+                )
             output = output.reshape(bsz, seq_len, -1)
         else:
             if self.use_grad_checkpoint == 1 and self.training and past_key_value is None:
@@ -487,7 +510,7 @@ class MOEFeedForward(nn.Module):
 
 class InstinctBlock(nn.Module):
     """混合注意力块:按 config.layer_types 分派——linear_attention 层走 GatedDeltaNet,
-    full_attention 层走标准 Attention;Pre-Norm 残差结构,FFN 支持 mode-1 选择性重算（checkpoint_ffn）。"""
+    full_attention 层走标准 Attention;Pre-Norm 残差结构,mode 1 只重算注意力核心，不重算 FFN。"""
     def __init__(self, layer_id: int, config: InstinctConfig):
         """按 layer_type 构造注意力子模块、两个 RMSNorm 与 MLP（可切 MoE）。"""
         super().__init__()
@@ -537,11 +560,6 @@ class InstinctBlock(nn.Module):
         )
 
     def _run_mlp(self, hidden_states):
-        if self.use_grad_checkpoint == 1 and self.training:
-            ffn_out, aux = checkpoint_ffn(self.mlp, hidden_states)
-            if aux is not None:
-                self.mlp.aux_loss = aux
-            return ffn_out
         return self.mlp(hidden_states)
 
     def _forward_mhc(self, hidden_states, position_embeddings, past_key_value=None,

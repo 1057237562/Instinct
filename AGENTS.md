@@ -1,7 +1,34 @@
 # Instinct Agent Instructions
 
 ## What this is
-Instinct — train InstinctV1Moe from scratch on a single GPU. The current V1 MoE configuration uses normalized top-2 routing with about 678.7M total parameters / 188.0M active parameters. All core algorithms (Dense/MoE Transformer, Pretrain, SFT, LoRA, DPO, PPO, GRPO, CISPO, Agentic RL, KD) implemented in pure PyTorch — no `trl`/`peft` abstractions.
+Instinct is a single-GPU language-model training and inference project with V1/V2 Dense and MoE configurations, plus linear-attention and RecurrsiveInstinct backbones. All core algorithms (Dense/MoE Transformer, Pretrain, SFT, LoRA, DPO, PPO, GRPO, CISPO, Agentic RL, KD) are implemented in pure PyTorch — no `trl`/`peft` abstractions. Rust tools handle dataset compilation and the AutoDL data/training relay.
+
+Last checked against the working tree on **2026-10-20**. Treat executable code,
+checkpoint sidecars and the shared template catalog as the source of truth for
+current behavior. Historical experiment numbers describe their recorded model,
+hardware and precision; partial JSON reports do not establish a completed run.
+
+## Before making changes
+
+- **Never end a training process without saving its current progress first.**
+  Requests to stop, pause, restart, or finish a diagnostic training run must use
+  the trainer's save-and-pause flow. Wait for the accumulated optimizer update,
+  save the full resume state (weights, optimizer, scaler and data cursor), and
+  verify the successful save and matching checkpoint before reporting it stopped.
+  An older checkpoint does not satisfy this rule. Do not use `Stop-Process`,
+  `taskkill`, `kill`, `terminate`, or an exception-based benchmark exit to discard
+  unsaved training progress. If saving fails or is blocked, keep the process
+  alive when possible and report the problem instead of forcing termination.
+- Inspect `git status --short` and relevant diffs first. Preserve existing local
+  changes, including untracked source files; do not reset panel state or templates.
+- Keep data, weights, resume states, runtime credentials and large generated
+  traces out of commits. Inspect `.gitignore` before creating new output paths.
+- Keep routine investigation and configuration checks CPU-only. Run GPU benchmarks
+  with training paused, and record the actual model, batches, precision and warmup
+  window when reporting performance.
+- Update the smallest relevant surface and run its focused checks. Changes to
+  trainer arguments or shipped presets also require WebUI/relay parity checks
+  described below; do not copy defaults into a second catalog.
 
 ## Project layout
 
@@ -9,7 +36,9 @@ Instinct — train InstinctV1Moe from scratch on a single GPU. The current V1 Mo
 model/          # Model definition (InstinctConfig, InstinctForCausalLM, LoRA), tokenizer files
 trainer/        # All training scripts (pretrain, SFT, LoRA, DPO, PPO, GRPO, Agent RL, KD, tokenizer)
                 # + shared infra: trainer_cli.py, trainer_utils.py, training_pipeline.py,
+                #   streaming_pretrain.py, packing_transition.py, training_eta.py,
                 #   training_profiler.py, rollout_engine.py, compile_cache.py
+                # + batched_muon.py / muon_kernels.py, recipes/ and profiles/
 dataset/        # Dataset corpora, data files, provenance, and audit reports
 scripts/data_loader/ # Training dataset loaders, source resolution, packing, and caching
 scripts/data_builder/ # Offline dataset collection, generation, cleaning, and audit utilities
@@ -18,10 +47,11 @@ data_relay/        # Rust relay server: run download/cleaning scripts, auto-boot
                    # no-GPU mode, transfer via HTTP pull (default)/SFTP/Jupyter, manage disk quota
 scripts/        # Inference, API server, WebUI, model conversion, training launchers
 eval_llm.py     # CLI inference script
-eval_*.py       # Benchmark harnesses (gsm8k, humaneval, pass_k, batch, report); artifacts land in eval/
+eval_*.py       # GSM8K, HumanEval, HumanEval OJ, pass@K, batch and report helpers
+                # LiveCodeBench generation/evaluation is in eval_llm.py; artifacts land in eval/
 tests/          # Pytest suite; `gpu` marker = needs CUDA
 experiments/    # Perf/research experiment scripts (lambda sweeps, synthetic data, plots)
-docs/           # Design docs: training_pipeline.md, compact_dataset_cache.md, gsm8k.md, humaneval.md, eval_webui.md
+docs/           # Pipeline/cache, packed attention, Muon precision, autotune and evaluation docs
 ```
 
 ## Essential commands
@@ -46,30 +76,59 @@ torchrun --nproc_per_node N trainer/train_pretrain.py
 torchrun --nproc_per_node N trainer/train_full_sft.py
 ```
 
+- Bare trainer defaults still select the legacy 8-layer Dense model. For a named
+  model, use the Config WebUI command preview or a matching launcher; CLI defaults
+  such as hidden size, layer count, precision and checkpointing can override JSON.
+- V2 Dense launcher (PowerShell, from repo root):
+  `./scripts/train_instinct_v2.ps1 -DataPath ./dataset/pretrain_x.parquet`.
+  It reads the shared **Instinct V2** recipe, sets UTF-8 and starts a new run.
+  It is not the separate fixed-budget recipe or a resume launcher.
+
 ### Precision knobs (all 8 trainers + WebUI)
 - `--dtype bfloat16|float16|fp32` — activation compute precision (autocast; fp32 = no autocast)
 - `--param_dtype fp32|bf16|fp16` — parameter precision (fp32 = master weights; bf16/fp16 = weights cast directly)
-- `--kv_cache_dtype fp32|bf16|fp16|fp8_e4m3|fp8_e5m2` — KV cache precision (fp8 = per-(batch,head) quantized cache, half decode bandwidth; affects generation/RL rollouts)
-- `--fp8_training` — FP8 training via torchao; optional dep: `pip install -r requirements-fp8.txt` (torchao==0.18.0)
+- `--kv_cache_dtype fp32|bf16|fp16|fp8_e4m3|fp8_e5m2` — cache precision on supported generation/RL paths; the static cache uses model dtype instead
+- `--fp8_training off|tensorwise|rowwise|rowwise_with_gw_hp` — explicit TorchAO recipe, not a boolean flag; default `off`. Optional dep: `pip install -r requirements-fp8.txt` (torchao==0.18.0)
+- `--fp8_filter auto|eligible` — skip small GEMMs expected to be slower, or convert all size-compatible Linear layers. Converted layer counts do not prove FP8 kernel coverage.
+- `--muon_mantissa 0|1`, `--muon_momentum_dtype fp32|bf16`,
+  `--muon_batch_size N`, `--muon_workspace_mb MiB` — shared Muon controls;
+  see the precision/resume contract under Critical gotchas.
 
 ### Testing
 ```bash
 python -m pytest tests/             # from repo root
 python -m pytest tests/ --skip-gpu  # force-skip CUDA-required tests
+python -m pytest tests/test_packed_attention.py --run-slow  # opt in to slow integration checks
 ```
 - Tests marked `@pytest.mark.gpu` auto-skip when CUDA is unavailable.
+- Tests marked `@pytest.mark.slow` are skipped unless `--run-slow` is supplied;
+  `--skip-gpu` alone does not opt into them. PyTorch itself is environment-specific
+  and is not pinned by an active requirement in `requirements.txt`.
 - `tests/conftest.py` enforces the `datasets`-before-`torch` import order (same Windows workaround as trainers) — do not reorder there either.
+
+Choose checks by the changed subsystem:
+
+| Change | Focused checks (repo root) |
+|---|---|
+| Presets / command builders / template migration | `python -m pytest tests/test_config_templates.py tests/test_config_webui_presets.py tests/test_config_webui_app.py --skip-gpu` |
+| Trainer flags / shared defaults | `python -m pytest tests/test_trainer_cli_defaults.py tests/test_flag_threading.py tests/test_flag_threading_e2e.py --skip-gpu`; `python data_relay/generate_training_schema.py --check` |
+| Packing / streaming / pause / ETA | `python -m pytest tests/test_streaming_chunks.py tests/test_pretrain_pause_accumulation.py tests/test_training_eta.py tests/test_webui_training_status.py --skip-gpu` |
+| Attention / compilation | `python -m pytest tests/test_packed_attention.py tests/test_packed_attention_v2.py tests/test_causal_attention_v2.py tests/test_compile_policy.py --skip-gpu`; rerun relevant CUDA cases for kernel changes |
+| Muon precision / fused updates | `python -m pytest tests/test_muon_mantissa.py tests/test_muon_bf16_momentum.py tests/test_muon_v2.py tests/test_muon_kernels.py --skip-gpu`; CUDA parity/performance needs separate validation |
 
 ### Resume from checkpoint
 ```bash
 python trainer/train_pretrain.py --from_resume 1
-# Checkpoints: checkpoints/{weight}_{dim}_resume.pth
-# Model weights: out/{weight}_{dim}.pth
+# Checkpoints: checkpoints/{weight}_{dim}{_moe}_resume.pth
+# Model weights: out/{weight}_{dim}{_moe}.pth
 ```
 
 ### Pause / resume (暂停/续训)
 - While training is running, the WebUI config has a "Pause Training" button: the trainer finishes its current step, saves `out/{weight}_{dim}{_moe}.pth` plus full resume state `checkpoints/{weight}_{dim}{_moe}_resume.pth`, and exits. To resume, tick "Resume from checkpoint" in the WebUI and press Start Training (or run with `--from_resume 1`).
 - CLI equivalent: `touch checkpoints/.pause_request` pauses any running trainer at the next step boundary (same save + exit code 42); `--from_resume 1` resumes.
+- PowerShell equivalent: `New-Item -ItemType File -Force checkpoints/.pause_request`.
+  Pretraining honors pause after the accumulated optimizer update (or final
+  gradient flush), because resume states do not contain pending gradients.
 - The WebUI Training panel has a "训练结束后自动关机" toggle: ticking it arms `scripts/monitor_training_shutdown.ps1` (via `-ProcessId`) whenever a training run or the pipeline starts — a detached watchdog, so shutdown still fires with the browser closed. Only exit code 0 shuts down; pause (42) and failure keep the machine on. Un-tick before the run ends to disarm (the watchdog re-reads `trainer/webui_state.json` right before scheduling). The in-page countdown can be cancelled with one click (`shutdown /a`).
 - Panel state auto-saves to `trainer/webui_state.json` on every interaction and is restored on the next open. Restores only re-apply a named preset when its definition fingerprint (`preset_fingerprint`) changed, so manual tweaks on top of a preset survive reloads.
 
@@ -86,36 +145,39 @@ python eval_llm.py --load_from ./instinct-3 --open_thinking 1
 ```
 
 Decode fast path (`optimize_inference`, used by the Chat WebUI and `eval_llm.py`):
-- The Chat WebUI loads with `INSTINCT_INFERENCE_COMPILE=auto`: **no trunk compile**, so loading
-  stays instant (0.05 s, vs ~50 s for `full`). Decode does not need it — the decode step is
-  captured as a CUDA graph, which is what removes the per-token launch cost. Set
-  `INSTINCT_INFERENCE_COMPILE=full` to compile the whole trunk instead: about 2x faster prefill
-  and 30% more decode throughput, for ~50 s of compiling at load **plus a second compile on the
-  first real prompt** (each `generate()` allocates a new static cache, and the compiled graph is
-  guarded on those buffers).
-- `generate()` on a single unpadded sequence decodes into a **preallocated KV cache**
-  (`model/static_cache.py`) written in place, then **captures that step as one CUDA graph**, so
-  per-token kernel launches and compiler guard evaluations cost nothing. Measured (mode=auto,
-  the WebUI default): 512-dim MoE 3.7 ms/token (268 tok/s), dense 768 1.9 ms/token (515 tok/s);
-  with mode=full: 2.7 ms/token and 1.5 ms/token. `python experiments/check_load_time.py` reports
-  the load breakdown per mode.
+- The Chat WebUI defaults to `INSTINCT_INFERENCE_COMPILE=auto`: fused kernels
+  without compiling the whole trunk. `full` compiles and warms the trunk;
+  `off` disables inference optimization. The CLI uses `--inference_compile`.
+  Compilation cost and throughput depend on the model, shapes and environment.
+- `model/static_cache.py` provides in-place KV buffers, reusable capacity buckets
+  and CUDA-graph decode. Decode states survive successive `generate()` calls,
+  preserving buffer addresses and captured graphs; new capacities/batch sizes can
+  require allocation and warmup. Initial decode headroom is 256 tokens, then
+  generation grows the cache as needed rather than reserving the entire allowance.
+- Static decode supports single sequences and unpadded/left-padded batches.
+  `INSTINCT_BATCH_STATIC_DECODE=0` disables the batched path. Right padding,
+  interior mask holes, early exit and `return_kv` use the growing-cache path;
+  memory guards can also trigger fallback.
 - The static cache stores keys/values in the **model dtype**; a quantized `kv_cache_dtype`
   (e.g. `fp8_e5m2`) is not applied on that path, since it would need a full
   dequantize+requantize per step. It logs when it overrides such a config.
-- Capture is skipped for batch > 1, padded batches, `return_kv`, logit lens
-  (`layer_callback`), and any dispatch that still synchronizes with the host (per-expert
-  loop, `cached` grouped backend) — those keep the previous eager/compiled loop.
-- MoE dispatch keeps the `torch.compiler.disable` barrier for training (Blackwell TMA
-  weight-gradient issue) and uses a traceable inference forward instead, which keeps the eager
-  (mode=auto) path 1.85x faster by removing a graph break per layer; it matters most where
-  capture cannot apply (logit lens, batch > 1, capture failure).
-- Regressions show up as graph breaks: `python experiments/graph_break_report.py`
-  (expect "graph count: 1"). Throughput A/B: `python experiments/bench_chat_moe_decode.py`.
+- Capture is skipped for diagnostic callbacks (such as logit lens), and dispatch
+  that synchronizes with the host (per-expert loop or `cached` grouped backend).
+  Static storage eligibility and graph-capture eligibility are separate checks.
+- MoE dispatch keeps the `torch.compiler.disable` barrier for training (Blackwell
+  TMA weight-gradient issue) and uses a traceable inference forward to avoid a
+  graph break per layer. Keep those two dispatch policies separate.
+- Diagnostics: `python experiments/check_load_time.py`,
+  `python experiments/graph_break_report.py` and
+  `python experiments/bench_chat_moe_decode.py`. Cache regressions are covered by
+  `tests/test_static_cache.py`; compare warm runs with identical prompt/output lengths.
 
 ### Model conversion
 ```bash
-cd scripts && python convert_model.py
-# Converts between torch (.pth) and transformers (HuggingFace) formats
+# Inspect scripts/convert_model.py and set lm_config and input/output paths first.
+# Its __main__ block is a legacy 8-layer Dense example, not an auto-detecting CLI.
+cd scripts
+python convert_model.py
 ```
 
 ### API server
@@ -127,9 +189,17 @@ cd scripts && python serve_openai_api.py
 
 ### WebUI
 ```bash
-# ⚠️ Must copy model folder into ./scripts/ first (e.g. cp -r instinct-3 ./scripts/instinct-3)
-cd scripts && streamlit run web_demo.py
+cd scripts
+streamlit run web_demo.py --server.port 8502
 ```
+
+Windows root launchers: `start_config_webui.bat` (8500),
+`start_chat_webui.bat` (8502), `start_eval_webui.bat` (8503), and
+`start_openai_api.bat` (8998). Config/Chat run from `scripts/`; the Eval launcher
+runs `python -m streamlit run scripts/eval_webui.py` from the repo root.
+Chat directly scans raw `.pth` weights in `out/` and `checkpoints/` (excluding
+`*_resume.pth`), supports a custom weight path, and defaults to the repo's
+`model/` tokenizer. No model-directory copy is required.
 
 HTTPS (Chat WebUI): `start_chat_webui.bat --https` from the repo root serves
 over TLS using a self-signed pair auto-generated at `certs/chat_webui.crt|.key`
@@ -150,22 +220,46 @@ Config WebUI lists both, and ignores `*.report.json` sidecars.
 cd dataset_compiler && cargo build --release
 ./target/release/dataset_compiler compile \
   -i ../dataset/pretrain_x.jsonl -o ../dataset/pretrain_x.parquet \
-  --align-chunk-bytes 1GiB
+  --align-chunk-bytes 1GiB --threads 16
 ./target/release/dataset_compiler verify ../dataset/pretrain_x.jsonl ../dataset/pretrain_x.parquet
 ```
 
 - Keep the source JSONL: `verify` compares row counts and values, and a compiled
   file is rebuilt from it whenever the corpus changes.
+- `verify` checks the total row count but compares only **1,000 rows by
+  default** (`--rows`, `--offset` select the window). Specify the intended full
+  row count for a full-value audit; do not describe the default sample as one.
+  `inspect FILE --json` reads footer/schema information without decoding all rows.
+  `--threads` controls compilation parsing; compression/writing and verification
+  have their own limits, so do not claim every stage uses that many workers.
 - `token_count` is preserved by the compiler, which is what lets bounded
   streaming plan chunks without tokenizing; a `--format auto` compile infers the
   preset from the first row.
 - Loader contract: chat corpora are `list<struct<utf8...>>`, `tools`/`tool_calls`
   stay JSON text, and nested non-message objects become JSON text. See
   `dataset_compiler/README.md` for the full schema rules.
-- Resume: `x.jsonl` and `x.parquet` count as the same corpus, so recompiling a
-  corpus and continuing is allowed. Streaming chunk boundaries are rebuilt by
-  that switch, so a mid-chunk cursor replays or skips part of one chunk and the
-  trainer logs the new row offset; resuming at an epoch boundary is exact.
+- Resume: corresponding `x.jsonl` and `x.parquet` paths count as the same corpus.
+  With matching `--align-chunk-bytes`, chunks retain the JSONL row ranges and the
+  saved cursor remains exact. Without matching alignment, a mid-chunk resume can
+  replay/skip part of a chunk and logs the new row offset; epoch-boundary resume
+  has no drift. Aligned Parquet boundaries take precedence over later chunk-size
+  requests. Keep corpus contents, packing and saved batch budgets consistent.
+
+### Bounded pretraining and progress
+
+- `--dataset_streaming auto|on|off` selects bounded chunk loading for pretraining;
+  auto compares estimated Arrow size with `--data_cache_max_gb` (default 5 GiB),
+  not GPU memory or compressed file size. `0` disables the cache size cap.
+- `--streaming_chunk_mb 1024`, `--streaming_prefetch_chunks 0|1` and
+  `--cache_build_mode inline|spawn` control staging. Budget checks reserve four
+  chunk footprints without prefetch, five with it. Preserve the next unread
+  chunk/step cursor and validate conservation when changing loader behavior.
+- Streaming LR/progress uses consumed valid tokens; estimated step totals are
+  not authoritative completion counts. `trainer/training_eta.py` estimates
+  remaining **current-epoch minutes** from the last three reporting intervals
+  (tokens for streaming, steps otherwise). Startup/resume/new epochs reset it;
+  the first report is `estimating`. Later data waits, saves and recompiles count
+  toward wall time. See `docs/training_pipeline.md` and its ETA tests.
 
 ### Data relay (download / clean / deliver to AutoDL)
 
@@ -371,14 +465,16 @@ cargo clippy
 - **Model configuration updates must reach Config WebUI.** `scripts/config_template_defaults.json` is the single catalog for built-in model presets and training recipes: `presets` holds model parameters, `defaults` holds shared recipe fields, `templates` holds per-model overrides, and `preset_training_keys` selects training fields applied during named-preset initialization. Config WebUI and the relay share the CPU-only loaders in `scripts/config_templates.py`; do not reintroduce model dictionaries or model-name-specific training branches in Python. When adding/changing a model, update the catalog and matching `trainer/config_*.json` / CLI launcher together. A standalone JSON or launcher is insufficient: the model must appear in **配置模板 → 已保存模板**, and loading it must apply the intended topology, precision, optimizer, checkpointing and batch settings. Account for CLI defaults that override model JSON fields.
 - **Migrate existing template libraries.** New shipped templates must be added to already initialized `trainer/webui_templates.json` libraries on reload. Use default fingerprints to refresh only unchanged shipped templates; preserve custom templates, manual edits and intentional deletions. Do not reset the active `trainer/webui_state.json` or replace a user's saved recipe to expose a new model.
 - **Verify all configuration surfaces.** Check the UI parameter count against the model, JSON/preset/template parity, template migration, and an actual Streamlit AppTest load plus generated-command check. Regenerate the relay schema with `python data_relay/generate_training_schema.py` and verify it with `--check` after changing presets or trainer arguments. Report where to select the model in Config WebUI; distinguish estimated memory from GPU measurements.
-- **Instinct V2 Dense**: 32 layers, hidden=1536, FFN=5504, 16 Q heads / 4 KV heads, head_dim=96, tied embeddings, vocab=6400; 1,010,277,888 total / active parameters. Native context 4096, RoPE theta=1e6, no inference scaling. `trainer/config_instinct_v2.json` and Config WebUI template **Instinct V2**. Local 16 GiB starting recipe: BF16 parameters/compute, Muon mantissa compensation with BF16 momentum, 128 MiB workspace, full-layer checkpointing (2), sequence length 2048, batch 1, accumulation 8, compile/FP8 off. Full GPU training memory/throughput is not yet measured.
+- **Instinct V2 Dense**: 32 layers, hidden=1536, FFN=5504, 16 Q heads / 4 KV heads, head_dim=96, tied embeddings, vocab=6400; **1,010,277,888 total / active parameters**. Native context 4096, RoPE theta=1e6, no inference scaling. `trainer/config_instinct_v2.json` and Config WebUI template **Instinct V2**. The shipped starting recipe uses BF16 parameters/compute, Muon mantissa with BF16 momentum, 128 MiB workspace, full-layer checkpointing (2), sequence length 2048, batch 1, accumulation 8, LR 3e-4, 2% warmup, compile/FP8 off.
+- **V2 Dense fixed-budget recipe is separate**: `trainer/recipes/instinct_v2_16g_fixed.json` plus `.model.json` and `trainer/profiles/instinct_v2_16g_fixed/profile.json`. It uses bucket streaming, token budget 5344, tensorwise FP8, compile and different LR/workspace settings. Paths and fingerprints are local-machine/source/corpus specific. The profile remains `status: manual`, not an accepted autotune search result. Its `evidence` includes short warm throughput/memory and paired quality measurements; the older recipe `.report.json` records the initial unvalidated recommendation. Do not claim these finite windows establish long-run convergence or include cold compilation.
+- **Instinct V2 MoE (standalone config)**: `trainer/config_instinct_v2_moe.json`; hidden=640, 32 layers, FFN/expert size=1728, 20 Q / 5 KV heads, head_dim=32, 8 experts, normalized top-2, tied embeddings, vocab=6400; **886,418,048 total / 249,408,128 active parameters**. Max position 32768 with LongRoPE from 4096. It currently has no built-in named preset/template in `scripts/config_template_defaults.json`; do not imply that it is selectable as a shipped WebUI template or has a validated training recipe. Wiring it into the UI requires the same catalog/migration/schema checks as other new presets.
 - **Instinct V1 Dense**: 20 layers, hidden=768, FFN intermediate size 2432, 8 q-heads / 4 kv-heads, head_dim=96, tied embeddings; 152,406,528 total / active parameters (about 152.4M). Verified against `checkpoints/pretrain_20260912_180004_768.json`, used by the `instinct-v1-0914` evaluation. Vocab 6400, max_pos 32768, SwiGLU, RMSNorm, RoPE θ=1e6.
 - **Dense legacy/default config**: 8 layers, hidden=768, 8 q-heads / 4 kv-heads. This is the old `instinct-3` / constructor default, NOT the trained Instinct V1 Dense configuration. Historical 8-layer experiment reports describe their own baselines.
 - **InstinctV1Moe**: hidden=512, 32 layers, 16 q-heads / 4 kv-heads, 8 experts, top-2 routing with `norm_topk_prob=true`, MoE intermediate size 1664 (678,726,144 total / 187,992,576 active parameters; see `trainer/config_instinct_v1_moe.json`). Historical top-1 checkpoints and MFU experiments have 106,203,648 active parameters; use their saved routing configuration when loading or comparing them.
 - Config in `model/model_instinct.py` → `InstinctConfig`. Defaults: `hidden_size=768`, `num_hidden_layers=8`, `use_moe=False`
-- **V1 comparison context**: the user reports that V1 MoE was trained on a 34GB dataset, while V1 Dense used two mini datasets for pretraining and SFT. File size does not establish consumed token count or code-token coverage. Compare checkpoint configs and actual training/evaluation records; do not infer that MoE saw less total data, or equate its 678.7M total parameters with dense per-token capacity (V1 Dense: 152.4M active; V1 MoE: 106.2M active).
-- **Alternate topologies**: `model/model_recurrsive_instinct.py` (RecurrsiveInstinct) and `model/model_instinct_linear.py` (linear attention). Run trainers through the wrappers `python run_recurrsive.py trainer/train_x.py` / `python run_linear.py trainer/train_x.py`, which swap `sys.modules["model.model_instinct"]` — don't edit `model_instinct.py` to switch topology
-- Aligned to Qwen3 ecosystem — compatible with `transformers`, `llama.cpp`, `vllm`, `ollama`
+- **V1 comparison context**: the user reports that V1 MoE was trained on a 34GB dataset, while V1 Dense used two mini datasets for pretraining and SFT. File size does not establish consumed token count or code-token coverage. Compare checkpoint configs and actual training/evaluation records; do not infer that MoE saw less total data, or equate its 678.7M total parameters with dense per-token capacity (V1 Dense: 152.4M active; historical top-1 V1 MoE: 106.2M; current top-2: 188.0M).
+- **Alternate topologies**: `model/model_recurrsive_instinct.py` (RecurrsiveInstinct) and `model/model_instinct_linear.py` (linear attention). Shared trainers select them via `--model_architecture standard|linear|recurrsive_instinct` (`--use_recurrsive 1` is a compatibility alias). The wrappers `python run_recurrsive.py trainer/train_x.py` / `python run_linear.py trainer/train_x.py` also swap `sys.modules["model.model_instinct"]`. Do not edit the standard backbone to switch topology. Residual layouts `standard|mhc|attnres` are a separate config axis.
+- Qwen3-compatible export is available for supported Dense/MoE configurations. Check the export path and runtime support for the actual topology and RoPE settings before claiming compatibility with `llama.cpp`, `vllm` or `ollama`; custom recurrent/linear/residual variants are not covered by that claim.
 
 ## Training pipeline (must respect order)
 
@@ -387,6 +483,16 @@ cargo clippy
 3. **SFT** (`train_full_sft.py`) — requires a completed pretrain/CPT base, uses `sft_t2t(_mini).jsonl`
 4. **Optional**: LoRA (`train_lora.py`), DPO (`train_dpo.py`), PPO (`train_ppo.py`), GRPO/CISPO (`train_grpo.py`), Agent RL (`train_agent.py`), KD (`train_distillation.py`)
 
+- A new stage from completed weights and a full-state resume are different
+  operations. Restore the saved topology before applying permitted stage changes.
+  `--moe_router_top_k` / `--moe_router_norm_topk_prob` explicitly migrate routing
+  in new pretrain/CPT/SFT stages; combining migration with resume is rejected.
+- `trainer/training_pipeline.py --plan PATH --validate-only` validates an exported
+  plan without training. Pipeline stages have independent snapshots/processes and
+  unique output prefixes under `trainer/pipeline_runs/`. Nonzero exits, including
+  pause (42), stop later stages. Restarting the pipeline creates a new run; resume
+  the paused stage through its trainer. Only stage-owned dataset caches are cleaned.
+
 ## Critical gotchas
 
 ### `__package__` hack
@@ -394,13 +500,62 @@ Training scripts and `scripts/` files set `__package__` + `sys.path.append` to r
 
 ### Working directory matters
 - **Training scripts**: MUST run from repo root. Data paths default to `./dataset/`, model paths to `./model/`, output to `./out/`, checkpoints to `./checkpoints/`. Reward model (`../internlm2-1_8b-reward`) lives as a sibling directory of the repo
-- **API server / WebUI**: MUST run from `scripts/` directory
+- **API server / Config WebUI / Chat WebUI**: launch from `scripts/` or use the root BAT launchers. **Eval WebUI** uses the repo-root command in `start_eval_webui.bat`.
 
 ### Windows workaround
 `trainer/` scripts import `datasets` before `torch` to work around a known pyarrow/torch DLL conflict on Windows. They also import `trainer.compile_cache` before `torch` to configure Inductor (compile cache). Do NOT reorder or remove either.
 
 ### Windows + torch.compile (`--use_compile 1`)
 `torch.compile` on Windows **requires UTF-8 mode** — torch's own inductor template files (e.g. `torch/_inductor/kernel/mm_grouped.py`) crash with `UnicodeDecodeError: 'gbk' codec can't decode` otherwise. Set `PYTHONUTF8=1` in the environment of the training process (WebUI launches already inject it).
+
+`model/compile_policy.py` sets per-region/accumulated specialization limits to
+128/4096, configurable with `INSTINCT_COMPILE_RECOMPILE_LIMIT` and
+`INSTINCT_COMPILE_ACCUMULATED_LIMIT`. Limit hits and compiler errors raise instead
+of silently using eager training. Do not hide failures with `suppress_errors`,
+reset caches per batch, or change shape policy just to avoid the limit.
+
+### Packed and single-document attention
+
+- `INSTINCT_PACKED_ATTENTION_BACKEND=auto|flex|sdpa` controls document-isolated
+  packed attention; `INSTINCT_CAUSAL_ATTENTION_BACKEND=auto|flex|sdpa` controls
+  plain causal dispatch. They are separate selectors. Preserve the exact
+  same-document + causal predicate, label masks, RoPE resets and padding semantics.
+- Build shared masks before checkpointed layers. For V2 Dense's 96-wide heads,
+  FlexAttention stays traceable inside the outer compiled checkpoint; inserting a
+  `torch.compiler.disable` boundary there can leave the whole layer eager.
+- The loader intentionally drops `sequence_ids` for one document per row. V2's
+  standard-residual training prepares a shared plain causal mask at model entry
+  for that branch. Packed Flex alone does not cover the single-document bucket.
+- Automatic 96-wide selection is gated on BF16, zero dropout, 16 Q / 4 KV heads
+  and the validated PyTorch 2.13 / Blackwell SM12 stack with Triton. CPU, explicit
+  caller masks and unsupported modes retain their existing paths. Explicit `flex`
+  still checks eligibility and raises for missing dependencies; eligible runtime
+  compilation errors are not silently swallowed. Use `sdpa` to select the fallback.
+- See `docs/packed_flex_attention.md`, `model/packed_attention.py` and
+  `model/flash_attn_4.py`. CUDA output/gradient/isolation and compiled-checkpoint
+  tests are needed for dispatch/kernel changes; microbenchmarks alone do not
+  establish full-training speed or quality.
+
+### Muon split weights and momentum precision
+
+- General defaults remain FP32 parameters/momentum. Explicit mantissa mode needs
+  optimizer `muon` and BF16 parameters. BF16 high bits + uint16 low bits preserve
+  the reconstructed FP32 weight update; forward sees truncated BF16 high bits,
+  so exact update arithmetic does not imply FP32-master training equivalence.
+- BF16 momentum is optional and requires mantissa mode. Momentum/update arithmetic
+  stays FP32; the new EMA is stored in BF16 for the next step. This quantization
+  changes the trajectory relative to FP32 momentum. Embeddings, tied heads, norms
+  and biases assigned to the companion AdamW stay FP32.
+- CLI controls override `INSTINCT_MUON_MANTISSA`,
+  `INSTINCT_MUON_MOMENTUM_DTYPE`, `INSTINCT_MUON_BATCH_SIZE` and
+  `INSTINCT_MUON_WORKSPACE_MB`; zero/omitted chunk limits retain defaults.
+  Resume must preserve the saved precision and raw uint16 state. A precision
+  change requires a new stage from weights, not silent resume-state conversion.
+- Fused V1 and V2 shapes are explicitly gated in `trainer/batched_muon.py` and
+  `trainer/muon_kernels.py`; other shapes retain the reference implementation.
+  Report measured peak memory separately from per-element storage estimates.
+  See `docs/muon_mantissa_fusion.md`, `docs/muon_bf16_momentum.md` and
+  `tests/test_muon_v2.py` for evidence and its limits.
 
 ### Training CUDA fast paths (Muon + MoE)
 
@@ -464,8 +619,10 @@ measured MFU and correctness evidence; do not infer the same speed on other GPUs
   expert weights directly and currently executes BF16. Verify kernel traces before
   claiming FP8 speedups. Unsloth FP8 LoRA / NVFP4 inference results do not establish
   full-parameter pretraining support; local probe is experiments/probe_fp8_training.py.
-- For a full original-path reference, set NS to `torch` and all three fusion
-  flags to `0`. `INSTINCT_MUON_BACKEND=native` remains the native optimizer option.
+- For the original NS/update/pack/SwiGLU comparison, set NS to `torch` and
+  `INSTINCT_MUON_FUSED_UPDATES`, `INSTINCT_MOE_FUSED_PACK`,
+  `INSTINCT_MOE_FUSED_SWIGLU` to `0`. Other attention/routing controls are separate.
+  `INSTINCT_MUON_BACKEND=native` remains the native optimizer option.
 - Preserve explicit FMA, BF16 intermediate rounding, FP32 decay rounding, and
   subnormal handling in these kernels. The symmetric NS GEMMs do **not** change
   the iteration into the rejected Gram recurrence. NS graphs contain only the
@@ -475,21 +632,31 @@ measured MFU and correctness evidence; do not infer the same speed on other GPUs
   Ordinary compiled training has nondeterministic gradients even between
   reference repeats; use the deterministic control when diagnosing kernel drift.
 
-### Swarmed (WandB replacement)
-WandB is blocked in China. Training scripts use `swanlab` by default; API is compatible with WandB calls. Set `--use_wandb` to enable logging.
+### SwanLab logging
+The legacy flag is `--use_wandb`, but the shared logger imports `swanlab as wandb`.
+Remote experiment logging is disabled unless that flag is supplied and runs on
+the main process. Preserve local logs and the saved run ID used on resume.
 
 ### `max_seq_len` is in tokens, not characters
-Chinese text: ~1.5–1.7 characters per token. English: ~4–5. Recommended values per dataset:
-- `pretrain_t2t_mini.jsonl` → `max_seq_len ≈ 768` (was ~340 for full pretrain_t2t)
-- `sft_t2t_mini.jsonl` → `max_seq_len ≈ 768`
+Measure lengths with the repo's tokenizer; character/token ratios vary by
+language and code. In bucket packing, also check `bucket_max_seq_len` and the
+actual bucket shapes. Keep training lengths within the selected model's context
+and distinguish native training context from inference-only RoPE extrapolation.
 
 ### Checkpoint paths
-- Simple saves: `out/{weight}_{hidden_size}.pth`
-- Resume checkpoints: `checkpoints/{weight}_{hidden_size}_resume.pth`
+- Simple saves: `out/{weight}_{hidden_size}{_moe}.pth`
+- Resume checkpoints: `checkpoints/{weight}_{hidden_size}{_moe}_resume.pth`
+- Matching configuration: `checkpoints/{weight}_{hidden_size}{_moe}.json`.
+  Preserve full resume states (model, optimizer, scaler, epoch/step and data state) alongside
+  lightweight inference weights; the latter do not provide an exact resume.
 - The `--from_resume 1` flag handles auto-detection; works across GPU count changes
 
 ### WebUI model discovery
-`web_demo.py` auto-scans `./scripts/` for subdirectories containing model weight files. The model folder must be copied there before launching.
+`web_demo.py` scans `out/` and `checkpoints/` for non-resume `.pth` files and also
+accepts a custom path. `scripts/web_demo_utils.py::resolve_model_config_path`
+prefers a JSON beside the weight, then the matching JSON in `checkpoints/`, then
+legacy `trainer/config_pretrain.json`. Check that fallback before diagnosing a
+topology mismatch. The default tokenizer is the repo's `model/` directory.
 
 ### Reward model location (RLAIF training)
 For PPO/GRPO, the reward model (`internlm2-1_8b-reward`) must be placed **alongside** the instinct repo (sibling directory), not inside it:
@@ -575,16 +742,31 @@ Qwen-generated dataset is free of model-identity contamination.
 | `--load_from model` | Use raw `.pth` weights |
 | `--load_from ./instinct-3` | Use transformers-format model |
 | `--weight full_sft` | Weight name prefix (only with `--load_from model`) |
+| `--checkpoint_path PATH --config_path PATH` | Explicit raw weight and its matching topology/RoPE JSON |
 | `--use_moe 1` | MoE model |
 | `--lora_weight lora_medical` | Apply LoRA on top |
-| `--inference_rope_scaling` | Enable YaRN length extrapolation |
+| `--inference_rope_scaling` | Enable default YaRN; use `--config_path` for saved LongRoPE settings |
 | `--open_thinking 1` | Adaptive thinking mode |
+| `--inference_compile auto\|full\|off` | Inference optimization mode |
+| `--benchmark livecodebench` | LiveCodeBench generation/evaluation; see `--lcb_*` options |
 
 ## Model conversion
-`scripts/convert_model.py` converts torch `.pth` → transformers format (and vice versa). Uses `Qwen3Config`/`Qwen3ForCausalLM` as the compatibility target. Supports LoRA merge.
+`scripts/convert_model.py` provides torch/Transformers conversion and LoRA merge.
+The compatibility export selects Qwen3 Dense or Qwen3 MoE classes. Its functions
+use the module-level `lm_config`; the example main block hardcodes the legacy
+8-layer Dense model. Load the real checkpoint configuration and set paths before
+running it. `convert_torch2transformers_instinct` preserves custom Instinct code
+and LongRoPE semantics that the Qwen3 export explicitly rejects (retained-start
+thresholds or separate short/long attention factors).
 
 ## Where to read more
 - `data_relay/README.md` / `data_relay/config.example.toml` — relay deployment, AutoDL token refresh, transfer channels, and disk management (verify implementation when comments differ)
-- `PLAN.md` — current performance-optimization plan for this branch (`codex/better_performance`): SDPA attention path, batch-level combined mask, selective gradient checkpointing, packing
-- `docs/training_pipeline.md` — end-to-end pipeline; `docs/compact_dataset_cache.md` — dataset cache design
+- `PLAN.md` — dated performance experiments, correctness gates and historical baselines; match the recorded topology/hardware before reusing a number
+- `scripts/config_template_defaults.json` / `scripts/config_templates.py` — shared presets, recipes and template migration; `trainer/config_*.json` — standalone model configurations
+- `docs/training_pipeline.md` — pipeline, stage/resume distinctions and ETA; `docs/compact_dataset_cache.md` — cache design; `scripts/data_loader/README.md` — loader entry points
+- `docs/packed_flex_attention.md` — packed/causal Flex dispatch and V2 compiled checkpointing
+- `docs/training_autotune.md` — isolated search, profiles and production compatibility
+- `docs/muon_bf16_momentum.md` / `docs/muon_mantissa_fusion.md` — precision contracts and measured validation; `docs/muon_low_precision_audit.md` includes historical pre-fusion results
+- `dataset_compiler/README.md` / `scripts/data_builder/README.md` — Rust compilation/verification and data preparation/audit entry points
+- `data_relay/deploy/ONLINE.md` — monitor/proxy deployment; keep its private staging archives and credentials out of the repository
 - `docs/gsm8k.md` / `docs/humaneval.md` / `docs/eval_webui.md` — benchmark harness and Eval WebUI details

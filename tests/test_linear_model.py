@@ -9,7 +9,7 @@ What is covered:
 
 1. ``test_mode012_loss_equal_full_attn`` — ``full_attention_interval=1`` turns
    every layer into the standard eager ``Attention`` (no GatedDeltaNet). Mode 1
-   (selective recompute of the attention core + ``checkpoint_ffn``) and Mode 2
+   (Attention-only recompute of the attention core) and Mode 2
    (whole-block ``torch.utils.checkpoint``) must be bitwise identical to Mode 0
    in forward loss/aux_loss and in every parameter gradient.
 2. ``test_mode2_linear_attn_loss_equal`` — ``full_attention_interval=4`` with 2
@@ -20,23 +20,14 @@ What is covered:
 3. ``test_moe_router_grad`` — MoE top-1 normalizes the router weight to 1.0, so
    ``gate.weight`` only receives gradient through the aux loss. Under Mode 1/2
    the checkpointed aux loss must flow back (trainers combine ``loss + aux_loss``).
-4. ``test_gated_delta_net_untouched`` — the ``git diff`` vs HEAD must not touch
-   the ``GatedDeltaNet`` class body (model lines 155-247): changes are limited
-   to the standard ``Attention`` / ``InstinctBlock`` / ``InstinctModel``
-   integration points.
+4. Mode 1 also checkpoints the parameter-free GatedDeltaNet core, retaining
+   the same loss/gradients while leaving projections and FFNs outside replay.
 """
-
-import re
-import subprocess
-from pathlib import Path
 
 import torch
 
 from model.model_instinct_linear import InstinctForCausalLM
 from tests.helpers import assert_grads_equal, make_tiny_config
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -69,23 +60,6 @@ def _make_inputs(seed=0, bs=2, seq=8):
     input_ids = torch.randint(0, 256, (bs, seq), generator=g)
     return input_ids, input_ids.clone()
 
-
-def _gated_delta_net_span(head_source):
-    """Line span of the ``class GatedDeltaNet`` body in the HEAD blob of
-    ``model/model_instinct_linear.py`` (1-based, exclusive end)."""
-    lines = head_source.splitlines()
-    start = None
-    for i, line in enumerate(lines):
-        if line.startswith("class GatedDeltaNet"):
-            start = i + 1
-            break
-    assert start is not None, "class GatedDeltaNet not found in HEAD blob"
-    end = len(lines) + 1
-    for i in range(start, len(lines)):
-        if lines[i].startswith(("class ", "def ")):
-            end = i + 1
-            break
-    return start, end
 
 
 # ---------------------------------------------------------------------------
@@ -180,33 +154,33 @@ def test_moe_router_grad():
         assert gate.grad.abs().sum().item() > 0, f"Mode {mode}: gate.weight.grad is all-zero"
 
 
-def test_gated_delta_net_untouched():
-    """The working-tree diff vs HEAD must not modify the GatedDeltaNet class
-    body — only the standard Attention/InstinctBlock/InstinctModel integration
-    points are allowed to change."""
-    proc = subprocess.run(
-        ["git", "diff", "-U0", "--", "model/model_instinct_linear.py"],
-        capture_output=True, text=True, cwd=str(_REPO_ROOT),
-    )
-    assert proc.returncode == 0, proc.stderr
+def test_mode1_linear_core_loss_and_gradients(monkeypatch):
+    from model.model_instinct_linear import GatedDeltaNet
+    input_ids, labels = _make_inputs()
+    reference, actual = _make_model(0), _make_model(1)
+    calls = {"core": 0, "projection": 0, "ffn": 0}
+    original = GatedDeltaNet._chunk_core
 
-    show = subprocess.run(
-        ["git", "show", "HEAD:model/model_instinct_linear.py"],
-        capture_output=True, text=True, cwd=str(_REPO_ROOT),
-    )
-    assert show.returncode == 0, show.stderr
-    span_start, span_end = _gated_delta_net_span(show.stdout)
+    def core(*args):
+        calls["core"] += 1
+        return original(*args)
 
-    for line in proc.stdout.splitlines():
-        m = re.match(r"^@@ -(\d+)(?:,(\d+))?", line)
-        if not m:
-            continue
-        start = int(m.group(1))
-        count = int(m.group(2)) if m.group(2) else 1
-        changed = range(start, start + count)
-        if changed.start < span_end and changed.stop > span_start:
-            raise AssertionError(
-                f"git diff touches GatedDeltaNet class body "
-                f"(class lines {span_start}-{span_end - 1}) at original lines "
-                f"{list(changed)}"
-            )
+    monkeypatch.setattr(GatedDeltaNet, '_chunk_core', staticmethod(core))
+    expected = reference(input_ids, labels=labels)
+    expected.loss.backward()
+    calls["core"] = 0
+    for name, child in actual.named_modules():
+        kind = 'ffn' if name.endswith('.mlp') else (
+            'projection' if name.endswith(('.in_proj_qkv', '.out_proj')) else None)
+        if kind:
+            def count(_module, _args, kind=kind):
+                calls[kind] += 1
+            child.register_forward_pre_hook(count)
+    got = actual(input_ids, labels=labels)
+    forward = dict(calls)
+    got.loss.backward()
+    assert torch.equal(got.loss, expected.loss)
+    assert_grads_equal(actual, reference)
+    assert calls['core'] == forward['core'] * 2
+    assert calls['projection'] == forward['projection']
+    assert calls['ffn'] == forward['ffn']

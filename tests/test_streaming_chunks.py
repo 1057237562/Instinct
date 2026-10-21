@@ -22,11 +22,14 @@ class NeverCalledTokenizer:
 
 
 def test_streaming_eta_uses_tokens_since_resume_and_current_epoch():
-    # Epoch 2: resumed at 200 tokens, consumed another 100 in one minute.
-    done, eta = streaming_token_progress(1300, 1200, 1000, 1, 60)
+    from trainer.training_eta import RecentThroughputETA
+    estimator = RecentThroughputETA()
+    # Epoch 2: the first report is an anchor after costly resume/compilation.
+    assert streaming_token_progress(1200, 1000, 1, 900, estimator=estimator) == (200, None)
+    done, eta = streaming_token_progress(1300, 1000, 1, 960, estimator=estimator)
     assert done == 300
     assert eta == 7
-    assert streaming_token_progress(2000, 1200, 1000, 1, 60) == (1000, 0)
+    assert streaming_token_progress(2000, 1000, 1, 1380, estimator=estimator) == (1000, 0)
 
 
 def test_completed_streaming_cursor_does_not_read_another_chunk():

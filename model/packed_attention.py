@@ -1,7 +1,7 @@
 """Block-sparse causal document attention with compact GQA K/V.
 
-The optional FlexAttention path is isolated from the outer model compiler.
-One block mask is built per batch and shared across every transformer layer.
+Block masks are prepared outside checkpointed layers and shared across them.
+V2's 96-wide attention remains traceable inside the outer model compiler.
 """
 
 from functools import lru_cache
@@ -100,6 +100,43 @@ def maybe_prepare_flex_mask(
     return build_packed_flex_mask(sequence_ids)
 
 
+def maybe_prepare_causal_flex_mask(
+    reference, *, enabled=True, attention_mask=None, dropout_p=0.0,
+    head_dim=32, num_attention_heads=None, num_key_value_heads=None,
+):
+    """Prepare V2's plain causal mask before entering checkpointed layers.
+
+    Single-document batches intentionally discard their sequence IDs in the
+    loader. They still need the 96-wide Flex path, but creating its mask inside
+    a layer would introduce a compiler-disable boundary inside checkpointing.
+    Keep ordinary inference, caller masks and other model shapes unchanged.
+    """
+    if (not enabled or head_dim != 96 or num_attention_heads != 16
+            or num_key_value_heads != 4 or not reference.is_cuda
+            or torch.version.hip is not None or attention_mask is not None
+            or dropout_p != 0.0 or reference.shape[1] <= 1
+            or not torch.is_grad_enabled()):
+        return None
+    backend = os.environ.get('INSTINCT_CAUSAL_ATTENTION_BACKEND', 'auto').strip().lower()
+    if backend not in ('auto', 'flex', 'sdpa'):
+        raise ValueError('INSTINCT_CAUSAL_ATTENTION_BACKEND must be auto, flex or sdpa')
+    if backend == 'sdpa':
+        return None
+    dtype = (torch.get_autocast_dtype('cuda') if torch.is_autocast_enabled('cuda')
+             else reference.dtype)
+    if dtype != torch.bfloat16:
+        return None
+    if backend == 'auto':
+        from model.cuda_fastpath import blackwell_training_kernels
+        if not blackwell_training_kernels(reference.device):
+            return None
+    if not _FLEX_AVAILABLE:
+        if backend == 'flex':
+            raise RuntimeError('Flex causal attention requires PyTorch FlexAttention and Triton')
+        return None
+    return build_causal_flex_mask(reference.shape[1], str(reference.device))
+
+
 def packed_flex_attention(q, k, v, mask: PackedFlexMask):
     if q.shape[-1] == 96 and torch.compiler.is_compiling():
         # A disable boundary inside full-layer checkpointing leaves the entire
@@ -133,6 +170,12 @@ def _causal_flex_mask(length, device):
     def causal(batch, head, query, key):
         return query >= key
     return create_mask(causal, None, None, length, length, device=device, BLOCK_SIZE=128)
+
+
+@torch.compiler.disable
+def build_causal_flex_mask(length, device):
+    """Cache batch/head-independent causal metadata outside the layer graph."""
+    return PackedFlexMask(_causal_flex_mask(length, device))
 
 
 @torch.compiler.disable
