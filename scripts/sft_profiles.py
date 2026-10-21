@@ -6,6 +6,7 @@ PROFILE_KEYS = (
     'sequence_packing_mode', 'seq_bucket', 'bucket_max_seq_len',
     'bucket_large_threshold', 'batch_size', 'accumulation_steps', 'optimizer',
     'param_dtype', 'activation_dtype', 'fp8_training', 'fp8_filter',
+    'muon_mantissa', 'muon_momentum_dtype', 'muon_batch_size', 'muon_workspace_mb',
     'use_compile', 'compile_mode', 'use_grad_checkpoint', 'data_cache_max_gb',
     'packing_batch_size', 'packing_num_proc', 'bucket_loader_workers',
     'moe_router_migration',
@@ -68,6 +69,9 @@ def switch_sft_profile(state, mode, *, entering=False):
     if mode != 'resume':
         profiles = state.get('sft_mode_profiles', {})
         if mode in profiles:
+            for key, value in {'muon_mantissa': False, 'muon_momentum_dtype': 'fp32',
+                               'muon_batch_size': 0, 'muon_workspace_mb': 0.0}.items():
+                _apply_state_value(state, key, profiles[mode].get(key, value))
             for key, value in profiles[mode].items():
                 if key in PROFILE_KEYS:
                     _apply_state_value(state, key, value)
@@ -78,6 +82,8 @@ def switch_sft_profile(state, mode, *, entering=False):
                 _apply_state_value(state, key, value)
             state['base_weight'] = 'auto (newest matching base)'
             state['param_dtype'] = 'fp32'
+            _apply_state_value(state, 'muon_mantissa', False)
+            _apply_state_value(state, 'muon_momentum_dtype', 'fp32')
             state['activation_dtype'] = 'bfloat16'
             _apply_state_value(state, 'moe_router_migration', False)
             for key, value in {

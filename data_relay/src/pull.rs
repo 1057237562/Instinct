@@ -127,6 +127,7 @@ pub fn build_pull_script(
         r#"#!/bin/bash
 # data_relay pull script for task {task_id}
 set -u
+export PATH="{python_path}:$PATH"
 ROOT="{root}"
 LOG="$ROOT/_relay_pull.log"
 BASE="{base}/pull/{task_id}"
@@ -134,6 +135,11 @@ T="{token}"
 
 mkdir -p "$ROOT"
 cd "$ROOT"
+# A relay restart may reconnect while the previous downloader is still alive.
+# The old process retains the task lock and remains the sole writer.
+exec 9> "$ROOT/_relay_pull.lock"
+flock -n 9 || exit 0
+echo "$$" > "$ROOT/_relay_pull.pid"
 : > "$LOG"
 echo "[relay-pull] start $(date -u +%FT%TZ)" >> "$LOG"
 
@@ -176,6 +182,7 @@ echo "[relay-pull] finish $(date -u +%FT%TZ) rc=$rc" >> "$LOG"
         root = remote_task_root.trim_end_matches('/'),
         base = base,
         token = token,
+        python_path = crate::sftp::REMOTE_PYTHON_PATH,
     )
 }
 
@@ -263,6 +270,7 @@ mod tests {
         assert!(s.contains("RELAY-PULL-EXIT="));
         assert!(s.contains("--max-connection-per-server=16"));
         assert!(s.contains("size-mismatch"));
+        assert!(s.contains(&format!("export PATH=\"{}:$PATH\"", crate::sftp::REMOTE_PYTHON_PATH)));
     }
 
     #[test]

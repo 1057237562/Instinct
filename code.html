@@ -213,7 +213,7 @@
 <span style="color:var(--secondary);">dataset/</span>     lm_dataset.py <span style="color:#6B7280;">— 5 dataset classes + JSONL data files</span>
 <span style="color:var(--secondary);">scripts/</span>     API server, WebUI, model conversion, tool-call eval <span style="color:#6B7280;">— 6 files</span>
 <span style="color:var(--secondary);">eval_llm.py</span>  CLI interactive inference <span style="color:#6B7280;">(repo root)</span>
-<span style="color:var(--secondary);">run_linear.py / run_loop.py</span>   Model-variant launchers <span style="color:#6B7280;">(repo root)</span>
+<span style="color:var(--secondary);">run_linear.py / run_recurrsive.py</span>   Model-variant launchers <span style="color:#6B7280;">(repo root)</span>
         </div>
       </div>
     </div>
@@ -227,7 +227,7 @@
         <h3 class="heading-md" style="margin-bottom:4px;">model/</h3>
         <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
           <code>model_instinct.py</code> — InstinctConfig / InstinctForCausalLM / RMSNorm / RoPE / Attention / FFN / MoE.<br>
-          <code>model_instinct_loop.py</code> — LoopUS looped depth.<br>
+          <code>model_recurrsive_instinct.py</code> — RecurrsiveInstinct recurrent depth.<br>
           <code>model_instinct_linear.py</code> — GatedDeltaNet.<br>
           <code>model_lora.py</code> — LoRA.<br>
           <code>flash_attn_4.py</code> · <code>kv_cache_quant.py</code> · <code>checkpointing.py</code>.<br>
@@ -466,7 +466,7 @@
         </div>
       </div>
 
-      <!-- LoopUS -->
+      <!-- RecurrsiveInstinct -->
       <div class="card card-tint-amber card-hover" style="position:relative;overflow:hidden;">
         <div class="geo-square" style="width:100px;height:100px;background:rgba(245,158,11,0.06);border-radius:16px;top:-10px;right:-10px;"></div>
         <div style="position:relative;z-index:1;">
@@ -474,9 +474,9 @@
             <i data-lucide="repeat" style="width:24px;height:24px;"></i>
           </div>
           <span class="tag tag-green" style="margin-bottom:16px;">Experimental</span>
-          <h3 class="heading-md" style="margin:12px 0 8px;">LoopUS</h3>
+          <h3 class="heading-md" style="margin:12px 0 8px;">RecurrsiveInstinct</h3>
           <p style="color:#4B5563;margin-bottom:24px;line-height:1.65;">
-            Looped depth — 1 shared block re-run 8× (1 prelude + 1 coda), effective depth 10, fixed params,
+            RecurrsiveInstinct depth — 1 shared block re-run 8× (1 prelude + 1 coda), effective depth 10, fixed params,
             zero-init loop-position embedding + input injection.
           </p>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
@@ -939,9 +939,9 @@ scaler.<span style="color:#93C5FD;">scale</span>(<span style="color:var(--second
     <!-- run_linear / run_loop shim -->
     <div style="max-width:780px;margin:24px auto 0;">
       <div class="card card-hover">
-        <h3 class="heading-md" style="margin-bottom:8px;">run_linear.py / run_loop.py — the shim</h3>
+        <h3 class="heading-md" style="margin-bottom:8px;">run_linear.py / run_recurrsive.py — the shim</h3>
         <p style="color:#6B7280;line-height:1.65;margin-bottom:16px;">
-          7-line launchers that swap <code>model.model_instinct</code> for the Linear / LoopUS variant,
+          7-line launchers that swap <code>model.model_instinct</code> for the Linear / RecurrsiveInstinct variant,
           then <code>exec</code> any target script. Example:
           <code>python run_linear.py eval_llm.py --weight full_sft</code>
         </p>
@@ -1011,7 +1011,7 @@ __file__ = <span style="color:var(--secondary);">target</span>
         <h3 class="heading-md" style="margin-bottom:4px;">trainer_cli.py</h3>
         <p style="color:#6B7280;line-height:1.65;font-size:0.9375rem;">
           Shared 37-flag parser: <code>--dtype</code>, <code>--param_dtype</code>, <code>--kv_cache_dtype</code>,
-          <code>--use_moe</code>, <code>--use_looped</code>, <code>--optimizer</code> adamw|adafactor|muon,
+          <code>--use_moe</code>, <code>--use_recurrsive</code>, <code>--optimizer</code> adamw|adafactor|muon,
           <code>--use_compile</code>, <code>--use_grad_checkpoint</code> 0|1|2.
         </p>
       </div>
@@ -1047,7 +1047,7 @@ __file__ = <span style="color:var(--secondary);">target</span>
     <div style="text-align:center;">
       <h2 class="heading-lg" style="margin-bottom:16px;">Instinct</h2>
       <p style="opacity:0.5;font-size:0.9375rem;max-width:480px;margin:0 auto 24px;">
-        Pure PyTorch · ~64M–71M params · Dense / MoE / LoopUS / Linear · 100% open source under Apache 2.0
+        Pure PyTorch · ~64M–71M params · Dense / MoE / RecurrsiveInstinct / Linear · 100% open source under Apache 2.0
       </p>
       <a href="https://github.com/1057237562/Instinct" class="btn btn-outline-light">
         <i data-lucide="star" style="width:18px;height:18px;"></i>

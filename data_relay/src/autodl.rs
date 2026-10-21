@@ -84,6 +84,26 @@ impl InstanceInfo {
 pub struct AutoDl {
     http: reqwest::Client,
     cfg: AutoDlCfg,
+    #[cfg(test)]
+    test_base: Option<String>,
+}
+
+/// A resource-stock rejection is retryable; billing/authentication/driver errors are not.
+#[derive(Debug)]
+pub struct GpuUnavailable(pub String);
+impl std::fmt::Display for GpuUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.0) }
+}
+impl std::error::Error for GpuUnavailable {}
+
+fn gpu_capacity_message(code: &str, message: &str) -> bool {
+    let text = format!("{code} {message}").to_lowercase();
+    if ["余额", "balance", "token", "权限", "permission", "authentication", "显存", "memory", "驱动", "driver"]
+        .iter().any(|word| text.contains(word)) { return false; }
+    (["gpu", "显卡", "算力"].iter().any(|word| text.contains(word))
+        && ["不足", "不够", "无空闲", "没有可用", "暂无可用", "not enough", "notenough", "insufficient", "no available", "no free", "out of stock", "sold out"]
+            .iter().any(|word| text.contains(word)))
+        || ["空闲资源不足", "资源库存不足"].iter().any(|word| text.contains(word))
 }
 
 impl AutoDl {
@@ -91,7 +111,18 @@ impl AutoDl {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()?;
-        Ok(AutoDl { http, cfg: cfg.clone() })
+        Ok(AutoDl { http, cfg: cfg.clone(), #[cfg(test)] test_base:None })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_client(cfg: &AutoDlCfg, base: String) -> Self {
+        let mut client=Self::new(cfg).unwrap();client.test_base=Some(base);client
+    }
+
+    fn endpoint(&self, base: &str, path: &str) -> String {
+        #[cfg(test)]
+        if let Some(base)=&self.test_base {return format!("{base}/{path}");}
+        format!("{base}/{path}")
     }
 
     // ---- low-level requests -------------------------------------------------
@@ -99,7 +130,7 @@ impl AutoDl {
     async fn console_post(&self, path: &str, body: Value) -> anyhow::Result<Value> {
         let resp = self
             .http
-            .post(format!("{CONSOLE_BASE}/{path}"))
+            .post(self.endpoint(CONSOLE_BASE,path))
             .header("Authorization", &self.cfg.console_token)
             .header("AppVersion", "0.0.0")
             .json(&body)
@@ -112,7 +143,7 @@ impl AutoDl {
     async fn console_get(&self, path: &str, query: &[(&str, &str)]) -> anyhow::Result<Value> {
         let mut req = self
             .http
-            .get(format!("{CONSOLE_BASE}/{path}"))
+            .get(self.endpoint(CONSOLE_BASE,path))
             .header("Authorization", &self.cfg.console_token)
             .header("AppVersion", "0.0.0");
         for (k, v) in query {
@@ -124,7 +155,7 @@ impl AutoDl {
     async fn pro_get(&self, path: &str, query: &[(&str, &str)]) -> anyhow::Result<Value> {
         let mut req = self
             .http
-            .get(format!("{PRO_BASE}/{path}"))
+            .get(self.endpoint(PRO_BASE,path))
             .header("Authorization", &self.cfg.dev_token);
         for (k, v) in query {
             req = req.query(&[(k, v)]);
@@ -135,7 +166,7 @@ impl AutoDl {
     async fn pro_post(&self, path: &str, body: Value) -> anyhow::Result<Value> {
         let resp = self
             .http
-            .post(format!("{PRO_BASE}/{path}"))
+            .post(self.endpoint(PRO_BASE,path))
             .header("Authorization", &self.cfg.dev_token)
             .json(&body)
             .send()
@@ -156,7 +187,9 @@ impl AutoDl {
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown error")
                 .to_string();
-            bail!("AutoDL API 错误 (code={code}, HTTP {status}): {msg}");
+            let error = format!("AutoDL API 错误 (code={code}, HTTP {status}): {msg}");
+            if gpu_capacity_message(code, &msg) { return Err(GpuUnavailable(error).into()); }
+            bail!("{error}");
         }
         Ok(v.get("data").cloned().unwrap_or(Value::Null))
     }
@@ -191,6 +224,15 @@ impl AutoDl {
                     data = self
                         .console_get("instance/snapshot", &[("instance_uuid", uuid)])
                         .await?;
+                }
+                // Detail may omit SSH credentials that are present in the list.
+                // Keep list fields, then overlay the more detailed response.
+                if let Some(listed) = self.list().await?.into_iter().find(|i| i.uuid == uuid) {
+                    if let (Some(base), Some(detail)) = (listed.raw.as_object(), data.as_object()) {
+                        let mut merged = base.clone();
+                        merged.extend(detail.clone());
+                        data = Value::Object(merged);
+                    }
                 }
                 data
             }
@@ -379,7 +421,10 @@ pub fn parse_ssh_command(cmd: &str) -> Option<(String, u16, String)> {
 }
 
 fn parse_instance(v: &Value) -> InstanceInfo {
-    let uuid = get_str(v, "uuid")
+    // Never adopt a nested machine/occupant UUID as the instance identity.
+    let uuid = v.get("instance_uuid").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned)
+        .or_else(|| v.get("uuid").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned))
+        .or_else(|| get_str(v, "uuid"))
         .or_else(|| get_str(v, "instance_uuid"))
         .unwrap_or_default();
     let status = get_str(v, "status").unwrap_or_else(|| "unknown".into());
@@ -450,6 +495,23 @@ fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capacity_errors_exclude_balance_auth_driver_and_memory_failures() {
+        for (code,message) in [("InsufficientGPU",""),("Fail","主机空闲GPU数量不够"),("Fail","No available GPU"),("Fail","空闲资源不足")] {
+            assert!(gpu_capacity_message(code,message),"{message}");
+        }
+        for message in ["GPU 开机失败：余额不足","Token expired","GPU driver unavailable","GPU memory insufficient","network timeout","实例已删除"] {
+            assert!(!gpu_capacity_message("Fail",message),"{message}");
+        }
+    }
+
+    #[test]
+    fn detail_instance_identity_precedes_nested_machine_uuid() {
+        let value = json!({"instance_uuid": "rrprrh6gtl-cb8265fc", "status": "shutdown",
+            "machine": {"occupant": {"uuid": "pro-unrelated"}}});
+        assert_eq!(parse_instance(&value).uuid, "rrprrh6gtl-cb8265fc");
+    }
 
     #[test]
     fn ssh_command_parse() {

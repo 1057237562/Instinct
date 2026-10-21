@@ -16,11 +16,13 @@ mem-efficient backend(在 sm_120 上实测约 20x 于 math),极端情况再回�
   128 倍数再截断(因果掩码下数值精确等价);非 causal 场景回退 SDPA。
 """
 from typing import Any, Callable, Optional
+import os
+import sys
 
 import torch
 import torch.nn.functional as F
 from model.attention_mask import PreparedAttentionBias, normalize_attention_mask
-from model.packed_attention import PackedFlexMask, packed_flex_attention
+from model.packed_attention import PackedFlexMask, packed_flex_attention, _FLEX_AVAILABLE
 
 _flash_attn_4_func = None
 _tried_import = False
@@ -82,6 +84,21 @@ def flash_attention(
         if dropout_p != 0.0:
             raise ValueError('Packed FlexAttention does not support attention dropout')
         return packed_flex_attention(q, k, v, attention_mask)
+    causal_backend = os.environ.get('INSTINCT_CAUSAL_ATTENTION_BACKEND', 'auto')
+    if causal_backend not in ('auto','sdpa','flex'):
+        raise ValueError('INSTINCT_CAUSAL_ATTENTION_BACKEND must be auto, sdpa or flex')
+    causal_flex = (causal_backend == 'flex' or (causal_backend == 'auto'
+        and _FLEX_AVAILABLE and torch.version.hip is None
+        and sys.platform == 'win32' and torch.__version__.startswith('2.13.')
+        and q.is_cuda and torch.cuda.get_device_capability(q.device)[0] == 12
+        and q.shape[2] == 16 and k.shape[2] == 4 and q.shape[-1] == 32))
+    if (causal_flex
+            and attention_mask is None and is_causal and dropout_p == 0.0
+            and torch.is_grad_enabled() and q.is_cuda and q.dtype == torch.bfloat16
+            and q.shape[1] == k.shape[1] and q.shape[1] > 1
+            and q.shape[-1] in (16,32,64,128)):
+        from model.packed_attention import causal_flex_attention
+        return causal_flex_attention(q,k,v)
     fa4 = _get_fa4()
     if (
         attention_mask is None

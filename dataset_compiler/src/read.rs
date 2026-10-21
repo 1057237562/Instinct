@@ -75,31 +75,34 @@ pub fn summarize(path: &Path) -> Result<ParquetSummary> {
     })
 }
 
-/// Read up to ``limit`` rows starting at ``offset`` as JSON values.
-pub fn read_values(
+/// Stream values with at most one 1024-row batch retained for verification.
+pub fn read_values_iter(
     path: &Path,
     offset: u64,
     limit: Option<u64>,
-) -> Result<(SchemaRef, Vec<Value>)> {
+) -> Result<(SchemaRef, impl Iterator<Item = Result<Value>>)> {
     let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .with_context(|| format!("{} is not a readable parquet file", path.display()))?;
     let schema = builder.schema().clone();
     let mut builder = builder.with_batch_size(1024);
     if offset > 0 {
-        builder = builder.with_offset(offset as usize);
+        builder =
+            builder.with_offset(usize::try_from(offset).context("offset exceeds platform size")?);
     }
     if let Some(limit) = limit {
-        builder = builder.with_limit(limit as usize);
+        builder =
+            builder.with_limit(usize::try_from(limit).context("limit exceeds platform size")?);
     }
     let reader = builder.build().context("cannot start a parquet reader")?;
-    let mut rows = Vec::new();
-    for batch in reader {
-        let batch = batch.context("cannot read a parquet record batch")?;
-        for index in 0..batch.num_rows() {
-            rows.push(row_to_value(&batch, index));
-        }
-    }
+    let rows = reader.flat_map(|batch| match batch {
+        Ok(batch) => (0..batch.num_rows())
+            .map(|index| Ok(row_to_value(&batch, index)))
+            .collect::<Vec<_>>(),
+        Err(error) => vec![Err(
+            anyhow::Error::new(error).context("cannot read a parquet record batch")
+        )],
+    });
     Ok((schema, rows))
 }
 
@@ -158,17 +161,21 @@ fn value_at(array: &ArrayRef, row: usize) -> Value {
         DataType::LargeUtf8 => Value::String(array.as_string::<i64>().value(row).to_string()),
         DataType::Int64 => Value::Number(array.as_primitive::<Int64Type>().value(row).into()),
         DataType::Int32 => Value::Number(array.as_primitive::<Int32Type>().value(row).into()),
-        DataType::Float64 => match serde_json::Number::from_f64(
-            array.as_primitive::<Float64Type>().value(row),
-        ) {
-            Some(number) => Value::Number(number),
-            None => Value::String("nan".to_string()),
-        },
+        DataType::Float64 => {
+            match serde_json::Number::from_f64(array.as_primitive::<Float64Type>().value(row)) {
+                Some(number) => Value::Number(number),
+                None => Value::String("nan".to_string()),
+            }
+        }
         DataType::Boolean => Value::Bool(array.as_boolean().value(row)),
         DataType::List(_) => {
             let list = array.as_list::<i32>();
             let values = list.value(row);
-            Value::Array((0..values.len()).map(|index| value_at(&values, index)).collect())
+            Value::Array(
+                (0..values.len())
+                    .map(|index| value_at(&values, index))
+                    .collect(),
+            )
         }
         DataType::Struct(fields) => {
             let structure = array.as_struct();

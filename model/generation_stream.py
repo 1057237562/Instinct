@@ -11,6 +11,7 @@ class TokenChunkBuffer:
         self.eos_token_id = eos_token_id
         self.pending = []
         self.overshoot = 0
+        self.first_transfer = True
 
     def start_decode(self):
         """Mark the prefill/decode boundary for stream metrics, if supported."""
@@ -20,11 +21,13 @@ class TokenChunkBuffer:
 
     def push(self, token, finished, final=False):
         self.pending.append(token)
-        if len(self.pending) < self.chunk_size and not final:
+        flush_first = self.first_transfer and getattr(self.streamer, 'flush_first_token', False)
+        if len(self.pending) < self.chunk_size and not final and not flush_first:
             return False
         # Tokens and completion flags travel together in one device->CPU copy.
         block = torch.cat([*self.pending, finished[:, None].to(token.dtype)], dim=1).cpu()
         self.pending.clear()
+        self.first_transfer = False
         tokens, flags = block[:, :-1], block[:, -1]
         done = bool(flags.bool().all()) if self.eos_token_id is not None else False
         if done:

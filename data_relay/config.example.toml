@@ -65,3 +65,16 @@ auto_clean = true
 keep_last_uploads = 3
 # jupyter 上传模式的单文件上限（MB）
 jupyter_max_file_mb = 64
+
+[training]
+# 训练从此仓库根目录运行。任务历史和守护进程保存在 .relay_training/ 下。
+repo_root = "/root/autodl-tmp"
+python = "/root/miniconda3/bin/python"
+min_free_gb = 8.0
+cache_max_gb = 1.0
+# config_webui 的本机缓存，相对本配置文件目录；训练参数和模型配置读取当前面板值。
+panel_state_path = "../trainer/webui_state.json"
+# 本地训练代码仓库，相对本配置文件目录；同步读取工作区，包含未提交修改。
+local_repo_root = ".."
+# GPU 库存不足时持续排队，按此间隔重试；不计入开机超时。
+gpu_retry_secs = 60

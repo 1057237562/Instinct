@@ -57,7 +57,7 @@ def test_select_inference_dtype_prefers_bf16_on_ampere_plus(monkeypatch):
 def test_trunk_compile_eligible_only_for_standard_topology():
     from model.model_instinct import InstinctConfig
     assert _trunk_compile_eligible(InstinctConfig(model_architecture='standard'))
-    assert not _trunk_compile_eligible(InstinctConfig(model_architecture='looped'))
+    assert not _trunk_compile_eligible(InstinctConfig(model_architecture='recurrsive_instinct'))
     assert not _trunk_compile_eligible(InstinctConfig(residual_type='mhc'))
 
 

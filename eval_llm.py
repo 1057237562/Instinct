@@ -85,12 +85,12 @@ def init_model(args):
                 InstinctForCausalLM as LinearInstinctForCausalLM,
             )
             model = LinearInstinctForCausalLM(LinearInstinctConfig(**config_kwargs))
-        elif architecture == 'looped':
-            from model.model_instinct_loop import (
-                InstinctConfig as LoopedInstinctConfig,
-                InstinctForCausalLM as LoopedInstinctForCausalLM,
+        elif architecture == 'recurrsive_instinct':
+            from model.model_recurrsive_instinct import (
+                InstinctConfig as RecurrsiveInstinctConfig,
+                InstinctForCausalLM as RecurrsiveInstinctForCausalLM,
             )
-            model = LoopedInstinctForCausalLM(LoopedInstinctConfig(**config_kwargs))
+            model = RecurrsiveInstinctForCausalLM(RecurrsiveInstinctConfig(**config_kwargs))
         else:
             model = InstinctForCausalLM(InstinctConfig(**config_kwargs))
         moe_suffix = '_moe' if model.config.use_moe else ''
@@ -433,7 +433,7 @@ def build_parser():
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument('--config_path', default=None, type=str, help="原生torch权重对应的模型config JSON（优先于架构CLI参数）")
-    parser.add_argument('--model_architecture', default='standard', choices=['standard', 'linear', 'looped'], help="原生torch模型主干")
+    parser.add_argument('--model_architecture', default='standard', choices=['standard', 'linear', 'recurrsive_instinct'], help="原生torch模型主干")
     parser.add_argument('--residual_type', default='standard', choices=['standard', 'mhc', 'attnres'], help="残差拓扑")
     parser.add_argument('--hc_mult', default=4, type=int, help="mHC并行残差流数量")
     parser.add_argument('--hc_sinkhorn_iters', default=20, type=int, help="mHC Sinkhorn迭代次数")
@@ -448,7 +448,7 @@ def build_parser():
     parser.add_argument('--show_speed', default=1, type=int, help="显示decode速度（tokens/s）")
     parser.add_argument('--early_exit', default=0, type=int, choices=[0, 1], help="启用动态Early Exit推理（0=否，1=是）")
     parser.add_argument('--exit_threshold', default=0.9, type=float, help="退出置信度阈值（0-1，默认0.9，仅--early_exit 1时生效）")
-    parser.add_argument('--num_steps', default=0, type=int, help="Instinct V2 latent recurrent 推理次数；0 使用模型配置默认值")
+    parser.add_argument('--num_steps', default=0, type=int, help="RecurrsiveInstinct latent recurrent 推理次数；0 使用模型配置默认值")
     parser.add_argument('--logit_lens', default=0, type=int, choices=[0, 1], help="启用Logit Lens逐层解释，展示每个Transformer层对下一个token的预测（0=否，1=是）")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
 

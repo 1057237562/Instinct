@@ -4,7 +4,7 @@
 在纯文本语料（pretrain_t2t(_mini).jsonl）上做自回归 next-token 预测，
 输出 {save_weight}_{hidden_size}.pth 权重，作为后续 SFT / LoRA / RL 等阶段的基座。
 支持 DDP、梯度累积、混合精度（autocast + GradScaler）、断点续训，
-以及 Looped 循环架构的可选深度奖励 / 自蒸馏。
+以及 RecurrsiveInstinct 循环架构的可选深度奖励 / 自蒸馏。
 """
 import os
 import sys
@@ -97,6 +97,20 @@ def _recompiled_resume_note(saved_data_config, streaming_plan, data_path):
     )
 
 
+def _pause_after_update(epoch, step, wandb):
+    """Save only after pending accumulated gradients have been applied."""
+    if not pause_requested(args):
+        return
+    clear_pause_request(args)
+    profiler.finish()
+    if is_main_process():
+        pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model,
+                              optimizer=optimizer, scaler=scaler, epoch=epoch,
+                              step=step, wandb=wandb, data_config=data_config)
+    Logger('[PAUSED] Training paused — resume checkpoint saved.')
+    sys.exit(PAUSE_EXIT_CODE)
+
+
 def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
                 wandb=None, packing_plan=None, token_schedule=None) -> int:
     """执行一个 epoch 的预训练循环。
@@ -131,11 +145,15 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
             set_cosine_lr(optimizer, epoch, step, iters, args)
         else:
             if len(batch) == 3:
-                batch_tokens = (batch[2] >= 0).sum().to(args.device)
+                batch_tokens = (batch[2] >= 0).sum()
             else:
-                batch_tokens = (batch[1] != -100).sum().to(args.device)
+                batch_tokens = (batch[1] != -100).sum()
             if dist.is_initialized():
+                batch_tokens = batch_tokens.to(args.device)
                 dist.all_reduce(batch_tokens, op=dist.ReduceOp.SUM)
+            # Single-GPU loader metadata is already on CPU. Sending this count
+            # to CUDA only to read .item() back serializes the preceding H2D
+            # transfers without changing the token-based LR schedule.
             consumed = int(batch_tokens.item())
             completed = int(data_config.get('streaming_processed_tokens', 0)) + consumed
             set_cosine_lr_progress(
@@ -151,6 +169,12 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
                 )
                 loss = res.loss + res.aux_loss
                 loss = loss / args.accumulation_steps
+                aux_loss_for_log = res.aux_loss.detach() if res.aux_loss is not None else None
+                loop_steps = getattr(res, 'recurrent_steps', None)
+                # Autograd retains what backward needs. Keeping the output
+                # object also pins full logits/hidden states through all layers
+                # and the optimizer, long after their gradients are computed.
+                del res
 
         with profiler.phase("backward"):
             scaler.scale(loss).backward()
@@ -166,7 +190,7 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
         if step % args.log_interval == 0 or (token_schedule is None and step == iters):
             spend_time = time.time() - start_time
             current_loss = loss.item() * args.accumulation_steps
-            current_aux_loss = res.aux_loss.item() if res.aux_loss is not None else 0.0
+            current_aux_loss = aux_loss_for_log.item() if aux_loss_for_log is not None else 0.0
             current_logits_loss = current_loss - current_aux_loss
             current_lr = optimizer.param_groups[-1]['lr']
             eta_min = spend_time / max(step - start_step, 1) * (iters - step) / 60
@@ -182,7 +206,6 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
                     f'{data_config["streaming_chunks"]}'
                 )
             elapsed_min = spend_time / 60
-            loop_steps = getattr(res, 'recurrent_steps', None)
             loop_str = f', loop_steps: {loop_steps:.2f}' if loop_steps else ''
             bucket_text = f', {bucket_status}' if bucket_status else ''
             Logger(f'Epoch:[{epoch + 1}/{args.epochs}]{progress_text}, loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}{loop_str}, lr: {current_lr:.8f}{bucket_text}, epoch_time: {eta_min:.1f}min, elapsed_time: {elapsed_min:.1f}min')
@@ -210,7 +233,7 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
             model.train()
             del state_dict
 
-        del input_ids, labels, sequence_ids, res, loss
+        del input_ids, labels, sequence_ids, loss, aux_loss_for_log
 
         if (
             args.use_compile == 1
@@ -221,16 +244,14 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
                 f'epoch={epoch + 1}, completed buckets >{args.bucket_large_threshold} tokens'
             )
 
-        # 暂停分支：检测到暂停请求标记时，清标记并保存检查点后以 42 退出（WebUI 据此识别“已暂停”）。
-        if pause_requested(args):
-            clear_pause_request(args)
-            profiler.finish()
-            if is_main_process():
-                pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, data_config=data_config)
-            Logger('[PAUSED] Training paused — resume checkpoint saved.')
-            sys.exit(PAUSE_EXIT_CODE)
+        # Resume states do not contain pending gradients. Honor pause only at
+        # an optimizer boundary, leaving the request armed while accumulating.
+        if step % args.accumulation_steps == 0:
+            _pause_after_update(epoch, step, wandb)
 
     flush_remaining_grad(scaler, optimizer, model.parameters(), args.grad_clip, last_step, start_step, args.accumulation_steps)
+    if last_step > start_step:
+        _pause_after_update(epoch, last_step, wandb)
     return last_step
 
 
@@ -300,11 +321,13 @@ if __name__ == "__main__":
         router_norm_topk_prob=args.moe_router_norm_topk_prob,
         router_top_k=args.moe_router_top_k,
     )
+    from trainer.autotune_config import verify_profile_model
+    verify_profile_model(lm_config, args)
     configure_bucket_memory_budget(model, args, checkpoint_data=ckp_data)
     data_config = packing_data_config(args)
-    if getattr(lm_config, 'model_architecture', '') == 'looped':
+    if getattr(lm_config, 'model_architecture', '') == 'recurrsive_instinct':
         Logger(
-            '[Instinct V2 recurrent-depth] '
+            '[RecurrsiveInstinct recurrent-depth] '
             f'P/R/C=({lm_config.prelude_layers}/{lm_config.recurrent_layers}/'
             f'{lm_config.coda_layers}), mean recurrence={lm_config.loop_iters}, '
             f'backprop depth={lm_config.mean_backprop_depth}, '
@@ -313,7 +336,7 @@ if __name__ == "__main__":
         if any((args.depth_reward >= 0, args.distill_weight >= 0,
                 args.exit_in_training >= 0, args.n_supervision > 0)):
             Logger(
-                '[Instinct V2] LoopUS depth-reward/self-distillation flags are '
+                '[RecurrsiveInstinct] LoopUS depth-reward/self-distillation flags are '
                 'deprecated and ignored; recurrence is trained with randomized '
                 'unrolling and truncated backpropagation.'
             )
@@ -432,7 +455,15 @@ if __name__ == "__main__":
     if dist.is_initialized():
         model = DistributedDataParallel(model, device_ids=[local_rank])
 
+    from trainer.trainer_utils import configure_training_cpu_threads
+    configure_training_cpu_threads(args)
     profiler = TrainingProfiler(args, name="pretrain")
+
+    if args.autotune_trial:
+        from trainer.autotune_trial import run_pretrain_trial
+        # The isolated worker calls this exact train_epoch, then exits before
+        # any epoch-final save or formal training cursor can be persisted.
+        sys.exit(run_pretrain_trial(globals(), args.autotune_trial))
 
     # 8. 开始训练
     for epoch in range(start_epoch, args.epochs):

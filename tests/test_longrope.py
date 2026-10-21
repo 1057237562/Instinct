@@ -82,7 +82,7 @@ def test_longrope_defaults_to_paper_attention_scaling():
     [
         "model.model_instinct",
         "model.model_instinct_linear",
-        "model.model_instinct_loop",
+        "model.model_recurrsive_instinct",
     ],
 )
 def test_every_instinct_backbone_accepts_longrope(module_name):

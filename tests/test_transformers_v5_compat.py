@@ -26,7 +26,7 @@ def test_custom_models_forward_on_transformers_v5(variant):
     elif variant == "linear":
         from model.model_instinct_linear import InstinctForCausalLM
     else:
-        from model.model_instinct_loop import InstinctForCausalLM
+        from model.model_recurrsive_instinct import InstinctForCausalLM
 
     model = InstinctForCausalLM(make_tiny_config(variant=variant)).eval()
     input_ids = torch.tensor([[1, 5, 7, 2]])

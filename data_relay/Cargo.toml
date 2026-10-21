@@ -16,6 +16,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
+sha2 = "0.10"
 walkdir = "2"
 percent-encoding = "2"
 russh = "0.45"

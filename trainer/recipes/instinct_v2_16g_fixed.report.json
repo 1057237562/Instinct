@@ -1,0 +1,31 @@
+{
+  "status": "recommended_unvalidated",
+  "template": "Instinct V2 16GiB 固定预算（未验收）",
+  "failed_trial": ".cache/autotune_webui/bad7ba44b6a00c2e632af07d/cbf61524b03f5e48fbf1/result.json",
+  "evidence": {
+    "stage": "warmup_backward",
+    "failed_token_budget": 10706,
+    "allocated_gib": 13.11,
+    "unallocated_reserved_gib": 1.26,
+    "allocator_limit_gib": 14.37,
+    "failed_allocation_mib": 32
+  },
+  "chosen_token_budget": 5344,
+  "expected_bucket_batches": [
+    {
+      "sequence_length": 2672,
+      "batch_size": 2
+    },
+    {
+      "sequence_length": 4096,
+      "batch_size": 1
+    }
+  ],
+  "allocator_probe": {
+    "expandable_segments_supported": false,
+    "warning": "expandable_segments not supported on this platform"
+  },
+  "qualification": "Manual fixed recipe. No measured throughput, memory peak or quality acceptance claim.",
+  "profile_path": "D:\\AI\\Instinct\\trainer\\profiles\\instinct_v2_16g_fixed\\profile.json",
+  "chosen_muon_workspace_mb": 256
+}

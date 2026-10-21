@@ -24,7 +24,13 @@ impl TaskStore {
                 continue;
             }
             match serde_json::from_str::<Task>(&std::fs::read_to_string(&manifest)?) {
-                Ok(task) => {
+                Ok(mut task) => {
+                    if task.data_upload.is_some()
+                        && matches!(task.status, TaskStatus::Verifying | TaskStatus::Uploading)
+                    {
+                        task.status = TaskStatus::Failed;
+                        task.error = Some("中继已重启；已接收的数据保留，可继续交付".into());
+                    }
                     map.insert(task.id.clone(), task);
                 }
                 Err(e) => tracing::warn!("跳过损坏的任务清单 {}: {e}", manifest.display()),
@@ -86,7 +92,7 @@ impl TaskStore {
             let task = map
                 .get(id)
                 .ok_or_else(|| anyhow::anyhow!("任务 {id} 不存在"))?;
-            if matches!(task.status, TaskStatus::Running | TaskStatus::Uploading) {
+            if matches!(task.status, TaskStatus::Running | TaskStatus::Uploading | TaskStatus::Verifying) {
                 anyhow::bail!("任务正在运行，请先取消再删除");
             }
         }
@@ -129,8 +135,12 @@ mod tests {
             remote_path: None,
             upload_total_bytes: 0,
             upload_done_bytes: 0,
+            upload_transferred_bytes: 0,
+            upload_attempt: 0,
+            upload_phase: String::new(),
             pull_token: None,
             error: None,
+            data_upload: None,
         }
     }
 

@@ -1,19 +1,19 @@
 """
-Isolate the impact of the Looped structure on model accuracy and PPL.
+Isolate the impact of the RecurrsiveInstinct structure on model accuracy and PPL.
 
 Three models, same pretrained start (out/pretrain_768.pth), same data, same
 training config (3 seeds x 80 iters, lr 2e-4, AdamW):
 
   A) Standard Instinct (8 fixed layers)                     — quality baseline
-  B) Looped Instinct, depth_reward=0.1 (paper default)      — loop + reward
-  C) Looped Instinct, depth_reward=0.0 (ablation)           — pure loop, no reward
+  B) RecurrsiveInstinct, depth_reward=0.1 (paper default)      — loop + reward
+  C) RecurrsiveInstinct, depth_reward=0.0 (ablation)           — pure loop, no reward
 
 Measurements:
-  1. Same-depth comparison: Standard(8 layers) vs Looped forced to k=1 step
+  1. Same-depth comparison: Standard(8 layers) vs RecurrsiveInstinct forced to k=1 step
      (encoder 2 + 1*loop 3 + output 3 = 8 effective layers).
-  2. Loop-depth scaling: Looped forced to k = 1,2,4,8 loop steps → PPL/acc
+  2. Loop-depth scaling: RecurrsiveInstinct forced to k = 1,2,4,8 loop steps → PPL/acc
      (test-time compute curve; does more looping improve quality?).
-  3. Dynamic-exit quality: Looped dynamic (q_th=0.75) vs forced-full-depth.
+  3. Dynamic-exit quality: RecurrsiveInstinct dynamic (q_th=0.75) vs forced-full-depth.
   4. Difficulty split: easy/medium/hard samples → steps used & quality.
 
 Outputs: experiments/results/impact_*.png, impact_summary.json
@@ -26,7 +26,7 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model.model_instinct import InstinctConfig, InstinctForCausalLM
-from model.model_looped_instinct import LoopedInstinctConfig, LoopedInstinctForCausalLM
+from model.model_recurrsive_instinct import RecurrsiveInstinctConfig, RecurrsiveInstinctForCausalLM
 from transformers import AutoTokenizer
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -74,8 +74,8 @@ def build_standard():
     return model
 
 
-def build_looped(depth_reward):
-    cfg = LoopedInstinctConfig(
+def build_recurrsive_instinct(depth_reward):
+    cfg = RecurrsiveInstinctConfig(
         hidden_size=768, num_hidden_layers=8, vocab_size=6400,
         flash_attn=False, inference_rope_scaling=False,
         loop_encoder_layers=[0, 1], loop_body_layers=[2, 3, 4],
@@ -83,7 +83,7 @@ def build_looped(depth_reward):
         q_threshold=Q_THRESHOLD, exit_in_training=True,
         n_supervision=N_SUPERVISION, beta=BETA, depth_reward=depth_reward,
     )
-    model = LoopedInstinctForCausalLM(cfg).to(DEVICE)
+    model = RecurrsiveInstinctForCausalLM(cfg).to(DEVICE)
     sd = torch.load("out/pretrain_768.pth", map_location=DEVICE)
     if "model_state_dict" in sd:
         sd = sd["model_state_dict"]
@@ -93,7 +93,7 @@ def build_looped(depth_reward):
     return model
 
 
-def train(model, ids, seed, is_looped):
+def train(model, ids, seed, is_recurrsive_instinct):
     rng = random.Random(seed)
     torch.manual_seed(seed); np.random.seed(seed)
     opt = torch.optim.AdamW(model.parameters(), lr=LR)
@@ -180,7 +180,7 @@ def main():
     }
     bucket_ids = {k: [ids[i] for i in v] for k, v in buckets.items()}
 
-    rows = {"A_standard": [], "B_looped_l0.1": [], "C_looped_l0.0": []}
+    rows = {"A_standard": [], "B_recurrsive_instinct_l0.1": [], "C_recurrsive_instinct_l0.0": []}
     forced_curves = {"B": [], "C": []}
     dynamic_rows = {"B": [], "C": []}
     difficulty_rows = {"B": [], "C": []}
@@ -190,14 +190,14 @@ def main():
 
         # A: standard
         m = build_standard()
-        train(m, ids, seed, is_looped=False)
+        train(m, ids, seed, is_recurrsive_instinct=False)
         ppl, acc = collect(m, ids)
         rows["A_standard"].append({"ppl": ppl, "acc": acc})
         print(f"  [A standard]      ppl={ppl:.4f} acc={acc:.4f}")
 
-        # B: looped λ=0.1
-        mb = build_looped(0.1)
-        train(mb, ids, seed, is_looped=True)
+        # B: recurrsive_instinct λ=0.1
+        mb = build_recurrsive_instinct(0.1)
+        train(mb, ids, seed, is_recurrsive_instinct=True)
         ppl_dyn, acc_dyn, steps_dyn = collect_dynamic(mb, ids)
         dynamic_rows["B"].append({"ppl": ppl_dyn, "acc": acc_dyn, "steps": steps_dyn})
         curve_b = {}
@@ -205,17 +205,17 @@ def main():
             p, a, s = collect_forced(mb, ids, k)
             curve_b[k] = {"ppl": p, "acc": a, "steps": s}
         forced_curves["B"].append(curve_b)
-        rows["B_looped_l0.1"].append({"ppl_dyn": ppl_dyn, "acc_dyn": acc_dyn,
+        rows["B_recurrsive_instinct_l0.1"].append({"ppl_dyn": ppl_dyn, "acc_dyn": acc_dyn,
                                       "steps_dyn": steps_dyn, "curve": curve_b})
-        print(f"  [B looped λ0.1]   dyn ppl={ppl_dyn:.4f} acc={acc_dyn:.4f} "
+        print(f"  [B recurrsive_instinct λ0.1]   dyn ppl={ppl_dyn:.4f} acc={acc_dyn:.4f} "
               f"steps={steps_dyn:.2f}")
         for k in [1, 2, 4, 8]:
             print(f"      forced k={k}: ppl={curve_b[k]['ppl']:.4f} "
                   f"acc={curve_b[k]['acc']:.4f}")
 
-        # C: looped λ=0.0 (ablation)
-        mc = build_looped(0.0)
-        train(mc, ids, seed, is_looped=True)
+        # C: recurrsive_instinct λ=0.0 (ablation)
+        mc = build_recurrsive_instinct(0.0)
+        train(mc, ids, seed, is_recurrsive_instinct=True)
         ppl_dyn, acc_dyn, steps_dyn = collect_dynamic(mc, ids)
         dynamic_rows["C"].append({"ppl": ppl_dyn, "acc": acc_dyn, "steps": steps_dyn})
         curve_c = {}
@@ -223,9 +223,9 @@ def main():
             p, a, s = collect_forced(mc, ids, k)
             curve_c[k] = {"ppl": p, "acc": a, "steps": s}
         forced_curves["C"].append(curve_c)
-        rows["C_looped_l0.0"].append({"ppl_dyn": ppl_dyn, "acc_dyn": acc_dyn,
+        rows["C_recurrsive_instinct_l0.0"].append({"ppl_dyn": ppl_dyn, "acc_dyn": acc_dyn,
                                       "steps_dyn": steps_dyn, "curve": curve_c})
-        print(f"  [C looped λ0.0]   dyn ppl={ppl_dyn:.4f} acc={acc_dyn:.4f} "
+        print(f"  [C recurrsive_instinct λ0.0]   dyn ppl={ppl_dyn:.4f} acc={acc_dyn:.4f} "
               f"steps={steps_dyn:.2f}")
 
         # difficulty split on model B
@@ -253,7 +253,7 @@ def main():
     m_std_acc, s_std_acc = mean_std(rows["A_standard"], "acc")
     print(f"A standard       : ppl {m_std_ppl:.4f}±{s_std_ppl:.4f}  acc {m_std_acc:.4f}±{s_std_acc:.4f}")
 
-    for tag, key in [("B λ0.1", "B_looped_l0.1"), ("C λ0.0", "C_looped_l0.0")]:
+    for tag, key in [("B λ0.1", "B_recurrsive_instinct_l0.1"), ("C λ0.0", "C_recurrsive_instinct_l0.0")]:
         m_p, s_p = mean_std(rows[key], "ppl_dyn")
         m_a, s_a = mean_std(rows[key], "acc_dyn")
         m_s, s_s = mean_std(rows[key], "steps_dyn")
@@ -276,12 +276,12 @@ def main():
     summary = {
         "standard": {"ppl_mean": m_std_ppl, "ppl_std": s_std_ppl,
                      "acc_mean": m_std_acc, "acc_std": s_std_acc},
-        "looped_l0.1_dynamic": {"ppl_mean": mean_std(rows["B_looped_l0.1"], "ppl_dyn")[0],
-                                "acc_mean": mean_std(rows["B_looped_l0.1"], "acc_dyn")[0],
-                                "steps_mean": mean_std(rows["B_looped_l0.1"], "steps_dyn")[0]},
-        "looped_l0.0_dynamic": {"ppl_mean": mean_std(rows["C_looped_l0.0"], "ppl_dyn")[0],
-                                "acc_mean": mean_std(rows["C_looped_l0.0"], "acc_dyn")[0],
-                                "steps_mean": mean_std(rows["C_looped_l0.0"], "steps_dyn")[0]},
+        "recurrsive_instinct_l0.1_dynamic": {"ppl_mean": mean_std(rows["B_recurrsive_instinct_l0.1"], "ppl_dyn")[0],
+                                "acc_mean": mean_std(rows["B_recurrsive_instinct_l0.1"], "acc_dyn")[0],
+                                "steps_mean": mean_std(rows["B_recurrsive_instinct_l0.1"], "steps_dyn")[0]},
+        "recurrsive_instinct_l0.0_dynamic": {"ppl_mean": mean_std(rows["C_recurrsive_instinct_l0.0"], "ppl_dyn")[0],
+                                "acc_mean": mean_std(rows["C_recurrsive_instinct_l0.0"], "acc_dyn")[0],
+                                "steps_mean": mean_std(rows["C_recurrsive_instinct_l0.0"], "steps_dyn")[0]},
         "forced_curves": {
             "B": {str(k): {"ppl": np.mean([c[k]["ppl"] for c in forced_curves["B"]]),
                             "acc": np.mean([c[k]["acc"] for c in forced_curves["B"]])}

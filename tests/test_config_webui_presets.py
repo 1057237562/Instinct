@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import pytest
+from scripts.config_templates import load_default_templates, load_model_presets, load_legacy_preset_names
 
 
 SOURCE = Path(__file__).parents[1] / "scripts" / "config_webui.py"
@@ -28,7 +29,9 @@ def _preset_helpers():
             "_preset_fingerprint",
         }:
             selected.append(node)
-    namespace = {"math": math, "json": json, "hashlib": hashlib}
+    namespace = {"math": math, "json": json, "hashlib": hashlib,
+                 "load_model_presets": load_model_presets,
+                 "load_legacy_preset_names": load_legacy_preset_names}
     exec(
         compile(ast.Module(body=selected, type_ignores=[]), str(SOURCE), "exec"),
         namespace,
@@ -58,23 +61,41 @@ def test_new_moe_presets_keep_top1_router_task_gradient():
             assert config["norm_topk_prob"] is False
 
 
+def test_instinct_v2_dense_json_preset_and_template_match():
+    helpers = _preset_helpers()
+    preset = helpers['PRESETS']['Instinct V2']
+    assert preset['model_architecture'] == 'standard' and not preset['use_moe']
+    assert helpers['calc_params'](preset)['Total Params']['value'] == 1_010_277_888
+    root = SOURCE.parents[1]
+    config = json.loads((root / 'trainer/config_instinct_v2.json').read_text(encoding='utf-8'))
+    template = load_default_templates()['Instinct V2']
+    for key, value in preset.items():
+        assert helpers['_config_preset_value'](config, key) == value, key
+        assert template[key] == value, key
+    assert config['head_dim'] == config['hidden_size'] // config['num_attention_heads'] == 96
+    assert template['batch_size'] == 1 and template['accumulation_steps'] == 8
+    assert template['max_seq_len'] == 2048 and template['muon_mantissa'] is True
+    assert template['muon_momentum_dtype'] == 'bf16' and template['optimizer'] == 'muon'
+    assert not template['use_compile'] and template['fp8_training'] == 'off'
+
+
 def test_instinct_v2_uses_latent_recurrent_depth_architecture():
     helpers = _preset_helpers()
     presets = helpers["PRESETS"]
     assert "instinct-3" not in presets
     assert "instinct-3-moe" not in presets
     assert "instinct2-small" not in presets
-    assert presets["Instinct V2"]["use_moe"] is False
-    assert presets["Instinct V2 MoE"]["use_moe"] is True
-    assert presets["Instinct V2 Small"]["hidden_size"] == 512
-    for name in ("Instinct V2", "Instinct V2 MoE", "Instinct V2 Small"):
+    assert presets["RecurrsiveInstinct"]["use_moe"] is False
+    assert presets["RecurrsiveInstinct MoE"]["use_moe"] is True
+    assert presets["RecurrsiveInstinct Small"]["hidden_size"] == 512
+    for name in ("RecurrsiveInstinct", "RecurrsiveInstinct MoE", "RecurrsiveInstinct Small"):
         config = presets[name]
-        assert config["model_architecture"] == "looped"
+        assert config["model_architecture"] == "recurrsive_instinct"
         assert (config["prelude_layers"], config["recurrent_layers"],
                 config["coda_layers"]) == (2, 4, 2)
         assert config["recurrence_sampling"] == "lognormal_poisson"
         assert config["use_input_injection"] is True
-    config = presets["Instinct V2"]
+    config = presets["RecurrsiveInstinct"]
     assert config["hidden_size"] == 1248
     assert config["intermediate_size"] == 4224
     assert config["num_attention_heads"] == 13
@@ -87,22 +108,22 @@ def test_instinct_v2_uses_latent_recurrent_depth_architecture():
     assert config["mean_backprop_depth"] == 8
     assert config["recurrence_log_normal_sigma"] == 1.0
     assert config["max_recurrence"] == 256
-    for name in ("Instinct V2 MoE", "Instinct V2 Small"):
+    for name in ("RecurrsiveInstinct MoE", "RecurrsiveInstinct Small"):
         assert presets[name]["loop_iters"] == 8
         assert presets[name]["mean_backprop_depth"] == 4
-    assert helpers["_LEGACY_PRESET_NAMES"]["instinct-3"] == "Instinct V2"
-    assert helpers["_LEGACY_PRESET_NAMES"]["instinct-3-moe"] == "Instinct V2 MoE"
+    assert helpers["_LEGACY_PRESET_NAMES"]["instinct-3"] == "RecurrsiveInstinct"
+    assert helpers["_LEGACY_PRESET_NAMES"]["instinct-3-moe"] == "RecurrsiveInstinct MoE"
 
 
 def test_instinct_v2_parameter_estimate_includes_adapter_and_sandwich_norms():
     helpers = _preset_helpers()
-    config = helpers["PRESETS"]["Instinct V2"]
+    config = helpers["PRESETS"]["RecurrsiveInstinct"]
     assert helpers["calc_params"](config)["Total Params"]["value"] == 187_521_984
 
 
 def test_instinct_v2_architecture_diagram_renders_recurrent_graph():
     helpers = _preset_helpers()
-    diagram = helpers["arch_diagram"](helpers["PRESETS"]["Instinct V2"])
+    diagram = helpers["arch_diagram"](helpers["PRESETS"]["RecurrsiveInstinct"])
     assert "187,521,984" in diagram
     assert "Prelude x2" in diagram
     assert "Input Injection Adapter" in diagram
@@ -121,7 +142,7 @@ def test_instinct_v1_architecture_diagram_remains_sequential():
     assert "recurrent-shell" not in diagram
 
 
-def test_instinct_v1_moe_preserves_dense_per_token_ffn_capacity():
+def test_instinct_v1_moe_uses_normalized_top2_routing():
     helpers = _preset_helpers()
     config = helpers["PRESETS"]["Instinct V1 MoE"]
     assert config["model_architecture"] == "standard"
@@ -131,7 +152,8 @@ def test_instinct_v1_moe_preserves_dense_per_token_ffn_capacity():
     assert config["num_attention_heads"] == 16
     assert config["num_key_value_heads"] == 4
     assert config["num_experts"] == 8
-    assert config["num_experts_per_tok"] == 1
+    assert config["num_experts_per_tok"] == 2
+    assert config["norm_topk_prob"] is True
     assert config["moe_intermediate_size"] == 1664
     assert config["rope_scaling_type"] == "longrope"
     assert config["factor"] == 8.0
@@ -141,9 +163,9 @@ def test_instinct_v1_moe_preserves_dense_per_token_ffn_capacity():
     assert config["short_attention_factor"] == 1.0
     breakdown = helpers["calc_params"](config)
     assert breakdown["Total Params"]["value"] == 678_726_144
-    assert breakdown["Active Total"]["value"] == 106_203_648
+    assert breakdown["Active Total"]["value"] == 187_992_576
     diagram = helpers["arch_diagram"](config)
-    assert "MoE-FFN (8E, top-1)" in diagram
+    assert "MoE-FFN (8E, top-2)" in diagram
     assert "Layer 32" in diagram
 
     vram = helpers["estimate_bucket_vram_plan"](
@@ -170,9 +192,9 @@ def test_current_serialized_configs_match_their_training_presets():
     helpers = _preset_helpers()
     for filename, preset_name in (
         ("config_pretrain.json", "Instinct V1 MoE"),
-        ("config_full_sft.json", "Instinct V2"),
-        ("config_dpo.json", "Instinct V2"),
-        ("config_instinct_v2.json", "Instinct V2"),
+        ("config_full_sft.json", "RecurrsiveInstinct"),
+        ("config_dpo.json", "RecurrsiveInstinct"),
+        ("config_recurrsive_instinct.json", "RecurrsiveInstinct"),
     ):
         preset = helpers["PRESETS"][preset_name]
         current = json.loads(
@@ -194,8 +216,8 @@ def test_preset_fingerprint_tracks_definition_changes():
     helpers = _preset_helpers()
     fingerprint = helpers["_preset_fingerprint"]
     # 同一定义的指纹稳定；旧版预设名映射到现名后指纹一致。
-    assert fingerprint("Instinct V2") == fingerprint("instinct-3")
-    assert fingerprint("Instinct V2") != fingerprint("Instinct V2 MoE")
+    assert fingerprint("RecurrsiveInstinct") == fingerprint("instinct-3")
+    assert fingerprint("RecurrsiveInstinct") != fingerprint("RecurrsiveInstinct MoE")
     # 非预设名（Custom / 未知）没有指纹，恢复时总会重新套用默认值。
     assert fingerprint("Custom") == ""
     assert fingerprint("missing-preset") == ""

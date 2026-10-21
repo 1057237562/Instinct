@@ -368,6 +368,7 @@ class MOEFeedForward(nn.Module):
             act_fn=self.act_fn,
             inference_backend=self._inference_backend,
             inference_stacks=self._inference_stacked,
+            checkpoint_mode=self.config.use_grad_checkpoint if self.training else 0,
         )
         if self.training:
             load = F.one_hot(topk_idx, self.config.num_experts).float().mean(0)
@@ -570,6 +571,8 @@ class InstinctModel(nn.Module):
                 enabled=self.config.flash_attn,
                 dropout_p=self.config.dropout if self.training else 0.0,
                 head_dim=self.config.head_dim,
+                num_attention_heads=self.config.num_attention_heads,
+                num_key_value_heads=self.config.num_key_value_heads,
             )
             if flex_mask is not None:
                 attention_mask = flex_mask

@@ -1,5 +1,19 @@
 # HumanEval 评测
 
+推荐使用 **HumanEval-OJ** 评测完整程序：模型阅读题面、输入输出格式和公开样例，可先思考，再提交从 stdin 读取、向 stdout 写入的 Python 程序。WebUI 默认选择 HumanEval-OJ，并默认开启思考；原版 HumanEval 函数补全仍可单独选择。
+
+```bash
+# 首次使用会自动构建并验证全部 164 题；也可以先手动生成题库
+python scripts/data_builder/build_humaneval_oj.py
+python eval_humaneval_oj.py --load_from model --weight full_sft --mode all --open_thinking 1 --max_new_tokens 4096 --k 1 --output eval/humaneval_oj_samples.jsonl
+```
+
+默认题库为 `dataset/humaneval_oj/humaneval_oj_problems.jsonl`，缺失时自动准备官方缓存并转换，旧版不完整题库会自动重建。仅指定自定义路径时，缺失文件会明确报错。转换保留所有原始 `check(candidate)` 断言、循环测试和随机测试（固定种子 42），通过 stdin/stdout 适配执行，包括浮点容差及多解条件；不再只抽取可解析的字面量断言，也不因 None、字典或混合类型而漏题。常规 I/O 是标量逐行、数组长度加空格分隔元素；多行字符串、字典、元组和混合类型的具体协议写在各题题面中，全部是纯文本，不是 JSON。
+
+最终代码从思考结束后的代码块提取；未结束的 `<think>` 内容不作为程序运行。提示只含题面、格式和公开样例，不含隐藏测试或参考程序。构建器只生成评测题库与 SHA-256 审计，不生成 SFT 训练数据。
+
+指标明确标为 **HumanEval-OJ pass@K**。它与原版函数补全有不同的提示和作答协议，不能作为官方 HumanEval 分数混报。是否提升通过率需要在同一权重与采样设置下实测；开启思考并不保证提升。
+
 `--mode all` 自动采用生成与评分流水线：每个批次的答案先写入 JSONL，再立即提交给 CPU 测试线程池，GPU 可继续生成下一批。`--workers` 控制评分并发，等待队列有上限，CPU 跟不上时会等待，避免无限堆积。逐样本结果及时写入 `_results.jsonl`，`_progress.json` 记录送评/完成数量；全部测试结束后才输出最终 pass@K 和压缩分析报告。失败中断保留已写入的答案和评分记录；`--resume` 不重复生成已有答案，但会重新评分已有答案以避免复用过期结果。
 
 批量生成可加 `--batch_size 8`（默认 1），一次处理多个题目/样本；WebUI 中对应「生成 Batch size」。显存不足时减小。原生 Linear 主干仅对相同输入长度的任务组批。改变批次大小或从部分结果恢复可能改变随机采样的后续答案；严格复现需固定参数并从空文件运行。

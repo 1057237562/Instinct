@@ -26,6 +26,7 @@ Key constraints honored here:
 """
 
 import math
+import os
 from typing import List, Optional, Tuple
 
 import torch
@@ -190,7 +191,7 @@ def checkpoint_ffn(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Gradient-checkpoint the FFN/MoE block (plan T3) — recompute, don't stash.
 
-    Wraps ``FeedForward`` (dense SwiGLU) or ``MOEFeedForward`` (top-1 routing)
+    Wraps ``FeedForward`` (dense SwiGLU) or ``MOEFeedForward``
     in ``torch.utils.checkpoint`` so the large intermediate activations
     (``[bs*seq, intermediate]``, expert expert-activations) are never kept
     alive between forward and backward: only ``hidden_states`` is saved, and
@@ -225,9 +226,42 @@ def checkpoint_ffn(
         aux = getattr(ffn_module, "aux_loss", None)
         return out, aux
 
+    if (not use_reentrant and hasattr(ffn_module, 'experts')
+            and hasattr(ffn_module, 'config') and ffn_module.training):
+        from model.moe_dispatch import inner_checkpoint_eligible
+        if inner_checkpoint_eligible(hidden_states, ffn_module.experts,
+                ffn_module.act_fn, ffn_module.config.use_grad_checkpoint):
+            # Gate/up activations are recomputed by the fused operator's backward.
+            # Avoid wrapping the entire FFN and recomputing it a second time.
+            return run(hidden_states)
+
+    options = {}
+    selective = os.environ.get('INSTINCT_MOE_SELECTIVE_CHECKPOINT', '0')
+    if selective not in ('0','1','2','3','down','gate_down'):
+        raise ValueError('INSTINCT_MOE_SELECTIVE_CHECKPOINT must be 0, 1, 2, 3, down or gate_down')
+    if selective != '0' and hasattr(ffn_module, 'experts') and not use_reentrant:
+        from functools import partial
+        options['context_fn'] = partial(_moe_checkpoint_contexts, selective)
     return torch.utils.checkpoint.checkpoint(
         run,
         hidden_states,
         use_reentrant=use_reentrant,
         preserve_rng_state=True,
+        **options,
     )
+
+
+def _moe_checkpoint_contexts(count):
+    from torch.utils.checkpoint import create_selective_checkpoint_contexts, CheckpointPolicy
+    counters = {False: 0, True: 0}
+    selected={'down':(2,), 'gate_down':(0,2)}.get(str(count))
+    if selected is None:
+        selected=tuple(range(int(count)))
+    def policy(ctx, op, *args, **kwargs):
+        if op._schema.name in ('instinct::checkpoint_expert_mm','instinct::checkpoint_direct_mm'):
+            index = counters[ctx.is_recompute]
+            counters[ctx.is_recompute] += 1
+            if index % 3 in selected:
+                return CheckpointPolicy.MUST_SAVE
+        return CheckpointPolicy.PREFER_RECOMPUTE
+    return create_selective_checkpoint_contexts(policy)

@@ -1,44 +1,48 @@
-# HumanEval -> OJ-style conversion (plain-text stdin/stdout)
+# HumanEval-OJ: complete programs with plain-text stdin/stdout
 
-Built by `scripts/data_builder/build_humaneval_oj.py` from the local official
-snapshot `dataset/humaneval/HumanEval.jsonl.gz` (MIT, OpenAI). Audit numbers:
-`build.report.json` (per-task detail, per-rule counts, identity scan, SHA-256).
+`eval_humaneval_oj.py` automatically builds the default bundle when missing and
+rebuilds legacy incomplete bundles. The Eval WebUI defaults to this benchmark,
+with thinking enabled and a 4096-token generation budget. Manual preparation:
 
-## Protocol (fixed for the whole set, classic OJ style - never JSON)
+```bash
+python scripts/data_builder/build_humaneval_oj.py
+```
 
-- stdin: plain text, one section per argument in signature order.
-  scalars on their own line (ints, floats, strings; booleans as 1/0);
-  lists/matrices are N-prefixed: a line with N, then N space-separated
-  numbers (lists of strings: N lines, one string each).
-- stdout: plain text rendered from the return value (bool as True/False,
-  number lists space-separated, string lists one per line, matrices one row
-  per line, None prints nothing), compared byte for byte.
+The builder reads or downloads the official OpenAI MIT-licensed snapshot at
+`dataset/humaneval/HumanEval.jsonl.gz`. It preserves **all 164 tasks** and executes
+each canonical solution against its complete original `check(candidate)` suite.
+It traces calls to produce I/O examples and plans, then runs the resulting
+standalone reference program through the original checks again. Conversion
+failure stops publication; no task or unsupported case is silently dropped.
 
-## How cases are produced
+Artifacts:
 
-1. Asserts in each task's `check()` are parsed with AST and constant-folded
-   (`candidate(args) == expr`, `expr == candidate(args)`,
-   `abs(candidate(...) - expr) < eps`).
-2. An I/O plan is derived from the signature's type annotations with a
-   value-based fallback; the reference program (prompt + canonical_solution +
-   plan-derived parsing/printing) EXECUTES on every case. Numeric parsing
-   preserves the literal's type so `isinstance(x, int)`-style canonicals
-   still work. Cases whose values contain None (no natural plain-text
-   encoding) are dropped and counted.
-3. The stored expected output is the reference program's actual stdout,
-   cross-checked against the assert literal (exact `==` for exact asserts,
-   isclose for abs()-style asserts). Only cross-verified pairs are kept;
-   tasks with zero verified pairs are skipped and listed in the report.
+- `humaneval_oj_problems.jsonl`: statement, I/O plan, test cases, original task,
+  and standalone reference program; only the statement is shown to the model.
+- `build.report.json`: source repository/URL and content hash, input/output row
+  counts, dropped/rewritten/filter counts, identity hits, per-task verification,
+  and output SHA-256. The source snapshot is retained unchanged.
 
-`humaneval_oj_sft.jsonl` renders each problem as a two-turn conversation whose
-assistant target is the executed reference program.
+I/O is plain text rather than JSON. Scalars occupy one line. Numeric input
+arrays use a length line followed by space-separated elements; numeric output
+arrays occupy one line. String lists and dictionaries carry counts. Tuples use
+ordered sections; multiline strings carry a line count. Values of mixed types
+use explicit type tags followed by plain-text sections. None is preserved.
+Each statement specifies its exact format and includes two examples.
 
-## Contamination warning (read before training on this)
+V2 scoring runs the model program independently for each distinct input, parses
+stdout according to the plan, and passes those values to the complete original
+test suite. This preserves original equality checks, tolerances, randomized
+loops (seed 42), dictionary order independence and multiple valid answers.
+The timeout applies to each program invocation, with an additional whole-suite
+time budget. Explicitly selected legacy V1 bundles retain their text comparison.
 
-This project's SFT recipes explicitly keep HumanEval as a held-out exclusion
-basis (`dataset/v1moe_sft64k/README.md`: HumanEval is only used for
-decontamination, no HumanEval-derived samples). Training on
-`humaneval_oj_sft.jsonl` burns HumanEval as a functional benchmark. Keep this
-directory out of SFT/RL training mixes unless that trade-off is explicitly
-accepted; the same converter pattern can be applied to non-eval corpora
-(magicoder, taco, ...) instead.
+The model may reason before its final Python code block. Code inside `<think>`
+is excluded, and an unfinished thinking response is not executed as a program.
+Scores are labelled **HumanEval-OJ pass@K**; changing the prompt and answer
+protocol means they are not official function-completion HumanEval scores.
+An improvement must be measured with matched weights and sampling settings.
+
+This is evaluation-only data. The builder does not generate SFT targets or add
+HumanEval to a training mix. Training on these problems or reference programs
+would contaminate the benchmark.

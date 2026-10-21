@@ -15,6 +15,8 @@ CPT_DEFAULTS = {
     'accumulation_steps': 1,
     'optimizer': 'muon',
     'param_dtype': 'fp32',
+    'muon_mantissa': False,
+    'muon_momentum_dtype': 'fp32',
     'activation_dtype': 'bfloat16',
     'fp8_training': 'tensorwise',
     'fp8_filter': 'auto',

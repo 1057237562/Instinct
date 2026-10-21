@@ -36,8 +36,8 @@ def document_mask(sequence_ids):
     return allowed
 
 
-@lru_cache(maxsize=1)
-def _flex_functions():
+@lru_cache(maxsize=2)
+def _flex_functions(autotune=False):
     from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
     # Flex also compiles when the outer trainer uses --use_compile 0.
@@ -45,7 +45,8 @@ def _flex_functions():
     configure_compile_limits()
     return (
         torch.compile(create_block_mask, fullgraph=True),
-        torch.compile(flex_attention, fullgraph=True),
+        torch.compile(flex_attention, fullgraph=True,
+                      **({'mode':'max-autotune-no-cudagraphs'} if autotune else {})),
     )
 
 
@@ -64,7 +65,7 @@ def build_packed_flex_mask(sequence_ids):
 
 def maybe_prepare_flex_mask(
     sequence_ids, reference, *, attention_mask=None, enabled=True,
-    dropout_p=0.0, head_dim=32,
+    dropout_p=0.0, head_dim=32, num_attention_heads=None, num_key_value_heads=None,
 ):
     """Select only the validated packed CUDA BF16, dropout-free fast path.
 
@@ -78,8 +79,16 @@ def maybe_prepare_flex_mask(
         return None
     if (not enabled or not reference.is_cuda or torch.version.hip is not None
             or attention_mask is not None or dropout_p != 0.0
-            or sequence_ids.size(1) <= 1 or head_dim not in (16, 32, 64, 128)):
+            or sequence_ids.size(1) <= 1):
         return None
+    if head_dim not in (16, 32, 64, 128):
+        from model.cuda_fastpath import blackwell_training_kernels
+        # Native non-power-of-two Flex kernels are validated here for V2's
+        # 96-wide heads. Older stacks/devices retain their existing SDPA path.
+        validated_v2 = (num_attention_heads == 16 and num_key_value_heads == 4
+                        and blackwell_training_kernels(reference.device))
+        if head_dim != 96 or (backend != 'flex' and not validated_v2):
+            return None
     dtype = (torch.get_autocast_dtype('cuda') if torch.is_autocast_enabled('cuda')
              else reference.dtype)
     if dtype != torch.bfloat16:
@@ -91,9 +100,23 @@ def maybe_prepare_flex_mask(
     return build_packed_flex_mask(sequence_ids)
 
 
-@torch.compiler.disable
 def packed_flex_attention(q, k, v, mask: PackedFlexMask):
-    _, attention = _flex_functions()
+    if q.shape[-1] == 96 and torch.compiler.is_compiling():
+        # A disable boundary inside full-layer checkpointing leaves the entire
+        # layer eager. Flex is a traceable higher-order op: keep V2's attention
+        # inside the outer compiled checkpoint, including FP8 projections.
+        from torch.nn.attention.flex_attention import flex_attention
+        return flex_attention(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
+            block_mask=mask.block_mask, enable_gqa=True,
+            kernel_options={'BACKEND': 'TRITON'},
+        ).transpose(1, 2)
+    return _packed_flex_attention_region(q, k, v, mask)
+
+
+@torch.compiler.disable
+def _packed_flex_attention_region(q, k, v, mask: PackedFlexMask):
+    _, attention = _flex_functions(_training_autotune(q))
     # Do not repeat KV heads: FlexAttention implements GQA in its kernels and
     # accumulates gradients into the original compact K/V tensors.
     output = attention(
@@ -102,3 +125,30 @@ def packed_flex_attention(q, k, v, mask: PackedFlexMask):
         kernel_options={'BACKEND': 'TRITON'},
     )
     return output.transpose(1, 2)
+
+
+@lru_cache(maxsize=8)
+def _causal_flex_mask(length, device):
+    create_mask, _ = _flex_functions()
+    def causal(batch, head, query, key):
+        return query >= key
+    return create_mask(causal, None, None, length, length, device=device, BLOCK_SIZE=128)
+
+
+@torch.compiler.disable
+def causal_flex_attention(q, k, v):
+    """Full causal attention with compact GQA, including single-document batches."""
+    _, attention = _flex_functions(_training_autotune(q))
+    mask = _causal_flex_mask(q.shape[1], str(q.device))
+    return attention(q.transpose(1,2), k.transpose(1,2), v.transpose(1,2),
+                     block_mask=mask, enable_gqa=True,
+                     kernel_options={'BACKEND': 'TRITON'}).transpose(1,2)
+
+
+def _training_autotune(q):
+    setting=os.environ.get('INSTINCT_FLEX_AUTOTUNE','auto')
+    if setting not in ('auto','0','1'):
+        raise ValueError('INSTINCT_FLEX_AUTOTUNE must be auto, 0 or 1')
+    from model.cuda_fastpath import blackwell_training_kernels
+    return torch.is_grad_enabled() and (setting=='1' or
+        (setting=='auto' and blackwell_training_kernels(q.device)))

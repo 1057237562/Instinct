@@ -44,6 +44,16 @@ def test_eos_at_different_positions_trims_only_unused_suffix():
     assert rows[1, -1].item() == 2
 
 
+def test_api_metrics_flush_first_token_then_keep_chunked_transfers():
+    streamer = Streamer()
+    streamer.flush_first_token = True
+    chunks = TokenChunkBuffer(streamer, 16, 2)
+    for step in range(35):
+        assert not chunks.push(torch.tensor([[step + 3]]), torch.tensor([False]), final=step == 34)
+    assert [block.shape[1] for block in streamer.blocks] == [1, 16, 16, 2]
+    assert torch.cat(streamer.blocks, dim=1).tolist() == [list(range(3, 38))]
+
+
 def test_animation_escapes_content_and_preserves_reduced_motion():
     markup = animated_stream_html('<old>', '<script>x</script>')
     assert '<script>' not in markup

@@ -59,6 +59,21 @@ def test_off_profiler_is_noop(tmp_path):
     assert profiler.finish() is None
 
 
+def test_continuous_window_includes_between_step_wait(monkeypatch, tmp_path):
+    # Markers are CPU seconds: compute 1ms, wait 8ms, compute 1ms.
+    clock = iter([0.0, 0.0, 0.0, 0.001, 0.001, 0.009, 0.009, 0.010, 0.010])
+    monkeypatch.setattr('trainer.training_profiler.time.perf_counter', lambda: next(clock))
+    profiler = TrainingProfiler(_args(tmp_path), name='window')
+    profiler.begin_step(tokens=100, useful_tokens=75)
+    assert profiler.end_step() is None
+    profiler.begin_step(tokens=100, useful_tokens=75)
+    result = profiler.end_step()
+    assert abs(result['profile/step_time_ms'] - 1.0) < 1e-6
+    assert abs(result['profile/window_step_time_ms'] - 5.0) < 1e-6
+    assert abs(result['profile/window_tokens_per_second'] - 20000) < 1e-6
+    assert abs(result['profile/window_useful_tokens_per_second'] - 15000) < 1e-6
+
+
 def test_torch_profiler_exports_official_chrome_trace(tmp_path):
     profiler = TrainingProfiler(
         _args(tmp_path, mode="torch", profile_interval=10), name="trace"

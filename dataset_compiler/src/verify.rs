@@ -14,7 +14,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
 use crate::build::{cell_to_value, convert_row};
-use crate::read::{canonical, plan_from_arrow, read_values, require_columns, summarize};
+use crate::read::{canonical, plan_from_arrow, read_values_iter, require_columns, summarize};
 use crate::schema::Preset;
 
 #[derive(Debug, Clone)]
@@ -61,7 +61,11 @@ impl VerifyOutcome {
             self.compiled_rows,
             self.compared,
             self.mismatches.len(),
-            if self.row_count_ok { "match" } else { "MISMATCH" }
+            if self.row_count_ok {
+                "match"
+            } else {
+                "MISMATCH"
+            }
         )
     }
 }
@@ -76,66 +80,18 @@ pub fn verify(source: &Path, compiled: &Path, options: &VerifyOptions) -> Result
     } else {
         options.format
     };
-    let (schema, compiled_rows) = read_values(compiled, options.offset, Some(options.rows))?;
+    let (schema, mut compiled_values) =
+        read_values_iter(compiled, options.offset, Some(options.rows))?;
     require_columns(&schema, preset, &options.text_key)?;
     let plan = plan_from_arrow(&schema, preset)?;
-    let expected = read_source_sample(source, &plan, options)?;
-
-    let mut mismatches = Vec::new();
-    let compared = expected.rows.len().min(compiled_rows.len()) as u64;
-    for index in 0..compared as usize {
-        let left = canonical(&expected.rows[index]);
-        let right = canonical(&compiled_rows[index]);
-        if left != right {
-            let position = options.offset + index as u64 + 1;
-            let detail = first_difference(&left, &right)
-                .unwrap_or_else(|| "values differ".to_string());
-            if mismatches.len() < 10 {
-                mismatches.push(format!("row {position}: {detail}"));
-            }
-        }
-    }
-    if expected.rows.len() as i64 != compiled_rows.len() as i64 && mismatches.len() < 10 {
-        mismatches.push(format!(
-            "sampled {} source rows but read {} compiled rows",
-            expected.rows.len(),
-            compiled_rows.len()
-        ));
-    }
-    let row_count_ok = expected.source_rows == summary.rows.max(0) as u64
-        || options.allow_row_mismatch;
-    if !row_count_ok {
-        mismatches.push(format!(
-            "source has {} rows but the parquet file has {}",
-            expected.source_rows, summary.rows
-        ));
-    }
-    Ok(VerifyOutcome {
-        source_rows: expected.source_rows,
-        compiled_rows: summary.rows,
-        compared,
-        mismatches,
-        row_count_ok,
-    })
-}
-
-struct SourceSample {
-    source_rows: u64,
-    rows: Vec<Value>,
-}
-
-/// One sequential pass: count every non-blank row, and convert the window
-/// ``[offset, offset + rows)`` through the compiled schema.
-fn read_source_sample(
-    source: &Path,
-    plan: &crate::schema::SchemaPlan,
-    options: &VerifyOptions,
-) -> Result<SourceSample> {
     let file = File::open(source).with_context(|| format!("cannot open {}", source.display()))?;
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, file);
-    let mut buffer: Vec<u8> = Vec::with_capacity(64 * 1024);
+    let mut buffer = Vec::with_capacity(64 * 1024);
     let mut source_rows = 0u64;
-    let mut rows = Vec::new();
+    let mut sampled_rows = 0u64;
+    let mut compiled_rows_read = 0u64;
+    let mut compared = 0u64;
+    let mut mismatches = Vec::new();
     let window_end = options.offset.saturating_add(options.rows);
     loop {
         buffer.clear();
@@ -157,11 +113,44 @@ fn read_source_sample(
         if position < options.offset || position >= window_end {
             continue;
         }
+        sampled_rows += 1;
         let value: Value = serde_json::from_slice(&buffer)
             .with_context(|| format!("row {}: invalid JSON", position + 1))?;
-        rows.push(cell_to_value(&convert_row(&value, plan)?, plan));
+        let left = canonical(&cell_to_value(&convert_row(&value, &plan)?, &plan));
+        if let Some(actual) = compiled_values.next() {
+            let right = canonical(&actual?);
+            compiled_rows_read += 1;
+            compared += 1;
+            if left != right && mismatches.len() < 10 {
+                let detail =
+                    first_difference(&left, &right).unwrap_or_else(|| "values differ".to_string());
+                mismatches.push(format!("row {}: {detail}", position + 1));
+            }
+        }
     }
-    Ok(SourceSample { source_rows, rows })
+    for actual in compiled_values {
+        actual?;
+        compiled_rows_read += 1;
+    }
+    if sampled_rows != compiled_rows_read && mismatches.len() < 10 {
+        mismatches.push(format!(
+            "sampled {sampled_rows} source rows but read {compiled_rows_read} compiled rows"
+        ));
+    }
+    let row_count_ok = source_rows == summary.rows.max(0) as u64 || options.allow_row_mismatch;
+    if !row_count_ok {
+        mismatches.push(format!(
+            "source has {source_rows} rows but the parquet file has {}",
+            summary.rows
+        ));
+    }
+    Ok(VerifyOutcome {
+        source_rows,
+        compiled_rows: summary.rows,
+        compared,
+        mismatches,
+        row_count_ok,
+    })
 }
 
 fn detect_source_preset(source: &Path, text_key: &str) -> Result<Preset> {
@@ -313,7 +302,11 @@ mod tests {
     #[test]
     fn a_missing_row_count_is_reported() {
         let (directory, output) = compile(
-            &["{\"text\": \"a\"}", "{\"text\": \"b\"}", "{\"text\": \"c\"}"],
+            &[
+                "{\"text\": \"a\"}",
+                "{\"text\": \"b\"}",
+                "{\"text\": \"c\"}",
+            ],
             CompileOptions {
                 limit: Some(2),
                 ..quiet()
@@ -330,6 +323,30 @@ mod tests {
             .mismatches
             .iter()
             .any(|message| message.contains("source has 3 rows")));
+    }
+
+    #[test]
+    fn full_verification_crosses_batches_and_detects_a_late_value_change() {
+        let lines: Vec<String> = (0..3073)
+            .map(|index| format!("{{\"text\": \"row {index}\"}}"))
+            .collect();
+        let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (directory, output) = compile(&borrowed, quiet());
+        let source = directory.path().join("source.jsonl");
+        let options = VerifyOptions {
+            rows: 10000,
+            ..VerifyOptions::default()
+        };
+        let outcome = verify(&source, &output, &options).unwrap();
+        assert!(outcome.ok());
+        assert_eq!(outcome.compared, 3073);
+        let mut changed = lines;
+        changed[2548] = "{\"text\": \"changed tail value\"}".to_string();
+        std::fs::write(&source, changed.join("\n") + "\n").unwrap();
+        let outcome = verify(&source, &output, &options).unwrap();
+        assert!(!outcome.ok());
+        assert_eq!(outcome.compared, 3073);
+        assert!(outcome.mismatches[0].contains("row 2549"));
     }
 
     #[test]

@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Instinct V2 187.5M latent recurrent-depth Transformer architecture">
-  <title>Instinct V2 — Recurrent Architecture</title>
+  <meta name="description" content="RecurrsiveInstinct 187.5M latent recurrent-depth Transformer architecture">
+  <title>RecurrsiveInstinct — Recurrent Architecture</title>
   <style>
     :root {
       --bg: #07101f;
@@ -198,7 +198,7 @@
 <body>
   <nav>
     <div class="container nav-inner">
-      <div class="brand"><span class="brand-mark">I²</span><span>Instinct V2</span></div>
+      <div class="brand"><span class="brand-mark">I²</span><span>RecurrsiveInstinct</span></div>
       <div class="nav-links">
         <a href="architecture-v1.html">V1 架构</a>
         <a href="architecture-v1-moe.html">V1 MoE</a>
@@ -213,7 +213,7 @@
   <header class="hero">
     <div class="container">
       <span class="eyebrow"><span class="pulse"></span> Latent recurrent-depth Transformer</span>
-      <h1><span class="gradient-text">Instinct V2 · 187.5M</span></h1>
+      <h1><span class="gradient-text">RecurrsiveInstinct · 187.5M</span></h1>
       <p>基于论文的 Prelude → Shared Recurrent Core → Coda 结构。只有 8 个物理层，通过 32 次平均递归展开为 132 层平均有效深度。</p>
       <div class="hero-actions">
         <a class="button primary" href="#architecture">查看循环架构</a>
@@ -423,7 +423,7 @@
       <div class="container">
         <div class="section-head">
           <small>Exact config</small>
-          <h2>当前 Instinct V2 配置</h2>
+          <h2>当前 RecurrsiveInstinct 配置</h2>
           <p>与 <span class="mono">trainer/config_pretrain.json</span>、<span class="mono">config_full_sft.json</span> 和 WebUI 预设一致。</p>
         </div>
         <pre><span class="key">"hidden_size"</span>: <span class="num">1248</span>,
@@ -432,7 +432,7 @@
 <span class="key">"num_attention_heads"</span>: <span class="num">13</span>,
 <span class="key">"num_key_value_heads"</span>: <span class="num">13</span>,
 <span class="key">"head_dim"</span>: <span class="num">96</span>,
-<span class="key">"model_architecture"</span>: "looped",
+<span class="key">"model_architecture"</span>: "recurrsive_instinct",
 <span class="key">"prelude_layers"</span>: <span class="num">2</span>,
 <span class="key">"recurrent_layers"</span>: <span class="num">4</span>,
 <span class="key">"coda_layers"</span>: <span class="num">2</span>,
@@ -450,7 +450,7 @@
 
   <footer>
     <div class="container footer-inner">
-      <span>Instinct V2 · Pure PyTorch latent recurrent-depth language model</span>
+      <span>RecurrsiveInstinct · Pure PyTorch latent recurrent-depth language model</span>
       <span>187,521,984 parameters · vocab 6,400 · max position 32,768</span>
     </div>
   </footer>

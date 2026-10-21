@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Generate a formatted Chinese master's-thesis-style PDF from the LoopUS-Instinct paper.
+"""Generate a formatted Chinese master's-thesis-style PDF from the RecurrsiveInstinct paper.
 
 Structure (per CN thesis conventions):
   Cover (no page number) -> Declaration (no page number) ->

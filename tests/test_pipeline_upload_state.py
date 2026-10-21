@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from streamlit.testing.v1 import AppTest
+from scripts.config_templates import snapshot_config, load_model_presets, load_legacy_preset_names
 
 
 def test_persistence_excludes_upload_but_keeps_pipeline_snapshots(tmp_path):
@@ -21,13 +22,15 @@ def test_persistence_excludes_upload_but_keeps_pipeline_snapshots(tmp_path):
              'batch_size': 12, 'btn_load_config': True, 'clear_train_log': False,
              '_override_moe_int': True}
     namespace = {'st': SimpleNamespace(session_state=state), 'os': os, 'json': json,
-                 'hashlib': hashlib}
+                 'hashlib': hashlib, 'snapshot_config': snapshot_config,
+                 'load_model_presets': load_model_presets,
+                 'load_legacy_preset_names': load_legacy_preset_names}
     exec(compile(ast.Module(body=functions + presets, type_ignores=[]), str(source), 'exec'),
          namespace)
     namespace['_persist_panel_state'](str(tmp_path))
     saved = json.loads((tmp_path / 'webui_state.json').read_text(encoding='utf-8'))
     assert saved == {'pipeline_stages': state['pipeline_stages'], 'batch_size': 12,
-                     '_override_moe_int': True, 'preset_fingerprint': ''}
+                     '_override_moe_int': True, 'preset_fingerprint': '', 'config_template': ''}
     assert not namespace['_panel_state_key_allowed']('pipeline_upload')
 
 

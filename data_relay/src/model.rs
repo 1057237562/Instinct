@@ -6,6 +6,10 @@ use std::path::{Component, Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
+    /// Browser is sending resumable data chunks.
+    Receiving,
+    /// Local data is being hashed before delivery.
+    Verifying,
     /// Created, waiting to run.
     Queued,
     /// Download script executing.
@@ -28,6 +32,8 @@ impl TaskStatus {
     #[allow(dead_code)] // used by tests / future CLI output
     pub fn as_str(self) -> &'static str {
         match self {
+            TaskStatus::Receiving => "receiving",
+            TaskStatus::Verifying => "verifying",
             TaskStatus::Queued => "queued",
             TaskStatus::Running => "running",
             TaskStatus::DownloadDone => "download_done",
@@ -89,11 +95,22 @@ pub struct Task {
     pub upload_total_bytes: u64,
     #[serde(default)]
     pub upload_done_bytes: u64,
+    /// Bytes sent in this attempt, excluding resumed/skipped files.
+    #[serde(default)]
+    pub upload_transferred_bytes: u64,
+    #[serde(default)]
+    pub upload_attempt: u64,
+    /// preparing / transferring / verifying; separate from the task lifecycle.
+    #[serde(default)]
+    pub upload_phase: String,
     /// Per-task token guarding the /pull/{task}/... HTTP channel (pull 模式).
     #[serde(default)]
     pub pull_token: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+    /// Absent for legacy script tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_upload: Option<crate::data_upload::DataUpload>,
 }
 
 pub fn now_secs() -> i64 {

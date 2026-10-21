@@ -24,6 +24,11 @@ def snapshot(state, model, trainer):
                     fp8_training='off', fp8_filter='auto', profile='off',
                     profile_warmup=10, profile_interval=100, profile_active_steps=5)
     args = {key: state.get(key, value) for key, value in defaults.items()}
+    try:
+        from scripts.muon_controls import panel_arguments
+    except ModuleNotFoundError:
+        from muon_controls import panel_arguments
+    args.update(panel_arguments(state))
     args.update(dtype=state.get('activation_dtype', 'bfloat16'),
                 epochs=state.get(f'epochs_{trainer}', 2),
                 learning_rate=state.get(f'learning_rate_{trainer}', 5e-4 if trainer == 'pretrain' else 1e-5),
@@ -32,7 +37,7 @@ def snapshot(state, model, trainer):
                 data_path=state.get(f'data_path_{trainer}', ''),
                 hidden_size=model['hidden_size'], num_hidden_layers=model['num_hidden_layers'],
                 use_moe=model['use_moe'],
-                use_looped=model.get('model_architecture') == 'looped',
+                use_recurrsive=model.get('model_architecture') == 'recurrsive_instinct',
                 early_exit=bool(model.get('early_exit_layers') and state.get('early_exit_enabled')))
     if not args['data_path']:
         raise ValueError('请先选择该阶段的数据集')
@@ -43,6 +48,22 @@ def snapshot(state, model, trainer):
     args.update(migration_args(
         state, model, trainer, from_resume=bool(state.get('from_resume', False)),
     ))
+    if state.get('bucket_token_budget', 0):
+        args['bucket_token_budget'] = int(state['bucket_token_budget'])
+    if trainer == 'pretrain' and args['dataset_streaming'] == 'on' and args['cache_build_mode'] == 'inline':
+        args['num_workers'] = 0
+    if trainer == 'pretrain' and state.get('autotune_use_profile'):
+        try:
+            from scripts.autotune_panel import profile_command, cli_values
+        except ModuleNotFoundError:
+            from autotune_panel import profile_command, cli_values
+        profile = state.get('autotune_profile_path', '').strip()
+        if not profile:
+            raise ValueError('请选择已验收的生产 profile 路径')
+        command = [sys.executable, 'trainer/train_pretrain.py']
+        for key, value in args.items():
+            command.extend(['--' + key, str(int(value) if isinstance(value, bool) else value)])
+        args = cli_values(profile_command(command, profile, trainer, model))
     return json.loads(json.dumps(dict(name=trainer, trainer=trainer, model=model, args=args)))
 
 

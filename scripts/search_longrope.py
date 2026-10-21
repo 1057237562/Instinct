@@ -122,8 +122,8 @@ def make_rope_scaling(candidate: Candidate, dim: int, original_max: int, target_
 def _architecture_classes(architecture: str):
     if architecture == "linear":
         from model.model_instinct_linear import InstinctConfig, InstinctForCausalLM
-    elif architecture == "looped":
-        from model.model_instinct_loop import InstinctConfig, InstinctForCausalLM
+    elif architecture == "recurrsive_instinct":
+        from model.model_recurrsive_instinct import InstinctConfig, InstinctForCausalLM
     else:
         from model.model_instinct import InstinctConfig, InstinctForCausalLM
     return InstinctConfig, InstinctForCausalLM

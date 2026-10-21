@@ -10,11 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 from model.model_instinct import InstinctConfig
-from model.model_instinct_loop import InstinctConfig as LoopedInstinctConfig
+from model.model_recurrsive_instinct import InstinctConfig as RecurrsiveInstinctConfig
 from model.model_instinct_linear import InstinctConfig as LinearInstinctConfig
 from trainer.trainer_utils import config_from_args
 
-ALL_CONFIGS = [InstinctConfig, LoopedInstinctConfig, LinearInstinctConfig]
+ALL_CONFIGS = [InstinctConfig, RecurrsiveInstinctConfig, LinearInstinctConfig]
 
 
 def make_args(**kw):
@@ -24,7 +24,7 @@ def make_args(**kw):
         hidden_size=64,
         num_hidden_layers=2,
         use_moe=0,
-        use_looped=0,
+        use_recurrsive=0,
         config_path="",
     )
     base.update(kw)
@@ -58,7 +58,7 @@ def test_config_from_args_explicit_override_wins():
     assert cfg.use_grad_checkpoint == 1
 
 
-def test_config_from_args_looped_variant():
-    cfg = config_from_args(make_args(use_looped=1, use_grad_checkpoint=2))
-    assert isinstance(cfg, LoopedInstinctConfig)
+def test_config_from_args_recurrsive_instinct_variant():
+    cfg = config_from_args(make_args(use_recurrsive=1, use_grad_checkpoint=2))
+    assert isinstance(cfg, RecurrsiveInstinctConfig)
     assert cfg.use_grad_checkpoint == 2

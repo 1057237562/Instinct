@@ -1,0 +1,17 @@
+[Unit]
+Description=Instinct data relay and training manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/instinct-relay
+ExecStart=/opt/instinct-relay/bin/data_relay --config /opt/instinct-relay/config.toml serve
+Environment=RUST_LOG=info
+UMask=0077
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
