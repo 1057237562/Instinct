@@ -13,7 +13,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $relayProjectRoot = Split-Path -Parent $PSScriptRoot
-$relayExecutable = Join-Path $relayProjectRoot 'data_relay_delivery.exe'
+$relayExecutable = Join-Path $relayProjectRoot 'data_relay\bin\data_relay_delivery.exe'
 $relaySourceFile = Join-Path $relayProjectRoot 'dataset\pretrain_coder_12b.parquet'
 $relayWorkingDir = Join-Path $relayProjectRoot 'data_relay'
 foreach ($relayRequiredFile in @($relayExecutable, $relaySourceFile, (Join-Path $relayWorkingDir 'config.toml'))) {

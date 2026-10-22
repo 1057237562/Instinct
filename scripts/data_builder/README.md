@@ -47,6 +47,47 @@ never append concurrently to the same JSONL file.
 Training launchers remain under `trainer/` or `scripts/`; these utilities only
 prepare and verify data.
 
+## l3_builder (Rust)
+
+`l3_builder/` is a standalone Rust crate (Cargo) that builds the
+UltraData-Code-L3 12B-token CPT corpus from `openbmb/UltraData-Code` L3. It is
+not imported or invoked by the Python builders, and it has no Python package
+wrapper: the same corpus workflow supplies `plan.json`, the cross-corpus
+fingerprint and 13-gram benchmark arrays, and the vendor-trigger list, while
+the binary is run directly. The final global shuffle, identity screening of
+diverted records and reporting stay in Python.
+
+The Rust worker processes one parquet shard per rayon task: text validation,
+global exact dedup (blake2b), cross-corpus dedup, the 4096-token length filter,
+13-word n-gram benchmark screening, vendor-mention diversion, and a per-language
+token quota. Fingerprint conventions must stay aligned with the Python builder
+(`fp16` / `fp8` / n-gram hashes; see the module header in `src/main.rs`).
+
+```bash
+# Build the crate (its target/ directory is git-ignored).
+cd scripts/data_builder/l3_builder
+cargo build --release
+
+# Run from the repository root so relative plan/data/tokenizer paths resolve.
+cd ../../..
+./scripts/data_builder/l3_builder/target/release/l3_builder \
+  --plan dataset/ultradata_code_l3_12b/plan.json \
+  --work dataset/ultradata_code_l3_12b \
+  --fingerprints <fingerprints.u64> \
+  --bench-ngrams <bench_ngrams.u64> \
+  --triggers <vendor_triggers.json> \
+  --tokenizer model/tokenizer.json \
+  --out <accepted.jsonl> \
+  --vendor-hits <vendor_hits.jsonl> \
+  --stats <stats.json> \
+  --threads 16
+```
+
+`--threads 0` uses all cores; `--only-lang <lang>` with `--append` extends a
+partially finished language run. Plan and downloads live under
+`dataset/ultradata_code_l3_12b/` (ignored), and the crate's `target/` build
+output is ignored as well.
+
 ## Candidate triage for suspicious data
 
 The anomaly filter supports JSONL, gzip-compressed JSONL, Parquet, and

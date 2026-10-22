@@ -6,7 +6,7 @@ set PYTHONUTF8=1
 rem Pick the newest build without overwriting an executable held by a running service.
 set "INSTINCT_RELAY_ROOT=%~dp0"
 set "RELAY_EXE="
-for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "@('data_relay_manager.exe','data_relay.exe','data_relay/target/release/data_relay.exe') | ForEach-Object { Get-Item -LiteralPath (Join-Path $env:INSTINCT_RELAY_ROOT $_) -ErrorAction SilentlyContinue } | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName"`) do set "RELAY_EXE=%%I"
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "@('data_relay/bin/data_relay_manager.exe','data_relay/bin/data_relay.exe','data_relay/target/release/data_relay.exe') | ForEach-Object { Get-Item -LiteralPath (Join-Path $env:INSTINCT_RELAY_ROOT $_) -ErrorAction SilentlyContinue } | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName"`) do set "RELAY_EXE=%%I"
 
 if not exist "%RELAY_EXE%" (
     echo [ERROR] Missing relay executable. Run cargo build --release in data_relay.

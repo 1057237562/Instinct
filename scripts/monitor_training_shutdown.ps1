@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 # A detached monitor is useful when the current terminal should remain free.
 if ($Detach) {
     $repoRoot = Split-Path -Parent $PSScriptRoot
-    $logDir = Join-Path $repoRoot 'checkpoints'
+    $logDir = Join-Path $repoRoot 'trainer/logs'
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 
     $stdoutLog = Join-Path $logDir 'training_shutdown_monitor.log'

@@ -3,7 +3,7 @@
 ## What this is
 Instinct is a single-GPU language-model training and inference project with V1/V2 Dense and MoE configurations, plus linear-attention and RecurrsiveInstinct backbones. All core algorithms (Dense/MoE Transformer, Pretrain, SFT, LoRA, DPO, PPO, GRPO, CISPO, Agentic RL, KD) are implemented in pure PyTorch — no `trl`/`peft` abstractions. Rust tools handle dataset compilation and the AutoDL data/training relay.
 
-Last checked against the working tree on **2026-10-20**. Treat executable code,
+Last checked against the working tree on **2026-10-23**. Treat executable code,
 checkpoint sidecars and the shared template catalog as the source of truth for
 current behavior. Historical experiment numbers describe their recorded model,
 hardware and precision; partial JSON reports do not establish a completed run.
@@ -32,27 +32,61 @@ hardware and precision; partial JSON reports do not establish a completed run.
 
 ## Project layout
 
+Four categories; root entry points (`eval_llm.py`, `eval_*.py`, `run_recurrsive.py`,
+`run_linear.py`, `trainer/train_*.py`, `start_*.bat`) are stable public paths — do not
+move them, and keep importable code under `scripts.*` / `trainer.*`.
+
 ```
-model/          # Model definition (InstinctConfig, InstinctForCausalLM, LoRA), tokenizer files
+# ── Training code ────────────────────────────────────────────────────
+model/          # Model definition (InstinctConfig, InstinctForCausalLM, LoRA),
+                # RecurrsiveInstinct/linear backbones, inference runtime, tokenizer files
 trainer/        # All training scripts (pretrain, SFT, LoRA, DPO, PPO, GRPO, Agent RL, KD, tokenizer)
                 # + shared infra: trainer_cli.py, trainer_utils.py, training_pipeline.py,
                 #   streaming_pretrain.py, packing_transition.py, training_eta.py,
                 #   training_profiler.py, rollout_engine.py, compile_cache.py
-                # + batched_muon.py / muon_kernels.py, recipes/ and profiles/
-dataset/        # Dataset corpora, data files, provenance, and audit reports
-scripts/data_loader/ # Training dataset loaders, source resolution, packing, and caching
-scripts/data_builder/ # Offline dataset collection, generation, cleaning, and audit utilities
-dataset_compiler/  # Rust tool: compile JSONL corpora into Parquet (see its README.md)
-data_relay/        # Rust relay server: run download/cleaning scripts, auto-boot AutoDL in
-                   # no-GPU mode, transfer via HTTP pull (default)/SFTP/Jupyter, manage disk quota
-scripts/        # Inference, API server, WebUI, model conversion, training launchers
+                # + batched_muon.py / muon_kernels.py, autotune*, config_*.json, recipes/, profiles/
+run_recurrsive.py / run_linear.py   # Alternate-topology wrappers (root)
+scripts/train_instinct_v2.ps1       # V2 Dense launcher
+
+# ── Data acquisition & build ─────────────────────────────────────────
+scripts/data_loader/   # Training dataset loaders, source resolution, packing, and caching
+scripts/data_builder/  # Offline dataset collection, generation, cleaning, and audit utilities
+                       # + l3_builder/ Rust corpus builder (cargo build inside that directory)
+dataset_compiler/      # Rust tool: compile JSONL corpora into Parquet (see its README.md)
+data_relay/            # Rust relay server: run download/cleaning scripts, auto-boot AutoDL in
+                       # no-GPU mode, transfer via HTTP pull (default)/SFTP/Jupyter, disk quota;
+                       # prebuilt Windows binaries live in data_relay/bin/ (ignored)
+dataset/               # Dataset corpora (data ignored), provenance, and audit reports (tracked)
+
+# ── Artifacts & checkpoints (git-ignored) ────────────────────────────
+out/            # Inference weights out/{weight}_{dim}{_moe}.pth + matching .json
+checkpoints/    # Full resume states checkpoints/{weight}_{dim}{_moe}_resume.pth + .json;
+                # checkpoints/_archive/ keeps retired/duplicate artifacts (archive, never delete)
+eval/           # Evaluation artifacts and runs
+experiments/results|data/   # Experiment outputs
+profiler_traces/ trainer/logs/ tmp/   # Traces, trainer + shutdown-monitor logs, scratch
+.relay_training/ .relay_code_sync/    # Relay-managed training state/backups
+
+# ── Tools & entry points ─────────────────────────────────────────────
+scripts/        # Inference, API server, Chat/Config/Eval WebUI, model conversion, monitoring,
+                # autotune panel, data tooling (importable as scripts.*)
 eval_llm.py     # CLI inference script
 eval_*.py       # GSM8K, HumanEval, HumanEval OJ, pass@K, batch and report helpers
                 # LiveCodeBench generation/evaluation is in eval_llm.py; artifacts land in eval/
+start_*.bat     # Root launchers (Config/Chat/Eval WebUI, API, data relay)
+
+# ── Docs & tests ─────────────────────────────────────────────────────
 tests/          # Pytest suite; `gpu` marker = needs CUDA
-experiments/    # Perf/research experiment scripts (lambda sweeps, synthetic data, plots)
+experiments/    # Perf/research experiment scripts (lambda sweeps, synthetic data, plots);
+                #   probes/ keeps retired one-off diagnostics
 docs/           # Pipeline/cache, packed attention, Muon precision, autotune and evaluation docs
+                # + docs/architecture/ (HTML architecture/tour pages) + docs/reports/ (dated reports)
 ```
+
+Put new files into the matching category: training code in `trainer/`/`model/`,
+data code in `scripts/data_*`/`dataset_compiler/`/`data_relay/`, tools in `scripts/`,
+and generated outputs only in the ignored artifact directories. See
+`docs/repo_layout.md` for the full map and cleanup rules.
 
 ## Essential commands
 
@@ -289,7 +323,7 @@ cargo clippy
   lifecycle), `autodl.rs` (console/Pro API), `disk.rs` (quota planning),
   `pull.rs` / `sftp.rs` / `jupyter.rs` (transfer channels), `web.rs` (HTTP API).
 - Server training manager: root `start_data_relay.bat` selects the newest of the
-  root manager/relay executables and `data_relay/target/release/data_relay.exe`.
+  `data_relay/bin/` manager/relay executables and `data_relay/target/release/data_relay.exe`.
   `training.rs` handles SSH/API operations and automatic
   no-GPU shutdown → GPU boot → SSH/CUDA readiness for WebUI start/resume clicks
   (`auto_gpu:true`, GPU billing). CLI `training --training-action start|resume`
@@ -334,8 +368,9 @@ cargo clippy
   cached lifecycle/UI fields into trainer arguments. Test CLI parity against the
   Config WebUI builders with `python data_relay/tests/test_training_panel_cache.py`.
 - Direct local delivery: root `upload_pretrain_coder_12b.bat` invokes
-  `scripts/upload_pretrain_coder_12b.ps1` using `data_relay_delivery.exe`
-  (separate binary so an active WebUI can keep running). It targets the configured
+  `scripts/upload_pretrain_coder_12b.ps1` using
+  `data_relay/bin/data_relay_delivery.exe` (separate binary so an active WebUI can
+  keep running). It targets the configured
   instance's `/root/autodl-tmp/dataset`, cleans two named old SFT corpora and
   disposable caches, updates `master`, uploads Parquet plus available audit
   sidecars, and verifies SHA-256 before installing final files. The PowerShell
@@ -770,3 +805,4 @@ thresholds or separate short/long attention factors).
 - `dataset_compiler/README.md` / `scripts/data_builder/README.md` — Rust compilation/verification and data preparation/audit entry points
 - `data_relay/deploy/ONLINE.md` — monitor/proxy deployment; keep its private staging archives and credentials out of the repository
 - `docs/gsm8k.md` / `docs/humaneval.md` / `docs/eval_webui.md` — benchmark harness and Eval WebUI details
+- `docs/repo_layout.md` — repository map: training / data acquisition / artifacts & checkpoints / tools, tracked-vs-ignored status, stable-path contract and cleanup rules

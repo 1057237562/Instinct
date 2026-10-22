@@ -454,22 +454,45 @@ after a clean exit (code 0) while keeping it on for pause (42) or failure.
 ## Project layout
 
 ```text
-model/                # InstinctConfig / InstinctForCausalLM / LoRA / RecurrsiveInstinct / linear architectures
-                      #   + inference runtime (inference_runtime, static_cache, grouped_mm, kv_cache_quant) + tokenizer files
-trainer/              # All training scripts (pretrain, SFT, LoRA, DPO, PPO, GRPO, Agent RL, KD, tokenizer)
-                      #   + trainer_cli.py shared CLI / training_pipeline.py / training_profiler.py
-dataset/              # Data documentation (dataset.md); corpora are gitignored and downloaded separately
-dataset_compiler/     # Rust tool: JSONL -> Parquet corpus compilation (see its README.md)
-scripts/              # Inference, API server, Chat/Config/Eval WebUIs, model conversion
-scripts/data_loader/  # Training-side loading: format resolution, packing, streaming chunks, cache budget
-scripts/data_builder/ # Offline collection/build/cleaning/audit tooling (see its README.md)
-eval_llm.py           # CLI inference + LiveCodeBench entry point
-eval_gsm8k.py / eval_humaneval.py / eval_pass_k.py / eval_batch.py / eval_report.py   # eval harnesses
-eval/                 # Evaluation artifacts and run records (eval/runs/<timestamp>_<ID>/)
-tests/                # pytest suite; gpu-marked tests auto-skip without CUDA
-docs/                 # Design docs: training_pipeline / compact_dataset_cache / gsm8k / humaneval / eval_webui / grouped_moe_gemm ...
-experiments/          # Performance/research experiment scripts (lambda sweeps, grouped-GEMM bench, graph-break report, ...)
+# ── Training code ────────────────────────────────────────
+model/                  # InstinctConfig / model trunks / LoRA / RecurrsiveInstinct / linear architectures
+                        #   + inference runtime (inference_runtime, static_cache, grouped_mm, kv_cache_quant) + tokenizer
+trainer/                # All training scripts (train_*.py) + shared infra (trainer_cli, training_pipeline,
+                        #   streaming_pretrain, training_eta, compile_cache, batched_muon, autotune*, ...)
+                        #   + config_*.json, recipes/, profiles/, logs/ (logs are not tracked)
+run_recurrsive.py / run_linear.py   # Alternate-topology wrappers (repo root)
+scripts/train_instinct_v2.ps1       # V2 Dense launcher
+
+# ── Data acquisition & build ─────────────────────────────
+scripts/data_loader/    # Training-side loading: format resolution, packing, streaming chunks, cache budget
+scripts/data_builder/   # Offline collection/build/cleaning/audit tooling (see its README.md); l3_builder/ is a Rust corpus builder
+dataset_compiler/       # Rust tool: JSONL -> Parquet compilation (see its README.md)
+data_relay/             # Rust download/clean/deliver relay; prebuilt exes live in data_relay/bin/ (ignored)
+dataset/                # Corpora (ignored) plus dataset.md and other tracked provenance/audit docs
+
+# ── Artifacts & checkpoints (all git-ignored) ────────────
+out/                    # Inference weights out/{weight}_{dim}{_moe}.pth + matching .json
+checkpoints/            # Full resume states *_resume.pth + matching .json; retired files archived under checkpoints/_archive/
+eval/                   # Evaluation artifacts and runs (eval/runs/<timestamp>_<ID>/)
+experiments/results|data/  profiler_traces/  trainer/logs/  tmp/   # Experiment/perf/log/scratch outputs
+.relay_training/  .relay_code_sync/                                # Relay-managed state and sync backups
+
+# ── Tools & entry points ─────────────────────────────────
+scripts/                # Config/Chat/Eval WebUIs, OpenAI API, model conversion, HTTPS certs, monitoring, autotune panel
+eval_llm.py             # CLI inference + LiveCodeBench entry point
+eval_*.py               # GSM8K, HumanEval, HumanEval OJ, pass@K, batch, report, data helpers
+start_*.bat             # Root launchers (Config/Chat/Eval WebUI, OpenAI API, data relay)
+requirements*.txt  pytest.ini
+
+# ── Docs & tests ─────────────────────────────────────────
+docs/                   # Design docs; docs/architecture/ (architecture/tour HTML), docs/reports/ (reports), docs/LongRoPE.md
+tests/                  # pytest suite; gpu-marked tests auto-skip without CUDA
+experiments/            # Performance/research scripts and evidence JSON; probes/ keeps one-off diagnostics
 ```
+
+See [docs/repo_layout.md](docs/repo_layout.md) for the full category map,
+tracked-vs-ignored status, artifact lifecycle/cleanup rules and the stable-path
+contract.
 
 ---
 
@@ -486,9 +509,9 @@ The shipped trainer configs (`trainer/*.json`) are currently:
 
 | Model | Parameters | Notes |
 |------|--------|------|
-| Instinct V1 | 152.4M | Dense, dim 768, 20 layers, 8Q/4KV GQA; see [architecture-v1.html](architecture-v1.html) |
-| Instinct V1 MoE | 678.7M-A106.2M | 16GB + Muon deep-thin: hidden 512, 32 layers, 16Q/4KV, 8 FFN=1664 experts, top-1; see [architecture-v1-moe.html](architecture-v1-moe.html) |
-| RecurrsiveInstinct | 187.5M | latent recurrent depth, physical layers `(2,4,2)`, mean effective depth 132; see [architecture.html](architecture.html) |
+| Instinct V1 | 152.4M | Dense, dim 768, 20 layers, 8Q/4KV GQA; see [architecture-v1.html](docs/architecture/architecture-v1.html) |
+| Instinct V1 MoE | 678.7M-A106.2M | 16GB + Muon deep-thin: hidden 512, 32 layers, 16Q/4KV, 8 FFN=1664 experts, top-1; see [architecture-v1-moe.html](docs/architecture/architecture-v1-moe.html) |
+| RecurrsiveInstinct | 187.5M | latent recurrent depth, physical layers `(2,4,2)`, mean effective depth 132; see [architecture.html](docs/architecture/architecture.html) |
 
 Instinct V1 Dense totals 152,406,528 parameters (~152.4M) and activates all of
 them per token; V1 MoE totals 678,726,144 with 106,203,648 active per token.

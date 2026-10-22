@@ -387,22 +387,44 @@ packing/流式加载、自动调优设置及流水线快照。选择模板后点
 ## 项目结构
 
 ```text
-model/                # InstinctConfig / InstinctForCausalLM / LoRA / RecurrsiveInstinct / linear 架构
-                      #   + 推理运行时(inference_runtime, static_cache, grouped_mm, kv_cache_quant) + tokenizer 文件
-trainer/              # 全部训练脚本(pretrain, SFT, LoRA, DPO, PPO, GRPO, Agent RL, KD, tokenizer)
-                      #   + trainer_cli.py 共享 CLI / training_pipeline.py 流水线 / training_profiler.py
-dataset/              # 数据说明文档(dataset.md);语料本体不入库,单独下载
-dataset_compiler/     # Rust 工具:JSONL -> Parquet 语料编译(见其 README.md)
-scripts/              # 推理、API 服务、Chat/Config/Eval WebUI、模型转换
-scripts/data_loader/  # 训练侧数据加载:格式解析、packing、流式分块、缓存预算
-scripts/data_builder/ # 离线数据收集/构建/清洗/审计工具(见其 README.md)
-eval_llm.py           # CLI 推理 + LiveCodeBench 评测入口
-eval_gsm8k.py / eval_humaneval.py / eval_pass_k.py / eval_batch.py / eval_report.py   # 评测 harness
-eval/                 # 评测产物与运行记录(eval/runs/<时间戳>_<ID>/)
-tests/                # pytest 套件;gpu 标记在无 CUDA 时自动跳过
-docs/                 # 设计文档:training_pipeline / compact_dataset_cache / gsm8k / humaneval / eval_webui / grouped_moe_gemm ...
-experiments/          # 性能/研究实验脚本(lambda sweep、分组 GEMM 基准、graph break 报告等)
+# ── 训练代码 ─────────────────────────────────────────────
+model/                  # InstinctConfig / 模型主干 / LoRA / RecurrsiveInstinct / linear 架构
+                        #   + 推理运行时(inference_runtime, static_cache, grouped_mm, kv_cache_quant) + tokenizer
+trainer/                # 全部训练脚本(train_*.py)+ 共享基础设施(trainer_cli、training_pipeline、
+                        #   streaming_pretrain、training_eta、compile_cache、batched_muon、autotune* 等)
+                        #   + config_*.json、recipes/、profiles/、logs/(logs 不入库)
+run_recurrsive.py / run_linear.py   # 替代架构包装入口(根目录，勿移动)
+scripts/train_instinct_v2.ps1       # V2 Dense 启动器
+
+# ── 数据获取与构建 ───────────────────────────────────────
+scripts/data_loader/    # 训练侧加载:格式解析、packing、流式分块、缓存预算
+scripts/data_builder/   # 离线数据收集/构建/清洗/审计(见其 README.md);l3_builder/ 为 Rust 语料构建器
+dataset_compiler/       # Rust 工具:JSONL -> Parquet 语料编译(见其 README.md)
+data_relay/             # Rust 下载/清洗/交付中继;预编译 exe 在 data_relay/bin/(不入库)
+dataset/                # 语料本体(不入库)与 dataset.md 等说明/审计文件
+
+# ── 产物与检查点(全部不入库) ────────────────────────────
+out/                    # 推理权重 out/{weight}_{dim}{_moe}.pth + 同名 .json
+checkpoints/            # 完整续训状态 *_resume.pth + 同名 .json;退役文件归档到 checkpoints/_archive/
+eval/                   # 评测产物与运行记录(eval/runs/<时间戳>_<ID>/)
+experiments/results|data/  profiler_traces/  trainer/logs/  tmp/   # 实验/性能/日志/临时产物
+.relay_training/  .relay_code_sync/                                # relay 托管状态与同步备份
+
+# ── 工具与运行入口 ───────────────────────────────────────
+scripts/                # Config/Chat/Eval WebUI、OpenAI API、模型转换、HTTPS 证书、监控、自动调优面板
+eval_llm.py             # CLI 推理 + LiveCodeBench 评测入口
+eval_*.py               # GSM8K、HumanEval、HumanEval OJ、pass@K、batch、report、data 辅助入口
+start_*.bat             # 根目录启动器(Config/Chat/Eval WebUI、OpenAI API、data relay)
+requirements*.txt  pytest.ini
+
+# ── 文档与测试 ───────────────────────────────────────────
+docs/                   # 设计文档;docs/architecture/(架构/导览 HTML)、docs/reports/(专题报告)、docs/LongRoPE.md
+tests/                  # pytest 套件;gpu 标记在无 CUDA 时自动跳过
+experiments/            # 性能/研究实验脚本与证据 json;probes/ 存放一次性诊断脚本
 ```
+
+完整的分类地图、入库/忽略状态、产物清理规则与"稳定路径"契约见
+[docs/repo_layout.md](docs/repo_layout.md)。
 
 ---
 
@@ -419,9 +441,9 @@ experiments/          # 性能/研究实验脚本(lambda sweep、分组 GEMM 基
 
 | 模型 | 参数量 | 说明 |
 |------|--------|------|
-| Instinct V1 | 152.4M | Dense，dim 768，20 层，8Q/4KV GQA；见 [architecture-v1.html](architecture-v1.html) |
-| Instinct V1 MoE | 678.7M-A188.0M | deep-thin：hidden 512、32 层、16Q/4KV、8 个 FFN=1664 专家，top-2，开启归一化；[历史 top-1 结构图](architecture-v1-moe.html) |
-| RecurrsiveInstinct | 187.5M | latent recurrent depth，物理层 `(2,4,2)`，平均有效深度 132；见 [architecture.html](architecture.html) |
+| Instinct V1 | 152.4M | Dense，dim 768，20 层，8Q/4KV GQA；见 [architecture-v1.html](docs/architecture/architecture-v1.html) |
+| Instinct V1 MoE | 678.7M-A188.0M | deep-thin：hidden 512、32 层、16Q/4KV、8 个 FFN=1664 专家，top-2，开启归一化；[历史 top-1 结构图](docs/architecture/architecture-v1-moe.html) |
+| RecurrsiveInstinct | 187.5M | latent recurrent depth，物理层 `(2,4,2)`，平均有效深度 132；见 [architecture.html](docs/architecture/architecture.html) |
 
 Instinct V1 Dense 的总参数和每 token 激活参数均为 152,406,528（约 152.4M）；V1 MoE 当前 top-2 配置为 678,726,144 总参数 / 187,992,576 激活参数，历史 top-1 配置为 106,203,648 激活参数。V1 Dense 使用 20 层、hidden=768、FFN=2432，不能与 `InstinctConfig` 默认的 8 层旧版 `instinct-3` 混淆；加载和评测应以权重对应的配置为准。按训练者提供的信息，V1 MoE 使用了 34GB 数据集，V1 Dense 则使用两个 mini 数据集分别进行预训练和 SFT；文件大小不等于实际训练 token 数或代码数据量。
 

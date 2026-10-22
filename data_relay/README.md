@@ -279,7 +279,7 @@ SSH 直传走 AutoDL 的 SSH 代理，大文件速度慢。data_relay 默认改�
 
 ### 本地数据集直接交付到训练仓库
 
-根目录 `upload_pretrain_coder_12b.bat` 使用独立的 `data_relay_delivery.exe`，
+根目录 `upload_pretrain_coder_12b.bat` 使用独立的 `data_relay/bin/data_relay_delivery.exe`，
 读取本目录 `config.toml`，将本地 `dataset/pretrain_coder_12b.parquet` 与存在的
 两份 `.report.json` 交付到实例 `/root/autodl-tmp/dataset/`。
 独立 exe 允许原有 WebUI 继续运行；它与普通服务由同一 Rust crate 编译。
@@ -347,7 +347,7 @@ SHA-256 校验后才替换最终文件，并写出 `.delivery.report.json`。
 在 `data_relay/` 工作目录下，本次已审核的存储维护可运行：
 
 ```powershell
-..\data_relay_delivery.exe --config config.toml remote-script --remote-script src/cleanup_server_space.py
+..\data_relay\bin\data_relay_delivery.exe --config config.toml remote-script --remote-script src/cleanup_server_space.py
 ```
 
 此脚本针对 `/root/autodl-tmp` 中固定名称的旧检查点临时文件和三对权重，
@@ -367,7 +367,7 @@ PyTorch ZIP 记录（只忽略归档包装目录名），一致后原子替换�
 numpy，或 pip/conda 混装）。这是固定的环境状态问题，不会自愈，需要体检脚本诊断：
 
 ```powershell
-..\data_relay_delivery.exe --config config.toml remote-script --remote-script src/check_server_python_env.py
+..\data_relay\bin\data_relay_delivery.exe --config config.toml remote-script --remote-script src/check_server_python_env.py
 ```
 
 默认只体检（只读）：实际导入 numpy / `numpy._core.multiarray`（按版本回退
@@ -419,8 +419,8 @@ API（均需访问令牌）：`POST /api/code-sync` 接收 `instance_uuid/includ
 
 ### 启动与续训
 
-项目根目录双击 `start_data_relay.bat`，启动器从根目录的 `data_relay_manager.exe`、
-`data_relay.exe` 和 `data_relay/target/release/data_relay.exe` 中按修改时间选择最新构建。
+项目根目录双击 `start_data_relay.bat`，启动器从 `data_relay/bin/` 下的 `data_relay_manager.exe`、
+`data_relay.exe`，以及 `data_relay/target/release/data_relay.exe` 中按修改时间选择最新构建。
 构建不会覆盖正在运行的进程；服务退出后重新运行启动器即可使用新版。
 打开 `http://localhost:7800` 并填写访问令牌。“服务器训练”页自动读取
 Config WebUI 缓存中的当前阶段、模型结构、数据路径和训练参数。可以直接修改中继的
@@ -528,13 +528,13 @@ CLI `--from-panel-cache` 仍可用参数指纹检测源缓存变更。
 CLI 示例（在 `data_relay/` 工作目录执行，先修改示例中的路径和训练参数）：
 
 ```powershell
-..\data_relay_manager.exe --config config.toml training --training-action inventory
-..\data_relay_manager.exe --config config.toml training --training-action panel_cache
-..\data_relay_manager.exe --config config.toml training --training-action start --from-panel-cache --request-json training_job.example.json --auto-gpu
-..\data_relay_manager.exe --config config.toml training --training-action list
-..\data_relay_manager.exe --config config.toml training --training-action pause --job-id r_ID
-..\data_relay_manager.exe --config config.toml training --training-action resume --job-id r_ID --auto-gpu
-..\data_relay_manager.exe --config config.toml training --training-action log --job-id r_ID
+..\data_relay\bin\data_relay_manager.exe --config config.toml training --training-action inventory
+..\data_relay\bin\data_relay_manager.exe --config config.toml training --training-action panel_cache
+..\data_relay\bin\data_relay_manager.exe --config config.toml training --training-action start --from-panel-cache --request-json training_job.example.json --auto-gpu
+..\data_relay\bin\data_relay_manager.exe --config config.toml training --training-action list
+..\data_relay\bin\data_relay_manager.exe --config config.toml training --training-action pause --job-id r_ID
+..\data_relay\bin\data_relay_manager.exe --config config.toml training --training-action resume --job-id r_ID --auto-gpu
+..\data_relay\bin\data_relay_manager.exe --config config.toml training --training-action log --job-id r_ID
 ```
 
 所有 API 使用原有 `Authorization` 访问令牌：
