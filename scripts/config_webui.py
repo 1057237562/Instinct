@@ -192,6 +192,47 @@ st.markdown(
         color: #d8b4fe; text-align: center; font: 700 12px 'Courier New', monospace;
         margin-top: 7px;
     }
+    /* Architecture precision view */
+    .arch2-meta { width: 100%; display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0 6px; justify-content: center; }
+    .arch2-chip-pair { display: inline-flex; align-items: center; white-space: nowrap; }
+    .arch2-chip-label { color: #7f8da3; font: 400 9px -apple-system, sans-serif; margin: 1px 2px 1px 6px; }
+    .arch2-chip { display: inline-block; padding: 1px 6px; border-radius: 6px; font: 600 9px 'Courier New', monospace; letter-spacing: 0.2px; border: 1px solid transparent; white-space: nowrap; }
+    .prec-fp32 { background: rgba(245,158,11,.16); color: #fbbf24; border-color: rgba(245,158,11,.35); }
+    .prec-bf16 { background: rgba(59,130,246,.16); color: #93c5fd; border-color: rgba(59,130,246,.35); }
+    .prec-fp16 { background: rgba(20,184,166,.16); color: #5eead4; border-color: rgba(20,184,166,.35); }
+    .prec-fp8 { background: rgba(168,85,247,.18); color: #d8b4fe; border-color: rgba(168,85,247,.38); }
+    .prec-off { background: rgba(100,116,139,.14); color: #94a3b8; border-color: rgba(100,116,139,.3); }
+    .prec-mix { background: rgba(148,163,184,.14); color: #cbd5e1; border-color: rgba(148,163,184,.3); }
+    .arch2-block-chips { margin-top: 5px; text-align: center; line-height: 1.9; }
+    .arch2-block-chips .arch2-chip-label { color: rgba(255,255,255,.55); }
+    .arch2-note { width: 100%; max-width: 520px; color: #7f8da3; font: 400 9px -apple-system, sans-serif; line-height: 1.6; margin: 2px 0 10px; text-align: left; }
+    .arch2-group { width: 100%; max-width: 480px; box-sizing: border-box; border: 1px solid #334155; border-radius: 14px; padding: 10px 10px 8px; background: linear-gradient(150deg, rgba(30,58,95,.5), rgba(17,28,46,.92)); margin: 4px 0; }
+    .arch2-group-title { text-align: center; color: #dbeafe; font: 700 12px 'Courier New', monospace; letter-spacing: 0.5px; }
+    .arch2-group-sub { text-align: center; color: #94a3b8; font: 400 9.5px -apple-system, sans-serif; margin: 3px 0 8px; line-height: 1.5; }
+    .arch2-module { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; background: #0f1a2b; border: 1px solid #22314a; border-radius: 8px; padding: 6px 8px; margin: 3px 0; }
+    .arch2-module-name { color: #e2e8f0; font: 600 10.5px 'Courier New', monospace; }
+    .arch2-module-detail { color: #7f8da3; font: 400 9px -apple-system, sans-serif; margin-top: 1px; }
+    .arch2-module-chips { text-align: right; line-height: 1.9; min-width: 120px; max-width: 58%; }
+    .arch2-residual { text-align: center; color: #fbbf24; font: 600 9.5px 'Courier New', monospace; margin: 4px 0; }
+    .arch2-layers { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; margin-top: 8px; border-top: 1px dashed #2b3b53; padding-top: 7px; }
+    .arch2-layer-pill { background: #162033; border: 1px solid #334155; border-radius: 6px; padding: 2px 7px; color: #9fb0c7; font: 600 9px 'Courier New', monospace; }
+    .arch2-layer-pill.hi { border-color: #2563eb; color: #bfdbfe; background: #1e3354; }
+    .arch2-module.cached { border-color: rgba(251,191,36,.55); box-shadow: inset 3px 0 0 #fbbf24; }
+    .arch2-module.cached .arch2-module-name { color: #fde68a; }
+    .arch2-module.recomputed { border-style: dashed; background: #0d1726; }
+    .arch2-module.recomputed .arch2-module-name { color: #94a3b8; }
+    .arch2-cache-chip { display: inline-block; padding: 1px 6px; border-radius: 6px; font: 700 9px 'Courier New', monospace; margin-right: 4px; }
+    .arch2-cache-chip.gold { background: rgba(245,158,11,.22); color: #fbbf24; border: 1px solid rgba(245,158,11,.55); }
+    .arch2-cache-chip.muted { background: rgba(100,116,139,.14); color: #94a3b8; border: 1px dashed rgba(148,163,184,.4); }
+    .arch-block.cached { outline: 2px solid rgba(251,191,36,.7); outline-offset: 1px; }
+    .arch-block.recomputed { outline: 2px dashed rgba(148,163,184,.45); outline-offset: 1px; }
+    .arch2-gold-legend { display: inline-block; padding: 1px 7px; border-radius: 6px; font: 700 9px 'Courier New', monospace; color: #fbbf24; background: rgba(245,158,11,.16); border: 1px solid rgba(245,158,11,.55); margin: 1px 2px 1px 6px; }
+    @media (max-width: 700px) {
+        .arch2-module { grid-template-columns: 1fr; }
+        .arch2-module-chips { text-align: left; }
+        .arch2-meta { justify-content: flex-start; }
+    }
+
     @media (max-width: 700px) {
         .arch-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .arch-split { grid-template-columns: 1fr; }
@@ -1377,44 +1418,284 @@ def render_log_metrics_charts(metrics):
 # Architecture diagram (HTML)
 # ═══════════════════════════════════════════════════════════════
 
-def arch_diagram(cfg: dict) -> str:
-    """Build an HTML architecture diagram string."""
+def precision_options() -> dict:
+    """Snapshot the precision controls that the architecture diagram annotates."""
+    return {
+        "optimizer": st.session_state.get("optimizer", "adamw"),
+        "param_dtype": st.session_state.get("param_dtype", "fp32"),
+        "activation": st.session_state.get("activation_dtype", "bfloat16"),
+        "muon_mantissa": bool(st.session_state.get("muon_mantissa", False)),
+        "muon_momentum_dtype": st.session_state.get("muon_momentum_dtype", "fp32"),
+        "fp8_training": st.session_state.get("fp8_training", "off"),
+        "fp8_filter": st.session_state.get("fp8_filter", "auto"),
+        "kv_cache_dtype": st.session_state.get("kv_cache_dtype", "fp32"),
+        "use_grad_checkpoint": int(st.session_state.get("use_grad_checkpoint", 0)),
+    }
+
+
+def arch_diagram(cfg: dict, precision: dict | None = None) -> str:
+    """Build an HTML architecture diagram with per-module precision labels.
+
+    "precision" mirrors the training panel's precision controls (optimizer,
+    parameter/activation dtype, TorchAO FP8 recipe, Muon mantissa, KV cache and
+    gradient checkpointing). When omitted the diagram falls back to plain
+    AdamW fp32 defaults so CPU-only preset tests can call it directly.
+    """
     n = cfg["num_hidden_layers"]
     use_moe = cfg.get("use_moe", False)
     arch = cfg.get("model_architecture", "standard")
     residual_type = cfg.get("residual_type", "standard")
+    h = cfg["hidden_size"]
+    q_heads = cfg["num_attention_heads"]
+    kv_heads = cfg["num_key_value_heads"]
+    head_dim = cfg.get("head_dim", compute_head_dim(h, q_heads))
+    int_size = cfg.get("intermediate_size", compute_intermediate_size(h))
+    moe_int = cfg.get("moe_intermediate_size", int_size)
 
-    blocks = []
+    # ── precision model ─────────────────────────────────────────
+    profile = {
+        "optimizer": "adamw",
+        "param_dtype": "fp32",
+        "activation": "bfloat16",
+        "muon_mantissa": False,
+        "muon_momentum_dtype": "fp32",
+        "fp8_training": "off",
+        "fp8_filter": "auto",
+        "kv_cache_dtype": "fp32",
+        "use_grad_checkpoint": 0,
+    }
+    if precision:
+        profile.update({key: value for key, value in precision.items() if value is not None})
+    optimizer = str(profile["optimizer"]).lower()
+    param_dtype = str(profile["param_dtype"]).lower()
+    compute = {"bfloat16": "bf16", "float16": "fp16", "fp32": "fp32"}.get(
+        str(profile["activation"]).lower(), "bf16"
+    )
+    fp8_training = str(profile["fp8_training"]).lower()
+    fp8_filter = str(profile["fp8_filter"]).lower()
+    fp8_on = fp8_training != "off"
+    fp8_compute = fp8_on and compute == "bf16"
+    fp8_mode = "rowwise" if "rowwise" in fp8_training else "tensorwise"
+    mantissa = (
+        optimizer == "muon"
+        and bool(profile["muon_mantissa"])
+        and param_dtype == "bf16"
+    )
+    matrix_w = "bf16" if mantissa else param_dtype
+    aux_w = "fp32" if mantissa else param_dtype
+    # fp32 auxiliary parameters (embedding/head/norms) seed the residual stream;
+    # bf16 projection outputs are promoted back to fp32 on every residual add.
+    residual_dtype = "fp32" if aux_w == "fp32" else aux_w
+    if mantissa:
+        matrix_opt = "Muon bf16 动量+u16"
+        aux_opt = "AdamW 2×fp32"
+        opt_summary = "Muon: bf16+uint16 权重 / bf16 动量 · AdamW: 2×fp32"
+    elif optimizer == "muon":
+        matrix_opt = f"Muon 1×{matrix_w}"
+        aux_opt = f"AdamW 2×{param_dtype}"
+        opt_summary = f"Muon: 1×{matrix_w} 动量 · AdamW: 2×{param_dtype}"
+    elif optimizer == "adafactor":
+        matrix_opt = aux_opt = "Adafactor 分解"
+        opt_summary = "Adafactor: 分解状态"
+    else:
+        matrix_opt = aux_opt = f"AdamW 2×{param_dtype}"
+        opt_summary = f"AdamW: 2×{param_dtype}"
+    linear_compute = f"{compute} → FP8" if fp8_compute else compute
+    ckpt_mode = int(profile["use_grad_checkpoint"])
+    ckpt_label = {0: "off", 1: "mode1 Attention-only", 2: "mode2 整层"}.get(
+        ckpt_mode, "off"
+    )
+    # Gradient-checkpoint activation cache coverage:
+    #   mode 0: nothing is replayed in backward -> every module keeps its activations.
+    #   mode 1: only the attention core is replayed -> everything else keeps them.
+    #   mode 2: the whole transformer layer is replayed -> only the layer input lasts.
+    layer_internal_cached = ckpt_mode in (0, 1)
+    attention_core_cached = ckpt_mode == 0
+    block_cached = ckpt_mode in (0, 1)
+    layer_cache = "saved" if layer_internal_cached else "recomputed"
+    attn_cache = "saved" if attention_core_cached else "recomputed"
+    block_cache = "saved" if block_cached else "recomputed"
+    kv_dtype = str(profile["kv_cache_dtype"]).lower()
+    attn_backend = "Flash/Flex/SDPA" if cfg.get("flash_attn", True) else "SDPA/math"
+    attn_type = (
+        f"MHA {q_heads}×{head_dim}"
+        if q_heads == kv_heads
+        else f"GQA {q_heads}q/{kv_heads}kv × {head_dim}"
+    )
+    ffn_label = "MoE-FFN" if use_moe else "SwiGLU FFN"
 
-    def _block(text, detail="", color_start="#1e3a5f", color_end="#2563eb"):
+    def _esc(text) -> str:
+        return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;").replace('"', "&quot;"))
+
+    def _kind(value) -> str:
+        text = str(value).lower()
+        if "fp8" in text:
+            return "fp8"
+        if "bf16" in text:
+            return "bf16"
+        if "fp16" in text:
+            return "fp16"
+        if "fp32" in text:
+            return "fp32"
+        if "off" in text:
+            return "off"
+        return "mix"
+
+    def _chip(label, value) -> str:
         return (
-            f'<div class="arch-block" style="background: linear-gradient(135deg, '
+            f'<span class="arch2-chip-pair">'
+            f'<span class="arch2-chip-label">{_esc(label)}</span>'
+            f'<span class="arch2-chip prec-{_kind(value)}">{_esc(value)}</span>'
+            f'</span>'
+        )
+
+    def _chips(items) -> str:
+        return "".join(_chip(label, value) for label, value in items)
+
+    def _cache_cls(cache_state) -> str:
+        return {"saved": " cached", "recomputed": " recomputed"}.get(cache_state, "")
+
+    def _block(text, detail="", color_start="#1e3a5f", color_end="#2563eb",
+               chips=(), cache_state=None):
+        chip_html = (
+            f'<div class="arch2-block-chips">{_chips(chips)}</div>' if chips else ""
+        )
+        return (
+            f'<div class="arch-block{_cache_cls(cache_state)}" '
+            f'style="background: linear-gradient(135deg, '
             f'{color_start} 0%, {color_end} 100%);">'
             f"<div>{text}</div>"
             f'<div class="arch-label">{detail}</div>'
+            f"{chip_html}"
             f"</div>"
         )
 
-    def _arrow():
+    def _arrow() -> str:
         return '<div class="arch-arrow">&#9660;</div>'
 
-    # Input
-    blocks.append(_block("Input", "token ids"))
+    def _stat(value, label) -> str:
+        return (
+            '<div class="arch-stat">'
+            f'<div class="arch-stat-value">{value}</div>'
+            f'<div class="arch-stat-label">{label}</div></div>'
+        )
+
+    def _meta() -> str:
+        width = " / ".join(sorted({matrix_w, aux_w})) if matrix_w != aux_w else matrix_w
+        fp8_state = f"FP8 {fp8_mode}" if fp8_compute else "off"
+        return (
+            '<div class="arch2-meta">'
+            + _chip("W 权重", width)
+            + _chip("C 计算", compute)
+            + _chip("G 梯度", "同 W")
+            + _chip("O 优化器", opt_summary)
+            + _chip("残差流", residual_dtype)
+            + _chip("FP8", fp8_state)
+            + _chip("检查点", ckpt_label)
+            + '<span class="arch2-gold-legend">金色 = 激活保存</span>'
+            + "</div>"
+        )
+
+    def _note() -> str:
+        lines = [
+            "W=权重存储 · C=矩阵乘计算（autocast） · G=梯度（与参数同 dtype） · "
+            "O=优化器状态；RMSNorm 内部与 CE loss 按 fp32 计算。"
+        ]
+        ckpt_notes = {
+            0: "梯度检查点关闭（mode0）：金色模块的激活全部保存到 backward。",
+            1: "mode1（Attention-only）：金色=激活保存，虚线灰框=backward 重算；"
+               "仅重算 attention core（QKᵀ/softmax/dropout/AV，输入 q/k/v 仍保存），"
+               "QKV/O 投影、QK-Norm、RoPE、FFN 的输出都保留。",
+            2: "mode2（整层）：金色=激活保存；层内模块全部在 backward 重算（虚线灰框），"
+               "每层只保存一份输入的 fp32 残差流 [B,S,hidden]。",
+        }
+        lines.append(ckpt_notes[ckpt_mode])
+        if mantissa:
+            lines.append(
+                f"Muon mantissa：隐藏矩阵 {matrix_w} 高位 + uint16 低位，"
+                f"embedding/head/norm 保持 {aux_w} 由 AdamW 管理，"
+                f"残差流因此为 {residual_dtype}。"
+            )
+        if fp8_compute:
+            lines.append(
+                f"FP8 {fp8_mode}（filter={fp8_filter}）只替换尺寸兼容 Linear 的 "
+                f"GEMM，权重与优化器状态仍为 {matrix_w}；反向以 e5m2 动态量化梯度输入。"
+            )
+        else:
+            lines.append("FP8 关闭：投影 GEMM 使用 " + compute + " autocast。")
+        if use_moe:
+            lines.append(
+                "MoE grouped dispatch 直接读取专家权重（BF16），"
+                "转换后的 FP8 卷积在此路径不生效。"
+            )
+        if residual_type != "standard":
+            lines.append(f"残差拓扑 {residual_type}，残差/路由参数按辅助参数精度处理。")
+        return '<div class="arch2-note">' + "".join(lines) + "</div>"
+
+    def _module(name, detail, chips, cache_state=None) -> str:
+        cache_chip = {
+            "saved": '<span class="arch2-cache-chip gold">保存</span>',
+            "recomputed": '<span class="arch2-cache-chip muted">重算</span>',
+        }.get(cache_state, "")
+        return (
+            f'<div class="arch2-module{_cache_cls(cache_state)}">'
+            f'<div><div class="arch2-module-name">{_esc(name)}</div>'
+            f'<div class="arch2-module-detail">{_esc(detail)}</div></div>'
+            f'<div class="arch2-module-chips">{cache_chip}{_chips(chips)}</div></div>'
+        )
+
+    def _residual_line() -> str:
+        return (
+            '<div class="arch2-residual">'
+            f"&#8853; 残差相加 · 残差流 {residual_dtype}</div>"
+        )
+
+    def _layer_pills() -> str:
+        if n > 32:
+            indices = list(range(1, 17)) + [None] + list(range(n - 15, n + 1))
+        else:
+            indices = list(range(1, n + 1))
+        pills = []
+        for index in indices:
+            if index is None:
+                pills.append('<span class="arch2-layer-pill">&#8943;</span>')
+            else:
+                hi = " hi" if index in (1, n) else ""
+                pills.append(
+                    f'<span class="arch2-layer-pill{hi}">Layer {index}</span>'
+                )
+        return '<div class="arch2-layers">' + "".join(pills) + "</div>"
+
+    blocks = []
+    total_params = calc_params(cfg)["Total Params"]["value"]
+    ffn_width_label = "专家 FFN" if use_moe else "FFN"
+    ffn_width = moe_int if use_moe else int_size
+    blocks.append(
+        '<div class="arch-summary">'
+        + _stat(f"{total_params:,}", "Parameters")
+        + _stat(n, "Layers")
+        + _stat(h, "Hidden")
+        + _stat(ffn_width, ffn_width_label)
+        + "</div>"
+    )
+    blocks.append(_meta())
+    blocks.append(_note())
+
+    # ── Input / embedding ──────────────────────────────────────
+    blocks.append(_block("Input", "token ids · int64", "#1e293b", "#334155"))
+    blocks.append(_arrow())
+    embedding_detail = f"vocab={cfg['vocab_size']} · dim={h}"
+    if cfg.get("tie_word_embeddings"):
+        embedding_detail += " · tied with LM Head"
+    blocks.append(
+        _block("Embedding", embedding_detail, "#0f3b5e", "#1d6fa5", cache_state="saved",
+               chips=(("W", aux_w), ("输出", residual_dtype), ("G", aux_w), ("O", aux_opt)))
+    )
     blocks.append(_arrow())
 
-    # Embedding
-    emb_detail = f"vocab={cfg['vocab_size']}, dim={cfg['hidden_size']}"
-    blocks.append(_block("Embedding", emb_detail, "#0f3b5e", "#1d6fa5"))
-    blocks.append(_arrow())
-
-    # RecurrsiveInstinct is a recurrent graph, not an eight-layer sequential stack.
-    # Render the shared core once and make recurrence/input injection explicit.
+    # ── RecurrsiveInstinct keeps its recurrent graph, with precision chips ──
     if arch == "recurrsive_instinct":
-        h = cfg["hidden_size"]
-        q_heads = cfg["num_attention_heads"]
-        kv_heads = cfg["num_key_value_heads"]
-        head_dim = cfg.get("head_dim", compute_head_dim(h, q_heads))
-        int_size = cfg.get("intermediate_size", compute_intermediate_size(h))
         prelude = cfg.get("prelude_layers", 2)
         recurrent = cfg.get("recurrent_layers", 4)
         coda = cfg.get("coda_layers", 2)
@@ -1423,167 +1704,233 @@ def arch_diagram(cfg: dict) -> str:
         sigma = cfg.get("recurrence_log_normal_sigma", 1.0)
         materialized = prelude + recurrent + coda
         effective = prelude + recurrent * recurrences + coda
-        total_params = calc_params(cfg)["Total Params"]["value"]
-        attention = (
-            f"MHA {q_heads}x{head_dim}"
-            if q_heads == kv_heads
-            else f"GQA {q_heads}q/{kv_heads}kv x {head_dim}"
-        )
-        ffn = "MoE SwiGLU" if use_moe else "SwiGLU"
-
-        blocks.insert(
-            0,
+        blocks.append(
             '<div class="arch-summary">'
-            f'<div class="arch-stat"><div class="arch-stat-value">{total_params:,}</div>'
-            '<div class="arch-stat-label">Parameters</div></div>'
-            f'<div class="arch-stat"><div class="arch-stat-value">{materialized}</div>'
-            '<div class="arch-stat-label">Physical layers</div></div>'
-            f'<div class="arch-stat"><div class="arch-stat-value">{effective}</div>'
-            '<div class="arch-stat-label">Mean effective depth</div></div>'
-            f'<div class="arch-stat"><div class="arch-stat-value">{recurrences}</div>'
-            '<div class="arch-stat-label">Mean recurrences</div></div>'
-            '</div>',
+            + _stat(f"{total_params:,}", "Parameters")
+            + _stat(materialized, "Physical layers")
+            + _stat(effective, "Mean effective depth")
+            + _stat(recurrences, "Mean recurrences")
+            + "</div>"
         )
         blocks.append(
             _block(
                 f"Prelude x{prelude}",
-                f"{attention} · {ffn} {h}->{int_size}->{h} · sandwich RMSNorm",
-                "#0f3b5e", "#1d6fa5",
+                f"{attn_type} · {ffn_label} {h}->{int_size}->{h} · sandwich RMSNorm",
+                "#0f3b5e", "#1d6fa5", cache_state=block_cache,
+                chips=(("W", matrix_w), ("C", compute), ("O", matrix_opt)),
             )
         )
         blocks.append(_arrow())
         blocks.append(
             '<div class="arch-split">'
-            f'<div class="arch-branch">Input latent e<span>Prelude output, injected every recurrence</span></div>'
-            f'<div class="arch-branch">Initial state s0<span>TruncNormal, std={cfg.get("state_init_std", math.sqrt(2 / 5)):.4f}</span></div>'
-            '</div>'
+            '<div class="arch-branch">Input latent e<span>Prelude output, injected every recurrence</span></div>'
+            '<div class="arch-branch">Initial state s0<span>TruncNormal, std='
+            + f"{cfg.get('state_init_std', math.sqrt(2 / 5)):.4f}"
+            + "</span></div>"
+            "</div>"
         )
         blocks.append(_arrow())
         blocks.append(
             _block(
                 "Input Injection Adapter",
                 f"concat [state ; e] -> Linear({2 * h}, {h}, bias=False)",
-                "#3b1f6e", "#6d28a8",
+                "#3b1f6e", "#6d28a8", cache_state=block_cache,
+                chips=(("W", matrix_w), ("C", compute), ("O", matrix_opt)),
             )
         )
         blocks.append(_arrow())
         blocks.append(
             '<div class="recurrent-shell">'
-            f'<div class="recurrent-title">Shared recurrent operator R · target mean {recurrences}</div>'
+            '<div class="recurrent-title">'
+            f"Shared recurrent operator R · target mean {recurrences}"
+            "</div>"
             '<div class="recurrent-core">'
-            f'Core Transformer x{recurrent}'
-            f'<span>{attention} · Q/K bias={cfg.get("qk_bias", True)} · '
-            f'QK norm={cfg.get("qk_norm", False)} · {ffn} {int_size}</span>'
-            '</div>'
-            f'<div class="arch-loop-arrow">↻ log-normal Poisson σ={sigma:g} · '
-            f'gradient through final {backprop} recurrences</div>'
-            '</div>'
+            f"Core Transformer x{recurrent}"
+            f"<span>{attn_type} · Q/K bias={cfg.get('qk_bias', True)} · "
+            f"QK norm={cfg.get('qk_norm', False)} · {ffn_label} {int_size}</span>"
+            "</div>"
+            + _meta()
+            + '<div class="arch-loop-arrow">&#8635; log-normal Poisson '
+            f"&#963;={sigma:g} · gradient through final {backprop} recurrences</div>"
+            "</div>"
         )
         blocks.append(_arrow())
         blocks.append(
-            _block("Recurrent RMSNorm", f"RMSNorm({h})", "#4a1d5e", "#7e22ce")
+            _block("Recurrent RMSNorm", f"RMSNorm({h})", "#4a1d5e", "#7e22ce",
+                   cache_state="saved",
+                   chips=(("W", aux_w), ("C", "fp32 内部")))
         )
         blocks.append(_arrow())
         blocks.append(
             _block(
                 f"Coda x{coda}",
-                f"{attention} · {ffn} {h}->{int_size}->{h} · sandwich RMSNorm",
-                "#1b4332", "#2d8a4e",
+                f"{attn_type} · {ffn_label} {h}->{int_size}->{h} · sandwich RMSNorm",
+                "#1b4332", "#2d8a4e", cache_state=block_cache,
+                chips=(("W", matrix_w), ("C", compute), ("O", matrix_opt)),
             )
         )
         blocks.append(_arrow())
         blocks.append(
-            _block("Final Norm", f"RMSNorm({h})", "#1b4332", "#2d8a4e")
+            _block("Final Norm", f"RMSNorm({h})", "#1b4332", "#2d8a4e",
+                   cache_state="saved",
+                   chips=(("W", aux_w), ("C", "fp32 内部")))
         )
         blocks.append(_arrow())
         lm_detail = f"vocab={cfg['vocab_size']}, dim={h}"
         if cfg.get("tie_word_embeddings"):
             lm_detail += " (tied with embedding)"
-        blocks.append(_block("LM Head", lm_detail, "#4a1942", "#7c3aed"))
-        blocks.append(_arrow())
-        blocks.append(_block("Output", "next-token logits", "#3b0f2e", "#6b1d5e"))
-        return f'<div class="arch-wrap">{"".join(blocks)}</div>'
-
-    # Layer stack
-    layer_color_s = "#1a3a5c"
-    layer_color_e = "#2d6a9f"
-    linear_color_s = "#3b1f6e"
-    linear_color_e = "#7c3aed"
-    for i in range(min(n, 32)):  # cap display at 32
-        label = f"Layer {i+1}" if n <= 32 or i < 16 or i >= n - 16 else "..."
-
-        if n > 32 and i == 16:
-            blocks.append(
-                _block(
-                    "&#8942;",
-                    f"... {n - 30} more layers ...",
-                    "#1a2332",
-                    "#1a2332",
-                )
-            )
-            blocks.append(_arrow())
-            continue
-        elif n > 32 and i >= 16 and i < n - 16:
-            continue
-
-        if arch == "linear":
-            interval = cfg.get("full_attention_interval", 4)
-            is_full = interval > 0 and (i + 1) % interval == 0
-            attn_type = "Full Attn" if is_full else "Linear Attn"
-            cs, ce = (layer_color_s, layer_color_e) if is_full else (linear_color_s, linear_color_e)
-        else:
-            attn_type = f"Attn({cfg['num_attention_heads']}h/{cfg['num_key_value_heads']}kv)"
-            cs, ce = layer_color_s, layer_color_e
-
-        ffn_label = "MoE-FFN" if use_moe else "FFN"
-        layer_detail = f"{attn_type} + {ffn_label}"
-        if residual_type == "mhc":
-            layer_detail += f" · mHC({cfg.get('hc_mult', 4)} streams)"
-        elif residual_type == "attnres":
-            variant = cfg.get("attnres_variant", "block").title()
-            layer_detail += f" · {variant} AttnRes"
-        if use_moe:
-            n_exp = cfg.get("num_experts", 4)
-            n_top = cfg.get("num_experts_per_tok", 1)
-            layer_detail += f" ({n_exp}E, top-{n_top})"
-        if cfg.get("early_exit_layers") and (i + 1) in cfg["early_exit_layers"]:
-            layer_detail += " · EE"
-
-        if arch == "recurrsive_instinct":
-            loop_color_s, loop_color_e = "#4a1d5e", "#9d4edd"
-            p = cfg.get("prelude_layers", 2)
-            r = cfg.get("recurrent_layers", 4)
-            if p <= i < p + r:
-                layer_detail += f" · RECURRENT x{cfg.get('loop_iters', 8)}"
-                cs, ce = loop_color_s, loop_color_e
-            elif i < p:
-                layer_detail += " · PRELUDE"
-                cs, ce = "#0f3b5e", "#1d6fa5"
-            else:
-                layer_detail += " · CODA"
-                cs, ce = "#1b4332", "#2d8a4e"
-
         blocks.append(
-            _block(f"Layer {i+1}", layer_detail, cs, ce)
+            _block("LM Head", lm_detail, "#4a1942", "#7c3aed", cache_state="saved",
+                   chips=(("W", aux_w), ("C", compute), ("logits", compute),
+                          ("O", aux_opt)))
         )
         blocks.append(_arrow())
+        blocks.append(
+            _block("Output", f"next-token logits {compute} · CE fp32",
+                   "#3b0f2e", "#6b1d5e", cache_state="saved",
+                   chips=(("loss", "fp32"),))
+        )
+        return f'<div class="arch-wrap">{"".join(blocks)}</div>'
 
-    # Final Norm
+    # ── Detailed Transformer block (all repetitions share this shape) ──
+    if arch == "linear":
+        interval = max(1, int(cfg.get("full_attention_interval", 4)))
+        full_layers = sum(1 for index in range(n) if (index + 1) % interval == 0)
+        linear_layers = n - full_layers
+        block_detail = (
+            f"Linear Attn x{linear_layers} + Full Attn x{full_layers}"
+            f"（每 {interval} 层一次 Full）· {ffn_label} · {residual_type}"
+        )
+    else:
+        block_detail = f"{attn_type} · {ffn_label} · {residual_type}"
+    if use_moe:
+        block_detail += (
+            f"（{cfg.get('num_experts', 4)}E, top-{cfg.get('num_experts_per_tok', 1)}）"
+        )
+    early_exit_layers = cfg.get("early_exit_layers") or []
+    if early_exit_layers:
+        block_detail += " · EE=" + ",".join(str(x) for x in early_exit_layers)
+
+    layer_modules = []
+    if ckpt_mode == 2:
+        # Whole-layer checkpoint: this fp32 residual stream is the only activation
+        # kept per layer; everything inside the layer is replayed in backward.
+        layer_modules.append(_module(
+            "层输入残差流（保存）",
+            f"[B,S,{h}] fp32 · 整层 checkpoint 唯一保留的激活",
+            (("C", "fp32"),), cache_state="saved",
+        ))
+    layer_modules.extend([
+        _module("RMSNorm（输入）", f"hidden {h} · fp32 内部", (
+            ("W", aux_w), ("C", "fp32 内部"), ("O", aux_opt),
+        ), cache_state=layer_cache),
+        _module(
+            "Q/K/V 投影",
+            f"{h} -> {q_heads * head_dim} / {kv_heads * head_dim} x2",
+            (("W", matrix_w), ("C", linear_compute), ("G", matrix_w),
+             ("O", matrix_opt)), cache_state=layer_cache,
+        ),
+        _module(
+            "QK-Norm",
+            f"RMSNorm(head_dim={head_dim}) · 每头归一化",
+            (("W", aux_w), ("C", "fp32 内部"), ("O", aux_opt)),
+            cache_state=layer_cache,
+        ),
+        _module(
+            "RoPE",
+            f"theta={cfg['rope_theta']:.0e} · cos/sin fp32 缓存",
+            (("缓存", "fp32"), ("输出", compute)), cache_state=layer_cache,
+        ),
+        _module(
+            f"Attention 核心（{attn_backend}）",
+            ("QK^T · softmax(fp32) · AV · checkpoint 重算（输入 q/k/v 保存）"
+             if ckpt_mode == 1 else
+             "QK^T · softmax(fp32) · AV · 整层重算" if ckpt_mode == 2 else
+             "QK^T · softmax(fp32) · AV"),
+            (("C", f"{compute} · softmax fp32"), ("KV cache", f"{kv_dtype}（推理）")),
+            cache_state=attn_cache,
+        ),
+        _module(
+            "O 投影",
+            f"{q_heads * head_dim} -> {h}",
+            (("W", matrix_w), ("C", linear_compute), ("G", matrix_w),
+             ("O", matrix_opt)), cache_state=layer_cache,
+        ),
+        _residual_line(),
+        _module("RMSNorm（FFN 前）", f"hidden {h} · fp32 内部", (
+            ("W", aux_w), ("C", "fp32 内部"), ("O", aux_opt),
+        ), cache_state=layer_cache),
+    ])
+    if use_moe:
+        layer_modules.extend([
+            _module(
+                "Router",
+                f"{h} -> {cfg.get('num_experts', 4)} experts · aux loss fp32",
+                (("W", matrix_w), ("C", compute), ("G", matrix_w),
+                 ("O", matrix_opt), ("aux", "fp32")), cache_state=layer_cache,
+            ),
+            _module(
+                f"MoE-FFN ({cfg.get('num_experts', 4)}E, top-"
+                f"{cfg.get('num_experts_per_tok', 1)})",
+                f"专家 SwiGLU {h}->{moe_int}->{h} · grouped dispatch 直读权重",
+                (("W", matrix_w), ("C", "BF16 grouped"), ("FP8", "不生效")),
+                cache_state=layer_cache,
+            ),
+        ])
+    else:
+        layer_modules.extend([
+            _module(
+                "Gate/Up 投影",
+                f"{h} -> {int_size} x2 · SwiGLU",
+                (("W", matrix_w), ("C", linear_compute), ("G", matrix_w),
+                 ("O", matrix_opt)), cache_state=layer_cache,
+            ),
+            _module(
+                "SwiGLU",
+                "silu(gate) x up",
+                (("C", compute),), cache_state=layer_cache,
+            ),
+            _module(
+                "Down 投影",
+                f"{int_size} -> {h}",
+                (("W", matrix_w), ("C", linear_compute), ("G", matrix_w),
+                 ("O", matrix_opt)), cache_state=layer_cache,
+            ),
+        ])
+    layer_modules.append(_residual_line())
     blocks.append(
-        _block("Final Norm", f"RMSNorm({cfg['hidden_size']})", "#1b4332", "#2d8a4e")
+        '<div class="arch2-group">'
+        '<div class="arch2-group-title">'
+        f"Transformer Layer x{n}"
+        "</div>"
+        f'<div class="arch2-group-sub">{_esc(block_detail)}</div>'
+        + "".join(layer_modules)
+        + _layer_pills()
+        + "</div>"
     )
     blocks.append(_arrow())
 
-    # LM Head
-    lm_detail = f"vocab={cfg['vocab_size']}, dim={cfg['hidden_size']}"
-    if cfg.get("tie_word_embeddings"):
-        lm_detail += " (tied)"
-    blocks.append(_block("LM Head", lm_detail, "#4a1942", "#7c3aed"))
+    # ── Final norm / LM head / output ──────────────────────────
+    blocks.append(
+        _block("Final Norm", f"RMSNorm({h})", "#1b4332", "#2d8a4e",
+               cache_state="saved",
+               chips=(("W", aux_w), ("C", "fp32 内部"), ("O", aux_opt)))
+    )
     blocks.append(_arrow())
-
-    # Output
-    blocks.append(_block("Output", "logits", "#3b0f2e", "#6b1d5e"))
-
+    lm_detail = f"vocab={cfg['vocab_size']}, dim={h}"
+    if cfg.get("tie_word_embeddings"):
+        lm_detail += " (tied with embedding)"
+    blocks.append(
+        _block("LM Head", lm_detail, "#4a1942", "#7c3aed", cache_state="saved",
+               chips=(("W", aux_w), ("C", compute), ("logits", compute),
+                      ("G", aux_w), ("O", aux_opt)))
+    )
+    blocks.append(_arrow())
+    blocks.append(
+        _block("Output", f"logits {compute} · CE loss fp32",
+               "#3b0f2e", "#6b1d5e", cache_state="saved",
+               chips=(("loss", "fp32"),))
+    )
     return f'<div class="arch-wrap">{"".join(blocks)}</div>'
 
 
@@ -2979,12 +3326,38 @@ _try_recover_training_state()
 # ═══ SIDEBAR ═══
 # ═══════════════════════════════════════════════════════════════
 
-try:
-    from scripts.config_layout import workspace, render_summary
-except ModuleNotFoundError:
-    from config_layout import workspace, render_summary
+def _load_layout_module():
+    """Load the layout helper straight from disk.
+
+    The Config WebUI is launched from scripts/ (streamlit run config_webui.py),
+    so "from scripts import ..." depends on the launch cwd/sys.path and can hit
+    a half-initialised namespace package after a hot reload. Loading the module
+    by its own path is cwd independent and always reads the latest file, so
+    edits to config_layout.py apply after a plain rerun without a restart.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    layout_path = Path(__file__).resolve().with_name("config_layout.py")
+    spec = importlib.util.spec_from_file_location(
+        "_instinct_config_layout", layout_path,
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load layout helper from {layout_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_layout_module = _load_layout_module()
+workspace = _layout_module.workspace
+render_summary = _layout_module.render_summary
 
 _ui = workspace(st)
+if "model_panel" not in _ui:
+    # Cached pre-two-column layout module (or a partial source update): keep the
+    # structure controls in one column instead of failing mid-render.
+    _ui["model_panel"] = _ui.get("model_left") or st.container()
 
 with st.sidebar:
     st.markdown(
@@ -3064,7 +3437,7 @@ with st.sidebar:
     _sidebar_status = st.empty()
 
     # ── Model Architecture ──
-    with _ui["model_left"].expander("模型类型", expanded=True):
+    with _ui["model_panel"].expander("模型类型", expanded=True):
         arch_options = ["Standard Transformer", "MoE Transformer", "GatedDeltaNet (Linear)", "RecurrsiveInstinct"]
         current_arch = st.session_state.get("model_architecture", "standard")
         if current_arch == "standard":
@@ -3102,7 +3475,7 @@ with st.sidebar:
             st.rerun()
 
     # ── Core Architecture ──
-    with _ui["model_left"].expander("核心结构", expanded=True):
+    with _ui["model_panel"].expander("核心结构", expanded=True):
         _slider(
             "hidden_size",
             128,
@@ -3161,7 +3534,7 @@ with st.sidebar:
         )
 
     # ── Residual Connections ──
-    with _ui["model_right"].expander("残差连接 · 实验性", expanded=False):
+    with _ui["model_panel"].expander("残差连接 · 实验性", expanded=False):
         _residual_labels = {
             "standard": "Standard residual",
             "mhc": "mHC (Manifold-Constrained Hyper-Connections)",
@@ -3221,7 +3594,7 @@ with st.sidebar:
                 )
 
     # ── Attention ──
-    with _ui["model_right"].expander("注意力", expanded=True):
+    with _ui["model_panel"].expander("注意力", expanded=True):
         _q_heads = _slider(
             "num_attention_heads",
             1,
@@ -3261,7 +3634,7 @@ with st.sidebar:
 
     # ── Linear Attention Config ──
     if st.session_state.get("model_architecture") == "linear":
-        with _ui["model_right"].expander("线性注意力", expanded=True):
+        with _ui["model_panel"].expander("线性注意力", expanded=True):
             _h = st.session_state.get("hidden_size", 768)
             _q = st.session_state.get("num_attention_heads", 8)
             _hd = compute_head_dim(_h, _q)
@@ -3334,7 +3707,7 @@ with st.sidebar:
 
     # ── RecurrsiveInstinct latent recurrent-depth Config ──
     if st.session_state.get("model_architecture") == "recurrsive_instinct":
-        with _ui["model_right"].expander("RecurrsiveInstinct 循环深度", expanded=True):
+        with _ui["model_panel"].expander("RecurrsiveInstinct 循环深度", expanded=True):
             _n_layers = st.session_state.get("num_hidden_layers", 8)
             _number_input(
                 "Prelude layers",
@@ -3418,7 +3791,7 @@ with st.sidebar:
             )
 
     # ── Position Encoding ──
-    with _ui["model_right"].expander("位置编码与 RoPE", expanded=False):
+    with _ui["model_panel"].expander("位置编码与 RoPE", expanded=False):
         _number_input(
             "max_position_embeddings",
             value=st.session_state.get("max_position_embeddings", 32768),
@@ -3563,7 +3936,7 @@ with st.sidebar:
             )
 
     # ── MoE ──
-    with _ui["model_left"].expander("MoE 专家与路由", expanded=True):
+    with _ui["model_panel"].expander("MoE 专家与路由", expanded=True):
         _checkbox(
             "use_moe",
             value=st.session_state.get("use_moe", False),
@@ -3692,7 +4065,7 @@ with st.sidebar:
             )
 
     # ── Early Exit (training only) ──
-    with _ui["model_right"].expander("提前退出 · 训练", expanded=False):
+    with _ui["model_panel"].expander("提前退出 · 训练", expanded=False):
         _checkbox(
             "Enable Early Exit Loss",
             value=st.session_state.get("early_exit_enabled", False),
@@ -3719,7 +4092,7 @@ with st.sidebar:
             )
 
     # ── Misc ──
-    with _ui["model_right"].expander("其他结构选项", expanded=False):
+    with _ui["model_panel"].expander("其他结构选项", expanded=False):
         _number_input(
             "rms_norm_eps",
             value=st.session_state.get("rms_norm_eps", 1e-6),
@@ -4777,7 +5150,7 @@ with _ui["diagram"]:
     architecture_title = (
         "RecurrsiveInstinct Architecture"
         if cfg.get("model_architecture") == "recurrsive_instinct"
-        else "Architecture"
+        else "Architecture · 精度视图"
     )
     st.markdown(
         '<div style="font-size: 13px; font-weight: 600; letter-spacing: 0.8px; '
@@ -4786,7 +5159,7 @@ with _ui["diagram"]:
         unsafe_allow_html=True,
     )
 
-    st.markdown(arch_diagram(cfg), unsafe_allow_html=True)
+    st.markdown(arch_diagram(cfg, precision_options()), unsafe_allow_html=True)
 
     # Additional architecture info
     int_size = cfg.get("intermediate_size", compute_intermediate_size(cfg["hidden_size"]))

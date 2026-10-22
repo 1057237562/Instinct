@@ -256,3 +256,75 @@ def test_training_metrics_parse_only_latest_unidentified_launch():
     # 没有 run 分段头的旧日志仍按整份解析。
     assert len(parse("Epoch:[1/1](1/1) loss: 1.0 lr: 0.1\n")) == 1
     assert parse("no metrics here\n") == []
+
+
+
+def test_architecture_diagram_breaks_down_layers_with_precision():
+    helpers = _preset_helpers()
+    config = helpers["PRESETS"]["Instinct V2"]
+    default = helpers["arch_diagram"](config)
+    assert "arch2-group" in default and "arch2-chip" in default
+    assert "Transformer Layer x32" in default
+    assert "Layer 1" in default and "Layer 32" in default
+    assert "RMSNorm（输入）" in default and "Q/K/V 投影" in default
+    assert "prec-off" in default and "AdamW 2×fp32" in default
+    # 梯度检查点关闭：所有模块激活都应标成金色（保存）。
+    assert "arch2-module cached" in default
+    assert "arch2-cache-chip gold" in default
+    assert "mode0" in default
+
+    precise = helpers["arch_diagram"](config, {
+        "optimizer": "muon",
+        "param_dtype": "bf16",
+        "activation": "bfloat16",
+        "muon_mantissa": True,
+        "muon_momentum_dtype": "bf16",
+        "fp8_training": "tensorwise",
+        "fp8_filter": "auto",
+        "kv_cache_dtype": "fp8_e5m2",
+        "use_grad_checkpoint": 1,
+    })
+    assert "Muon mantissa" in precise
+    assert "bf16 → FP8" in precise
+    assert "fp8_e5m2" in precise
+    assert "mode1 Attention-only" in precise
+    assert "uint16" in precise
+    assert "残差流 fp32" in precise
+    # mode1 只重算 attention core：该行标灰，其余模块标金。
+    assert "checkpoint 重算（输入 q/k/v 保存）" in precise
+    assert "arch2-module recomputed" in precise
+    assert precise.count("arch2-module cached") > precise.count("arch2-module recomputed")
+
+
+def test_architecture_diagram_recurrent_layer_chips_and_moe_note():
+    helpers = _preset_helpers()
+    recurrent = helpers["arch_diagram"](helpers["PRESETS"]["RecurrsiveInstinct"])
+    assert "arch2-chip" in recurrent
+    moe = helpers["arch_diagram"](helpers["PRESETS"]["Instinct V1 MoE"], {
+        "optimizer": "muon", "param_dtype": "fp32", "activation": "bfloat16",
+        "muon_mantissa": False, "fp8_training": "off",
+    })
+    assert "MoE-FFN (8E, top-2)" in moe
+    assert "BF16 grouped" in moe
+
+
+def test_architecture_diagram_marks_checkpoint_cache_coverage():
+    helpers = _preset_helpers()
+    config = helpers["PRESETS"]["Instinct V2"]
+    base = {
+        "optimizer": "adamw", "param_dtype": "fp32", "activation": "bfloat16",
+        "muon_mantissa": False, "fp8_training": "off",
+    }
+
+    keep = helpers["arch_diagram"](config, dict(base, use_grad_checkpoint=0))
+    assert "金色模块的激活全部保存" in keep
+    assert "arch2-module cached" in keep
+    assert "arch2-module recomputed" not in keep
+
+    replay = helpers["arch_diagram"](config, dict(base, use_grad_checkpoint=2))
+    assert "层输入残差流（保存）" in replay
+    assert "整层重算" in replay
+    assert "arch2-module recomputed" in replay
+    assert replay.count("arch2-module recomputed") > replay.count("arch2-module cached")
+    # 层外的 embedding / final norm / lm head 仍保留激活。
+    assert "arch-block cached" in replay
