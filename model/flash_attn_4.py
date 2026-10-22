@@ -21,6 +21,7 @@ import sys
 
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import _StopRecomputationError
 from model.attention_mask import PreparedAttentionBias, normalize_attention_mask
 from model.packed_attention import PackedFlexMask, packed_flex_attention, _FLEX_AVAILABLE
 
@@ -84,6 +85,9 @@ def flash_attention(
         if dropout_p != 0.0:
             raise ValueError('Packed FlexAttention does not support attention dropout')
         return packed_flex_attention(q, k, v, attention_mask)
+    # V2's 96-wide causal path arrives here with a model-entry-prepared
+    # PackedFlexMask. Keep the legacy layer-local selector below for V1:
+    # its compiler-disabled mask builder must not enter V2 checkpoints.
     causal_backend = os.environ.get('INSTINCT_CAUSAL_ATTENTION_BACKEND', 'auto')
     if causal_backend not in ('auto','sdpa','flex'):
         raise ValueError('INSTINCT_CAUSAL_ATTENTION_BACKEND must be auto, sdpa or flex')
@@ -123,6 +127,11 @@ def flash_attention(
                 if isinstance(out, tuple):
                     out = out[0]
                 return out[:, :seqlen] if pad else out
+            except _StopRecomputationError:
+                # Non-reentrant Attention-only checkpointing deliberately
+                # stops replay once saved tensors are regenerated. This is not
+                # an unsupported FA4 shape and must not switch backend.
+                raise
             except Exception:
                 pass  # FA4 kernel 不支持当前 shape/dtype,回退 SDPA
     # 回退: 显式展开 K/V 可让当前 torch.compile + packed mask 保持已验证的

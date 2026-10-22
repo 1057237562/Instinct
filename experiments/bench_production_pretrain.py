@@ -2,15 +2,23 @@
 
 Only instrumentation and the stopping boundary differ from the listed CLI.
 No synthetic/replayed tensors, changed samplers or model substitutions.
+Optional --resident-data stages the exact bounded batch sequence before training
+to isolate loader and host-to-device overhead; it is a diagnostic upper bound.
 Optional --threads is an explicitly recorded CPU scheduling experiment.
 Finish after warmup + measured updates, before the trainer's
 epoch-final checkpoint. Ordinary periodic logging/saving remains enabled.
+
+Launch-record runs block checkpoint writes. --production-timing keeps the
+trainer profiler off and excludes pre-run evaluation. The explicit budget-test
+mode restarts only the in-memory data cursor with checkpoint weights/optimizer;
+it is a feasibility experiment, not an exact resume at a different budget.
 """
 import argparse
 from collections import Counter
 from contextlib import contextmanager
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import runpy
@@ -40,18 +48,6 @@ def describe(values):
                 maximum=max(values))
 
 
-def _save_attention_contexts():
-    """Experimental SAC policy; retain Flex results, recompute other operations."""
-    from torch.utils.checkpoint import CheckpointPolicy, create_selective_checkpoint_contexts
-    from torch._higher_order_ops.flex_attention import flex_attention
-
-    def policy(ctx, op, *args, **kwargs):
-        return (CheckpointPolicy.MUST_SAVE if op == flex_attention
-                else CheckpointPolicy.PREFER_RECOMPUTE)
-
-    return create_selective_checkpoint_contexts(policy)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--steps', type=int, default=100)
@@ -71,6 +67,10 @@ def main():
     parser.add_argument('--memory-gb', type=float, default=15.5)
     parser.add_argument('--token-budget', type=int, default=0,
                         help='Explicit production bucket token budget; changes batch sizes and training trajectory')
+    parser.add_argument('--restart-data-for-budget-test', action='store_true',
+                        help='Isolated budget feasibility test: keep checkpoint weights/optimizer, restart the data cursor; never writes a training checkpoint')
+    parser.add_argument('--check-finite-loss', action='store_true',
+                        help='Retain detached scalar losses and check them after the timed window')
     parser.add_argument('--checkpoint-mode', type=int, choices=[1,2], default=None,
                         help='Keep checkpointing enabled: FFN selective (1) or whole block (2)')
     parser.add_argument('--selective-save-attention', action='store_true',
@@ -79,11 +79,19 @@ def main():
     parser.add_argument('--threads', type=int, default=0)
     parser.add_argument('--trace-last-step', action='store_true',
                         help='Diagnostic only: profiler overhead affects the reported window')
+    parser.add_argument('--production-timing', action='store_true',
+                        help='Keep profile=off; synchronize only at warm-window boundaries, without evaluation or per-phase CUDA events')
+    parser.add_argument('--resident-data', choices=('off', 'cpu', 'cuda'), default='off',
+                        help='Diagnostic only: stage the exact bounded batches in CPU/GPU memory before warmup, preserving their order and CPU bookkeeping')
     parser.add_argument('--quality', action='store_true',
                         help='Record training losses and evaluate 32 fixed second-chunk sequences before/after')
     parser.add_argument('--quality-batch-change', action='store_true',
                         help='Use equal-update non-regression gates for an authorized batch/packing change')
     options = parser.parse_args()
+    if options.production_timing and (options.quality or options.trace_last_step):
+        parser.error('production-timing excludes quality evaluation and operator tracing; run those separately')
+    if options.resident_data != 'off' and not options.production_timing:
+        parser.error('resident-data requires production-timing for an unprofiled comparison')
     launch = json.loads(options.launch_record.read_text(encoding='utf-8')) if options.launch_record else None
     if not launch and options.checkpoint_mode is None:
         options.checkpoint_mode = 1
@@ -91,6 +99,10 @@ def main():
         parser.error('selective-save-attention requires a full-layer-checkpoint launch record')
     if options.resume_checkpoint and not launch:
         parser.error('resume-checkpoint requires launch-record')
+    if options.restart_data_for_budget_test and not (launch and options.resume_checkpoint and options.token_budget > 0):
+        parser.error('restart-data-for-budget-test requires launch-record, resume-checkpoint and a positive token-budget')
+    if launch and options.resume_checkpoint and options.token_budget > 0 and not options.restart_data_for_budget_test:
+        parser.error('a different resume budget requires the explicit isolated restart-data-for-budget-test mode')
     if launch and options.quality and not options.validation_cache:
         parser.error('launch-record quality validation requires its held-out validation-cache')
     if options.validation_count < 1:
@@ -134,6 +146,7 @@ def main():
         raise RuntimeError('Parquet audit SHA-256 mismatch')
     print(f'[BENCH] audited container={corpus}, sha256={source_hash}', flush=True)
     started = time.perf_counter()
+    wall_clock_offset = time.time() - started
     instances = []
     observed = []
     samples = []
@@ -142,6 +155,10 @@ def main():
     batch_digest = hashlib.sha256()
     clock = {}
     windows_memory = {}
+    checkpoint_origin = {}
+    resident_batches = []
+    resident_prepared = {}
+    resident_report = dict(mode=options.resident_data)
 
     def record_windows_memory(label):
         if os.name == 'nt':
@@ -150,16 +167,14 @@ def main():
     original_profiler = profiler_module.TrainingProfiler
     original_iterator = ChunkedPackedEpochLoader.__iter__
     original_checkpoint = trainer_utils.lm_checkpoint
-    original_activation_checkpoint = torch.utils.checkpoint.checkpoint
+    original_prepare_batch = trainer_utils.prepare_lm_batch
+
+    def prepare_resident_batch(batch, device):
+        if options.resident_data == 'cuda':
+            return resident_prepared[id(batch)]
+        return original_prepare_batch(batch, device)
     if options.selective_save_attention:
-        from model.model_instinct import FeedForward, InstinctBlock
-
-        def experimental_checkpoint(function, *args, **kwargs):
-            if isinstance(function, InstinctBlock) and isinstance(function.mlp, FeedForward):
-                kwargs['context_fn'] = _save_attention_contexts
-            return original_activation_checkpoint(function, *args, **kwargs)
-
-        torch.utils.checkpoint.checkpoint = experimental_checkpoint
+        os.environ['INSTINCT_DENSE_SELECTIVE_CHECKPOINT'] = 'attention'
     import importlib
     flash_module = importlib.import_module('model.flash_attn_4')
     original_resolve = flash_module.resolve_flash_attn
@@ -174,6 +189,14 @@ def main():
         state = torch.load(options.resume_checkpoint, map_location='cpu', weights_only=False)
         if state.get('world_size', 1) != 1:
             raise ValueError('Benchmark resume requires a single-GPU checkpoint')
+        if options.restart_data_for_budget_test:
+            checkpoint_origin.update(epoch=state.get('epoch', 0), step=state.get('step', 0),
+                                     data_config=dict(state.get('data_config') or {}))
+            state['epoch'] = state['step'] = 0
+            state['data_config'] = dict(state.get('data_config') or {})
+            state['data_config'].update(bucket_token_budget=options.token_budget,
+                                       streaming_chunk_index=0, streaming_chunk_step=0,
+                                       streaming_processed_tokens=0)
         return state
 
     class RecordingProfiler(original_profiler):
@@ -199,6 +222,10 @@ def main():
             if options.quality:
                 losses.append((sys._getframe(1).f_locals['loss'].detach()
                                * self.production_globals['args'].accumulation_steps).clone())
+            elif options.check_finite_loss:
+                # Scalar storage only: no CUDA event, clone, item or reduction
+                # enters the measured production loop.
+                losses.append(sys._getframe(1).f_locals['loss'].detach())
             sample = self._current
             result = super().end_step()
             if sample is not None:
@@ -252,13 +279,40 @@ def main():
 
     def measured_iterator(loader):
         iterator = original_iterator(loader)
+        if options.resident_data != 'off':
+            staging_start = time.perf_counter()
+            staging_digest = hashlib.sha256()
+            for _ in range(options.warmup + options.steps):
+                batch = next(iterator)
+                resident_batches.append(batch)
+                for tensor in batch:
+                    staging_digest.update(str(tuple(tensor.shape)).encode())
+                    staging_digest.update(tensor.numpy().tobytes())
+                if options.resident_data == 'cuda':
+                    resident_prepared[id(batch)] = original_prepare_batch(
+                        batch, instances[0].production_globals['args'].device)
+            torch.cuda.synchronize()
+            resident_report.update(
+                staging_seconds=time.perf_counter() - staging_start,
+                initial_batch_sha256=staging_digest.hexdigest(),
+                batches=len(resident_batches),
+                cpu_bytes=sum(t.numel() * t.element_size()
+                              for batch in resident_batches for t in batch),
+                cuda_bytes=sum(t.numel() * t.element_size()
+                               for batch in resident_prepared.values()
+                               for t in batch if t is not None))
+            print('[BENCH RESIDENT] ' + json.dumps(resident_report), flush=True)
         for index in range(options.warmup + options.steps):
             if index == options.warmup:
                 torch.cuda.synchronize()
+                if options.production_timing:
+                    torch.cuda.reset_peak_memory_stats()
                 record_windows_memory('warmup_end')
+                print(f'[BENCH] warmup complete; measuring {options.steps} steps; '
+                      f'resident_data={options.resident_data}', flush=True)
                 clock['steady_start'] = time.perf_counter()
             fetch_start = time.perf_counter()
-            batch = next(iterator)
+            batch = resident_batches[index] if resident_batches else next(iterator)
             fetch_end = time.perf_counter()
             if options.quality:
                 for tensor in batch:
@@ -297,13 +351,29 @@ def main():
                 yield batch
             record['cpu_loop_body_ms'] = 1000 * (time.perf_counter() - fetch_end)
             if index == 0:
-                torch.cuda.synchronize()
+                if not options.production_timing:
+                    torch.cuda.synchronize()
                 clock['first_step_done'] = time.perf_counter()
-            if index % 10 == 9:
+            if index % 10 == 9 and not options.production_timing:
                 print(f'[BENCH] completed={index + 1}', flush=True)
         torch.cuda.synchronize()
         clock['steady_end'] = time.perf_counter()
         record_windows_memory('timed_window_end')
+        if resident_batches:
+            digest = hashlib.sha256()
+            for batch in resident_batches:
+                for tensor in batch:
+                    digest.update(str(tuple(tensor.shape)).encode())
+                    digest.update(tensor.numpy().tobytes())
+                if options.resident_data == 'cuda':
+                    expected_ids = batch[2] if len(batch) == 3 and torch.any(batch[2] > 0).item() else None
+                    for expected, actual in zip((*batch[:2], expected_ids), resident_prepared[id(batch)]):
+                        if expected is None:
+                            assert actual is None
+                        else:
+                            assert torch.equal(expected, actual.cpu()), 'Resident input changed during training'
+            assert digest.hexdigest() == resident_report['initial_batch_sha256']
+            resident_report.update(batch_sha256=digest.hexdigest(), inputs_unchanged=True)
         if options.quality:
             validate_model('final')
             del quality['validation_batches']
@@ -376,7 +446,7 @@ def main():
                 os.environ.setdefault(key, value)
         for key, value in {
             '--from_resume': int(options.resume_checkpoint is not None),
-            '--profile': 'timing', '--profile_warmup': options.warmup,
+            '--profile': 'off' if options.production_timing else 'timing', '--profile_warmup': options.warmup,
             '--profile_interval': options.steps, '--save_interval': 2147483647,
             '--save_dir': options.output.parent / 'isolated_weights',
             '--pause_file': options.output.parent / 'nonexistent_benchmark_pause',
@@ -384,11 +454,17 @@ def main():
             option(key, value)
         if options.checkpoint_mode is not None:
             option('--use_grad_checkpoint', options.checkpoint_mode)
+        if options.token_budget > 0:
+            option('--bucket_token_budget', options.token_budget)
+    elif options.production_timing:
+        argv[argv.index('--profile') + 1] = 'off'
     previous_argv = sys.argv
     profiler_module.TrainingProfiler = RecordingProfiler
     ChunkedPackedEpochLoader.__iter__ = measured_iterator
     if options.resume_checkpoint:
         trainer_utils.lm_checkpoint = isolated_checkpoint
+    if options.resident_data == 'cuda':
+        trainer_utils.prepare_lm_batch = prepare_resident_batch
     sys.argv = argv
     try:
         runpy.run_path('trainer/train_pretrain.py', run_name='__main__')
@@ -400,7 +476,7 @@ def main():
         profiler_module.TrainingProfiler = original_profiler
         ChunkedPackedEpochLoader.__iter__ = original_iterator
         trainer_utils.lm_checkpoint = original_checkpoint
-        torch.utils.checkpoint.checkpoint = original_activation_checkpoint
+        trainer_utils.prepare_lm_batch = original_prepare_batch
         flash_module.resolve_flash_attn = original_resolve
     instance = instances[0]
     instance.finish()
@@ -408,6 +484,13 @@ def main():
     measured = observed[options.warmup:]
     measured_samples = samples[options.warmup:]
     seconds = clock['steady_end'] - clock['steady_start']
+    loss_check = None
+    if options.check_finite_loss:
+        factor = 1 if options.quality else namespace['args'].accumulation_steps
+        checked_losses = [float(value) * factor for value in losses]
+        loss_check = dict(count=len(checked_losses), all_finite=all(map(math.isfinite, checked_losses)),
+                          last_loss=checked_losses[-1], minimum_loss=min(checked_losses),
+                          maximum_loss=max(checked_losses))
     phase_ms = {}
     for record, sample in zip(measured, measured_samples):
         record['gpu_step_ms'] = sample.total_start.elapsed_time(sample.total_end)
@@ -422,14 +505,20 @@ def main():
                                 for item in measured).items():
         subset = [(item, sample) for item, sample in zip(measured, measured_samples)
                   if (item['batch_size'], item['sequence_length']) == shape]
-        by_shape.append(dict(batch_size=shape[0], sequence_length=shape[1], steps=count,
-                             loader_next_ms=describe([item['loader_next_ms'] for item, _ in subset]),
-                             gpu_step_ms=describe([sample.total_start.elapsed_time(sample.total_end)
-                                                  for _, sample in subset])))
+        shape_observed = [item for item in measured
+                          if (item['batch_size'], item['sequence_length']) == shape]
+        entry = dict(batch_size=shape[0], sequence_length=shape[1], steps=count,
+                     loader_next_ms=describe([item['loader_next_ms'] for item in shape_observed]))
+        if subset:
+            entry['gpu_step_ms'] = describe([sample.total_start.elapsed_time(sample.total_end)
+                                            for _, sample in subset])
+        by_shape.append(entry)
     # Detect finite losses without an extra synchronization in the hot path.
     report = dict(gpu=torch.cuda.get_device_name(), torch=torch.__version__,
                   steps=options.steps, warmup=options.warmup,
                   wall_seconds=seconds, wall_ms_per_step=1000 * seconds / options.steps,
+                  measured_start_unix=clock['steady_start'] + wall_clock_offset,
+                  measured_end_unix=clock['steady_end'] + wall_clock_offset,
                   startup_to_first_batch_seconds=clock['first_batch_ready'] - started,
                   first_step_seconds=clock['first_step_done'] - clock['first_batch_ready'],
                   start_to_measured_window_end_seconds=clock['steady_end'] - started,
@@ -443,9 +532,17 @@ def main():
                   data_config=namespace['data_config'],
                   cpu_threads=torch.get_num_threads(),
                   trace_diagnostic=options.trace_last_step,
+                  production_timing=options.production_timing,
+                  resident_data=resident_report,
+                  first_step_device_synchronized=not options.production_timing,
+                  peak_allocated_gib=torch.cuda.max_memory_allocated() / 2**30,
+                  peak_reserved_gib=torch.cuda.max_memory_reserved() / 2**30,
                   cold_attention_probe=options.cold_attention_probe,
                   selective_save_attention=options.selective_save_attention,
                   quality=quality,
+                  loss_check=loss_check,
+                  restart_data_for_budget_test=options.restart_data_for_budget_test,
+                  checkpoint_origin=checkpoint_origin,
                   windows_gpu_memory=windows_memory,
                   source_sha256=source_sha256,
                   cuda_allocator=dict(
@@ -453,7 +550,7 @@ def main():
                       **{key:torch.cuda.memory_stats().get(key) for key in (
                           'inactive_split_bytes.all.peak','num_alloc_retries','num_ooms')}),
                   environment={key: value for key, value in os.environ.items()
-                               if key.startswith(('INSTINCT_MUON_', 'INSTINCT_MOE_',
+                               if key.startswith(('INSTINCT_MUON_', 'INSTINCT_MOE_', 'INSTINCT_DENSE_',
                                                   'INSTINCT_PACKED_ATTENTION_',
                                                   'INSTINCT_CAUSAL_ATTENTION_',
                                                   'INSTINCT_TRAINING_',
@@ -474,6 +571,8 @@ def main():
     print('[BENCH RESULT] ' + json.dumps({key: value for key, value in report.items()
                                         if key not in ('config', 'args', 'cli', 'data_config',
                                                        'observations')}, indent=2), flush=True)
+    if loss_check is not None and not loss_check['all_finite']:
+        raise RuntimeError('Non-finite training loss in the isolated benchmark')
 
 
 if __name__ == '__main__':

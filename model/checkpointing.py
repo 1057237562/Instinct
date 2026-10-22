@@ -1,9 +1,12 @@
-"""Selective attention recomputation — gradient-checkpointing Mode 1.
+"""Attention-only recomputation and explicit experimental checkpoint helpers.
 
 ``RecomputeAttention`` keeps only Q/K/V (plus attention mask and RNG state)
 across the explicit eager-attention fallback and recomputes its core in
 backward. The fused FA4/SDPA fast path performs its own memory-efficient
-attention and is intentionally not wrapped here; mode 1 checkpoints its FFN.
+attention. Mode 1 wraps that fused core with PyTorch's non-reentrant checkpoint
+at the model call site, preserving its backend. QKV/O projections and FFNs are
+not checkpointed by mode 1. ``checkpoint_ffn`` remains an explicit experiment
+helper; the models do not call it as part of mode 1.
 
 Semantics are a byte-for-byte re-implementation of the eager math-attention
 branch of ``Attention.forward`` in ``model/model_instinct.py:142-147``;
@@ -264,4 +267,38 @@ def _moe_checkpoint_contexts(count):
             if index % 3 in selected:
                 return CheckpointPolicy.MUST_SAVE
         return CheckpointPolicy.PREFER_RECOMPUTE
+    return create_selective_checkpoint_contexts(policy)
+
+
+def dense_checkpoint_options(config, hidden_states, attention_mask):
+    """Opt-in V2 Flex result retention inside the original checkpoint call.
+
+    Replacing ``torch.utils.checkpoint.checkpoint`` with a Python wrapper hides
+    the checkpoint higher-order op from Dynamo. Pass context_fn at the actual
+    call site so the FP8 trunk stays compiled.
+    """
+    setting = os.environ.get('INSTINCT_DENSE_SELECTIVE_CHECKPOINT', '0')
+    if setting not in ('0', 'attention'):
+        raise ValueError('INSTINCT_DENSE_SELECTIVE_CHECKPOINT must be 0 or attention')
+    if setting == '0':
+        return {}
+    from model.packed_attention import PackedFlexMask
+    if (getattr(config, 'use_moe', False)
+            or getattr(config, 'residual_type', 'standard') != 'standard'
+            or config.hidden_size != 1536 or config.head_dim != 96
+            or config.num_attention_heads != 16 or config.num_key_value_heads != 4
+            or not hidden_states.is_cuda or not isinstance(attention_mask, PackedFlexMask)):
+        return {}
+    return {'context_fn': dense_attention_checkpoint_contexts}
+
+
+def dense_attention_checkpoint_contexts():
+    """Retain Flex output/LSE, recompute the remaining full-layer region."""
+    from torch.utils.checkpoint import CheckpointPolicy, create_selective_checkpoint_contexts
+    from torch._higher_order_ops.flex_attention import flex_attention
+
+    def policy(ctx, op, *args, **kwargs):
+        return (CheckpointPolicy.MUST_SAVE if op == flex_attention
+                else CheckpointPolicy.PREFER_RECOMPUTE)
+
     return create_selective_checkpoint_contexts(policy)

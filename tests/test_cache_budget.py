@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -106,6 +108,50 @@ def test_dead_process_lease_is_removed(tmp_path):
     cache_budget.enforce_cache_budget(tmp_path, max_bytes=500)
     assert not lease.exists()
     assert not active.exists()
+
+
+def test_live_child_probe_preserves_process_and_lease(tmp_path, monkeypatch):
+    child = subprocess.Popen(
+        [sys.executable, '-u', '-c', 'import sys; print("ready"); sys.stdin.read()'],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+    )
+    try:
+        assert child.stdout.readline().strip() == 'ready'
+        if os.name == 'nt':
+            def forbidden(*args):
+                raise AssertionError('Windows PID checks must never call os.kill')
+            monkeypatch.setattr(cache_budget.os, 'kill', forbidden)
+        active = _file(tmp_path / 'active.arrow', 1000, 1_000_000)
+        lease_dir = tmp_path / '.instinct-leases'
+        lease_dir.mkdir()
+        lease = lease_dir / f'{child.pid}.json'
+        lease.write_text(json.dumps({'pid': child.pid, 'paths': [str(active)]}))
+        assert cache_budget._pid_alive(child.pid)
+        with pytest.raises(cache_budget.CacheBudgetExceeded):
+            cache_budget.enforce_cache_budget(tmp_path, max_bytes=500)
+        assert child.poll() is None
+        assert active.exists() and lease.exists()
+    finally:
+        child.stdin.close()
+        child.wait(timeout=10)
+        child.stdout.close()
+    assert not cache_budget._pid_alive(child.pid)
+    cache_budget.enforce_cache_budget(tmp_path, max_bytes=500)
+    assert not lease.exists() and not active.exists()
+
+
+def test_unqueryable_process_keeps_its_cache_lease(monkeypatch):
+    def denied(pid):
+        raise cache_budget.psutil.AccessDenied(pid)
+    monkeypatch.setattr(cache_budget.psutil, 'pid_exists', denied)
+    assert cache_budget._pid_alive(os.getpid() + 1)
+
+
+def test_pid_probe_rejects_invalid_and_unrepresentable_values():
+    assert not cache_budget._pid_alive(0)
+    assert not cache_budget._pid_alive(-1)
+    assert not cache_budget._pid_alive(2**100)
 
 
 def test_nested_worker_counts_against_parent_budget(tmp_path, monkeypatch):

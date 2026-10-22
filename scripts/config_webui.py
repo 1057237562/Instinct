@@ -192,6 +192,47 @@ st.markdown(
         color: #d8b4fe; text-align: center; font: 700 12px 'Courier New', monospace;
         margin-top: 7px;
     }
+    /* Architecture precision view */
+    .arch2-meta { width: 100%; display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0 6px; justify-content: center; }
+    .arch2-chip-pair { display: inline-flex; align-items: center; white-space: nowrap; }
+    .arch2-chip-label { color: #7f8da3; font: 400 9px -apple-system, sans-serif; margin: 1px 2px 1px 6px; }
+    .arch2-chip { display: inline-block; padding: 1px 6px; border-radius: 6px; font: 600 9px 'Courier New', monospace; letter-spacing: 0.2px; border: 1px solid transparent; white-space: nowrap; }
+    .prec-fp32 { background: rgba(245,158,11,.16); color: #fbbf24; border-color: rgba(245,158,11,.35); }
+    .prec-bf16 { background: rgba(59,130,246,.16); color: #93c5fd; border-color: rgba(59,130,246,.35); }
+    .prec-fp16 { background: rgba(20,184,166,.16); color: #5eead4; border-color: rgba(20,184,166,.35); }
+    .prec-fp8 { background: rgba(168,85,247,.18); color: #d8b4fe; border-color: rgba(168,85,247,.38); }
+    .prec-off { background: rgba(100,116,139,.14); color: #94a3b8; border-color: rgba(100,116,139,.3); }
+    .prec-mix { background: rgba(148,163,184,.14); color: #cbd5e1; border-color: rgba(148,163,184,.3); }
+    .arch2-block-chips { margin-top: 5px; text-align: center; line-height: 1.9; }
+    .arch2-block-chips .arch2-chip-label { color: rgba(255,255,255,.55); }
+    .arch2-note { width: 100%; max-width: 520px; color: #7f8da3; font: 400 9px -apple-system, sans-serif; line-height: 1.6; margin: 2px 0 10px; text-align: left; }
+    .arch2-group { width: 100%; max-width: 480px; box-sizing: border-box; border: 1px solid #334155; border-radius: 14px; padding: 10px 10px 8px; background: linear-gradient(150deg, rgba(30,58,95,.5), rgba(17,28,46,.92)); margin: 4px 0; }
+    .arch2-group-title { text-align: center; color: #dbeafe; font: 700 12px 'Courier New', monospace; letter-spacing: 0.5px; }
+    .arch2-group-sub { text-align: center; color: #94a3b8; font: 400 9.5px -apple-system, sans-serif; margin: 3px 0 8px; line-height: 1.5; }
+    .arch2-module { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; background: #0f1a2b; border: 1px solid #22314a; border-radius: 8px; padding: 6px 8px; margin: 3px 0; }
+    .arch2-module-name { color: #e2e8f0; font: 600 10.5px 'Courier New', monospace; }
+    .arch2-module-detail { color: #7f8da3; font: 400 9px -apple-system, sans-serif; margin-top: 1px; }
+    .arch2-module-chips { text-align: right; line-height: 1.9; min-width: 120px; max-width: 58%; }
+    .arch2-residual { text-align: center; color: #fbbf24; font: 600 9.5px 'Courier New', monospace; margin: 4px 0; }
+    .arch2-layers { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; margin-top: 8px; border-top: 1px dashed #2b3b53; padding-top: 7px; }
+    .arch2-layer-pill { background: #162033; border: 1px solid #334155; border-radius: 6px; padding: 2px 7px; color: #9fb0c7; font: 600 9px 'Courier New', monospace; }
+    .arch2-layer-pill.hi { border-color: #2563eb; color: #bfdbfe; background: #1e3354; }
+    .arch2-module.cached { border-color: rgba(251,191,36,.55); box-shadow: inset 3px 0 0 #fbbf24; }
+    .arch2-module.cached .arch2-module-name { color: #fde68a; }
+    .arch2-module.recomputed { border-style: dashed; background: #0d1726; }
+    .arch2-module.recomputed .arch2-module-name { color: #94a3b8; }
+    .arch2-cache-chip { display: inline-block; padding: 1px 6px; border-radius: 6px; font: 700 9px 'Courier New', monospace; margin-right: 4px; }
+    .arch2-cache-chip.gold { background: rgba(245,158,11,.22); color: #fbbf24; border: 1px solid rgba(245,158,11,.55); }
+    .arch2-cache-chip.muted { background: rgba(100,116,139,.14); color: #94a3b8; border: 1px dashed rgba(148,163,184,.4); }
+    .arch-block.cached { outline: 2px solid rgba(251,191,36,.7); outline-offset: 1px; }
+    .arch-block.recomputed { outline: 2px dashed rgba(148,163,184,.45); outline-offset: 1px; }
+    .arch2-gold-legend { display: inline-block; padding: 1px 7px; border-radius: 6px; font: 700 9px 'Courier New', monospace; color: #fbbf24; background: rgba(245,158,11,.16); border: 1px solid rgba(245,158,11,.55); margin: 1px 2px 1px 6px; }
+    @media (max-width: 700px) {
+        .arch2-module { grid-template-columns: 1fr; }
+        .arch2-module-chips { text-align: left; }
+        .arch2-meta { justify-content: flex-start; }
+    }
+
     @media (max-width: 700px) {
         .arch-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .arch-split { grid-template-columns: 1fr; }
@@ -1168,19 +1209,71 @@ def load_config_to_session(config_dict: dict):
 def parse_training_metrics(log_text):
     """Extract training metrics from log for charting. Returns list of dicts.
 
-    Resume appends every new run (each starting with its own ``# epochs:``
-    header) to the same file.  Charting the whole file interleaves runs whose
-    global step numbers restart at 1, which draws sawtooth curves, so parse
-    only the final run segment — the same slice the progress bar reads.
+    Keep history when a launch explicitly resumes the same saved run. New or
+    unidentified launches start a new curve. ETA windows reset on every launch;
+    lifecycle status still uses only the latest launch's log segment.
     """
-    if "# epochs:" in log_text:
-        log_text = log_text.rsplit("# epochs:", 1)[-1]
+    try:
+        from trainer.training_eta import RecentThroughputETA
+    except ModuleNotFoundError as exc:
+        if exc.name != 'trainer':
+            raise
+        # Streamlit is also launched directly with scripts/ as its cwd.
+        import sys
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from trainer.training_eta import RecentThroughputETA
+
     rows = []
+    eta_estimator = RecentThroughputETA()
+    eta_epoch = None
+    command = ''
+    run_weight = None
+    first_metric = True
+
+    def command_value(names):
+        match = re.search(
+            r'(?:^|\s)--(?:' + names + r')(?:=|\s+)(?:"([^"]+)"|\'([^\']+)\'|(\S+))',
+            command,
+        )
+        return next((value for value in match.groups() if value is not None), None) if match else None
+
     for line in log_text.strip().split("\n"):
+        if line.startswith('# command:'):
+            command = line[len('# command:'):].strip()
+            continue
+        if line.startswith('# epochs:'):
+            weight = command_value('save_weight|lora_name')
+            if not (weight and weight == run_weight and command_value('from_resume') == '1'):
+                rows.clear()
+            run_weight = weight
+            command = ''
+            eta_estimator = RecentThroughputETA()
+            eta_epoch = None
+            first_metric = True
+            continue
+        resume = re.search(r"Epoch \[(\d+)/\d+\]:.*(?:resume global step (\d+)|跳过前(\d+)个step)", line)
+        if resume:
+            epoch = int(resume.group(1))
+            next_step = int(resume.group(2)) if resume.group(2) else int(resume.group(3)) + 1
+            # A periodic checkpoint can predate the last logged step. Discard
+            # only the abandoned suffix before plotting the replayed work.
+            rows = [row for row in rows if (row['_epoch'], row['_epoch_step']) < (epoch, next_step)]
+            eta_estimator = RecentThroughputETA()
+            first_metric = True
         ep = re.search(r"Epoch:\[(\d+)/(\d+)\]\((\d+)/~?(\d+)\)", line)
-        if not ep or 'loss:' not in line:
+        completed_epoch = (
+            'Streaming epoch complete' in line
+            and re.search(r'\bcheckpoint_saved:\s*1\b', line) is not None
+        )
+        if not ep or ('loss:' not in line and not completed_epoch):
             continue
         epoch, _epochs, epoch_step, epoch_steps = map(int, ep.groups())
+        if first_metric:
+            rows = [row for row in rows if (row['_epoch'], row['_epoch_step']) < (epoch, epoch_step)]
+            first_metric = False
+        if epoch != eta_epoch:
+            eta_estimator = RecentThroughputETA()
+            eta_epoch = epoch
         row = {
             "_epoch": epoch,
             "_epoch_step": epoch_step,
@@ -1191,9 +1284,55 @@ def parse_training_metrics(log_text):
                 row[m.group(1)] = float(m.group(2))
             except ValueError:
                 pass
+        # New trainers report synchronized window ETA directly. Recompute
+        # legacy logs for the chart without changing the file or running job.
+        if 'eta_basis: recent_' not in line:
+            elapsed = row.get('elapsed_seconds')
+            if elapsed is None and 'elapsed_time' in row:
+                elapsed = row['elapsed_time'] * 60
+            tokens = re.search(r"\btokens:\s*(\d+)/(\d+)", line)
+            if elapsed is not None:
+                completed, total = map(int, tokens.groups()) if tokens else (epoch_step, epoch_steps)
+                eta = eta_estimator.update(completed, elapsed, total)
+                row.pop('epoch_time', None)
+                if eta is not None:
+                    row['epoch_time'] = eta
         if row:
             rows.append(row)
     return rows
+
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def _training_log_snapshot(path, mtime_ns, size):
+    """Cache contents and parsed metrics for one version of a log file."""
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        content = handle.read()
+    return content, parse_training_metrics(content)
+
+
+def _read_training_log(path):
+    if not path:
+        return "", []
+    try:
+        version = os.stat(path)
+        return _training_log_snapshot(path, version.st_mtime_ns, version.st_size)
+    except OSError:
+        return "", []
+
+
+def _format_training_duration(minutes):
+    """Format minute-valued log metrics with normalized days/hours/minutes."""
+    if not math.isfinite(minutes):
+        return "estimating"
+    days, remainder = divmod(max(0, round(minutes * 10)), 14400)
+    hours, tenths = divmod(remainder, 600)
+    parts = []
+    if days:
+        parts.append(f"{days} d")
+    if days or hours:
+        parts.append(f"{hours} h")
+    parts.append(f"{tenths / 10:g} min")
+    return " ".join(parts)
 
 
 def render_log_metrics_charts(metrics):
@@ -1201,6 +1340,19 @@ def render_log_metrics_charts(metrics):
     if not metrics:
         st.info("Waiting for training metrics…")
         return
+
+    latest = metrics[-1]
+    durations = []
+    elapsed = (latest["elapsed_seconds"] / 60 if "elapsed_seconds" in latest
+               else latest.get("elapsed_time"))
+    if elapsed is not None:
+        durations.append(f"Elapsed: {_format_training_duration(elapsed)}")
+    if "epoch_time" in latest:
+        durations.append(f"Epoch Remaining: {_format_training_duration(latest['epoch_time'])}")
+    elif elapsed is not None:
+        durations.append("Epoch Remaining: estimating")
+    if durations:
+        st.caption(" · ".join(durations))
 
     loss_keys = sorted({
         key for metric in metrics for key in metric
@@ -1214,7 +1366,7 @@ def render_log_metrics_charts(metrics):
     chart_groups = [
         ("Loss", loss_keys),
         ("Learning Rate", lr_keys[:1]),
-        ("Epoch Time (min)", time_keys),
+        ("Epoch Remaining", time_keys),
     ]
 
     rendered = False
@@ -1230,7 +1382,33 @@ def render_log_metrics_charts(metrics):
             }
             for index, metric in enumerate(metrics)
         ]
-        st.line_chart(chart_data, x="step", width="stretch")
+        if keys == ["epoch_time"]:
+            for point in chart_data:
+                if "epoch_time" in point:
+                    point["duration"] = _format_training_duration(point["epoch_time"])
+            # Keep the numeric minute scale; format axis labels and hover text.
+            tenths = "round(datum.value * 10)"
+            axis_duration = (
+                f"({tenths} >= 14400 ? floor({tenths} / 14400) + ' d ' : '') + "
+                f"({tenths} >= 600 ? floor(({tenths} % 14400) / 600) + ' h ' : '') + "
+                f"format(({tenths} % 600) / 10, '~g') + ' min'"
+            )
+            st.vega_lite_chart(chart_data, {
+                "mark": {"type": "line", "point": True},
+                "encoding": {
+                    "x": {"field": "step", "type": "quantitative", "title": "Step"},
+                    "y": {
+                        "field": "epoch_time", "type": "quantitative", "title": title,
+                        "axis": {"labelExpr": axis_duration},
+                    },
+                    "tooltip": [
+                        {"field": "step", "type": "quantitative", "title": "Step"},
+                        {"field": "duration", "type": "nominal", "title": title},
+                    ],
+                },
+            }, width="stretch")
+        else:
+            st.line_chart(chart_data, x="step", width="stretch")
 
     if not rendered:
         st.info("This log has no plottable training metrics yet.")
@@ -1240,44 +1418,284 @@ def render_log_metrics_charts(metrics):
 # Architecture diagram (HTML)
 # ═══════════════════════════════════════════════════════════════
 
-def arch_diagram(cfg: dict) -> str:
-    """Build an HTML architecture diagram string."""
+def precision_options() -> dict:
+    """Snapshot the precision controls that the architecture diagram annotates."""
+    return {
+        "optimizer": st.session_state.get("optimizer", "adamw"),
+        "param_dtype": st.session_state.get("param_dtype", "fp32"),
+        "activation": st.session_state.get("activation_dtype", "bfloat16"),
+        "muon_mantissa": bool(st.session_state.get("muon_mantissa", False)),
+        "muon_momentum_dtype": st.session_state.get("muon_momentum_dtype", "fp32"),
+        "fp8_training": st.session_state.get("fp8_training", "off"),
+        "fp8_filter": st.session_state.get("fp8_filter", "auto"),
+        "kv_cache_dtype": st.session_state.get("kv_cache_dtype", "fp32"),
+        "use_grad_checkpoint": int(st.session_state.get("use_grad_checkpoint", 0)),
+    }
+
+
+def arch_diagram(cfg: dict, precision: dict | None = None) -> str:
+    """Build an HTML architecture diagram with per-module precision labels.
+
+    "precision" mirrors the training panel's precision controls (optimizer,
+    parameter/activation dtype, TorchAO FP8 recipe, Muon mantissa, KV cache and
+    gradient checkpointing). When omitted the diagram falls back to plain
+    AdamW fp32 defaults so CPU-only preset tests can call it directly.
+    """
     n = cfg["num_hidden_layers"]
     use_moe = cfg.get("use_moe", False)
     arch = cfg.get("model_architecture", "standard")
     residual_type = cfg.get("residual_type", "standard")
+    h = cfg["hidden_size"]
+    q_heads = cfg["num_attention_heads"]
+    kv_heads = cfg["num_key_value_heads"]
+    head_dim = cfg.get("head_dim", compute_head_dim(h, q_heads))
+    int_size = cfg.get("intermediate_size", compute_intermediate_size(h))
+    moe_int = cfg.get("moe_intermediate_size", int_size)
 
-    blocks = []
+    # ── precision model ─────────────────────────────────────────
+    profile = {
+        "optimizer": "adamw",
+        "param_dtype": "fp32",
+        "activation": "bfloat16",
+        "muon_mantissa": False,
+        "muon_momentum_dtype": "fp32",
+        "fp8_training": "off",
+        "fp8_filter": "auto",
+        "kv_cache_dtype": "fp32",
+        "use_grad_checkpoint": 0,
+    }
+    if precision:
+        profile.update({key: value for key, value in precision.items() if value is not None})
+    optimizer = str(profile["optimizer"]).lower()
+    param_dtype = str(profile["param_dtype"]).lower()
+    compute = {"bfloat16": "bf16", "float16": "fp16", "fp32": "fp32"}.get(
+        str(profile["activation"]).lower(), "bf16"
+    )
+    fp8_training = str(profile["fp8_training"]).lower()
+    fp8_filter = str(profile["fp8_filter"]).lower()
+    fp8_on = fp8_training != "off"
+    fp8_compute = fp8_on and compute == "bf16"
+    fp8_mode = "rowwise" if "rowwise" in fp8_training else "tensorwise"
+    mantissa = (
+        optimizer == "muon"
+        and bool(profile["muon_mantissa"])
+        and param_dtype == "bf16"
+    )
+    matrix_w = "bf16" if mantissa else param_dtype
+    aux_w = "fp32" if mantissa else param_dtype
+    # fp32 auxiliary parameters (embedding/head/norms) seed the residual stream;
+    # bf16 projection outputs are promoted back to fp32 on every residual add.
+    residual_dtype = "fp32" if aux_w == "fp32" else aux_w
+    if mantissa:
+        matrix_opt = "Muon bf16 动量+u16"
+        aux_opt = "AdamW 2×fp32"
+        opt_summary = "Muon: bf16+uint16 权重 / bf16 动量 · AdamW: 2×fp32"
+    elif optimizer == "muon":
+        matrix_opt = f"Muon 1×{matrix_w}"
+        aux_opt = f"AdamW 2×{param_dtype}"
+        opt_summary = f"Muon: 1×{matrix_w} 动量 · AdamW: 2×{param_dtype}"
+    elif optimizer == "adafactor":
+        matrix_opt = aux_opt = "Adafactor 分解"
+        opt_summary = "Adafactor: 分解状态"
+    else:
+        matrix_opt = aux_opt = f"AdamW 2×{param_dtype}"
+        opt_summary = f"AdamW: 2×{param_dtype}"
+    linear_compute = f"{compute} → FP8" if fp8_compute else compute
+    ckpt_mode = int(profile["use_grad_checkpoint"])
+    ckpt_label = {0: "off", 1: "mode1 Attention-only", 2: "mode2 整层"}.get(
+        ckpt_mode, "off"
+    )
+    # Gradient-checkpoint activation cache coverage:
+    #   mode 0: nothing is replayed in backward -> every module keeps its activations.
+    #   mode 1: only the attention core is replayed -> everything else keeps them.
+    #   mode 2: the whole transformer layer is replayed -> only the layer input lasts.
+    layer_internal_cached = ckpt_mode in (0, 1)
+    attention_core_cached = ckpt_mode == 0
+    block_cached = ckpt_mode in (0, 1)
+    layer_cache = "saved" if layer_internal_cached else "recomputed"
+    attn_cache = "saved" if attention_core_cached else "recomputed"
+    block_cache = "saved" if block_cached else "recomputed"
+    kv_dtype = str(profile["kv_cache_dtype"]).lower()
+    attn_backend = "Flash/Flex/SDPA" if cfg.get("flash_attn", True) else "SDPA/math"
+    attn_type = (
+        f"MHA {q_heads}×{head_dim}"
+        if q_heads == kv_heads
+        else f"GQA {q_heads}q/{kv_heads}kv × {head_dim}"
+    )
+    ffn_label = "MoE-FFN" if use_moe else "SwiGLU FFN"
 
-    def _block(text, detail="", color_start="#1e3a5f", color_end="#2563eb"):
+    def _esc(text) -> str:
+        return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;").replace('"', "&quot;"))
+
+    def _kind(value) -> str:
+        text = str(value).lower()
+        if "fp8" in text:
+            return "fp8"
+        if "bf16" in text:
+            return "bf16"
+        if "fp16" in text:
+            return "fp16"
+        if "fp32" in text:
+            return "fp32"
+        if "off" in text:
+            return "off"
+        return "mix"
+
+    def _chip(label, value) -> str:
         return (
-            f'<div class="arch-block" style="background: linear-gradient(135deg, '
+            f'<span class="arch2-chip-pair">'
+            f'<span class="arch2-chip-label">{_esc(label)}</span>'
+            f'<span class="arch2-chip prec-{_kind(value)}">{_esc(value)}</span>'
+            f'</span>'
+        )
+
+    def _chips(items) -> str:
+        return "".join(_chip(label, value) for label, value in items)
+
+    def _cache_cls(cache_state) -> str:
+        return {"saved": " cached", "recomputed": " recomputed"}.get(cache_state, "")
+
+    def _block(text, detail="", color_start="#1e3a5f", color_end="#2563eb",
+               chips=(), cache_state=None):
+        chip_html = (
+            f'<div class="arch2-block-chips">{_chips(chips)}</div>' if chips else ""
+        )
+        return (
+            f'<div class="arch-block{_cache_cls(cache_state)}" '
+            f'style="background: linear-gradient(135deg, '
             f'{color_start} 0%, {color_end} 100%);">'
             f"<div>{text}</div>"
             f'<div class="arch-label">{detail}</div>'
+            f"{chip_html}"
             f"</div>"
         )
 
-    def _arrow():
+    def _arrow() -> str:
         return '<div class="arch-arrow">&#9660;</div>'
 
-    # Input
-    blocks.append(_block("Input", "token ids"))
+    def _stat(value, label) -> str:
+        return (
+            '<div class="arch-stat">'
+            f'<div class="arch-stat-value">{value}</div>'
+            f'<div class="arch-stat-label">{label}</div></div>'
+        )
+
+    def _meta() -> str:
+        width = " / ".join(sorted({matrix_w, aux_w})) if matrix_w != aux_w else matrix_w
+        fp8_state = f"FP8 {fp8_mode}" if fp8_compute else "off"
+        return (
+            '<div class="arch2-meta">'
+            + _chip("W 权重", width)
+            + _chip("C 计算", compute)
+            + _chip("G 梯度", "同 W")
+            + _chip("O 优化器", opt_summary)
+            + _chip("残差流", residual_dtype)
+            + _chip("FP8", fp8_state)
+            + _chip("检查点", ckpt_label)
+            + '<span class="arch2-gold-legend">金色 = 激活保存</span>'
+            + "</div>"
+        )
+
+    def _note() -> str:
+        lines = [
+            "W=权重存储 · C=矩阵乘计算（autocast） · G=梯度（与参数同 dtype） · "
+            "O=优化器状态；RMSNorm 内部与 CE loss 按 fp32 计算。"
+        ]
+        ckpt_notes = {
+            0: "梯度检查点关闭（mode0）：金色模块的激活全部保存到 backward。",
+            1: "mode1（Attention-only）：金色=激活保存，虚线灰框=backward 重算；"
+               "仅重算 attention core（QKᵀ/softmax/dropout/AV，输入 q/k/v 仍保存），"
+               "QKV/O 投影、QK-Norm、RoPE、FFN 的输出都保留。",
+            2: "mode2（整层）：金色=激活保存；层内模块全部在 backward 重算（虚线灰框），"
+               "每层只保存一份输入的 fp32 残差流 [B,S,hidden]。",
+        }
+        lines.append(ckpt_notes[ckpt_mode])
+        if mantissa:
+            lines.append(
+                f"Muon mantissa：隐藏矩阵 {matrix_w} 高位 + uint16 低位，"
+                f"embedding/head/norm 保持 {aux_w} 由 AdamW 管理，"
+                f"残差流因此为 {residual_dtype}。"
+            )
+        if fp8_compute:
+            lines.append(
+                f"FP8 {fp8_mode}（filter={fp8_filter}）只替换尺寸兼容 Linear 的 "
+                f"GEMM，权重与优化器状态仍为 {matrix_w}；反向以 e5m2 动态量化梯度输入。"
+            )
+        else:
+            lines.append("FP8 关闭：投影 GEMM 使用 " + compute + " autocast。")
+        if use_moe:
+            lines.append(
+                "MoE grouped dispatch 直接读取专家权重（BF16），"
+                "转换后的 FP8 卷积在此路径不生效。"
+            )
+        if residual_type != "standard":
+            lines.append(f"残差拓扑 {residual_type}，残差/路由参数按辅助参数精度处理。")
+        return '<div class="arch2-note">' + "".join(lines) + "</div>"
+
+    def _module(name, detail, chips, cache_state=None) -> str:
+        cache_chip = {
+            "saved": '<span class="arch2-cache-chip gold">保存</span>',
+            "recomputed": '<span class="arch2-cache-chip muted">重算</span>',
+        }.get(cache_state, "")
+        return (
+            f'<div class="arch2-module{_cache_cls(cache_state)}">'
+            f'<div><div class="arch2-module-name">{_esc(name)}</div>'
+            f'<div class="arch2-module-detail">{_esc(detail)}</div></div>'
+            f'<div class="arch2-module-chips">{cache_chip}{_chips(chips)}</div></div>'
+        )
+
+    def _residual_line() -> str:
+        return (
+            '<div class="arch2-residual">'
+            f"&#8853; 残差相加 · 残差流 {residual_dtype}</div>"
+        )
+
+    def _layer_pills() -> str:
+        if n > 32:
+            indices = list(range(1, 17)) + [None] + list(range(n - 15, n + 1))
+        else:
+            indices = list(range(1, n + 1))
+        pills = []
+        for index in indices:
+            if index is None:
+                pills.append('<span class="arch2-layer-pill">&#8943;</span>')
+            else:
+                hi = " hi" if index in (1, n) else ""
+                pills.append(
+                    f'<span class="arch2-layer-pill{hi}">Layer {index}</span>'
+                )
+        return '<div class="arch2-layers">' + "".join(pills) + "</div>"
+
+    blocks = []
+    total_params = calc_params(cfg)["Total Params"]["value"]
+    ffn_width_label = "专家 FFN" if use_moe else "FFN"
+    ffn_width = moe_int if use_moe else int_size
+    blocks.append(
+        '<div class="arch-summary">'
+        + _stat(f"{total_params:,}", "Parameters")
+        + _stat(n, "Layers")
+        + _stat(h, "Hidden")
+        + _stat(ffn_width, ffn_width_label)
+        + "</div>"
+    )
+    blocks.append(_meta())
+    blocks.append(_note())
+
+    # ── Input / embedding ──────────────────────────────────────
+    blocks.append(_block("Input", "token ids · int64", "#1e293b", "#334155"))
+    blocks.append(_arrow())
+    embedding_detail = f"vocab={cfg['vocab_size']} · dim={h}"
+    if cfg.get("tie_word_embeddings"):
+        embedding_detail += " · tied with LM Head"
+    blocks.append(
+        _block("Embedding", embedding_detail, "#0f3b5e", "#1d6fa5", cache_state="saved",
+               chips=(("W", aux_w), ("输出", residual_dtype), ("G", aux_w), ("O", aux_opt)))
+    )
     blocks.append(_arrow())
 
-    # Embedding
-    emb_detail = f"vocab={cfg['vocab_size']}, dim={cfg['hidden_size']}"
-    blocks.append(_block("Embedding", emb_detail, "#0f3b5e", "#1d6fa5"))
-    blocks.append(_arrow())
-
-    # RecurrsiveInstinct is a recurrent graph, not an eight-layer sequential stack.
-    # Render the shared core once and make recurrence/input injection explicit.
+    # ── RecurrsiveInstinct keeps its recurrent graph, with precision chips ──
     if arch == "recurrsive_instinct":
-        h = cfg["hidden_size"]
-        q_heads = cfg["num_attention_heads"]
-        kv_heads = cfg["num_key_value_heads"]
-        head_dim = cfg.get("head_dim", compute_head_dim(h, q_heads))
-        int_size = cfg.get("intermediate_size", compute_intermediate_size(h))
         prelude = cfg.get("prelude_layers", 2)
         recurrent = cfg.get("recurrent_layers", 4)
         coda = cfg.get("coda_layers", 2)
@@ -1286,167 +1704,233 @@ def arch_diagram(cfg: dict) -> str:
         sigma = cfg.get("recurrence_log_normal_sigma", 1.0)
         materialized = prelude + recurrent + coda
         effective = prelude + recurrent * recurrences + coda
-        total_params = calc_params(cfg)["Total Params"]["value"]
-        attention = (
-            f"MHA {q_heads}x{head_dim}"
-            if q_heads == kv_heads
-            else f"GQA {q_heads}q/{kv_heads}kv x {head_dim}"
-        )
-        ffn = "MoE SwiGLU" if use_moe else "SwiGLU"
-
-        blocks.insert(
-            0,
+        blocks.append(
             '<div class="arch-summary">'
-            f'<div class="arch-stat"><div class="arch-stat-value">{total_params:,}</div>'
-            '<div class="arch-stat-label">Parameters</div></div>'
-            f'<div class="arch-stat"><div class="arch-stat-value">{materialized}</div>'
-            '<div class="arch-stat-label">Physical layers</div></div>'
-            f'<div class="arch-stat"><div class="arch-stat-value">{effective}</div>'
-            '<div class="arch-stat-label">Mean effective depth</div></div>'
-            f'<div class="arch-stat"><div class="arch-stat-value">{recurrences}</div>'
-            '<div class="arch-stat-label">Mean recurrences</div></div>'
-            '</div>',
+            + _stat(f"{total_params:,}", "Parameters")
+            + _stat(materialized, "Physical layers")
+            + _stat(effective, "Mean effective depth")
+            + _stat(recurrences, "Mean recurrences")
+            + "</div>"
         )
         blocks.append(
             _block(
                 f"Prelude x{prelude}",
-                f"{attention} · {ffn} {h}->{int_size}->{h} · sandwich RMSNorm",
-                "#0f3b5e", "#1d6fa5",
+                f"{attn_type} · {ffn_label} {h}->{int_size}->{h} · sandwich RMSNorm",
+                "#0f3b5e", "#1d6fa5", cache_state=block_cache,
+                chips=(("W", matrix_w), ("C", compute), ("O", matrix_opt)),
             )
         )
         blocks.append(_arrow())
         blocks.append(
             '<div class="arch-split">'
-            f'<div class="arch-branch">Input latent e<span>Prelude output, injected every recurrence</span></div>'
-            f'<div class="arch-branch">Initial state s0<span>TruncNormal, std={cfg.get("state_init_std", math.sqrt(2 / 5)):.4f}</span></div>'
-            '</div>'
+            '<div class="arch-branch">Input latent e<span>Prelude output, injected every recurrence</span></div>'
+            '<div class="arch-branch">Initial state s0<span>TruncNormal, std='
+            + f"{cfg.get('state_init_std', math.sqrt(2 / 5)):.4f}"
+            + "</span></div>"
+            "</div>"
         )
         blocks.append(_arrow())
         blocks.append(
             _block(
                 "Input Injection Adapter",
                 f"concat [state ; e] -> Linear({2 * h}, {h}, bias=False)",
-                "#3b1f6e", "#6d28a8",
+                "#3b1f6e", "#6d28a8", cache_state=block_cache,
+                chips=(("W", matrix_w), ("C", compute), ("O", matrix_opt)),
             )
         )
         blocks.append(_arrow())
         blocks.append(
             '<div class="recurrent-shell">'
-            f'<div class="recurrent-title">Shared recurrent operator R · target mean {recurrences}</div>'
+            '<div class="recurrent-title">'
+            f"Shared recurrent operator R · target mean {recurrences}"
+            "</div>"
             '<div class="recurrent-core">'
-            f'Core Transformer x{recurrent}'
-            f'<span>{attention} · Q/K bias={cfg.get("qk_bias", True)} · '
-            f'QK norm={cfg.get("qk_norm", False)} · {ffn} {int_size}</span>'
-            '</div>'
-            f'<div class="arch-loop-arrow">↻ log-normal Poisson σ={sigma:g} · '
-            f'gradient through final {backprop} recurrences</div>'
-            '</div>'
+            f"Core Transformer x{recurrent}"
+            f"<span>{attn_type} · Q/K bias={cfg.get('qk_bias', True)} · "
+            f"QK norm={cfg.get('qk_norm', False)} · {ffn_label} {int_size}</span>"
+            "</div>"
+            + _meta()
+            + '<div class="arch-loop-arrow">&#8635; log-normal Poisson '
+            f"&#963;={sigma:g} · gradient through final {backprop} recurrences</div>"
+            "</div>"
         )
         blocks.append(_arrow())
         blocks.append(
-            _block("Recurrent RMSNorm", f"RMSNorm({h})", "#4a1d5e", "#7e22ce")
+            _block("Recurrent RMSNorm", f"RMSNorm({h})", "#4a1d5e", "#7e22ce",
+                   cache_state="saved",
+                   chips=(("W", aux_w), ("C", "fp32 内部")))
         )
         blocks.append(_arrow())
         blocks.append(
             _block(
                 f"Coda x{coda}",
-                f"{attention} · {ffn} {h}->{int_size}->{h} · sandwich RMSNorm",
-                "#1b4332", "#2d8a4e",
+                f"{attn_type} · {ffn_label} {h}->{int_size}->{h} · sandwich RMSNorm",
+                "#1b4332", "#2d8a4e", cache_state=block_cache,
+                chips=(("W", matrix_w), ("C", compute), ("O", matrix_opt)),
             )
         )
         blocks.append(_arrow())
         blocks.append(
-            _block("Final Norm", f"RMSNorm({h})", "#1b4332", "#2d8a4e")
+            _block("Final Norm", f"RMSNorm({h})", "#1b4332", "#2d8a4e",
+                   cache_state="saved",
+                   chips=(("W", aux_w), ("C", "fp32 内部")))
         )
         blocks.append(_arrow())
         lm_detail = f"vocab={cfg['vocab_size']}, dim={h}"
         if cfg.get("tie_word_embeddings"):
             lm_detail += " (tied with embedding)"
-        blocks.append(_block("LM Head", lm_detail, "#4a1942", "#7c3aed"))
-        blocks.append(_arrow())
-        blocks.append(_block("Output", "next-token logits", "#3b0f2e", "#6b1d5e"))
-        return f'<div class="arch-wrap">{"".join(blocks)}</div>'
-
-    # Layer stack
-    layer_color_s = "#1a3a5c"
-    layer_color_e = "#2d6a9f"
-    linear_color_s = "#3b1f6e"
-    linear_color_e = "#7c3aed"
-    for i in range(min(n, 32)):  # cap display at 32
-        label = f"Layer {i+1}" if n <= 32 or i < 16 or i >= n - 16 else "..."
-
-        if n > 32 and i == 16:
-            blocks.append(
-                _block(
-                    "&#8942;",
-                    f"... {n - 30} more layers ...",
-                    "#1a2332",
-                    "#1a2332",
-                )
-            )
-            blocks.append(_arrow())
-            continue
-        elif n > 32 and i >= 16 and i < n - 16:
-            continue
-
-        if arch == "linear":
-            interval = cfg.get("full_attention_interval", 4)
-            is_full = interval > 0 and (i + 1) % interval == 0
-            attn_type = "Full Attn" if is_full else "Linear Attn"
-            cs, ce = (layer_color_s, layer_color_e) if is_full else (linear_color_s, linear_color_e)
-        else:
-            attn_type = f"Attn({cfg['num_attention_heads']}h/{cfg['num_key_value_heads']}kv)"
-            cs, ce = layer_color_s, layer_color_e
-
-        ffn_label = "MoE-FFN" if use_moe else "FFN"
-        layer_detail = f"{attn_type} + {ffn_label}"
-        if residual_type == "mhc":
-            layer_detail += f" · mHC({cfg.get('hc_mult', 4)} streams)"
-        elif residual_type == "attnres":
-            variant = cfg.get("attnres_variant", "block").title()
-            layer_detail += f" · {variant} AttnRes"
-        if use_moe:
-            n_exp = cfg.get("num_experts", 4)
-            n_top = cfg.get("num_experts_per_tok", 1)
-            layer_detail += f" ({n_exp}E, top-{n_top})"
-        if cfg.get("early_exit_layers") and (i + 1) in cfg["early_exit_layers"]:
-            layer_detail += " · EE"
-
-        if arch == "recurrsive_instinct":
-            loop_color_s, loop_color_e = "#4a1d5e", "#9d4edd"
-            p = cfg.get("prelude_layers", 2)
-            r = cfg.get("recurrent_layers", 4)
-            if p <= i < p + r:
-                layer_detail += f" · RECURRENT x{cfg.get('loop_iters', 8)}"
-                cs, ce = loop_color_s, loop_color_e
-            elif i < p:
-                layer_detail += " · PRELUDE"
-                cs, ce = "#0f3b5e", "#1d6fa5"
-            else:
-                layer_detail += " · CODA"
-                cs, ce = "#1b4332", "#2d8a4e"
-
         blocks.append(
-            _block(f"Layer {i+1}", layer_detail, cs, ce)
+            _block("LM Head", lm_detail, "#4a1942", "#7c3aed", cache_state="saved",
+                   chips=(("W", aux_w), ("C", compute), ("logits", compute),
+                          ("O", aux_opt)))
         )
         blocks.append(_arrow())
+        blocks.append(
+            _block("Output", f"next-token logits {compute} · CE fp32",
+                   "#3b0f2e", "#6b1d5e", cache_state="saved",
+                   chips=(("loss", "fp32"),))
+        )
+        return f'<div class="arch-wrap">{"".join(blocks)}</div>'
 
-    # Final Norm
+    # ── Detailed Transformer block (all repetitions share this shape) ──
+    if arch == "linear":
+        interval = max(1, int(cfg.get("full_attention_interval", 4)))
+        full_layers = sum(1 for index in range(n) if (index + 1) % interval == 0)
+        linear_layers = n - full_layers
+        block_detail = (
+            f"Linear Attn x{linear_layers} + Full Attn x{full_layers}"
+            f"（每 {interval} 层一次 Full）· {ffn_label} · {residual_type}"
+        )
+    else:
+        block_detail = f"{attn_type} · {ffn_label} · {residual_type}"
+    if use_moe:
+        block_detail += (
+            f"（{cfg.get('num_experts', 4)}E, top-{cfg.get('num_experts_per_tok', 1)}）"
+        )
+    early_exit_layers = cfg.get("early_exit_layers") or []
+    if early_exit_layers:
+        block_detail += " · EE=" + ",".join(str(x) for x in early_exit_layers)
+
+    layer_modules = []
+    if ckpt_mode == 2:
+        # Whole-layer checkpoint: this fp32 residual stream is the only activation
+        # kept per layer; everything inside the layer is replayed in backward.
+        layer_modules.append(_module(
+            "层输入残差流（保存）",
+            f"[B,S,{h}] fp32 · 整层 checkpoint 唯一保留的激活",
+            (("C", "fp32"),), cache_state="saved",
+        ))
+    layer_modules.extend([
+        _module("RMSNorm（输入）", f"hidden {h} · fp32 内部", (
+            ("W", aux_w), ("C", "fp32 内部"), ("O", aux_opt),
+        ), cache_state=layer_cache),
+        _module(
+            "Q/K/V 投影",
+            f"{h} -> {q_heads * head_dim} / {kv_heads * head_dim} x2",
+            (("W", matrix_w), ("C", linear_compute), ("G", matrix_w),
+             ("O", matrix_opt)), cache_state=layer_cache,
+        ),
+        _module(
+            "QK-Norm",
+            f"RMSNorm(head_dim={head_dim}) · 每头归一化",
+            (("W", aux_w), ("C", "fp32 内部"), ("O", aux_opt)),
+            cache_state=layer_cache,
+        ),
+        _module(
+            "RoPE",
+            f"theta={cfg['rope_theta']:.0e} · cos/sin fp32 缓存",
+            (("缓存", "fp32"), ("输出", compute)), cache_state=layer_cache,
+        ),
+        _module(
+            f"Attention 核心（{attn_backend}）",
+            ("QK^T · softmax(fp32) · AV · checkpoint 重算（输入 q/k/v 保存）"
+             if ckpt_mode == 1 else
+             "QK^T · softmax(fp32) · AV · 整层重算" if ckpt_mode == 2 else
+             "QK^T · softmax(fp32) · AV"),
+            (("C", f"{compute} · softmax fp32"), ("KV cache", f"{kv_dtype}（推理）")),
+            cache_state=attn_cache,
+        ),
+        _module(
+            "O 投影",
+            f"{q_heads * head_dim} -> {h}",
+            (("W", matrix_w), ("C", linear_compute), ("G", matrix_w),
+             ("O", matrix_opt)), cache_state=layer_cache,
+        ),
+        _residual_line(),
+        _module("RMSNorm（FFN 前）", f"hidden {h} · fp32 内部", (
+            ("W", aux_w), ("C", "fp32 内部"), ("O", aux_opt),
+        ), cache_state=layer_cache),
+    ])
+    if use_moe:
+        layer_modules.extend([
+            _module(
+                "Router",
+                f"{h} -> {cfg.get('num_experts', 4)} experts · aux loss fp32",
+                (("W", matrix_w), ("C", compute), ("G", matrix_w),
+                 ("O", matrix_opt), ("aux", "fp32")), cache_state=layer_cache,
+            ),
+            _module(
+                f"MoE-FFN ({cfg.get('num_experts', 4)}E, top-"
+                f"{cfg.get('num_experts_per_tok', 1)})",
+                f"专家 SwiGLU {h}->{moe_int}->{h} · grouped dispatch 直读权重",
+                (("W", matrix_w), ("C", "BF16 grouped"), ("FP8", "不生效")),
+                cache_state=layer_cache,
+            ),
+        ])
+    else:
+        layer_modules.extend([
+            _module(
+                "Gate/Up 投影",
+                f"{h} -> {int_size} x2 · SwiGLU",
+                (("W", matrix_w), ("C", linear_compute), ("G", matrix_w),
+                 ("O", matrix_opt)), cache_state=layer_cache,
+            ),
+            _module(
+                "SwiGLU",
+                "silu(gate) x up",
+                (("C", compute),), cache_state=layer_cache,
+            ),
+            _module(
+                "Down 投影",
+                f"{int_size} -> {h}",
+                (("W", matrix_w), ("C", linear_compute), ("G", matrix_w),
+                 ("O", matrix_opt)), cache_state=layer_cache,
+            ),
+        ])
+    layer_modules.append(_residual_line())
     blocks.append(
-        _block("Final Norm", f"RMSNorm({cfg['hidden_size']})", "#1b4332", "#2d8a4e")
+        '<div class="arch2-group">'
+        '<div class="arch2-group-title">'
+        f"Transformer Layer x{n}"
+        "</div>"
+        f'<div class="arch2-group-sub">{_esc(block_detail)}</div>'
+        + "".join(layer_modules)
+        + _layer_pills()
+        + "</div>"
     )
     blocks.append(_arrow())
 
-    # LM Head
-    lm_detail = f"vocab={cfg['vocab_size']}, dim={cfg['hidden_size']}"
-    if cfg.get("tie_word_embeddings"):
-        lm_detail += " (tied)"
-    blocks.append(_block("LM Head", lm_detail, "#4a1942", "#7c3aed"))
+    # ── Final norm / LM head / output ──────────────────────────
+    blocks.append(
+        _block("Final Norm", f"RMSNorm({h})", "#1b4332", "#2d8a4e",
+               cache_state="saved",
+               chips=(("W", aux_w), ("C", "fp32 内部"), ("O", aux_opt)))
+    )
     blocks.append(_arrow())
-
-    # Output
-    blocks.append(_block("Output", "logits", "#3b0f2e", "#6b1d5e"))
-
+    lm_detail = f"vocab={cfg['vocab_size']}, dim={h}"
+    if cfg.get("tie_word_embeddings"):
+        lm_detail += " (tied with embedding)"
+    blocks.append(
+        _block("LM Head", lm_detail, "#4a1942", "#7c3aed", cache_state="saved",
+               chips=(("W", aux_w), ("C", compute), ("logits", compute),
+                      ("G", aux_w), ("O", aux_opt)))
+    )
+    blocks.append(_arrow())
+    blocks.append(
+        _block("Output", f"logits {compute} · CE loss fp32",
+               "#3b0f2e", "#6b1d5e", cache_state="saved",
+               chips=(("loss", "fp32"),))
+    )
     return f'<div class="arch-wrap">{"".join(blocks)}</div>'
 
 
@@ -2407,6 +2891,67 @@ def _pause_checkpoint_saved(log_path, paused_state=None):
         return False
 
 
+def _paused_resume_prefix(train_type, cfg):
+    """Identify the paused run itself, never an unrelated newest checkpoint."""
+    if st.session_state.get('train_status') != 'paused':
+        return None
+    log_path = st.session_state.get('train_log_path')
+    paused = _read_paused_state()
+    if not _pause_checkpoint_saved(log_path, paused):
+        return None
+    prefix = os.path.basename(log_path)[len('train_'):-len('.log')]
+    candidates = [prefix]
+    if paused and paused.get('train_type') == train_type:
+        weight = paused.get('weight')
+        if weight and re.fullmatch(re.escape(weight) + r'(?:_[2-9]\d*)?', prefix):
+            candidates.insert(0, weight)
+    # CLI pauses have no .paused.json. The launch header also disambiguates
+    # collision-suffixed log names without scanning unrelated checkpoints.
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as handle:
+            commands = re.findall(r'^# command: (.+)$', handle.read(), re.MULTILINE)
+        if commands:
+            match = re.search(
+                r'(?:^|\s)--(?:save_weight|lora_name)(?:=|\s+)(?:"([^"]+)"|\'([^\']+)\'|(\S+))',
+                commands[-1],
+            )
+            if match:
+                weight = next(value for value in match.groups() if value is not None)
+                if re.fullmatch(re.escape(weight) + r'(?:_[2-9]\d*)?', prefix):
+                    candidates.insert(0, weight)
+    except OSError:
+        return None
+    for weight in candidates:
+        if (re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', weight)
+                and weight.startswith(_default_weight_prefix(train_type) + '_')
+                and _matches_arch_tag(weight, _arch_tag())
+                and _resume_checkpoint_exists(weight, cfg['hidden_size'], cfg['use_moe'])):
+            return weight
+    return None
+
+
+def _request_resume(train_type, weight):
+    """A button callback selects resume before Streamlit rebuilds its widgets."""
+    if (st.session_state.get('train_type', 'pretrain') != train_type
+            or _paused_resume_prefix(train_type, build_config_dict()) != weight):
+        st.session_state['_resume_action_error'] = '暂停断点已变化，请刷新并重新选择。'
+        return
+    pid, _ = _find_running_train_process()
+    if pid is not None:
+        st.session_state['_resume_action_error'] = '已有训练进程运行，未重复启动。'
+        return
+    st.session_state.pop('_resume_action_error', None)
+    st.session_state.from_resume = True
+    if train_type == 'full_sft':
+        st.session_state.sft_start_mode = 'resume'
+    st.session_state[f'save_prefix_{train_type}'] = weight
+    st.session_state['_paused_resume_target'] = {
+        'train_type': train_type, 'weight': weight,
+        'log_path': st.session_state.get('train_log_path'),
+    }
+    st.session_state.train_triggered = True
+
+
 def _detached_training_status(log_path, process_found, paused_state, now=None):
     """Resolve a recovered run for which this WebUI has no ``Popen`` object."""
     if process_found:
@@ -2781,12 +3326,38 @@ _try_recover_training_state()
 # ═══ SIDEBAR ═══
 # ═══════════════════════════════════════════════════════════════
 
-try:
-    from scripts.config_layout import workspace, render_summary
-except ModuleNotFoundError:
-    from config_layout import workspace, render_summary
+def _load_layout_module():
+    """Load the layout helper straight from disk.
+
+    The Config WebUI is launched from scripts/ (streamlit run config_webui.py),
+    so "from scripts import ..." depends on the launch cwd/sys.path and can hit
+    a half-initialised namespace package after a hot reload. Loading the module
+    by its own path is cwd independent and always reads the latest file, so
+    edits to config_layout.py apply after a plain rerun without a restart.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    layout_path = Path(__file__).resolve().with_name("config_layout.py")
+    spec = importlib.util.spec_from_file_location(
+        "_instinct_config_layout", layout_path,
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load layout helper from {layout_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_layout_module = _load_layout_module()
+workspace = _layout_module.workspace
+render_summary = _layout_module.render_summary
 
 _ui = workspace(st)
+if "model_panel" not in _ui:
+    # Cached pre-two-column layout module (or a partial source update): keep the
+    # structure controls in one column instead of failing mid-render.
+    _ui["model_panel"] = _ui.get("model_left") or st.container()
 
 with st.sidebar:
     st.markdown(
@@ -2866,7 +3437,7 @@ with st.sidebar:
     _sidebar_status = st.empty()
 
     # ── Model Architecture ──
-    with _ui["model_left"].expander("模型类型", expanded=True):
+    with _ui["model_panel"].expander("模型类型", expanded=True):
         arch_options = ["Standard Transformer", "MoE Transformer", "GatedDeltaNet (Linear)", "RecurrsiveInstinct"]
         current_arch = st.session_state.get("model_architecture", "standard")
         if current_arch == "standard":
@@ -2904,7 +3475,7 @@ with st.sidebar:
             st.rerun()
 
     # ── Core Architecture ──
-    with _ui["model_left"].expander("核心结构", expanded=True):
+    with _ui["model_panel"].expander("核心结构", expanded=True):
         _slider(
             "hidden_size",
             128,
@@ -2963,7 +3534,7 @@ with st.sidebar:
         )
 
     # ── Residual Connections ──
-    with _ui["model_right"].expander("残差连接 · 实验性", expanded=False):
+    with _ui["model_panel"].expander("残差连接 · 实验性", expanded=False):
         _residual_labels = {
             "standard": "Standard residual",
             "mhc": "mHC (Manifold-Constrained Hyper-Connections)",
@@ -3023,7 +3594,7 @@ with st.sidebar:
                 )
 
     # ── Attention ──
-    with _ui["model_right"].expander("注意力", expanded=True):
+    with _ui["model_panel"].expander("注意力", expanded=True):
         _q_heads = _slider(
             "num_attention_heads",
             1,
@@ -3063,7 +3634,7 @@ with st.sidebar:
 
     # ── Linear Attention Config ──
     if st.session_state.get("model_architecture") == "linear":
-        with _ui["model_right"].expander("线性注意力", expanded=True):
+        with _ui["model_panel"].expander("线性注意力", expanded=True):
             _h = st.session_state.get("hidden_size", 768)
             _q = st.session_state.get("num_attention_heads", 8)
             _hd = compute_head_dim(_h, _q)
@@ -3136,7 +3707,7 @@ with st.sidebar:
 
     # ── RecurrsiveInstinct latent recurrent-depth Config ──
     if st.session_state.get("model_architecture") == "recurrsive_instinct":
-        with _ui["model_right"].expander("RecurrsiveInstinct 循环深度", expanded=True):
+        with _ui["model_panel"].expander("RecurrsiveInstinct 循环深度", expanded=True):
             _n_layers = st.session_state.get("num_hidden_layers", 8)
             _number_input(
                 "Prelude layers",
@@ -3220,7 +3791,7 @@ with st.sidebar:
             )
 
     # ── Position Encoding ──
-    with _ui["model_right"].expander("位置编码与 RoPE", expanded=False):
+    with _ui["model_panel"].expander("位置编码与 RoPE", expanded=False):
         _number_input(
             "max_position_embeddings",
             value=st.session_state.get("max_position_embeddings", 32768),
@@ -3365,7 +3936,7 @@ with st.sidebar:
             )
 
     # ── MoE ──
-    with _ui["model_left"].expander("MoE 专家与路由", expanded=True):
+    with _ui["model_panel"].expander("MoE 专家与路由", expanded=True):
         _checkbox(
             "use_moe",
             value=st.session_state.get("use_moe", False),
@@ -3494,7 +4065,7 @@ with st.sidebar:
             )
 
     # ── Early Exit (training only) ──
-    with _ui["model_right"].expander("提前退出 · 训练", expanded=False):
+    with _ui["model_panel"].expander("提前退出 · 训练", expanded=False):
         _checkbox(
             "Enable Early Exit Loss",
             value=st.session_state.get("early_exit_enabled", False),
@@ -3521,7 +4092,7 @@ with st.sidebar:
             )
 
     # ── Misc ──
-    with _ui["model_right"].expander("其他结构选项", expanded=False):
+    with _ui["model_panel"].expander("其他结构选项", expanded=False):
         _number_input(
             "rms_norm_eps",
             value=st.session_state.get("rms_norm_eps", 1e-6),
@@ -4027,12 +4598,13 @@ with st.sidebar:
         if st.session_state.get("profile", "off") == "torch":
             st.warning("算子 trace 会明显拖慢采集窗口，只建议短时诊断；其余训练会继续正常运行。")
         _selectbox(
-            "梯度检查点模式（0关闭/1选择性/2整层）",
+            "梯度检查点模式（0关闭/1仅Attention/2整层）",
             [0, 1, 2],
             index=st.session_state.get("use_grad_checkpoint", 0),
             key="use_grad_checkpoint",
-            help="Gradient checkpointing mode: 0 = off, 1 = selectively recompute "
-                 "attention/FFN activations, 2 = full-layer checkpointing.",
+            help="0 = off; 1 = Attention-only: recompute the attention core, "
+                 "keeping QKV/O projections and FFN activations; 2 = full-layer checkpointing. "
+                 "Mode 1 retains more activations than the previous FFN-checkpoint implementation.",
         )
         _selectbox(
             "参数精度 (param_dtype)",
@@ -4235,17 +4807,30 @@ with st.sidebar:
                 if _cmd_error:
                     st.error(_cmd_error)
         with _launch_action:
+            _launch_disabled = (
+                _compile_invalid or _fp8_invalid or _low_precision_invalid or _muon_invalid
+                or _dataset_missing or _base_missing
+                or st.session_state.get('train_status') == 'running'
+                or autotune_active(st.session_state) or _autotune_profile_invalid
+            )
+            if st.session_state.get('train_status') == 'paused':
+                _resume_type = st.session_state.get('train_type', 'pretrain')
+                _resume_prefix = _paused_resume_prefix(_resume_type, build_config_dict())
+                st.button(
+                    '继续训练', width='stretch', key='btn_resume_train', type='primary',
+                    disabled=_launch_disabled or _resume_prefix is None,
+                    on_click=_request_resume, args=(_resume_type, _resume_prefix),
+                    help='恢复当前暂停轮次的模型、优化器和数据进度，自动选择从检查点续训。',
+                )
+                if _resume_prefix is None:
+                    st.caption('未找到与当前模型匹配的暂停断点，请检查模型和训练阶段。')
             if st.button(
                 "开始训练", width="stretch", key="btn_start_train", type="primary",
-                disabled=(
-                    _compile_invalid or _fp8_invalid or _low_precision_invalid or _muon_invalid
-                    or _dataset_missing or _base_missing
-                    or st.session_state.get('train_status') == 'running'
-                    or autotune_active(st.session_state)
-                    or _autotune_profile_invalid
-                ),
+                disabled=_launch_disabled,
             ):
                 st.session_state.train_triggered = True
+            if st.session_state.get('_resume_action_error'):
+                st.error(st.session_state['_resume_action_error'])
         if st.session_state.get("train_status") == "running":
             _render_training_controls()
 
@@ -4289,7 +4874,7 @@ with st.sidebar:
                 with st.expander("Failure log (last 80 lines)", expanded=True):
                     st.code(_failed_tail, language="text")
         elif st.session_state.get("train_status") == "paused":
-            st.warning("训练已暂停并保存。如需继续，请勾选「从检查点续训」后点击「开始训练」。",
+            st.warning("训练已暂停并保存。点击「继续训练」可恢复本轮断点。",
                        icon=":material/pause_circle:")
             st.caption("暂停时已保存模型权重和完整续训状态。")
 
@@ -4300,16 +4885,19 @@ with st.sidebar:
 if st.session_state.get("train_triggered", False):
     if autotune_active(st.session_state):
         st.session_state.train_triggered = False
+        st.session_state.pop('_paused_resume_target', None)
         st.warning('自动调优正在运行，请先停止调优。')
 
 if st.session_state.get("train_triggered", False):
     _pipeline_process = st.session_state.get('_pipeline_proc')
     if _pipeline_process is not None and _pipeline_process.poll() is None:
         st.session_state.train_triggered = False
+        st.session_state.pop('_paused_resume_target', None)
         st.warning('训练流水线正在运行，请先暂停流水线。')
 
 if st.session_state.get("train_triggered", False):
     st.session_state.train_triggered = False
+    _paused_resume_target = st.session_state.pop('_paused_resume_target', None)
     proc = st.session_state.get("train_proc")
     if proc is not None:
         if proc.poll() is None:
@@ -4339,8 +4927,13 @@ if st.session_state.get("train_triggered", False):
                 )
                 continue_completed_sft = train_type == "full_sft" and sft_start_mode == "continue"
                 stamp = time.strftime("%Y%m%d_%H%M%S")
-                save_prefix = _resolve_save_prefix(train_type, cfg["hidden_size"], cfg["use_moe"],
-                                                   from_resume, stamp)
+                if _paused_resume_target is not None:
+                    if _paused_resume_target['train_type'] != train_type or not from_resume:
+                        raise ValueError('暂停续训目标与当前训练模式不一致。')
+                    save_prefix = _paused_resume_target['weight']
+                else:
+                    save_prefix = _resolve_save_prefix(train_type, cfg["hidden_size"], cfg["use_moe"],
+                                                       from_resume, stamp)
                 _launch_ok = True
                 if from_resume and (save_prefix is None or not _resume_checkpoint_exists(
                         save_prefix, cfg["hidden_size"], cfg["use_moe"])):
@@ -4371,6 +4964,12 @@ if st.session_state.get("train_triggered", False):
                     logs_dir = os.path.join(trainer_dir, "logs")
                     os.makedirs(logs_dir, exist_ok=True)
                     log_path = os.path.join(logs_dir, f"train_{save_prefix}.log")
+                    if from_resume and _paused_resume_target is not None:
+                        # Preserve the exact paused log, including a collision
+                        # suffix such as _2; the callback verified its run.
+                        paused_log = _paused_resume_target.get('log_path')
+                        if paused_log and os.path.isfile(paused_log):
+                            log_path = paused_log
                     if not from_resume:
                         seq = 1
                         while os.path.exists(log_path):
@@ -4423,6 +5022,8 @@ if st.session_state.get("train_triggered", False):
                     )
                     st.session_state.train_status = "running"
                     _maybe_arm_shutdown_monitor(st.session_state.train_proc.pid)
+                    if _paused_resume_target is not None:
+                        st.rerun()  # Replace paused controls with the running controls.
         except Exception:
             st.session_state.train_status = "failed"
 
@@ -4518,8 +5119,8 @@ def _render_training_activity():
             elif st.session_state.get("train_status") == "paused":
                 tt = st.session_state.get("train_type", "pretrain")
                 cfg_local = build_config_dict()
-                ckpt_prefix = _latest_checkpoint_prefix(tt, cfg_local["hidden_size"], cfg_local["use_moe"], _arch_tag())
-                st.warning(f"Training paused. Resume checkpoint: checkpoints/{ckpt_prefix}_{cfg_local['hidden_size']}_resume.pth" if ckpt_prefix else "Training paused. Resume via 'Resume from checkpoint' + Start Training.",
+                ckpt_prefix = _paused_resume_prefix(tt, cfg_local)
+                st.warning(f"训练已暂停。点击「继续训练」恢复 {ckpt_prefix}。" if ckpt_prefix else "训练已暂停，当前模型未匹配到本轮续训断点。",
                            icon=":material/pause_circle:")
 
             # ── Auto-shutdown countdown ──
@@ -4549,7 +5150,7 @@ with _ui["diagram"]:
     architecture_title = (
         "RecurrsiveInstinct Architecture"
         if cfg.get("model_architecture") == "recurrsive_instinct"
-        else "Architecture"
+        else "Architecture · 精度视图"
     )
     st.markdown(
         '<div style="font-size: 13px; font-weight: 600; letter-spacing: 0.8px; '
@@ -4558,7 +5159,7 @@ with _ui["diagram"]:
         unsafe_allow_html=True,
     )
 
-    st.markdown(arch_diagram(cfg), unsafe_allow_html=True)
+    st.markdown(arch_diagram(cfg, precision_options()), unsafe_allow_html=True)
 
     # Additional architecture info
     int_size = cfg.get("intermediate_size", compute_intermediate_size(cfg["hidden_size"]))
@@ -4714,130 +5315,127 @@ with _ui["monitor"]:
     # Let each scheduled run finish so Streamlit can remove stale elements.
     @st.fragment(run_every=2 if _auto_refresh_training_log else None)
     def _render_training_log():
+        current_log_path = st.session_state.get("train_log_path")
+        current_content, current_metrics = _read_training_log(current_log_path)
         if st.session_state.get("train_status") == "running":
             log_path = st.session_state.get("train_log_path")
             if log_path and os.path.exists(log_path):
-                with open(log_path, "r", encoding="utf-8") as f:
-                    log = f.read()
-                metrics = parse_training_metrics(log)
+                log, metrics = current_content, current_metrics
                 with st.expander("Raw Log", expanded=len(metrics) == 0, icon=":material/description:"):
                     st.code(log[-10000:] if len(log) > 10000 else log or "(empty)", language="text", line_numbers=False)
         elif st.session_state.get("train_status") == "paused":
             tt = st.session_state.get("train_type", "pretrain")
             cfg_local = build_config_dict()
-            ckpt_prefix = _latest_checkpoint_prefix(tt, cfg_local["hidden_size"], cfg_local["use_moe"], _arch_tag())
-            st.warning(f"Training paused. Resume checkpoint: checkpoints/{ckpt_prefix}_{cfg_local['hidden_size']}_resume.pth" if ckpt_prefix else "Training paused. Resume via 'Resume from checkpoint' + Start Training.",
+            ckpt_prefix = _paused_resume_prefix(tt, cfg_local)
+            st.warning(f"训练已暂停。可继续本轮断点 {ckpt_prefix}。" if ckpt_prefix else "训练已暂停，当前模型未匹配到本轮续训断点。",
                        icon=":material/pause_circle:")
             st.caption("暂停时已保存模型权重和完整续训状态。")
+            if st.button(
+                '继续训练', key='btn_resume_train_monitor', type='primary',
+                disabled=_launch_disabled or ckpt_prefix is None,
+                on_click=_request_resume, args=(tt, ckpt_prefix),
+            ):
+                # The monitor runs as a fragment; dispatch the shared launcher
+                # on a full app run after the callback selects the saved run.
+                st.rerun(scope='app')
         elif st.session_state.get("train_status") == "stopped":
             st.warning('训练已终止，未额外保存当前进度；已有检查点保留。')
         elif st.session_state.get("train_status") == "success":
             st.success("Training completed successfully")
             log_path = st.session_state.get("train_log_path")
             if log_path and os.path.exists(log_path):
-                with open(log_path, "r", encoding="utf-8") as f:
-                    log = f.read()
+                log = current_content
                 with st.expander("Training Log", expanded=False, icon=":material/description:"):
                     st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
         elif st.session_state.get("train_status") == "failed":
             st.error("Training stopped or failed (see log below)")
             log_path = st.session_state.get("train_log_path")
             if log_path and os.path.exists(log_path):
-                with open(log_path, "r", encoding="utf-8") as f:
-                    log = f.read()
+                log = current_content
                 if log.strip():
                     with st.expander("Error Log", expanded=True, icon=":material/description:"):
                         st.code(log[-5000:] if len(log) > 5000 else log, language="text", line_numbers=False)
 
-        # ── Training Data: exactly one historical log + the current log ──
-        trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
-        logs_dir = os.path.join(trainer_dir, "logs")
-        current_log_path = st.session_state.get("train_log_path")
-        if not current_log_path or not os.path.exists(current_log_path):
-            current_log_path = None
+        st.markdown("#### Current training")
+        if current_log_path and os.path.exists(current_log_path):
+            st.caption(os.path.basename(current_log_path))
+            render_log_metrics_charts(current_metrics)
+        else:
+            st.info("No current training log is selected.")
 
-        log_candidates = []
-        if os.path.isdir(logs_dir):
-            log_candidates.extend(
-                os.path.join(logs_dir, filename)
-                for filename in os.listdir(logs_dir)
-                if filename.endswith(".log")
-            )
-        legacy_log = os.path.join(trainer_dir, "train_output.log")
-        if os.path.exists(legacy_log):
-            log_candidates.append(legacy_log)
+    # History is discovered only on a full page run, outside the live fragment.
+    # Unchanged files reuse their parsed snapshot across page interactions.
+    trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
+    logs_dir = os.path.join(trainer_dir, "logs")
+    current_log_path = st.session_state.get("train_log_path")
+    if not current_log_path or not os.path.exists(current_log_path):
+        current_log_path = None
 
-        current_log_key = (
-            os.path.normcase(os.path.abspath(current_log_path)) if current_log_path else None
+    log_candidates = []
+    if os.path.isdir(logs_dir):
+        log_candidates.extend(
+            os.path.join(logs_dir, filename)
+            for filename in os.listdir(logs_dir)
+            if filename.endswith(".log")
         )
-        history_logs = sorted(
-            (
-                path for path in log_candidates
-                if os.path.normcase(os.path.abspath(path)) != current_log_key
-            ),
-            key=os.path.getmtime,
-            reverse=True,
+    legacy_log = os.path.join(trainer_dir, "train_output.log")
+    if os.path.exists(legacy_log):
+        log_candidates.append(legacy_log)
+
+    current_log_key = (
+        os.path.normcase(os.path.abspath(current_log_path)) if current_log_path else None
+    )
+    history_logs = sorted(
+        (
+            path for path in log_candidates
+            if os.path.normcase(os.path.abspath(path)) != current_log_key
+        ),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+
+    # Failed/compile-only logs have no Epoch metrics and should not occupy the one
+    # historical comparison slot.
+    history_data = {}
+    for history_path in history_logs:
+        history_content, history_metrics = _read_training_log(history_path)
+        if history_metrics:
+            history_data[history_path] = (history_content, history_metrics)
+
+    if history_data or current_log_path:
+        st.markdown(
+            f'<div class="section-title">{_CHART_SVG}Training Data</div>',
+            unsafe_allow_html=True,
         )
+        history_column, current_column = st.columns(2)
 
-        # Failed/compile-only logs have no Epoch metrics and should not occupy the one
-        # historical comparison slot.
-        history_data = {}
-        for history_path in history_logs:
-            with open(history_path, "r", encoding="utf-8", errors="replace") as history_file:
-                history_content = history_file.read()
-            history_metrics = parse_training_metrics(history_content)
-            if history_metrics:
-                history_data[history_path] = (history_content, history_metrics)
-
-        current_content, current_metrics = "", []
-        if current_log_path:
-            with open(current_log_path, "r", encoding="utf-8", errors="replace") as current_file:
-                current_content = current_file.read()
-            current_metrics = parse_training_metrics(current_content)
-
-        if history_data or current_log_path:
-            st.markdown(
-                f'<div class="section-title">{_CHART_SVG}Training Data</div>',
-                unsafe_allow_html=True,
-            )
-            history_column, current_column = st.columns(2)
-
-            with history_column:
-                st.markdown("#### Historical log")
-                if history_data:
-                    if st.session_state.get("history_log_select") not in history_data:
-                        st.session_state.history_log_select = next(iter(history_data))
-                    selected_history = _selectbox(
-                        "Compare against",
-                        list(history_data),
-                        format_func=os.path.basename,
-                        key="history_log_select",
+        with history_column:
+            st.markdown("#### Historical log")
+            if history_data:
+                if st.session_state.get("history_log_select") not in history_data:
+                    st.session_state.history_log_select = next(iter(history_data))
+                selected_history = _selectbox(
+                    "Compare against",
+                    list(history_data),
+                    format_func=os.path.basename,
+                    key="history_log_select",
+                )
+                historical_content, historical_metrics = history_data[selected_history]
+                st.caption(os.path.basename(selected_history))
+                render_log_metrics_charts(historical_metrics)
+                with st.expander("Historical raw log", expanded=False, icon=":material/description:"):
+                    st.code(
+                        historical_content[-5000:] if len(historical_content) > 5000 else historical_content,
+                        language="text", line_numbers=False,
                     )
-                    historical_content, historical_metrics = history_data[selected_history]
-                    st.caption(os.path.basename(selected_history))
-                    render_log_metrics_charts(historical_metrics)
-                    with st.expander("Historical raw log", expanded=False, icon=":material/description:"):
-                        st.code(
-                            historical_content[-5000:] if len(historical_content) > 5000 else historical_content,
-                            language="text", line_numbers=False,
-                        )
-                else:
-                    st.info("No earlier log with training metrics is available.")
+            else:
+                st.info("No earlier log with training metrics is available.")
 
-            with current_column:
-                st.markdown("#### Current training")
-                if current_log_path:
-                    st.caption(os.path.basename(current_log_path))
-                    render_log_metrics_charts(current_metrics)
-                else:
-                    st.info("No current training log is selected.")
+        with current_column:
+            _render_training_log()
+    else:
+        _render_training_log()
 
-        if not history_data and not current_log_path:
-            st.info("还没有训练日志。启动训练后，这里会显示进度、loss 与吞吐曲线。")
-
-        _persist_panel_state(trainer_dir)
-
-    _render_training_log()
 
 # Footer
 st.markdown(

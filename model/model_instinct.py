@@ -26,9 +26,9 @@ from model.static_cache import (
     layer_specs,
     left_pad_starts,
 )
-from model.checkpointing import recompute_attention, checkpoint_ffn
+from model.checkpointing import recompute_attention, dense_checkpoint_options
 from model.attention_mask import apply_attention_mask, prepare_sdpa_attention_bias
-from model.packed_attention import maybe_prepare_flex_mask
+from model.packed_attention import maybe_prepare_flex_mask, maybe_prepare_causal_flex_mask
 from model.sequence_packing import (
     merge_packed_attention_mask, positions_from_sequence_ids,
 )
@@ -307,13 +307,20 @@ class Attention(nn.Module):
             output = output.reshape(bsz, seq_len, -1)
         elif (self.flash and (seq_len > 1)
                 and (not self.is_causal or past_key_value is None)):
-            # Packed masks stay on memory-efficient SDPA. Mode 1 checkpoints
-            # the FFN only on this fast path; recomputing attention here was
-            # slower and caused torch.compile to decompose SDPA into dense BMMs.
-            output = flash_attention(
-                xq, xk, xv, dropout_p=self.dropout if self.training else 0.0,
-                is_causal=self.is_causal, attention_mask=attention_mask,
-            )
+            if self.use_grad_checkpoint == 1 and self.training and past_key_value is None:
+                # Checkpoint only the parameter-free attention core. Keep QKV/O
+                # projections, norms and the FFN outside this boundary.
+                output = torch.utils.checkpoint.checkpoint(
+                    flash_attention, xq, xk, xv,
+                    dropout_p=self.dropout, is_causal=self.is_causal,
+                    attention_mask=attention_mask,
+                    use_reentrant=False, preserve_rng_state=True,
+                )
+            else:
+                output = flash_attention(
+                    xq, xk, xv, dropout_p=self.dropout if self.training else 0.0,
+                    is_causal=self.is_causal, attention_mask=attention_mask,
+                )
             output = output.reshape(bsz, seq_len, -1)
         else:
             if self.use_grad_checkpoint == 1 and self.training and past_key_value is None:
@@ -368,7 +375,9 @@ class MOEFeedForward(nn.Module):
             act_fn=self.act_fn,
             inference_backend=self._inference_backend,
             inference_stacks=self._inference_stacked,
-            checkpoint_mode=self.config.use_grad_checkpoint if self.training else 0,
+            # Mode 1 is Attention-only, including when expert inner-checkpoint
+            # experiment flags are present in the environment.
+            checkpoint_mode=0,
         )
         if self.training:
             load = F.one_hot(topk_idx, self.config.num_experts).float().mean(0)
@@ -417,21 +426,10 @@ class InstinctBlock(nn.Module):
         )
         hidden_states = hidden_states + residual
         normed = self.post_attention_layernorm(hidden_states)
-        if self.use_grad_checkpoint == 1 and self.training:
-            ffn_out, aux = checkpoint_ffn(self.mlp, normed)
-            if aux is not None:
-                self.mlp.aux_loss = aux   # returned graph node replaces the no_grad side-channel attribute
-            hidden_states = hidden_states + ffn_out
-        else:
-            hidden_states = hidden_states + self.mlp(normed)
+        hidden_states = hidden_states + self.mlp(normed)
         return hidden_states, present_key_value
 
     def _run_mlp(self, hidden_states):
-        if self.use_grad_checkpoint == 1 and self.training:
-            ffn_out, aux = checkpoint_ffn(self.mlp, hidden_states)
-            if aux is not None:
-                self.mlp.aux_loss = aux
-            return ffn_out
         return self.mlp(hidden_states)
 
     def _forward_mhc(self, hidden_states, position_embeddings, past_key_value=None,
@@ -582,6 +580,20 @@ class InstinctModel(nn.Module):
                     attention_mask = prepare_sdpa_attention_bias(
                         attention_mask, hidden_states, query_length=seq_length,
                     )
+        elif (self.training and self.residual_type == "standard"
+              and not use_cache and past_key_values[0] is None):
+            # A single-document batch has no sequence_ids. Prepare its V2
+            # causal Flex mask once, outside every checkpointed transformer
+            # layer, so attention and FP8 projections remain in one graph.
+            causal_mask = maybe_prepare_causal_flex_mask(
+                hidden_states, enabled=self.config.flash_attn,
+                attention_mask=attention_mask, dropout_p=self.config.dropout,
+                head_dim=self.config.head_dim,
+                num_attention_heads=self.config.num_attention_heads,
+                num_key_value_heads=self.config.num_key_value_heads,
+            )
+            if causal_mask is not None:
+                attention_mask = causal_mask
         position_embeddings = select_rope_cache(
             self.freqs_cos, self.freqs_sin,
             self.freqs_cos_short, self.freqs_sin_short,
@@ -594,6 +606,8 @@ class InstinctModel(nn.Module):
         return_intermediate = kwargs.pop("return_intermediate", False)
         exit_check_fn = kwargs.pop("exit_check_fn", None)
         layer_callback = kwargs.pop("layer_callback", None)
+        checkpoint_options = (dense_checkpoint_options(self.config, hidden_states, attention_mask)
+                              if self.config.use_grad_checkpoint == 2 and self.training else {})
         for layer, past_key_value in zip(self.layers, past_key_values):
             layer_forward = layer
             if self.residual_type == "attnres":
@@ -607,7 +621,7 @@ class InstinctModel(nn.Module):
                 hidden_states, present = torch.utils.checkpoint.checkpoint(
                     layer_forward, hidden_states, position_embeddings, past_key_value,
                     use_cache, attention_mask,
-                    use_reentrant=False, preserve_rng_state=True)
+                    use_reentrant=False, preserve_rng_state=True, **checkpoint_options)
             else:
                 hidden_states, present = layer_forward(
                     hidden_states,

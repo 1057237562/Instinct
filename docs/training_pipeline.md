@@ -26,6 +26,59 @@ python trainer/training_pipeline.py --plan training_pipeline.json --validate-onl
 python trainer/training_pipeline.py --plan training_pipeline.json
 ```
 
+## 预训练剩余时间
+
+`epoch_time` 表示**当前 epoch 的剩余分钟数**。流式预训练按有效输入 token
+计数，使用最近 3 个日志区间的 `Δtokens / Δseconds`，再计算
+`剩余 tokens / 近期 tokens/s / 60`。普通预训练使用同一算法按 step 计数。
+它使用区间总量加权，不直接平均各区间的速率。
+
+每次启动、续训或进入新 epoch 都重建估计器；首次日志只建立基准，显示
+`epoch_time: estimating`。首次记录之前的启动和编译耗时不进入后续窗口；后续发生的数据等待、
+保存 checkpoint 和重新编译计入实际耗时，并在移出窗口后失效。
+读取 loss 完成 GPU 同步后才记录单调时钟，避免计入已排队但尚未完成的进度。
+日志额外保留 `elapsed_seconds`、`eta_window_seconds`、`eta_window_tokens`
+（或 `eta_window_steps`）和近期吞吐，便于复核。
+
+WebUI 的 **Epoch Remaining** 图使用该估计。页面的已用/剩余时长摘要、图表刻度和
+悬浮提示自动按 `d h min` 展示，例如 `1501 min` 显示为 `1 d 1 h 1 min`；
+不足一小时只显示分钟，分钟保留至多一位小数。日志内容和数值指标仍保留原来的分钟单位。
+已有包含 `elapsed_time` 的旧日志会在展示时重算，原始日志不改写。旧日志时间仅精确到 0.1 分钟，
+因此重算结果有舍入误差。ETA 是近期速率外推，不能预知后续数据分布和系统负载变化。
+
+## LM 输入传输与 GPU 利用率诊断
+
+预训练 DataLoader 使用 `pin_memory=True`。`prepare_lm_batch()` 将 CPU 输入、
+标签和必要的 `sequence_ids` 以 `non_blocking=True` 提交到当前 CUDA 流；同一流上的
+前向计算仍在复制完成后执行。这样避免默认 `.to(cuda)` 在每个张量复制后阻塞主线程、
+等待该流此前的训练工作。复制回 CPU 保持同步，调用者可以立即读取结果。
+这是取消主线程等待，不等于使用独立复制流实现传输与计算并行。
+
+定位利用率锯齿时同时记录单步时间、有效 token/s、瞬时功率和 Windows 引擎计数。
+不要把 CPU 在输入传输调用中的等待时间全部算作 PCIe 搬运时间，也不要把单个引擎
+曲线的 0% 直接当作整个 GPU 空闲。统计计数可能成批更新；对超出合理范围或倒退的
+计数单独标记，不用于 MFU。启动编译、稳定训练和检查点保存应分别报告。
+诊断训练结束必须通过正常保存后暂停流程，并验证完整续训状态；不得丢弃未保存进度。
+
+## 梯度检查点模式（2026-10-22 起）
+
+| `use_grad_checkpoint` | 重算范围 |
+|---|---|
+| 0 | 不显式添加激活检查点 |
+| 1 | **Attention-only**：只重算注意力核心，QKV/O 投影、Norm 和 FFN 保留正常反向所需激活 |
+| 2 | 整个 Transformer 层；递归骨干保留原有循环区域边界 |
+
+模式 1 在融合 Attention 路径上使用非重入 checkpoint，保留原来的
+Flex/FA4/SDPA 后端；普通数学 Attention 继续重算 QKᵀ、mask、softmax、dropout、AV。
+混合线性骨干只重算无缓存训练的 GatedDeltaNet 核心，投影、卷积和输出归一化在区域外。
+推理、KV cache 更新及 FFN/MoE 都不因模式 1 增加重算；模式 2 的定义不变。
+
+旧版模式 1 在融合 Attention 路径上实际重算 FFN，这与新定义不同。现有权重、优化器
+状态和数据游标格式仍兼容，但旧模式 1 的显存预算及性能记录不代表新策略。
+特别是新策略保留 FFN 激活，不能直接沿用整层重算的最大 token budget。
+旧 V1 MoE 的 FFN-checkpoint 显存曲线不再自动选用；预算需按新策略实测，续训时仍须
+保持保存的 packing/数据游标契约。历史实验中的“FFN checkpoint”描述保留其原始含义。
+
 ## V1 MoE 修复与低预算验证（2026-10-01）
 
 ### 首次 SFT、继续 SFT 与断点续训的配置切换

@@ -24,6 +24,7 @@ ARG_CHOICES = {
 }
 ARG_POSITIVE = {'bucket_token_budget', 'bucket_gpu_memory_gb'}
 ENV_CHOICES = {
+    'INSTINCT_DENSE_SELECTIVE_CHECKPOINT': ('0', 'attention'),
     'INSTINCT_MOE_INNER_CHECKPOINT': ('0', '1', '2'),
     'INSTINCT_MOE_SELECTIVE_CHECKPOINT': ('0', 'down', 'gate_down'),
     'INSTINCT_MUON_PREALLOCATE': ('0', '1'),

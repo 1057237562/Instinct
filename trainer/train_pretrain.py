@@ -37,6 +37,7 @@ from trainer.trainer_cli import (
 )
 from trainer.packing_transition import packing_data_config, SequencePackingPlan
 from trainer.training_profiler import TrainingProfiler
+from trainer.training_eta import RecentThroughputETA
 from trainer.moe_monitor import collect_moe_routing_stats
 from trainer.streaming_pretrain import (
     ChunkedPackedEpochLoader,
@@ -126,8 +127,8 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
         每个 step 依次完成：余弦 LR 调度 → 前向（autocast）→ 反向（GradScaler）
         → 按 accumulation_steps 累积后裁剪梯度并更新参数 → 周期性打日志 / 存检查点。
     """
-    start_time = time.time()
-    start_tokens = int(data_config.get('streaming_processed_tokens', 0))
+    start_time = time.perf_counter()
+    eta_estimator = RecentThroughputETA()
     data_config['epoch_steps'] = int(iters)
     last_step = start_step
     for step, batch in enumerate(loader, start=start_step + 1):
@@ -188,28 +189,43 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
             wandb.log(profile_metrics)
 
         if step % args.log_interval == 0 or (token_schedule is None and step == iters):
-            spend_time = time.time() - start_time
             current_loss = loss.item() * args.accumulation_steps
             current_aux_loss = aux_loss_for_log.item() if aux_loss_for_log is not None else 0.0
+            # Reading loss waits for this step's queued CUDA work. Sample the
+            # clock afterwards so progress and wall time refer to the same step.
+            spend_time = time.perf_counter() - start_time
             current_logits_loss = current_loss - current_aux_loss
             current_lr = optimizer.param_groups[-1]['lr']
-            eta_min = spend_time / max(step - start_step, 1) * (iters - step) / 60
             progress_text = f'({step}/{iters})'
             if token_schedule is not None:
                 epoch_tokens = int(token_schedule['total_tokens']) // args.epochs
                 epoch_done, eta_min = streaming_token_progress(
-                    completed, start_tokens, epoch_tokens, epoch, spend_time,
+                    completed, epoch_tokens, epoch, spend_time, estimator=eta_estimator,
                 )
+                eta_unit = 'tokens'
                 progress_text = (
                     f'({step}/~{iters}), tokens: {epoch_done}/{epoch_tokens}, '
                     f'chunk: {data_config.get("streaming_chunk_index", 0) + 1}/'
                     f'{data_config["streaming_chunks"]}'
                 )
+            else:
+                eta_min = eta_estimator.update(step, spend_time, iters)
+                eta_unit = 'steps'
             elapsed_min = spend_time / 60
+            eta_text = f'{eta_min:.1f}min' if eta_min is not None else 'estimating'
+            eta_metrics = {
+                'eta_window_seconds': eta_estimator.window_seconds,
+                f'eta_window_{eta_unit}': eta_estimator.window_progress,
+            }
+            if eta_estimator.rate is not None:
+                eta_metrics[f'eta_{eta_unit}_per_second'] = eta_estimator.rate
+            eta_details = ', '.join(f'{key}: {value:.3f}' for key, value in eta_metrics.items())
             loop_str = f', loop_steps: {loop_steps:.2f}' if loop_steps else ''
             bucket_text = f', {bucket_status}' if bucket_status else ''
-            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]{progress_text}, loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}{loop_str}, lr: {current_lr:.8f}{bucket_text}, epoch_time: {eta_min:.1f}min, elapsed_time: {elapsed_min:.1f}min')
-            log_dict = {"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min, "elapsed_time": elapsed_min}
+            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]{progress_text}, loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}{loop_str}, lr: {current_lr:.8f}{bucket_text}, epoch_time: {eta_text}, elapsed_time: {elapsed_min:.1f}min, elapsed_seconds: {spend_time:.3f}, eta_basis: recent_{eta_unit}, {eta_details}')
+            log_dict = {"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "elapsed_time": elapsed_min, "elapsed_seconds": spend_time, **eta_metrics}
+            if eta_min is not None:
+                log_dict["epoch_time"] = eta_min
             if loop_steps: log_dict["loop_steps"] = loop_steps
             if lm_config.use_moe:
                 routing_stats = collect_moe_routing_stats(model)

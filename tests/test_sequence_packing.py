@@ -118,7 +118,9 @@ def test_calibrated_profile_rejects_unmeasured_training_paths(monkeypatch):
     model=SimpleNamespace(config=config,parameters=lambda:iter([param]))
     args=SimpleNamespace(optimizer='muon',dtype='bfloat16',accumulation_steps=1,
                          use_compile=1,compile_mode='max-autotune-no-cudagraphs',bucket_max_seq_len=4096)
-    assert _validated_bucket_memory_profile(model,args)==V1_MOE_TRAINING_MEMORY_PROFILE
+    # The matching old topology no longer implies matching activation storage:
+    # mode 1 now retains FFN activations instead of checkpointing them.
+    assert _validated_bucket_memory_profile(model,args) is None
     args.accumulation_steps=2
     assert _validated_bucket_memory_profile(model,args) is None
     args.accumulation_steps=1
@@ -737,12 +739,11 @@ def test_recurrsive_instinct_packed_segment_matches_standalone_forward():
     torch.testing.assert_close(packed_logits, standalone_logits, rtol=1e-5, atol=1e-6)
 
 
-def test_checkpoint_mode1_packed_mask_uses_sdpa_and_ffn_checkpoint(monkeypatch):
+def test_checkpoint_mode1_packed_mask_replays_only_sdpa_core(monkeypatch):
     import model.model_instinct as dense_module
 
-    calls = {"flash": 0, "ffn_checkpoint": 0}
+    calls = {"flash": 0, "ffn": 0}
     original_flash = dense_module.flash_attention
-    original_checkpoint_ffn = dense_module.checkpoint_ffn
 
     def fail_recompute(*args, **kwargs):
         raise AssertionError("packed mask fell back to eager attention recomputation")
@@ -751,13 +752,8 @@ def test_checkpoint_mode1_packed_mask_uses_sdpa_and_ffn_checkpoint(monkeypatch):
         calls["flash"] += 1
         return original_flash(*args, **kwargs)
 
-    def spy_checkpoint_ffn(*args, **kwargs):
-        calls["ffn_checkpoint"] += 1
-        return original_checkpoint_ffn(*args, **kwargs)
-
     monkeypatch.setattr(dense_module, "recompute_attention", fail_recompute)
     monkeypatch.setattr(dense_module, "flash_attention", spy_flash)
-    monkeypatch.setattr(dense_module, "checkpoint_ffn", spy_checkpoint_ffn)
     config = InstinctConfig(
         vocab_size=64, hidden_size=32, num_hidden_layers=1,
         num_attention_heads=4, num_key_value_heads=2,
@@ -765,6 +761,9 @@ def test_checkpoint_mode1_packed_mask_uses_sdpa_and_ffn_checkpoint(monkeypatch):
         use_grad_checkpoint=1, tie_word_embeddings=False,
     )
     model = InstinctForCausalLM(config).train()
+    def count_ffn(_module, _args):
+        calls['ffn'] += 1
+    model.model.layers[0].mlp.register_forward_pre_hook(count_ffn)
     input_ids = torch.tensor([[5, 6, 7, 20, 21, 22]])
     labels = input_ids.clone()
     labels[:, 3] = -100
@@ -773,7 +772,7 @@ def test_checkpoint_mode1_packed_mask_uses_sdpa_and_ffn_checkpoint(monkeypatch):
     output = model(input_ids, labels=labels, sequence_ids=sequence_ids)
     assert torch.isfinite(output.loss)
     output.loss.backward()
-    assert calls == {"flash": 1, "ffn_checkpoint": 1}
+    assert calls == {"flash": 2, "ffn": 1}
 
 
 class _SizedDataset(Dataset):

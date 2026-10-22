@@ -4,7 +4,7 @@
   "trainer": "pretrain",
   "validation": {
     "performed": false,
-    "reason": "User requested fixed settings without further search."
+    "reason": "Manual recipe, no full autotune search. Budget 8193 has measured warm performance; budget 16384 is a separate isolated feasibility test and is not applied here."
   },
   "hardware": {
     "gpu": "NVIDIA GeForce RTX 5070 Ti",
@@ -24,7 +24,7 @@
     "driver": "616.56",
     "triton": "3.4.0.post20",
     "torchao": "0.18.0",
-    "source": "2c923f2fd7f6eddd41c311d829766a352a0f51e0cb6f40b42c34a4a6ca612103"
+    "source": "b3a2e5d38dc758f335dbd565483e9cc5cd20d87aa1423ef0f48248f94ec2b7af"
   },
   "contract": {
     "model": {
@@ -148,15 +148,16 @@
   },
   "settings": {
     "args": {
-      "bucket_token_budget": 5344,
+      "bucket_token_budget": 8193,
       "bucket_gpu_memory_gb": 16.0,
       "use_grad_checkpoint": 2,
       "use_compile": 1,
       "compile_mode": "max-autotune-no-cudagraphs"
     },
     "env": {
-      "INSTINCT_MUON_WORKSPACE_MB": "256",
-      "INSTINCT_MUON_BATCH_SIZE": "16"
+      "INSTINCT_MUON_WORKSPACE_MB": "512",
+      "INSTINCT_MUON_BATCH_SIZE": "16",
+      "INSTINCT_DENSE_SELECTIVE_CHECKPOINT": "0"
     }
   },
   "evidence": {
@@ -171,7 +172,290 @@
         "experiments/muon_v2_fp8_compiled_validation.json"
       ],
       "scope": "Exact optimizer-state and full-model update parity; isolated optimizer timing. Fixed batch recipe remains manual, not autotune-validated."
+    },
+    "v2_compile_packed_attention": {
+      "date": "2026-10-20",
+      "source": "e717af2f14647c3242404060df05512d577606413b0b32ddf8e2f290068cdf23",
+      "reports": [
+        "experiments/results/v2_optimization/summary.json",
+        "experiments/results/v2_optimization/reference_quality.json",
+        "experiments/results/v2_optimization/flex96_quality.json"
+      ],
+      "report_sha256": {
+        "experiments/results/v2_optimization/summary.json": "d4b7bc7b597829ba019cd896d859ab578893f514539c6735224745f87d210363",
+        "experiments/results/v2_optimization/reference_quality.json": "761e03dafa15c905e15a63f2fe2561d2dcc7fdd28bcbf0e8facdd654388fa7b5",
+        "experiments/results/v2_optimization/flex96_quality.json": "cdd64eb691db335ba8427d4719fd4670bd7e24dcd8ad63f169b064578df015c9"
+      },
+      "warmup_microsteps": 8,
+      "measured_microsteps": 32,
+      "measurements": {
+        "wall_seconds": 16.145049699998708,
+        "microstep_ms": 504.5328031249596,
+        "useful_tokens_per_second": 9310.16025302245,
+        "useful_TF_per_s": 61.23534941265663,
+        "mixed_MFU_pct": 39.078123580449656,
+        "BF16_reference_MFU_pct": 69.6647888653659,
+        "phases_ms": {
+          "data_transfer": 0.23540900135412812,
+          "forward": 111.03473544120789,
+          "backward": 341.9126167297363,
+          "optimizer": 51.065378189086914
+        },
+        "peak_allocated_GiB": 11.926538467407227,
+        "peak_reserved_GiB": 12.90625
+      },
+      "speedup_vs_reference": 2.843316834137967,
+      "quality": {
+        "same_checkpoint_weights_and_training_batches": true,
+        "training_20_microstep_windows": [
+          {
+            "start": 1,
+            "end": 20,
+            "reference_mean_loss": 4.14337842464447,
+            "candidate_mean_loss": 4.143364989757538,
+            "relative_change": -3.2424957498283406e-06
+          },
+          {
+            "start": 21,
+            "end": 40,
+            "reference_mean_loss": 4.157972812652588,
+            "candidate_mean_loss": 4.157641649246216,
+            "relative_change": -7.96453996438721e-05
+          }
+        ],
+        "validation_reference": 3.7975747714985415,
+        "validation_candidate": 3.7973847319859773,
+        "validation_relative_change": -5.004233596413257e-05,
+        "finite_losses": true,
+        "passed": true,
+        "scope": "40 real microsteps / 5 optimizer updates, 8 held-out sequences; short non-regression check, not bitwise gradient parity or a convergence proof."
+      },
+      "MFU_method": "6*N*useful_tokens + 12*layers*qheads*head_dim*causal_pairs. FP8/BF16 FP32-accumulation nominal dense peaks 175.8/87.9 TF/s; excludes optimizer, checkpoint recomputation and padding.",
+      "bucket_token_budget": 5344
+    },
+    "v2_causal_attention": {
+      "date": "2026-10-20",
+      "source": "46f3603a0ff0bd3476726c9cbce9874fac38ab934b684b70633322df7f72dde5",
+      "reports": [
+        "experiments/results/v2_causal96/reference_current.json",
+        "experiments/results/v2_causal96/candidate.json",
+        "experiments/results/v2_causal96/summary.json"
+      ],
+      "report_sha256": {
+        "experiments/results/v2_causal96/reference_current.json": "fe81fa6ffbaed621d5561e12bf4500834d44736030b3409487a88878facea5c9",
+        "experiments/results/v2_causal96/candidate.json": "798c906b151ff05c8b57d03d724308cdeb9f8d8db9cda593335a574f3be56c19",
+        "experiments/results/v2_causal96/summary.json": "8466c699845db7d2b4054463d2c7b3c642c2e36bee99e22e74a32b3d15610a1f"
+      },
+      "warmup_microsteps": 16,
+      "measured_microsteps": 128,
+      "measurements": {
+        "wall_seconds": 60.45932069999981,
+        "microstep_ms": 472.3384429687485,
+        "useful_tokens_per_second": 9616.515588803197,
+        "useful_TF_per_s": 63.683702713154375,
+        "mixed_MFU_pct": 40.85703940356168,
+        "BF16_reference_MFU_pct": 72.45017373510167,
+        "phases_ms": {
+          "data_transfer": 0.2553725006291643,
+          "forward": 100.37509626150131,
+          "backward": 318.0296745300293,
+          "optimizer": 53.49017262458801
+        },
+        "peak_allocated_GiB": 10.203765869140625,
+        "peak_reserved_GiB": 11.8125
+      },
+      "speedup_vs_reference": 2.4672735993872994,
+      "quality": {
+        "same_checkpoint_weights_and_training_batches": true,
+        "training_20_microstep_windows": [
+          {
+            "start": 1,
+            "end": 20,
+            "reference_mean_loss": 3.4559414386749268,
+            "candidate_mean_loss": 3.455902802944183,
+            "relative_change": -1.1179509673173023e-05
+          },
+          {
+            "start": 21,
+            "end": 40,
+            "reference_mean_loss": 3.6262309074401857,
+            "candidate_mean_loss": 3.6261835217475893,
+            "relative_change": -1.3067477997391474e-05
+          },
+          {
+            "start": 41,
+            "end": 60,
+            "reference_mean_loss": 3.6231557011604307,
+            "candidate_mean_loss": 3.6232344627380373,
+            "relative_change": 2.173839164056089e-05
+          },
+          {
+            "start": 61,
+            "end": 80,
+            "reference_mean_loss": 3.3588719606399535,
+            "candidate_mean_loss": 3.358878695964813,
+            "relative_change": 2.0052341793748768e-06
+          },
+          {
+            "start": 81,
+            "end": 100,
+            "reference_mean_loss": 3.384447252750397,
+            "candidate_mean_loss": 3.3845089435577393,
+            "relative_change": 1.8227734910743782e-05
+          },
+          {
+            "start": 101,
+            "end": 120,
+            "reference_mean_loss": 3.5216631412506105,
+            "candidate_mean_loss": 3.521655523777008,
+            "relative_change": -2.163033003734782e-06
+          },
+          {
+            "start": 121,
+            "end": 140,
+            "reference_mean_loss": 3.8355220079422,
+            "candidate_mean_loss": 3.835784447193146,
+            "relative_change": 6.842334639264565e-05
+          },
+          {
+            "start": 141,
+            "end": 144,
+            "reference_mean_loss": 3.477085053920746,
+            "candidate_mean_loss": 3.476965010166168,
+            "relative_change": -3.4524250260221824e-05
+          }
+        ],
+        "validation_reference": 3.138892673992396,
+        "validation_candidate": 3.138914938816602,
+        "validation_relative_change": 7.093209777627544e-06,
+        "finite_losses": true,
+        "passed": true,
+        "scope": "144 real microsteps / 18 optimizer updates, 8 held-out sequences; short non-regression check, not bitwise gradient parity or a convergence proof."
+      },
+      "tests": {
+        "junit": "D:\\AI\\Instinct\\.cache\\v2_causal96_fix\\gpu_tests.xml",
+        "sha256": "1c5d406ef1afb94744835367068e9735419fe1178e2c1a529bf3c39327f064e4"
+      },
+      "production_verification": {
+        "report": "experiments/results/v2_causal96/production.json",
+        "sha256": "c49f0519f39e280cfebbb2735b3dc3613246830f540ee4f7eb8d35eae1ad255b",
+        "pid": 40808,
+        "resume_step": 2152,
+        "windows": [
+          {
+            "global_steps_inclusive": [
+              2169,
+              2268
+            ],
+            "microsteps": 100,
+            "gpu_mean_step_ms": 446.25,
+            "useful_tokens": 452661,
+            "padded_tokens": 484480,
+            "causal_pairs": 441191461,
+            "window_seconds_approx": 44.62785556374355,
+            "useful_tokens_per_second_approx": 10143.014811756935,
+            "mixed_MFU_pct_approx": 43.25803162807413,
+            "peak_allocated_GiB": 10.22,
+            "peak_reserved_GiB": 11.92
+          },
+          {
+            "global_steps_inclusive": [
+              2269,
+              2368
+            ],
+            "microsteps": 100,
+            "gpu_mean_step_ms": 445.72,
+            "useful_tokens": 473730,
+            "padded_tokens": 498208,
+            "causal_pairs": 418303024,
+            "window_seconds_approx": 44.574393844502104,
+            "useful_tokens_per_second_approx": 10627.850636681867,
+            "mixed_MFU_pct_approx": 44.672071317572296,
+            "peak_allocated_GiB": 10.22,
+            "peak_reserved_GiB": 11.92
+          },
+          {
+            "global_steps_inclusive": [
+              2369,
+              2468
+            ],
+            "microsteps": 100,
+            "gpu_mean_step_ms": 440.97,
+            "useful_tokens": 470448,
+            "padded_tokens": 495712,
+            "causal_pairs": 426048642,
+            "window_seconds_approx": 44.102491103202844,
+            "useful_tokens_per_second_approx": 10667.152540184625,
+            "mixed_MFU_pct_approx": 44.99921122285789,
+            "peak_allocated_GiB": 10.22,
+            "peak_reserved_GiB": 11.92
+          }
+        ]
+      },
+      "bucket_token_budget": 5344
+    },
+    "v2_mfu_20261021": {
+      "date": "2026-10-21",
+      "source": "efa93d136e50d0ed30503a41a9319685c14f447176fee124406cf0c7c38716a0",
+      "reports": [
+        "experiments/results/v2_mfu_20261021/baseline.json",
+        "experiments/results/v2_mfu_20261021/production_off.json",
+        "experiments/results/v2_mfu_20261021/production_events.json"
+      ],
+      "report_sha256": {
+        "experiments/results/v2_mfu_20261021/baseline.json": "0b33d06c2f65b08b4729fc4d1343b3000b73770dd228481292056713fde74160",
+        "experiments/results/v2_mfu_20261021/production_off.json": "e111d0b07e4599a4e3cd8a631ab205b0c56cffb1023037202d847ab952cc3826",
+        "experiments/results/v2_mfu_20261021/production_events.json": "038454c19056d2cf3e028bc6c5f9f3ebc6721e277f49954c4f4568de9badd834"
+      },
+      "profiler_off_microstep_ms": 663.4248152343752,
+      "profiler_off_mixed_mfu_pct": 49.04983145096154,
+      "windows_pid_probe": "psutil.pid_exists; live child and cache protection regression tests passed",
+      "scope": "8193 budget retained. Selective attention caching stays disabled; its full performance run was interrupted. CUDA-event on/off wall times differ by 0.35%. Sawtooth Task Manager usage was observed with profiling off; the original visually flat run also used a different checkpoint experiment, so visual changes cannot be attributed exclusively to profiling."
+    },
+    "v2_budget16384_20261021": {
+      "status": "failed_oom",
+      "report": "experiments/results/v2_mfu_20261021/budget16384_failure.json",
+      "report_sha256": "3eb84cdc602b561aa7af649343805c7823c7d079a6d95e5c66a28e81d56b414a",
+      "source": "efa93d136e50d0ed30503a41a9319685c14f447176fee124406cf0c7c38716a0",
+      "failed_microstep": 2,
+      "applied_to_recipe": false
+    },
+    "nonblocking_lm_input_20261022": {
+      "source": "6affff2026382e54976f2d9cded044cf0ef4b84d26d50cd06f3120165008aba9",
+      "previous_source": "efa93d136e50d0ed30503a41a9319685c14f447176fee124406cf0c7c38716a0",
+      "report": "experiments/results/v2_gpu_sawtooth_20261021/comparison.json",
+      "checks": {
+        "cpu_passed": 14,
+        "gpu_passed": 3,
+        "old_blocking_transfer_regression_reproduced": true
+      },
+      "comparison_token_budget": 12288,
+      "warmup_microsteps": 16,
+      "measured_microsteps": 128,
+      "tokens_per_second_before": 11895.801539133765,
+      "tokens_per_second_after": 11917.677206270884,
+      "throughput_change_pct": 0.18389401559160135,
+      "scope": "Only CUDA input-copy host synchronization changed. Both fresh V2 runs saved full step-144 resume states. Manual profile budget 8193 is retained; this is not a new autotune search or a new performance measurement at budget 8193."
+    },
+    "attention_only_mode1_20261022": {
+      "source": "b3a2e5d38dc758f335dbd565483e9cc5cd20d87aa1423ef0f48248f94ec2b7af",
+      "previous_source": "6affff2026382e54976f2d9cded044cf0ef4b84d26d50cd06f3120165008aba9",
+      "meaning": "Mode 1 now checkpoints attention cores only; FFN and QKV/O projections stay outside replay. Mode 2 settings in this manual profile are unchanged.",
+      "cpu_checks": "134 passed in checkpoint/model/packing/CLI suites plus 14 passed in attention/compile-policy suites; isolated Config WebUI AppTest 13 passed; relay schema --check passed. GPU tests were separately enabled. One pre-existing preset test expects V1 MoE in the user-selected V2 config_pretrain.json; reproduced against pre-change source.",
+      "gpu_checks": "V2 2-layer hidden1536/head96/GQA16:4 BF16 and TorchAO tensorwise FP8: loss and all parameter gradients checked for causal and packed inputs. Additional FP8 packed trace confirms FlexAttention CUDA kernels remain present.",
+      "paused_checkpoint": "checkpoints/pretrain_20261022_012602_1536_resume.pth",
+      "paused_step": 672,
+      "capacity_scope": "No new full-32-layer Attention-only token-budget or throughput claim. Historical FFN-checkpoint memory calibration is no longer selected automatically."
     }
   },
-  "limitation": "Manual fixed recipe. No measured throughput, memory peak or quality acceptance claim."
+  "limitation": "Manual 8193-token cap requested by the user; not GPU-validated at this budget. Historical performance/quality evidence uses budget 5344. The current saved batch cursor also uses 5344; exact resume at 8193 requires cursor migration before changing checkpoint metadata.",
+  "manual_budget_change": {
+    "date": "2026-10-20",
+    "previous_token_budget": 5344,
+    "requested_token_budget": 8193,
+    "gpu_validation_performed": false,
+    "checkpoint_step": 3352,
+    "checkpoint_cursor_budget": 5344,
+    "resume_migration_required": true
+  }
 }

@@ -49,8 +49,11 @@ def workspace(st):
         launch = st.container()
         train_left, train_right = st.columns(2, gap="large")
     with model:
-        st.caption("左侧选择预设；下方修改结构参数。修改会同步更新参数量、架构图和训练命令。")
-        model_left, model_right, diagram = st.columns([1, 1, 1.15], gap="large")
+        st.caption(
+            "左侧为单列结构参数；右侧架构图按模块拆解，并标注权重 / 计算 / 梯度 / 优化器精度。"
+            "修改会同步更新参数量、架构图和训练命令。"
+        )
+        model_panel, diagram = st.columns([1.02, 1.48], gap="large")
         breakdown = st.container()
     with pipeline:
         st.caption("分别保存 Pretrain 与 SFT 配置快照，再运行完整训练流程。")
@@ -58,7 +61,8 @@ def workspace(st):
         st.caption("查看当前训练状态、日志和历史曲线对照。")
     return dict(summary=summary, activity=activity, train_left=train_left,
                 train_right=train_right, launch=launch, tune=tune,
-                model_left=model_left, model_right=model_right, diagram=diagram,
+                model_panel=model_panel, diagram=diagram,
+                model_left=model_panel, model_right=model_panel,  # legacy aliases
                 breakdown=breakdown, pipeline=pipeline, monitor=monitor, export=export)
 
 
