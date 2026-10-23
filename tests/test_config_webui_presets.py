@@ -328,3 +328,14 @@ def test_architecture_diagram_marks_checkpoint_cache_coverage():
     assert replay.count("arch2-module recomputed") > replay.count("arch2-module cached")
     # 层外的 embedding / final norm / lm head 仍保留激活。
     assert "arch-block cached" in replay
+
+    selective = helpers["arch_diagram"](config, dict(base, use_grad_checkpoint=3))
+    assert "mode3 Dense selective" in selective
+    assert "GEMM" in selective
+    assert "arch2-module cached" in selective
+    assert "arch2-module recomputed" in selective
+
+    projection = helpers["arch_diagram"](config, dict(base, use_grad_checkpoint=4))
+    assert "mode4 预算 selective" in projection
+    assert "arch2-module cached" in projection
+    assert "arch2-module recomputed" in projection

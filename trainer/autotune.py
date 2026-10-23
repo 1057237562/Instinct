@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from trainer.autotune_config import (
     ROOT, SCHEMA, ARG_CHOICES, ARG_POSITIVE, PERF_ENV, ENV_CHOICES, ENV_POSITIVE, ENV_TILES,
     audit_source, changed, digest, quality_gate, read_json, validate_settings, write_json,
+    checkpoint_choices, tuning_model, validate_checkpoint_choice,
 )
 
 
@@ -41,11 +42,15 @@ def arguments(values):
 def search_space(spec, baseline):
     """Default ranges are relative to the measured baseline, not a GPU model."""
     budget = baseline['resolved_token_budget']
+    model = baseline.get('contract', {}).get('model')
+    if not isinstance(model, dict):
+        model = tuning_model(spec.get('args', {}))
+    validate_checkpoint_choice(spec.get('args', {}).get('use_grad_checkpoint', 1), model)
     grid = spec.get('search')
     if grid is None:
         grid = {
             'args.bucket_token_budget': sorted({max(16, round(budget*x/16)*16) for x in (.5, .75, 1., 1.25, 1.5, 2.)}),
-            'args.use_grad_checkpoint': [1, 2],
+            'args.use_grad_checkpoint': list(checkpoint_choices(model)),
             'env.INSTINCT_MOE_INNER_CHECKPOINT': ['0', '1', '2'],
             'env.INSTINCT_MUON_WORKSPACE_MB': ['64', '128', '256', '512'],
             'env.INSTINCT_MUON_BATCH_SIZE': ['8', '16', '32'],
@@ -56,6 +61,11 @@ def search_space(spec, baseline):
             'env.INSTINCT_GROUPED_MM_DW_TILE': ['64,64,32,4,3', '64,128,32,4,3'],
             'env.INSTINCT_GROUPED_MM_PROGRAMS_PER_SM': ['2', '4'],
         }
+        if not model.get('use_moe', False):
+            # Dense has no routed experts; these axes would waste trials on
+            # no-op switches and can conflict with mode 3's outer checkpoint.
+            grid = {key: value for key, value in grid.items()
+                    if not key.startswith(('env.INSTINCT_MOE_', 'env.INSTINCT_GROUPED_MM_'))}
     for name, values in grid.items():
         if not isinstance(values, list) or not values:
             raise ValueError(f'empty search axis: {name}')
@@ -64,6 +74,8 @@ def search_space(spec, baseline):
             raise ValueError(f'invalid search axis: {name}')
         for value in values:
             validate_settings({section: {key: value}})
+            if name == 'args.use_grad_checkpoint':
+                validate_checkpoint_choice(value, model)
     return grid
 
 
@@ -237,6 +249,10 @@ class Search:
 
     def trial(self, settings, *, probe=False, confirm=False):
         validate_settings(settings)
+        validate_checkpoint_choice(settings['args'].get('use_grad_checkpoint', 1),
+                                   tuning_model(self.spec.get('args', {})))
+        if not compatible(settings):
+            raise ValueError('incompatible outer and MoE inner checkpoint settings')
         identifier = digest(settings)[:20] + ('-probe' if probe else '-confirm' if confirm else '')
         directory = self.directory / identifier
         request = dict(schema=SCHEMA, settings=settings, source=self.source,
@@ -327,8 +343,9 @@ def main():
     if not base.get('sequence_packing') or base.get('sequence_packing_mode') != 'bucket':
         raise ValueError('configuration must enable bucket packing')
     validate_settings({'env': spec.get('environment', {})})
+    # Validate base mode and custom axes before corpus hashing or a GPU probe.
+    grid = search_space(spec, {'resolved_token_budget': int(base.get('bucket_token_budget', 0) or 16384)})
     if options.plan_only:
-        grid = search_space(spec, {'resolved_token_budget': int(base.get('bucket_token_budget', 0) or 16384)})
         print(json.dumps(dict(scope='single GPU, standard Dense/MoE pretrain, real streaming source',
             search=grid, default_budget_note='default batch candidates scale from measured baseline',
             max_trials=options.max_trials, maximum_updates=options.max_trials*(options.warmup+options.steps),

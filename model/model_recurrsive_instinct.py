@@ -26,7 +26,7 @@ from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from model.flash_attn_4 import flash_attention
 from model.kv_cache_quant import parse_cache, make_cache
-from model.checkpointing import recompute_attention
+from model.checkpointing import recompute_attention, validate_mfu_checkpoint_config
 from model.attention_mask import apply_attention_mask, prepare_sdpa_attention_bias
 from model.packed_attention import maybe_prepare_flex_mask
 from model.sequence_packing import merge_packed_attention_mask, positions_from_sequence_ids
@@ -63,6 +63,7 @@ class RecurrsiveInstinctConfig(PretrainedConfig):
         self.kv_cache_dtype = kwargs.get("kv_cache_dtype", "fp32")
         # Gradient Checkpointing configs
         self.use_grad_checkpoint = kwargs.get("use_grad_checkpoint", 0)
+        validate_mfu_checkpoint_config(self, architecture='recurrsive_instinct')
         self.num_attention_heads = kwargs.get("num_attention_heads", 8)
         self.num_key_value_heads = kwargs.get("num_key_value_heads", 4)
         if self.num_attention_heads < 1 or self.num_key_value_heads < 1:

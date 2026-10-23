@@ -42,10 +42,16 @@ def test_kwargs_override(cfg_cls, value):
     assert cfg_cls(use_grad_checkpoint=value).use_grad_checkpoint == value
 
 
-@pytest.mark.parametrize("value", [0, 1, 2])
+@pytest.mark.parametrize("value", [0, 1, 2, 3, 4])
 def test_config_from_args_passes_flag(value):
     cfg = config_from_args(make_args(use_grad_checkpoint=value))
     assert cfg.use_grad_checkpoint == value
+
+
+@pytest.mark.parametrize('mode', [3, 4])
+def test_selective_mode_survives_config_serialization(mode):
+    cfg = config_from_args(make_args(use_grad_checkpoint=mode))
+    assert InstinctConfig.from_dict(cfg.to_dict()).use_grad_checkpoint == mode
 
 
 def test_config_from_args_missing_attr_defaults_zero():

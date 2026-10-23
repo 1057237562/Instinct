@@ -18,7 +18,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = 1
 ARG_CHOICES = {
-    'use_grad_checkpoint': (1, 2),
+    'use_grad_checkpoint': (1, 2, 3, 4),
     'use_compile': (0, 1),
     'compile_mode': ('default', 'reduce-overhead', 'max-autotune', 'max-autotune-no-cudagraphs'),
 }
@@ -74,6 +74,41 @@ def write_json(path, value):
 
 def read_json(path):
     return json.loads(Path(path).read_text(encoding='utf-8-sig'))
+
+
+def checkpoint_choices(model):
+    """CPU-only eligibility matching the model's Dense SAC boundary."""
+    if (model.get('model_architecture', 'standard') == 'standard'
+            and not model.get('use_moe', False)
+            and model.get('residual_type', 'standard') == 'standard'):
+        return ARG_CHOICES['use_grad_checkpoint']
+    return (1, 2)
+
+
+def tuning_model(args):
+    """Resolve only checkpoint eligibility fields, with trainer CLI precedence.
+
+    config_from_args always overrides JSON use_moe with the CLI default (0),
+    but preserves JSON architecture/residual_type unless explicitly supplied.
+    Keep parent planning independent of torch/CUDA; parity is tested against
+    config_from_args rather than constructing a model here.
+    """
+    path = Path(args['config_path']) if args.get('config_path') else None
+    if path is not None and not path.is_absolute():
+        path = ROOT / path
+    model = read_json(path) if path is not None and path.is_file() else {}
+    return dict(
+        use_moe=bool(int(args.get('use_moe', 0) or 0)),
+        model_architecture=('recurrsive_instinct' if int(args.get('use_recurrsive', 0) or 0)
+                            else args.get('model_architecture') or model.get('model_architecture', 'standard')),
+        residual_type=args.get('residual_type') or model.get('residual_type', 'standard'),
+    )
+
+
+def validate_checkpoint_choice(mode, model):
+    if mode not in checkpoint_choices(model):
+        raise ValueError('autotune requires checkpoint mode 1/2; modes 3/4 additionally '
+                         'requires standard Dense with residual_type=standard')
 
 
 def tile(value):
@@ -221,6 +256,8 @@ def apply_profile(args):
     if profile.get('schema') != SCHEMA or profile.get('status') not in ('validated', 'manual'):
         raise ValueError('autotune profile is not validated or explicitly manual')
     settings = validate_settings(profile['settings'])
+    if settings['args'].get('use_grad_checkpoint') in (3, 4):
+        validate_checkpoint_choice(settings['args']['use_grad_checkpoint'], tuning_model(vars(args)))
     if hardware_fingerprint(args.device) != profile['hardware']:
         raise ValueError('autotune hardware/software/source fingerprint changed; retune this machine')
     if training_contract(args) != profile['contract']:

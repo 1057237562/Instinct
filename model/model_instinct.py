@@ -26,7 +26,9 @@ from model.static_cache import (
     layer_specs,
     left_pad_starts,
 )
-from model.checkpointing import recompute_attention, dense_checkpoint_options
+from model.checkpointing import (
+    recompute_attention, dense_checkpoint_options, validate_mfu_checkpoint_config,
+)
 from model.attention_mask import apply_attention_mask, prepare_sdpa_attention_bias
 from model.packed_attention import maybe_prepare_flex_mask, maybe_prepare_causal_flex_mask
 from model.sequence_packing import (
@@ -126,6 +128,7 @@ class InstinctConfig(PretrainedConfig):
         self.attnres_block_size = int(kwargs.get("attnres_block_size", default_block_size))
         if self.attnres_block_size < 1:
             raise ValueError("attnres_block_size must be >= 1")
+        validate_mfu_checkpoint_config(self)
 
 # ═══════════════════════════════════════════════════════════════
 # Instinct Model
@@ -606,14 +609,20 @@ class InstinctModel(nn.Module):
         return_intermediate = kwargs.pop("return_intermediate", False)
         exit_check_fn = kwargs.pop("exit_check_fn", None)
         layer_callback = kwargs.pop("layer_callback", None)
+        mfu_checkpoint = self.config.use_grad_checkpoint in (3, 4) and self.training and torch.is_grad_enabled()
+        if mfu_checkpoint and (use_cache or any(past is not None for past in past_key_values)):
+            raise ValueError('Dense selective checkpoint training requires use_cache=False and no past_key_values')
         checkpoint_options = (dense_checkpoint_options(self.config, hidden_states, attention_mask)
-                              if self.config.use_grad_checkpoint == 2 and self.training else {})
-        for layer, past_key_value in zip(self.layers, past_key_values):
+                              if (self.config.use_grad_checkpoint == 2 and self.training) or mfu_checkpoint else {})
+        for layer_index, (layer, past_key_value) in enumerate(zip(self.layers, past_key_values)):
             layer_forward = layer
             if self.residual_type == "attnres":
                 layer_forward = (layer.forward_attnres_full if self.config.attnres_variant == "full"
                                  else layer.forward_attnres_block)
-            if self.config.use_grad_checkpoint == 2 and self.training:
+            if (self.config.use_grad_checkpoint == 2 and self.training) or mfu_checkpoint:
+                if self.config.use_grad_checkpoint == 4:
+                    checkpoint_options = dense_checkpoint_options(
+                        self.config, hidden_states, attention_mask, layer_index)
                 # Pass the module directly, not a closure over it: torch's non-reentrant
                 # checkpoint mis-differentiates parameterized closures composed over 2+
                 # layers (wrong grads in the first block). The MoE aux_loss attribute

@@ -87,6 +87,20 @@ class PanelCacheTests(unittest.TestCase):
         self.assertEqual(original['sha256'], changed['sha256'])
         self.assertNotEqual(original['state_sha256'], changed['state_sha256'])
 
+    def test_dense_selective_checkpoint_matches_panel_command(self):
+        for mode in (3, 4):
+            with self.subTest(mode=mode):
+                state = {'hidden_size':1536, 'num_hidden_layers':32, 'num_attention_heads':16,
+                         'num_key_value_heads':4, 'use_moe':False, 'model_architecture':'standard',
+                         'residual_type':'standard', 'use_grad_checkpoint':mode, 'batch_size':1}
+                scope = reference_builders(state)
+                command = scope['_build_training_command']('pretrain', scope['build_config_dict'](),
+                                                            'fixture', False)['cmd']
+                cached = self.cached(state)
+                self.assertEqual(command[command.index('--use_grad_checkpoint') + 1], str(mode))
+                self.assertEqual(cached['args']['use_grad_checkpoint'], mode)
+                self.assertEqual(cached['model_config']['use_grad_checkpoint'], mode)
+
 
 if __name__ == '__main__':
     unittest.main()

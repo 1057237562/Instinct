@@ -1502,7 +1502,8 @@ def arch_diagram(cfg: dict, precision: dict | None = None) -> str:
         opt_summary = f"AdamW: 2×{param_dtype}"
     linear_compute = f"{compute} → FP8" if fp8_compute else compute
     ckpt_mode = int(profile["use_grad_checkpoint"])
-    ckpt_label = {0: "off", 1: "mode1 Attention-only", 2: "mode2 整层"}.get(
+    ckpt_label = {0: "off", 1: "mode1 Attention-only", 2: "mode2 整层",
+                  3: "mode3 Dense selective", 4: "mode4 预算 selective"}.get(
         ckpt_mode, "off"
     )
     # Gradient-checkpoint activation cache coverage:
@@ -1513,7 +1514,13 @@ def arch_diagram(cfg: dict, precision: dict | None = None) -> str:
     attention_core_cached = ckpt_mode == 0
     block_cached = ckpt_mode in (0, 1)
     layer_cache = "saved" if layer_internal_cached else "recomputed"
+    projection_cache = "saved" if ckpt_mode == 3 else layer_cache
+    ffn_projection_cache = "saved" if ckpt_mode == 3 else layer_cache
     attn_cache = "saved" if attention_core_cached else "recomputed"
+    if ckpt_mode == 3 and cfg.get("flash_attn", True) and cfg.get("dropout", 0.0) == 0.0:
+        attn_cache = "saved"
+    if ckpt_mode == 4:
+        attn_cache = None  # selected by bucket, rather than every layer unconditionally
     block_cache = "saved" if block_cached else "recomputed"
     kv_dtype = str(profile["kv_cache_dtype"]).lower()
     attn_backend = "Flash/Flex/SDPA" if cfg.get("flash_attn", True) else "SDPA/math"
@@ -1609,6 +1616,11 @@ def arch_diagram(cfg: dict, precision: dict | None = None) -> str:
                "QKV/O 投影、QK-Norm、RoPE、FFN 的输出都保留。",
             2: "mode2（整层）：金色=激活保存；层内模块全部在 backward 重算（虚线灰框），"
                "每层只保存一份输入的 fp32 残差流 [B,S,hidden]。",
+            3: "mode3（Dense selective）：保留 GEMM 和受支持的融合 Attention 结果；"
+               "RMSNorm、RoPE、SwiGLU 中间量重算。显存高于 mode2，目标是提高 MFU。"
+               "math Attention、非零 dropout 的 Attention 仍重算；仅支持 standard Dense/残差。",
+            4: "mode4（预算 selective）：短桶保留紧凑 K/V、重算 Attention；4096 及更长桶优先保留融合 Attention。"
+               "剩余预算保留顶部部分层的 gate/up；输出缓存估算上限 1.75 GiB，不是总显存上限。仅支持 standard Dense/残差。",
         }
         lines.append(ckpt_notes[ckpt_mode])
         if mantissa:
@@ -1812,13 +1824,15 @@ def arch_diagram(cfg: dict, precision: dict | None = None) -> str:
         block_detail += " · EE=" + ",".join(str(x) for x in early_exit_layers)
 
     layer_modules = []
-    if ckpt_mode == 2:
-        # Whole-layer checkpoint: this fp32 residual stream is the only activation
-        # kept per layer; everything inside the layer is replayed in backward.
+    if ckpt_mode in (2, 3, 4):
+        # Both checkpoint policies retain the layer input; mode 3 also caches
+        # selected expensive results within that boundary.
         layer_modules.append(_module(
             "层输入残差流（保存）",
-            f"[B,S,{h}] fp32 · 整层 checkpoint 唯一保留的激活",
-            (("C", "fp32"),), cache_state="saved",
+            f"[B,S,{h}] {residual_dtype} · " + (
+                "整层 checkpoint 唯一保留的激活" if ckpt_mode == 2 else
+                "按桶/层选择保留 KV、Attention、gate/up" if ckpt_mode == 4 else "另保留 GEMM/融合 Attention 结果"),
+            (("C", residual_dtype),), cache_state="saved",
         ))
     layer_modules.extend([
         _module("RMSNorm（输入）", f"hidden {h} · fp32 内部", (
@@ -1826,9 +1840,9 @@ def arch_diagram(cfg: dict, precision: dict | None = None) -> str:
         ), cache_state=layer_cache),
         _module(
             "Q/K/V 投影",
-            f"{h} -> {q_heads * head_dim} / {kv_heads * head_dim} x2",
+            f"{h} -> {q_heads * head_dim} / {kv_heads * head_dim} x2" + (" · 短桶仅 K/V 选择保留" if ckpt_mode == 4 else ""),
             (("W", matrix_w), ("C", linear_compute), ("G", matrix_w),
-             ("O", matrix_opt)), cache_state=layer_cache,
+             ("O", matrix_opt)), cache_state=None if ckpt_mode == 4 else projection_cache,
         ),
         _module(
             "QK-Norm",
@@ -1846,6 +1860,8 @@ def arch_diagram(cfg: dict, precision: dict | None = None) -> str:
             ("QK^T · softmax(fp32) · AV · checkpoint 重算（输入 q/k/v 保存）"
              if ckpt_mode == 1 else
              "QK^T · softmax(fp32) · AV · 整层重算" if ckpt_mode == 2 else
+             "融合结果保存；math / 非零 dropout 重算" if ckpt_mode == 3 else
+             "短桶重算；4096+ 桶优先保存融合输出/LSE" if ckpt_mode == 4 else
              "QK^T · softmax(fp32) · AV"),
             (("C", f"{compute} · softmax fp32"), ("KV cache", f"{kv_dtype}（推理）")),
             cache_state=attn_cache,
@@ -1854,7 +1870,7 @@ def arch_diagram(cfg: dict, precision: dict | None = None) -> str:
             "O 投影",
             f"{q_heads * head_dim} -> {h}",
             (("W", matrix_w), ("C", linear_compute), ("G", matrix_w),
-             ("O", matrix_opt)), cache_state=layer_cache,
+             ("O", matrix_opt)), cache_state=projection_cache,
         ),
         _residual_line(),
         _module("RMSNorm（FFN 前）", f"hidden {h} · fp32 内部", (
@@ -1881,9 +1897,9 @@ def arch_diagram(cfg: dict, precision: dict | None = None) -> str:
         layer_modules.extend([
             _module(
                 "Gate/Up 投影",
-                f"{h} -> {int_size} x2 · SwiGLU",
+                f"{h} -> {int_size} x2 · SwiGLU" + (" · 顶部部分层保留" if ckpt_mode == 4 else ""),
                 (("W", matrix_w), ("C", linear_compute), ("G", matrix_w),
-                 ("O", matrix_opt)), cache_state=layer_cache,
+                 ("O", matrix_opt)), cache_state=None if ckpt_mode == 4 else ffn_projection_cache,
             ),
             _module(
                 "SwiGLU",
@@ -1894,7 +1910,7 @@ def arch_diagram(cfg: dict, precision: dict | None = None) -> str:
                 "Down 投影",
                 f"{int_size} -> {h}",
                 (("W", matrix_w), ("C", linear_compute), ("G", matrix_w),
-                 ("O", matrix_opt)), cache_state=layer_cache,
+                 ("O", matrix_opt)), cache_state=ffn_projection_cache,
             ),
         ])
     layer_modules.append(_residual_line())
@@ -4598,13 +4614,16 @@ with st.sidebar:
         if st.session_state.get("profile", "off") == "torch":
             st.warning("算子 trace 会明显拖慢采集窗口，只建议短时诊断；其余训练会继续正常运行。")
         _selectbox(
-            "梯度检查点模式（0关闭/1仅Attention/2整层）",
-            [0, 1, 2],
+            "梯度检查点模式（0关闭/1仅Attention/2整层/3 Dense selective/4 预算selective）",
+            [0, 1, 2, 3, 4],
             index=st.session_state.get("use_grad_checkpoint", 0),
             key="use_grad_checkpoint",
             help="0 = off; 1 = Attention-only: recompute the attention core, "
                  "keeping QKV/O projections and FFN activations; 2 = full-layer checkpointing. "
-                 "Mode 1 retains more activations than the previous FFN-checkpoint implementation.",
+                 "3 = standard Dense selective: retain GEMM and supported fused attention results, "
+                 "recompute cheap intermediates. Uses more VRAM than mode 2 to reduce replay. "
+                 "4 = budgeted bucket-aware retention of KV or fused attention, plus upper-layer gate/up. "
+                 "MoE, linear, recurrent and nonstandard residuals require mode 0/1/2.",
         )
         _selectbox(
             "参数精度 (param_dtype)",

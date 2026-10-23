@@ -11,6 +11,12 @@ def test_gradient_accumulation_defaults_to_one():
     assert args.accumulation_steps == 1
 
 
+@pytest.mark.parametrize('mode', [3, 4])
+def test_dense_selective_checkpoint_cli_choice(mode):
+    args = build_trainer_parser('checkpoint-test').parse_args(['--use_grad_checkpoint', str(mode)])
+    assert args.use_grad_checkpoint == mode
+
+
 def test_bucket_vram_setting_caps_cuda_allocator(monkeypatch):
     calls = []
     monkeypatch.setattr(trainer_cli.torch.cuda, 'is_available', lambda: True)

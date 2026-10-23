@@ -34,6 +34,100 @@ def test_neighbors_cover_batch_checkpoint_interaction_and_avoid_double_replay():
     assert not any(c['args']['use_grad_checkpoint']==2 and c['env']['INSTINCT_MOE_INNER_CHECKPOINT']=='2' for c in candidates)
 
 
+@pytest.mark.parametrize('model,choices', [
+    ({}, [1, 2, 3, 4]), ({'use_moe': 1}, [1, 2]),
+    ({'residual_type': 'mhc'}, [1, 2]), ({'residual_type': 'attnres'}, [1, 2]),
+    ({'model_architecture': 'linear'}, [1, 2]),
+    ({'model_architecture': 'recurrsive_instinct'}, [1, 2]),
+])
+def test_checkpoint_search_respects_topology(model, choices):
+    grid = autotune.search_space({'args': model}, {'resolved_token_budget': 2048})
+    assert grid['args.use_grad_checkpoint'] == choices
+    assert ('env.INSTINCT_MOE_INNER_CHECKPOINT' in grid) == bool(model.get('use_moe'))
+    if 3 not in choices:
+        with pytest.raises(ValueError, match='standard Dense'):
+            autotune.search_space({'args': model, 'search': {'args.use_grad_checkpoint': [2, 3]}},
+                                  {'resolved_token_budget': 2048})
+
+
+@pytest.mark.parametrize('overrides', [
+    {}, {'use_moe': 1}, {'residual_type': 'standard'},
+    {'model_architecture': 'standard'}, {'use_recurrsive': 1},
+])
+def test_checkpoint_topology_resolution_matches_trainer(tmp_path, overrides):
+    from trainer.trainer_utils import config_from_args
+    path = tmp_path / 'model.json'
+    cfg.write_json(path, {'use_moe': True, 'residual_type': 'mhc', 'model_architecture': 'linear'})
+    args = dict(config_path=str(path), **overrides)
+    actual = config_from_args(SimpleNamespace(**args)).to_dict()
+    resolved = cfg.tuning_model(args)
+    assert resolved == {key: actual[key] for key in resolved}
+
+
+@pytest.mark.parametrize('mode', [3, 4])
+def test_selective_neighbors_and_memory_bracket_are_independent(tmp_path, mode):
+    settings = {'args': {'bucket_token_budget': 2048, 'use_grad_checkpoint': 2}, 'env': {}}
+    grid = {'args.bucket_token_budget': [1024, 2048, 4096],
+            'args.use_grad_checkpoint': [2, mode], 'env.INSTINCT_MOE_INNER_CHECKPOINT': ['0', '2']}
+    candidates = list(autotune.neighbors(settings, grid))
+    assert any(c['args'] == {'bucket_token_budget': 4096, 'use_grad_checkpoint': mode} for c in candidates)
+    assert all(c['env'].get('INSTINCT_MOE_INNER_CHECKPOINT', '0') == '0'
+               for c in candidates if c['args']['use_grad_checkpoint'] == mode)
+    search = autotune.Search({}, SimpleNamespace(), tmp_path, {})
+    selective = cfg.changed(settings, 'args', 'use_grad_checkpoint', mode)
+    key2, bracket2 = search.memory_state(settings, grid)
+    key3, bracket3 = search.memory_state(selective, grid)
+    bracket3.observe(2048, 'oom')
+    assert key2 != key3
+    assert bracket2.high == len(bracket2.values)
+
+
+@pytest.mark.parametrize('mode', [3, 4])
+def test_invalid_selective_baseline_is_rejected_before_probe_or_corpus_read(tmp_path, monkeypatch, mode):
+    spec = tmp_path / 'spec.json'
+    cfg.write_json(spec, {'args': {'from_weight': 'none', 'sequence_packing': 1,
+        'sequence_packing_mode': 'bucket', 'use_moe': 1, 'use_grad_checkpoint': mode}})
+    monkeypatch.setattr(autotune, 'audit_source', lambda *a: pytest.fail('must fail before corpus read'))
+    monkeypatch.setattr(autotune, 'gpu_snapshot', lambda: pytest.fail('must fail before GPU access'))
+    monkeypatch.setattr(sys, 'argv', ['autotune.py', '--config', str(spec)])
+    with pytest.raises(ValueError, match='standard Dense'):
+        autotune.main()
+
+
+@pytest.mark.parametrize('use_moe', [0, 1])
+@pytest.mark.parametrize('mode', [3, 4])
+def test_selective_trial_preflight_checks_topology_without_cuda(tmp_path, monkeypatch, use_moe, mode):
+    from trainer import autotune_trial
+    from trainer.trainer_cli import build_trainer_parser
+    request = tmp_path / 'request.json'
+    source = tmp_path / 'source.jsonl'
+    source.write_text('{}\n')
+    cfg.write_json(request, dict(schema=1, settings={'args': {'use_grad_checkpoint': mode}, 'env': {}},
+        warmup=2, steps=2, validation_examples=1,
+        source={'size': source.stat().st_size, 'mtime_ns': source.stat().st_mtime_ns}))
+    args = build_trainer_parser('test').parse_args(['--use_grad_checkpoint', str(mode), '--use_moe', str(use_moe)])
+    args.autotune_trial = str(request)
+    args.from_resume = 0
+    args.from_weight = 'none'
+    args.sequence_packing = 1
+    args.sequence_packing_mode = 'bucket'
+    args.dataset_streaming = 'on'
+    args.cache_build_mode = 'inline'
+    args.save_dir, args.pause_file = str(tmp_path / 'weights'), str(tmp_path / 'pause')
+    args.save_interval, args.data_path = 100, str(source)
+    monkeypatch.setenv('WORLD_SIZE', '1')
+    monkeypatch.setattr(autotune_trial, 'training_contract', lambda _: {'model': 'fixture'})
+    calls = []
+    monkeypatch.setattr(autotune_trial, 'hardware_fingerprint', lambda _: calls.append('hardware') or {})
+    if use_moe:
+        with pytest.raises(ValueError, match='standard Dense'):
+            autotune_trial.prepare_trial(args)
+        assert not calls
+    else:
+        autotune_trial.prepare_trial(args)
+        assert calls == ['hardware']
+
+
 def test_binary_budget_finds_memory_boundary_with_few_trials():
     state=autotune.BudgetBisection(range(1,65),8)
     state.observe(8,'ok')
@@ -180,6 +274,19 @@ def test_profile_keeps_resume_budget_for_existing_cursor(tmp_path,monkeypatch,re
     cfg.apply_profile(args)
     assert args.bucket_token_budget==expected
     assert os.environ['INSTINCT_TRAINING_CPU_THREADS']=='2'
+
+
+@pytest.mark.parametrize('mode', [3, 4])
+def test_selective_profile_applies_and_keeps_resume_cursor_budget(tmp_path, monkeypatch, mode):
+    args, profile, path = profile_fixture(tmp_path, monkeypatch, resume=1)
+    profile['settings']['args']['use_grad_checkpoint'] = mode
+    cfg.write_json(path, profile)
+    cfg.apply_profile(args)
+    assert args.use_grad_checkpoint == mode
+    assert args.bucket_token_budget == 0
+    args.use_moe = 1
+    with pytest.raises(ValueError, match='standard Dense'):
+        cfg.apply_profile(args)
 
 
 def test_profile_rejects_different_hardware_and_explicit_conflicts(tmp_path,monkeypatch):

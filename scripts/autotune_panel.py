@@ -23,6 +23,8 @@ except ModuleNotFoundError:
 # CPU-only; the Windows lock currently affects this local checkout. Ordinary
 # accessible checkouts keep Python's standard FileFinder unchanged.
 prepare_imports()
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
 
 
 def read_json(path):
@@ -65,6 +67,7 @@ def cli_values(command):
 
 def requirements(state, model):
     """Show all actionable prerequisites, using the same checks as launch."""
+    from trainer.autotune_config import checkpoint_choices
     return [
         (state.get('train_type', 'pretrain') == 'pretrain', '从零 Pretrain',
          '目前自动调优仅支持单卡从零预训练；CPT、SFT 和 RL 请使用各自训练配置。'),
@@ -74,8 +77,8 @@ def requirements(state, model):
          '请关闭 Resume 后校准；实验使用独立随机初始化，不读取或覆盖续训状态。'),
         (bool(state.get('sequence_packing')) and state.get('sequence_packing_mode') == 'bucket', 'Bucket packing',
          '请开启 sequence packing 并选择 bucket 模式。'),
-        (state.get('use_grad_checkpoint', 0) in (1, 2), 'Gradient checkpointing',
-         '请开启 gradient checkpointing（模式 1 或 2）。'),
+        (state.get('use_grad_checkpoint', 0) in checkpoint_choices(model), 'Gradient checkpointing',
+         '请开启 gradient checkpointing（模式 1/2；标准 Dense 且标准残差还支持模式 3/4）。'),
         (state.get('dataset_streaming', 'auto') == 'on' and state.get('cache_build_mode', 'inline') == 'inline', '流式加载 + Inline 缓存',
          '请使用 dataset streaming=on、cache build=inline，以匹配调优实验和生产数据管线。'),
         (bool(state.get('data_path_pretrain')), '已选择预训练数据',
@@ -89,9 +92,10 @@ def eligibility(state, model):
 
 def prepare_settings(state):
     """Widget callback: only set execution prerequisites, before the next render."""
+    from trainer.autotune_config import ARG_CHOICES
     state.update(sequence_packing=True, sequence_packing_mode='bucket',
                  dataset_streaming='on', cache_build_mode='inline')
-    if state.get('use_grad_checkpoint', 0) not in (1, 2):
+    if state.get('use_grad_checkpoint', 0) not in ARG_CHOICES['use_grad_checkpoint']:
         state['use_grad_checkpoint'] = 1
 
 
@@ -156,8 +160,10 @@ def profile_command(command, profile_path, train_type, model):
     # corpus SHA-256 and the training contract before allocating the model.
     if str(ROOT) not in sys.path:
         sys.path.append(str(ROOT))
-    from trainer.autotune_config import source_fingerprint, validate_settings
+    from trainer.autotune_config import source_fingerprint, validate_settings, validate_checkpoint_choice
     settings = validate_settings(profile['settings'])
+    if settings['args'].get('use_grad_checkpoint') in (3, 4):
+        validate_checkpoint_choice(settings['args']['use_grad_checkpoint'], model)
     if profile['hardware']['source'] != source_fingerprint():
         raise ValueError('训练代码已变化，请重新调优后再应用 profile')
     values = cli_values(command)

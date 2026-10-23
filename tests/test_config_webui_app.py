@@ -322,6 +322,53 @@ def test_custom_template_lifecycle_restores_full_recipe_and_survives_reload(guar
     assert list(load_templates()) == default_names + ['训练 B']
 
 
+@pytest.mark.parametrize('mode', [3, 4])
+def test_dense_selective_checkpoint_selection_preview_and_reload(guard_state_file, mode):
+    app = _run_app()
+    _input(app, 'selectbox', '_template_select').set_value('Instinct V2').run()
+    _button(app, 'btn_template_load').click().run()
+    _input(app, 'selectbox', 'use_grad_checkpoint').set_value(mode).run()
+    assert not app.exception
+    preview = next(code.value for code in app.code if 'train_pretrain.py' in code.value)
+    assert f'--use_grad_checkpoint {mode}' in preview
+    assert app.session_state['hidden_size'] == 1536
+    assert _run_app().session_state['use_grad_checkpoint'] == mode
+
+
+@pytest.mark.parametrize('mode', [3, 4])
+def test_dense_selective_autotune_preparation_and_plan(guard_state_file, tmp_path, monkeypatch, mode):
+    from scripts import autotune_panel
+    from trainer.autotune import search_space
+    captured = []
+
+    def launch(directory, command):
+        captured.append((directory, command))
+        autotune_panel.write_json(directory / 'run.json', {'status': 'success'})
+
+    monkeypatch.setattr(autotune_panel, 'launch', launch)
+    STATE_FILE.write_text(json.dumps(dict(
+        preset='Instinct V2', preset_fingerprint=_preset_fingerprint_fn()('Instinct V2'),
+        hidden_size=1536, num_hidden_layers=32, num_attention_heads=16, num_key_value_heads=4,
+        use_moe=False, model_architecture='standard', residual_type='standard',
+        use_grad_checkpoint=mode, sequence_packing=False, dataset_streaming='off',
+        data_path_pretrain='dataset/pretrain_clean.parquet', autotune_output=str(tmp_path),
+    )), encoding='utf-8')
+    app = _run_app()
+    assert _input(app, 'selectbox', 'use_grad_checkpoint').value == mode
+    _button(app, 'btn_autotune_prepare').click().run()
+    assert not app.exception
+    assert app.session_state['use_grad_checkpoint'] == mode
+    assert not _button(app, 'btn_autotune_plan').disabled
+    _button(app, 'btn_autotune_plan').click().run()
+    assert not app.exception
+    assert len(captured) == 1
+    directory, command = captured[0]
+    assert '--plan-only' in command
+    spec = autotune_panel.read_json(directory / 'spec.json')
+    assert spec['args']['use_grad_checkpoint'] == mode
+    assert search_space(spec, {'resolved_token_budget': 2048})['args.use_grad_checkpoint'] == [1, 2, 3, 4]
+
+
 def test_sft_template_load_does_not_reapply_profile_defaults(guard_state_file):
     app = _run_app()
     _input(app, 'selectbox', 'train_type').set_value('full_sft').run()

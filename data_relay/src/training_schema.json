@@ -151,14 +151,16 @@
         },
         {
           "key": "use_grad_checkpoint",
-          "label": "梯度检查点（0 关闭 / 1 仅 Attention / 2 整层）",
+          "label": "梯度检查点（0 关闭 / 1 仅 Attention / 2 整层 / 3 Dense selective / 4 预算 selective）",
           "default": 0,
           "type": "int",
           "min": 0,
           "choices": [
             0,
             1,
-            2
+            2,
+            3,
+            4
           ]
         },
         {

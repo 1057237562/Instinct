@@ -11,7 +11,7 @@
   "rope_theta": 1000000.0,
   "inference_rope_scaling": false,
   "use_moe": false,
-  "use_grad_checkpoint": 2,
+  "use_grad_checkpoint": 3,
   "rms_norm_eps": 1e-06,
   "flash_attn": true,
   "intermediate_size": 5504,

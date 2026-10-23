@@ -70,7 +70,7 @@ def schema():
         f('kv_cache_dtype', 'KV Cache 精度', 'fp32', ['fp32', 'bf16', 'fp16', 'fp8_e4m3', 'fp8_e5m2']),
         f('fp8_training', 'FP8 训练', 'off', ['off', 'tensorwise', 'rowwise', 'rowwise_with_gw_hp']),
         f('fp8_filter', 'FP8 层筛选', 'auto', ['auto', 'eligible']),
-        f('use_grad_checkpoint', '梯度检查点（0 关闭 / 1 仅 Attention / 2 整层）', 0, min=0), f('use_compile', '启用 torch.compile', True),
+        f('use_grad_checkpoint', '梯度检查点（0 关闭 / 1 仅 Attention / 2 整层 / 3 Dense selective / 4 预算 selective）', 0, min=0), f('use_compile', '启用 torch.compile', True),
         f('compile_mode', '编译模式', 'reduce-overhead', ['default', 'reduce-overhead', 'max-autotune', 'max-autotune-no-cudagraphs']),
     ]), dict(title='数据加载、Packing 与缓存', fields=[
         f('sequence_packing', '启用序列打包', False), f('sequence_packing_mode', '打包模式', 'fixed', ['fixed', 'bucket']),

@@ -112,11 +112,25 @@ CLI 配置中的 `audit` 和 `provenance` 为可选项；显式提供 `audit` �
 | 参数 | 搜索方式 |
 |---|---|
 | 每卡 token budget | 围绕基线已解析预算的 0.5–2 倍搜索，允许超出本机旧经验上限 |
-| checkpoint | FFN/整层，以及可用的算子内 checkpoint；禁止关闭或双重重放 |
+| checkpoint | 标准 Dense + standard 残差搜索 1（Attention-only）/2（整层）/3（Dense selective）/4（预算 selective）；其他受支持拓扑仅 1/2。MoE 可搜索算子内 checkpoint；禁止关闭或双重重放 |
 | Muon | workspace、矩阵分组大小、momentum 预分配 |
 | CPU | PyTorch intra-op 线程数；在模型初始化后调整，保持初始化 RNG |
 | compile | 编译模式；自定义搜索可增加 `args.use_compile: [0, 1]` |
 | MoE Triton | forward/dW tile、warps/stages、每 SM 的持久调度规模 |
+
+Dense 的默认搜索不包含 MoE 内层 checkpoint 或 grouped-MM 内核轴。
+面板“一键准备调优设置”保留已选择的 ckpt3/ckpt4；试跑、profile 验证与应用也接受这两个档位。
+自定义 `search` 可以设置 `"args.use_grad_checkpoint": [2, 4]`，只比较这两种策略。
+MoE、linear、RecurrsiveInstinct、mHC/AttnRes 不能使用 ckpt3/ckpt4；不支持的组合在
+CPU 计划检查阶段报错。显存边界按 checkpoint 策略分别搜索，不能复用 ckpt2
+的最大可用 token budget。已有 profile 仍受源码/模型/语料指纹检查约束，
+不会把旧 profile 的档位直接改成 3 或把其测量结果当作 ckpt3 的验收。
+
+ckpt3 接入回归：`tests/test_autotune.py`、`tests/test_autotune_webui.py` 和
+`tests/test_config_webui_app.py --skip-gpu` 合计 110 passed、1 GPU skipped。
+覆盖 CPU 计划预览、CLI/JSON 拓扑优先级、试跑预检查、独立显存区间、profile
+应用与 resume 预算保留，以及真实 AppTest 的“一键准备 → 计划”流程。
+这些是接入检查，不代表已经执行或通过 ckpt3 的真实语料自动调优。
 
 例如只搜索 batch 和 CPU 线程：
 

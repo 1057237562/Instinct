@@ -8,6 +8,14 @@ at the model call site, preserving its backend. QKV/O projections and FFNs are
 not checkpointed by mode 1. ``checkpoint_ffn`` remains an explicit experiment
 helper; the models do not call it as part of mode 1.
 
+Mode 3 uses native selective activation checkpointing around each standard
+Dense block: keep GEMM and supported fused-attention results, recompute cheap
+intermediates. Modes 0/1/2 retain their original behavior.
+Mode 4 bounds the retained outputs to a 1.75 GiB analytical cache allowance.
+Long contexts prioritize fused attention; shorter contexts retain compact K/V.
+The remaining allowance retains gate/up in upper layers, releasing them early
+in backward. This allowance is not a total GPU-memory or allocator guarantee.
+
 Semantics are a byte-for-byte re-implementation of the eager math-attention
 branch of ``Attention.forward`` in ``model/model_instinct.py:142-147``;
 the exact math lives in ``_attention_core`` below.
@@ -30,11 +38,15 @@ Key constraints honored here:
 
 import math
 import os
+from functools import partial
 from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 from model.attention_mask import apply_attention_mask
+
+
+DENSE_RECIPE_CACHE_BYTES = 1792 * 2**20
 
 
 def _repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -270,13 +282,53 @@ def _moe_checkpoint_contexts(count):
     return create_selective_checkpoint_contexts(policy)
 
 
-def dense_checkpoint_options(config, hidden_states, attention_mask):
-    """Opt-in V2 Flex result retention inside the original checkpoint call.
+def dense_checkpoint_options(config, hidden_states, attention_mask, layer_index=0,
+                             *, mode4_policy='recipe', mode4_gate_layers=None):
+    """Mode 3/4 SAC, or opt-in mode 2 V2 Flex result retention.
 
     Replacing ``torch.utils.checkpoint.checkpoint`` with a Python wrapper hides
     the checkpoint higher-order op from Dynamo. Pass context_fn at the actual
     call site so the FP8 trunk stays compiled.
     """
+    if getattr(config, 'use_grad_checkpoint', 0) == 3:
+        validate_mfu_checkpoint_config(config)
+        # Skipping a stochastic fused attention op on replay would shift the
+        # RNG stream used by later dropout. Keep its replay when dropout > 0.
+        return {'context_fn': partial(dense_mfu_checkpoint_contexts,
+                                      save_attention=getattr(config, 'dropout', 0.0) == 0.0)}
+    if getattr(config, 'use_grad_checkpoint', 0) == 4:
+        validate_mfu_checkpoint_config(config)
+        if mode4_policy == 'recipe':
+            mode4_policy = ('attention_gate' if hidden_states.shape[1] >= 4096
+                            and config.flash_attn and config.dropout == 0. else 'kv_gate')
+        if mode4_policy not in ('kv_gate', 'attention_gate', 'projections'):
+            raise ValueError('unknown mode 4 cache policy')
+        base_layers = config.num_hidden_layers
+        if mode4_gate_layers is None:
+            dtype = (torch.get_autocast_dtype(hidden_states.device.type)
+                     if torch.is_autocast_enabled(hidden_states.device.type) else hidden_states.dtype)
+            element_bytes = 4 if dtype == torch.float32 else 2
+            tokens = hidden_states.shape[0] * hidden_states.shape[1]
+            kv_width = config.num_key_value_heads * config.head_dim
+            q_width = config.num_attention_heads * config.head_dim
+            base_per_token = (element_bytes * q_width + 4 * config.num_attention_heads
+                              if mode4_policy == 'attention_gate' else element_bytes * 2 * kv_width)
+            base_layers = min(config.num_hidden_layers, DENSE_RECIPE_CACHE_BYTES // max(1, tokens * base_per_token))
+            base_bytes = tokens * base_layers * base_per_token
+            gate_bytes = tokens * 2 * config.intermediate_size * element_bytes
+            mode4_gate_layers = max(0, min(config.num_hidden_layers,
+                (DENSE_RECIPE_CACHE_BYTES - base_bytes) // max(1, gate_bytes)))
+        keep_gate = layer_index >= max(0, config.num_hidden_layers - mode4_gate_layers)
+        keep_base = layer_index >= config.num_hidden_layers - base_layers
+        return {'context_fn': partial(dense_recipe_checkpoint_contexts,
+            hidden_size=config.hidden_size,
+            query_dim=config.num_attention_heads * config.head_dim,
+            kv_dim=config.num_key_value_heads * config.head_dim,
+            ffn_dim=config.intermediate_size,
+            save_gate_up=keep_gate and mode4_policy != 'projections',
+            projections=('all' if layer_index >= config.num_hidden_layers // 2 else 'none')
+                        if mode4_policy == 'projections' else ('kv' if mode4_policy == 'kv_gate' and keep_base else 'none'),
+            save_attention=mode4_policy == 'attention_gate' and keep_base and getattr(config, 'dropout', 0.) == 0.)}
     setting = os.environ.get('INSTINCT_DENSE_SELECTIVE_CHECKPOINT', '0')
     if setting not in ('0', 'attention'):
         raise ValueError('INSTINCT_DENSE_SELECTIVE_CHECKPOINT must be 0 or attention')
@@ -300,5 +352,96 @@ def dense_attention_checkpoint_contexts():
     def policy(ctx, op, *args, **kwargs):
         return (CheckpointPolicy.MUST_SAVE if op == flex_attention
                 else CheckpointPolicy.PREFER_RECOMPUTE)
+
+    return create_selective_checkpoint_contexts(policy)
+
+
+def validate_mfu_checkpoint_config(config, *, architecture=None):
+    """Fail explicitly where Dense SAC has no validated checkpoint boundary."""
+    mode = getattr(config, 'use_grad_checkpoint', 0)
+    if mode not in (3, 4):
+        return
+    architecture = architecture or getattr(config, 'model_architecture', 'standard')
+    if (architecture != 'standard' or getattr(config, 'use_moe', False)
+            or getattr(config, 'residual_type', 'standard') != 'standard'):
+        raise ValueError(f'use_grad_checkpoint={mode} requires standard Dense with '
+                         'residual_type=standard; use mode 2 for MoE, linear, '
+                         'RecurrsiveInstinct or other residual topologies')
+
+
+def dense_mfu_checkpoint_contexts(*, save_attention=True):
+    """Mode 3: keep dense GEMMs and fused attention, replay cheap operations.
+
+    MUST_SAVE survives AOTAutograd partitioning. Do not save arbitrary bmm:
+    eager/math attention's score matrix is quadratic in sequence length and
+    is mutated by the causal mask. Its core is intentionally recomputed.
+    Contexts are fresh per layer/forward; never share a SAC cache across layers.
+    No parameter is detached and no custom parameter backward is needed.
+    """
+    from torch.utils.checkpoint import CheckpointPolicy, create_selective_checkpoint_contexts
+    from torch._higher_order_ops.flex_attention import flex_attention
+
+    gemms = {
+        torch.ops.aten.mm.default,
+        torch.ops.aten.addmm.default,
+        torch.ops.aten._scaled_mm.default,
+    }
+    fused_attention = {
+        flex_attention,
+        torch.ops.aten._scaled_dot_product_flash_attention.default,
+        torch.ops.aten._scaled_dot_product_flash_attention_for_cpu.default,
+        torch.ops.aten._scaled_dot_product_efficient_attention.default,
+        torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+    }
+
+    def policy(ctx, op, *args, **kwargs):
+        if op in gemms or (save_attention and op in fused_attention):
+            return CheckpointPolicy.MUST_SAVE
+        return CheckpointPolicy.PREFER_RECOMPUTE
+
+    return create_selective_checkpoint_contexts(policy)
+
+
+def dense_recipe_checkpoint_contexts(*, hidden_size, query_dim, kv_dim, ffn_dim,
+                                    projections='kv', save_gate_up=False, save_attention=False):
+    """Mode 4: bound large FFN caches to a small number of upper layers.
+
+    Match logical Linear dimensions, not call order or batch shape. This also
+    handles TorchAO _scaled_mm while selecting gate/up only in planned layers.
+    Nonselected GEMMs and attention kernels MUST_RECOMPUTE so AOT partitioning
+    cannot silently restore mode 3's expensive activation cache.
+    """
+    from torch.utils.checkpoint import CheckpointPolicy, create_selective_checkpoint_contexts
+    from torch._higher_order_ops.flex_attention import flex_attention
+
+    projection_shapes = ({(hidden_size, query_dim), (hidden_size, kv_dim), (query_dim, hidden_size)}
+                         if projections == 'all' else
+                         {(hidden_size, kv_dim)} if projections == 'kv' and kv_dim != query_dim else set())
+    ffn_shapes = {(hidden_size, ffn_dim), (ffn_dim, hidden_size)}
+    gemms = {torch.ops.aten.mm.default, torch.ops.aten.addmm.default,
+             torch.ops.aten._scaled_mm.default}
+    attention = {flex_attention, torch.ops.aten.bmm.default,
+                 torch.ops.aten._scaled_dot_product_flash_attention.default,
+                 torch.ops.aten._scaled_dot_product_flash_attention_for_cpu.default,
+                 torch.ops.aten._scaled_dot_product_efficient_attention.default,
+                 torch.ops.aten._scaled_dot_product_cudnn_attention.default}
+
+    def policy(ctx, op, *args, **kwargs):
+        if op in gemms:
+            lhs, rhs = args[1:3] if op == torch.ops.aten.addmm.default else args[:2]
+            shape = (lhs.shape[-1], rhs.shape[-1])
+            # Ambiguous equal-width FFNs favor recompute, never an unbounded
+            # FFN cache disguised as a small attention projection.
+            if (save_gate_up and ffn_dim not in (hidden_size, query_dim, kv_dim)
+                    and shape == (hidden_size, ffn_dim)):
+                return CheckpointPolicy.MUST_SAVE
+            if shape in projection_shapes and shape not in ffn_shapes:
+                return CheckpointPolicy.MUST_SAVE
+            return CheckpointPolicy.MUST_RECOMPUTE
+        if op in attention:
+            if save_attention and op != torch.ops.aten.bmm.default:
+                return CheckpointPolicy.MUST_SAVE
+            return CheckpointPolicy.MUST_RECOMPUTE
+        return CheckpointPolicy.PREFER_RECOMPUTE
 
     return create_selective_checkpoint_contexts(policy)

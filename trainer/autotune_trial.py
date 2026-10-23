@@ -10,6 +10,7 @@ import traceback
 
 from trainer.autotune_config import (
     SCHEMA, hardware_fingerprint, read_json, training_contract, validate_settings, write_json,
+    tuning_model, validate_checkpoint_choice,
 )
 
 
@@ -28,7 +29,8 @@ def prepare_trial(args):
         raise ValueError('autotune currently calibrates isolated from-scratch pretraining')
     if not args.sequence_packing or args.sequence_packing_mode != 'bucket' or args.dataset_streaming != 'on':
         raise ValueError('autotune currently requires streaming bucket-packed pretraining')
-    if args.use_grad_checkpoint not in (1, 2) or args.cache_build_mode != 'inline':
+    validate_checkpoint_choice(args.use_grad_checkpoint, tuning_model(vars(args)))
+    if args.cache_build_mode != 'inline':
         raise ValueError('autotune keeps checkpointing on and uses the inline data pipeline')
     for name in ('warmup', 'steps', 'validation_examples'):
         if not isinstance(request[name], int) or request[name] <= 0:

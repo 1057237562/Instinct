@@ -71,7 +71,7 @@ def test_webui_removes_saved_deadlines_and_launches_plan_without_time_limits(tmp
     assert all('--time-limit' not in item.value and '-timeout' not in item.value for item in view.code)
     spec = tmp_path / 'spec.json'
     panel.write_json(spec, {'args': {'from_weight': 'none', 'sequence_packing': 1,
-                                   'sequence_packing_mode': 'bucket'}})
+                                   'sequence_packing_mode': 'bucket', 'use_grad_checkpoint': 3}})
     state = dict(old_state, autotune_max_trials=view.session_state['autotune_max_trials'])
     command = panel.tuning_command(spec, tmp_path, state, plan_only=True)
     assert not {'--time-limit', '--trial-timeout', '--baseline-timeout'}.intersection(command)
@@ -82,6 +82,7 @@ def test_webui_removes_saved_deadlines_and_launches_plan_without_time_limits(tmp
     assert plan['max_trials'] == 12
     assert plan['time_limit_seconds'] is None
     assert plan['saves_formal_weights'] is False
+    assert plan['search']['args.use_grad_checkpoint'] == [1, 2, 3, 4]
 
 
 def test_profile_removes_performance_conflicts_preserves_math(tmp_path, monkeypatch):
@@ -188,6 +189,31 @@ def test_unsupported_pipeline_explained(change):
                  sequence_packing_mode='bucket', dataset_streaming='on', data_path_pretrain='a')
     assert panel.eligibility(state, {}) is None
     assert panel.eligibility(dict(state, **change), {})
+
+
+@pytest.mark.parametrize('mode', [3, 4])
+def test_prepare_keeps_selective_mode_and_checks_dense_eligibility(mode):
+    state = dict(train_type='pretrain', use_grad_checkpoint=mode, data_path_pretrain='a')
+    panel.prepare_settings(state)
+    assert state['use_grad_checkpoint'] == mode
+    assert panel.eligibility(state, {}) is None
+    for model in ({'use_moe': True}, {'residual_type': 'mhc'}, {'residual_type': 'attnres'}):
+        assert '标准 Dense 且标准残差' in panel.eligibility(state, model)
+
+
+@pytest.mark.parametrize('mode', [3, 4])
+def test_selective_profile_preview_removes_conflicting_mode_and_rejects_moe(tmp_path, monkeypatch, mode):
+    from trainer import autotune_config
+    monkeypatch.setattr(autotune_config, 'source_fingerprint', lambda: 'current')
+    path = tmp_path / 'profile.json'
+    panel.write_json(path, dict(schema=1, status='validated', hardware={'source': 'current'},
+        settings={'args': {'use_grad_checkpoint': mode}, 'env': {}}))
+    command = panel.profile_command(['python', 'train_pretrain.py', '--use_grad_checkpoint', '2'],
+                                    path, 'pretrain', {})
+    assert '--use_grad_checkpoint' not in command
+    assert command[-2:] == ['--autotune_profile', str(path)]
+    with pytest.raises(ValueError, match='standard Dense'):
+        panel.profile_command([], path, 'pretrain', {'use_moe': True})
 
 
 def test_pid_reuse_is_not_recovered_as_owned_job(tmp_path, monkeypatch):
@@ -323,10 +349,15 @@ def test_recovery_ignores_autotune_training_children(monkeypatch):
     tree = ast.parse(source.read_text(encoding='utf-8'))
     names = {'_training_script_from_argv', '_training_mode_from_argv', '_find_running_train_process'}
     import re
-    namespace = dict(os=os, sys=sys, re=re)
+    namespace = dict(os=os, sys=sys, re=re, __file__=str(source))
     nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     exec(compile(ast.Module(nodes, type_ignores=[]), str(source), 'exec'), namespace)
     processes = [SimpleNamespace(info=dict(pid=1, name='python.exe', cmdline=['python', 'train_pretrain.py', '--autotune_trial', 'scratch/request.json'])),
                  SimpleNamespace(info=dict(pid=2, name='python.exe', cmdline=['python', 'train_full_sft.py']))]
+    for process in processes:
+        process.cmdline = lambda argv=process.info['cmdline']: argv
+        process.cwd = lambda: str(panel.ROOT / 'trainer')
+        process.create_time = lambda: 123.
     monkeypatch.setattr(psutil, 'process_iter', lambda fields: processes)
+    monkeypatch.setattr(psutil, 'Process', lambda pid: next(p for p in processes if p.info['pid'] == pid))
     assert namespace['_find_running_train_process']() == (2, 'train_full_sft')

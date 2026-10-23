@@ -43,30 +43,41 @@ def test_context_keeps_all_checkpoint_regions_in_one_trunk(monkeypatch):
 
 @pytest.mark.gpu
 @pytest.mark.parametrize('fp8', [False, True])
-def test_compiled_selective_attention_loss_and_gradients(monkeypatch, fp8):
+@pytest.mark.parametrize('mode,sequence_length', [(2,137), (3,137), (4,137), (4,4096)])
+def test_compiled_selective_attention_loss_and_gradients(monkeypatch, fp8, mode, sequence_length):
     from model.model_instinct import InstinctConfig, InstinctForCausalLM
     from model.flash_attn_4 import resolve_flash_attn
     from trainer.trainer_utils import cast_training_parameters, apply_torchao_fp8_training
+
+    if mode == 4:
+        # Exercise both a replayed FFN and a cached gate/up layer in the small
+        # GPU model; the production 32-layer bucket plans are checked on CPU.
+        from functools import partial
+        import model.model_instinct as model_module
+        from model.checkpointing import dense_checkpoint_options
+        monkeypatch.setattr(model_module, 'dense_checkpoint_options',
+                            partial(dense_checkpoint_options, mode4_gate_layers=1))
 
     resolve_flash_attn()
     torch.manual_seed(307)
     monkeypatch.setenv('INSTINCT_MUON_MANTISSA', '1')
     config = InstinctConfig(hidden_size=1536, intermediate_size=5504, num_hidden_layers=2,
         num_attention_heads=16, num_key_value_heads=4, head_dim=96, vocab_size=128,
-        max_position_embeddings=256, use_grad_checkpoint=2)
+        max_position_embeddings=max(256, sequence_length), use_grad_checkpoint=2)
     model = cast_training_parameters(InstinctForCausalLM(config), 'bf16').cuda().train()
     if fp8:
         apply_torchao_fp8_training(model, SimpleNamespace(fp8_training='tensorwise',
             fp8_filter='auto', dtype='bfloat16', device='cuda', use_compile=1))
     reference = copy.deepcopy(model)
+    model.config.use_grad_checkpoint = mode
     actual_model, expected_model = torch.compile(model), torch.compile(reference)
     for packed in (False, True):
-        tokens = torch.randint(1, 128, (1, 137), device='cuda')
+        tokens = torch.randint(1, 128, (1, sequence_length), device='cuda')
         labels = tokens.clone()
         labels[:, -7:] = -100
         ids = None
         if packed:
-            ids = (torch.arange(137, device='cuda') // 43)[None]
+            ids = (torch.arange(sequence_length, device='cuda') // 43)[None]
             ids[:, -7:] = -1
             labels[:, 43::43] = -100
         model.zero_grad(set_to_none=True)
