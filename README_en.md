@@ -49,10 +49,10 @@ All core algorithms (Pretrain / SFT / LoRA / DPO / PPO / GRPO / CISPO / Agentic 
 
 ## Features
 
-- **Single-GPU training**: the V1 MoE 16GB + Muon configuration totals 678.7M parameters with 106.2M active per token (hidden 512, 32 layers)
+- **Single-GPU training**: the V1 MoE 16GB + Muon configuration totals 678.7M parameters with 188.0M active per token (hidden 512, 32 layers)
 - **Pure native implementation**: no third-party training framework abstractions — Transformer, LoRA and the RL family are hand-written
 - **Complete training pipeline**: Pretrain → CPT → SFT → LoRA → DPO → PPO / GRPO / CISPO → Agentic RL → Distillation
-- **Multiple architectures**: Dense, MoE, and RecurrsiveInstinct recurrent depth; V1 MoE uses 8 experts with top-1 routing
+- **Multiple architectures**: Dense, MoE, and RecurrsiveInstinct recurrent depth; V1 MoE uses 8 experts with top-2 routing
 - **RecurrsiveInstinct recurrent depth**: Prelude / latent recurrent core / Coda — extend latent-space inference compute at test time with `num_steps`
 - **Inference fast path**: static KV cache + decode-step CUDA graph + fused RMSNorm/SwiGLU kernels; the MoE grouped GEMM auto-selects a native / triton / cached backend per platform
 - **Adaptive sequence buckets**: experimental length-bucketed packing driven by a wall-time DP, memory-aware batching, deterministic shuffling, and a persistent compile cache
@@ -504,17 +504,21 @@ The shipped trainer configs (`trainer/*.json`) are currently:
 
 | Config file | Architecture | Key parameters |
 |----------|------|----------|
-| `config_pretrain.json` / `config_instinct_v1_moe.json` | Instinct V1 MoE | hidden 512, 32 layers, 8 FFN=1664 experts with top-1 routing, 16Q/4KV GQA (head_dim 32), RoPE θ=1e6 + LongRoPE factor 8.0 (original 4096), max_position 32768, tied embeddings |
+| `config_pretrain.json` / `config_instinct_v1_moe.json` | Instinct V1 MoE | hidden 512, 32 layers, 8 FFN=1664 experts with top-2 routing, normalized top-k weights, 16Q/4KV GQA (head_dim 32), RoPE θ=1e6 + LongRoPE factor 8.0 (original 4096), max_position 32768, tied embeddings |
+| `config_instinct_v2.json` | Instinct V2 Dense | hidden 1536, 32 layers, SwiGLU FFN=5504, 16Q/4KV GQA (head_dim 96), vocab 6400, context 4096, BF16 parameters, tied embeddings |
 | `config_full_sft.json` (= `config_recurrsive_instinct.json` / `config_dpo.json`) | RecurrsiveInstinct | hidden 1248, physical layers (Prelude 2 / Core 4 / Coda 2), 13Q/13KV MHA (head_dim 96), FFN 4224, `loop_iters 32`, `mean_backprop_depth 8`, RoPE θ=5e4 |
 
 | Model | Parameters | Notes |
 |------|--------|------|
 | Instinct V1 | 152.4M | Dense, dim 768, 20 layers, 8Q/4KV GQA; see [architecture-v1.html](docs/architecture/architecture-v1.html) |
-| Instinct V1 MoE | 678.7M-A106.2M | 16GB + Muon deep-thin: hidden 512, 32 layers, 16Q/4KV, 8 FFN=1664 experts, top-1; see [architecture-v1-moe.html](docs/architecture/architecture-v1-moe.html) |
+| Instinct V2 Dense | 1.01B | hidden 1536, 32 layers, 16Q/4KV GQA, FFN=5504, BF16; parameter count derived from the shared config |
+| Instinct V1 MoE | 678.7M-A188.0M | 16GB + Muon deep-thin: hidden 512, 32 layers, 16Q/4KV, 8 FFN=1664 experts, top-2; see [architecture-v1-moe.html](docs/architecture/architecture-v1-moe.html) |
 | RecurrsiveInstinct | 187.5M | latent recurrent depth, physical layers `(2,4,2)`, mean effective depth 132; see [architecture.html](docs/architecture/architecture.html) |
 
 Instinct V1 Dense totals 152,406,528 parameters (~152.4M) and activates all of
-them per token; V1 MoE totals 678,726,144 with 106,203,648 active per token.
+them per token; V2 Dense uses `trainer/config_instinct_v2.json` and totals
+1,010,277,888 parameters; V1 MoE totals 678,726,144 with 187,992,576 active
+per token (the historical top-1 configuration activated 106,203,648).
 V1 Dense uses 20 layers, hidden=768, FFN=2432 and must not be confused with
 the 8-layer legacy `instinct-3` defaults of `InstinctConfig`; loading and
 evaluation should follow the config that matches the weights. Per the
