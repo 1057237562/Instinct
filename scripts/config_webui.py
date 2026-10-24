@@ -1084,6 +1084,15 @@ if "_pending_config_load" in st.session_state:
 # ═══════════════════════════════════════════════════════════════
 # Refresh recovery — detect running training process on page reload
 # ═══════════════════════════════════════════════════════════════
+def _training_type_from_command(command):
+    """Recover the panel's valid train type, including the native runner."""
+    if re.search(r"train_cublas\.py(?:\s|$)", command):
+        match = re.search(r"--train_type\s+(\w+)", command)
+        return "cublas:" + (match.group(1) if match else "pretrain")
+    match = re.search(r"train_(\w+)\.py(?:\s|$)", command)
+    return match.group(1) if match else None
+
+
 def _find_running_train_process():
     """Check if a train_*.py process is still alive. Returns (pid, script_name) or (None, None)."""
     import subprocess as _sp
@@ -1097,15 +1106,13 @@ def _find_running_train_process():
                 if 'train_' in line and '.py' in line:
                     parts = line.strip().rsplit(None, 1)
                     if len(parts) == 2 and parts[1].isdigit():
-                        script = line.split('train_')[1].split('.py')[0] if 'train_' in line else '?'
-                        return int(parts[1]), f"train_{script}"
+                        return int(parts[1]), _training_type_from_command(line)
         else:
             result = _sp.run(['pgrep', '-f', 'train_.*\\.py'], capture_output=True, text=True, timeout=5)
             pids = result.stdout.strip().split()
             if pids:
                 result2 = _sp.run(['ps', '-p', pids[0], '-o', 'command='], capture_output=True, text=True, timeout=5)
-                script = 'train_' + result2.stdout.split('train_')[1].split('.py')[0] if 'train_' in result2.stdout else '?'
-                return int(pids[0]), f"train_{script}"
+                return int(pids[0]), _training_type_from_command(result2.stdout)
     except Exception:
         pass
     return None, None
@@ -1169,9 +1176,10 @@ def _latest_checkpoint_prefix(train_type, hidden_size, use_moe, arch_tag=""):
     dim_suffix = f"_{hidden_size}{'_moe' if use_moe else ''}"
     matches = []
     for f in os.listdir(ckpt_dir):
-        if not f.endswith("_resume.pth"):
+        extension = "_resume.npz" if st.session_state.get("runtime_backend", "pytorch") == "cublas" else "_resume.pth"
+        if not f.endswith(extension):
             continue
-        stem = f[: -len("_resume.pth")]
+        stem = f[: -len(extension)]
         if stem.endswith(dim_suffix):
             prefix = stem[: -len(dim_suffix)]
             if prefix.startswith(f"{train_type}_"):
@@ -1190,13 +1198,13 @@ def _latest_checkpoint_prefix(train_type, hidden_size, use_moe, arch_tag=""):
 def _resolve_save_prefix(train_type, hidden_size, use_moe, from_resume, stamp):
     arch_tag = _arch_tag()
     if from_resume:
-        prefix = st.session_state.get(f"save_prefix_{train_type}")
+        prefix = st.session_state.get(f"save_prefix_{st.session_state.get('runtime_backend', 'pytorch')}_{train_type}")
         if not prefix:
             prefix = _latest_checkpoint_prefix(train_type, hidden_size, use_moe, arch_tag)
         if prefix:
             return prefix
     prefix = f"{_default_weight_prefix(train_type)}_{stamp}{arch_tag}"
-    st.session_state[f"save_prefix_{train_type}"] = prefix
+    st.session_state[f"save_prefix_{st.session_state.get('runtime_backend', 'pytorch')}_{train_type}"] = prefix
     return prefix
 
 
@@ -1220,7 +1228,8 @@ def _available_weight_files():
         d = os.path.join(repo_root, sub)
         if os.path.isdir(d):
             for f in sorted(os.listdir(d)):
-                if f.endswith(".pth") and "_resume.pth" not in f:
+                extensions = (".pth", ".npz") if st.session_state.get("runtime_backend", "pytorch") == "cublas" else (".pth",)
+                if f.endswith(extensions) and "_resume." not in f and "_adapter." not in f:
                     files.append(os.path.join(sub, f))
     return files
 
@@ -1235,9 +1244,10 @@ def _latest_weight_file(base_type, hidden_size, use_moe, arch_tag=""):
         if not os.path.isdir(d):
             continue
         for f in os.listdir(d):
-            if not f.endswith(".pth") or "_resume.pth" in f:
+            extensions = (".pth", ".npz") if st.session_state.get("runtime_backend", "pytorch") == "cublas" else (".pth",)
+            if not f.endswith(extensions) or "_resume." in f or "_adapter." in f:
                 continue
-            stem = f[: -len(".pth")]
+            stem = os.path.splitext(f)[0]
             if stem.endswith(dim_suffix) and stem[: -len(dim_suffix)].startswith(f"{base_type}_"):
                 type_part = stem[: -len(dim_suffix)]
                 if arch_tag:
@@ -1271,12 +1281,16 @@ def _try_recover_training_state():
         st.session_state.train_status = "running"
         st.session_state.train_log_path = log_path
         if pid and script:
-            st.session_state.train_type = script
+            if script.startswith("cublas:"):
+                st.session_state.runtime_backend = "cublas"
+                script = script.split(":", 1)[1]
+            if script in ("pretrain", "full_sft", "lora", "dpo", "ppo", "grpo", "agent", "distillation"):
+                st.session_state.train_type = script
     elif pid is None and not recently_modified:
         with open(log_path, "r", encoding="utf-8") as f:
             log = f.read()
         if log.strip():
-            st.session_state.train_status = "success"
+            st.session_state.train_status = "failed" if "Traceback (most recent call last)" in log else "success"
             st.session_state.train_log_path = log_path
 
 _try_recover_training_state()
@@ -1783,6 +1797,12 @@ with st.sidebar:
 
     # ── Training ──
     with st.expander("🚀 Training", expanded=(st.session_state.get("train_status") == "running")):
+        st.selectbox("Training backend", ["pytorch", "cublas"], key="runtime_backend",
+                     help="cuBLASLt + Triton 原生训练，不在训练进程导入 PyTorch/TorchAO；需先构建 native bridge。")
+        if st.session_state.get("runtime_backend", "pytorch") == "cublas":
+            st.selectbox("FP8 projection training", ["auto", "0", "1"], key="native_fp8",
+                         help="auto: SM89+ 启用 E4M3 前向/E5M2 反向；SM80/86 使用所选 BF16/FP16/FP32。")
+            st.caption("原生路径尚待实卡验收；首次启动会编译 Triton kernels。")
         train_type = st.selectbox(
             "Training type",
             ["pretrain", "full_sft", "lora", "dpo", "ppo", "grpo", "agent", "distillation"],
@@ -1800,7 +1820,7 @@ with st.sidebar:
                     st.session_state._pending_config_load = json.load(f)
                 st.rerun()
         st.checkbox("Resume from checkpoint (--from_resume)", value=False, key="from_resume",
-                    help="Auto-detect and resume from checkpoints/{weight}_{dim}{_moe}_resume.pth")
+                    help="Auto-detect checkpoints/{weight}_{dim}{_moe}_resume.pth (PyTorch) or _resume.npz (cuBLAS)")
         _weight_files = _available_weight_files()
         _auto_label = "auto (newest matching base)"
         _base_options = ["none (from scratch)", _auto_label] + _weight_files
@@ -1813,7 +1833,7 @@ with st.sidebar:
             _base_options,
             key="base_weight",
             help="SFT 基于 pretrain、LoRA/DPO/PPO/GRPO/Agent/蒸馏基于 full_sft 启动。"
-                 "可选 out/ 与 checkpoints/ 下的 .pth（自动排除 _resume 检查点），"
+                 "可选 out/ 与 checkpoints/ 下的 .pth；cuBLAS 后端同时支持 .npz，.pth 首次由独立 CPU 进程转换。"
                  "或 'auto' 自动选择最新匹配权重；'none' 从随机初始化开始。"
                  "选中 Resume 且检查点含完整状态时，基础权重会自动跳过。",
         )
@@ -1847,6 +1867,7 @@ with st.sidebar:
             "Use torch.compile (Triton)",
             value=st.session_state.get("use_compile", True),
             key="use_compile",
+            disabled=st.session_state.get("runtime_backend", "pytorch") == "cublas",
             help="启用 torch.compile (Triton 后端)，实测约 40% 提速；MoE/Loop 变体兼容性请自行验证",
         )
         st.selectbox(
@@ -1856,7 +1877,7 @@ with st.sidebar:
                 st.session_state.get("compile_mode", "reduce-overhead")
             ),
             key="compile_mode",
-            disabled=not st.session_state.get("use_compile", True),
+            disabled=not st.session_state.get("use_compile", True) or st.session_state.get("runtime_backend", "pytorch") == "cublas",
             help="default=Triton 编译（现状）；reduce-overhead=叠加 CUDA graph，"
                  "消除 kernel launch 间隙，小模型首选（MoE 动态路由可能部分 fallback，无碍）；"
                  "max-autotune=极限调优，编译极慢",
@@ -1928,7 +1949,8 @@ if st.session_state.get("train_triggered", False):
         try:
             trainer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trainer")
             train_type = st.session_state.get("train_type", "pretrain")
-            script_name = f"train_{train_type}.py"
+            native_backend = st.session_state.get("runtime_backend", "pytorch") == "cublas"
+            script_name = "train_cublas.py" if native_backend else f"train_{train_type}.py"
             script_path = os.path.join(trainer_dir, script_name)
             if not os.path.exists(script_path):
                 st.session_state.train_status = "failed"
@@ -1950,10 +1972,15 @@ if st.session_state.get("train_triggered", False):
                 if from_weight == "auto":
                     base_type = _BASE_WEIGHT_TYPE.get(train_type, train_type)
                     auto_path = _latest_weight_file(base_type, cfg["hidden_size"], cfg["use_moe"], _arch_tag())
+                    if native_backend and not auto_path and train_type != "pretrain" and not from_resume:
+                        raise FileNotFoundError("No matching base weights; select weights or explicitly choose none (from scratch).")
                     from_weight = auto_path if auto_path else "none"
                 elif from_weight.startswith(("out/", "checkpoints/")):
                     from_weight = os.path.join(os.path.dirname(trainer_dir), from_weight)
-                if cfg.get("model_architecture") == "linear":
+                if native_backend:
+                    cmd = [sys.executable, "-u", script_path, "--train_type", train_type,
+                           "--fp8", st.session_state.get("native_fp8", "auto")]
+                elif cfg.get("model_architecture") == "linear":
                     # linear 架构必须经 run_linear.py 的 sys.modules 劫持启动，直接跑 trainer 会静默回退到标准 Transformer
                     runner = os.path.join(os.path.dirname(trainer_dir), "run_linear.py")
                     cmd = [sys.executable, "-u", runner, script_path]
@@ -1977,7 +2004,7 @@ if st.session_state.get("train_triggered", False):
                 cmd.extend(["--dtype", st.session_state.get("activation_dtype", "bfloat16")])
                 cmd.extend(["--param_dtype", st.session_state.get("param_dtype", "fp32")])
                 cmd.extend(["--kv_cache_dtype", st.session_state.get("kv_cache_dtype", "fp32")])
-                if st.session_state.get("use_compile", True):
+                if not native_backend and st.session_state.get("use_compile", True):
                     cmd.extend(["--use_compile", "1"])
                     cmd.extend(["--compile_mode", st.session_state.get("compile_mode", "reduce-overhead")])
                 grad_ckpt = st.session_state.get("use_grad_checkpoint", 0)
@@ -2008,7 +2035,8 @@ if st.session_state.get("train_triggered", False):
                         seq += 1
                         log_path = os.path.join(logs_dir, f"train_{save_prefix}_{seq}.log")
                 log_file = open(log_path, "a" if from_resume else "w", encoding="utf-8")
-                log_file.write(f"# torch.compile (Triton): {'ON' if st.session_state.get('use_compile', True) else 'OFF'}\n")
+                log_file.write(f"# Backend: {'cuBLASLt/Triton native' if native_backend else 'PyTorch'}\n")
+                log_file.write(f"# torch.compile (Triton): {'ON' if not native_backend and st.session_state.get('use_compile', True) else 'OFF'}\n")
                 log_file.flush()
                 st.session_state.train_log_path = log_path
                 st.session_state.train_proc = subprocess.Popen(

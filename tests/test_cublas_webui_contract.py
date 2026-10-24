@@ -34,7 +34,7 @@ def test_every_exported_field_has_an_owner_and_values_survive():
                                           'early_exit_enabled': extra, 'inference_rope_scaling': extra})
                 request = WebUIRequest.from_dicts(config)
                 for key, value in config.items():
-                    assert request.model[key] == value
+                    assert request.model[key] == (True if key == 'use_moe' and arch == 'moe' else value)
                 seen.update(config)
     owned = {key for keys in MODEL_FIELDS.values() for key in keys}
     assert seen == owned
@@ -56,8 +56,8 @@ def test_choices_match_real_webui_and_all_training_modes_are_requirements():
                 assert r.training['optimizer'] == optimizer and r.training['kv_cache_dtype'] == dtype
                 if mode not in ('pretrain', 'full_sft'):
                     assert mode in r.required_features()
-                assert not r.report()['training_ready']
-                with pytest.raises(NotImplementedError):
+                assert r.report()['implementation_ready'] and not r.report()['training_ready']
+                with pytest.raises(RuntimeError):
                     r.require_training_ready()
 
 
@@ -77,7 +77,7 @@ def test_compile_is_only_exclusion_and_unsupported_features_are_visible():
 @pytest.mark.parametrize('config,training', [
     ({'typo': 1}, {}), ({}, {'optimizer': 'sgd'}), ({'hidden_size': 0}, {}),
     ({'num_attention_heads': 3, 'num_key_value_heads': 2}, {}),
-    ({'head_dim': 7}, {}), ({'early_exit_layers': [8]}, {}),
+    ({'head_dim': 7}, {}), ({'early_exit_layers': [9]}, {}),
     ({'rope_scaling': {'factor': -2}}, {}), ({}, {'batch_size': 1.5}),
     ({'hidden_act': 'bad'}, {}), ({'use_grad_checkpoint': 3}, {}),
 ])
@@ -107,3 +107,13 @@ raise SystemExit(result)
     assert result.returncode == 2, result.stderr
     report = json.loads(result.stdout)
     assert not report['training_ready'] and 'recompute' in report['blockers']
+
+
+def test_webui_recovers_native_mode_without_invalid_selectbox_value():
+    import re
+    node=next(n for n in SOURCE.body if isinstance(n,ast.FunctionDef) and n.name=='_training_type_from_command')
+    scope={'re':re};exec(compile(ast.Module(body=[node],type_ignores=[]),'<recovery>','exec'),scope)
+    parse=scope['_training_type_from_command']
+    assert parse('python -u trainer/train_cublas.py --train_type grpo --fp8 auto')=='cublas:grpo'
+    assert parse('python trainer/train_full_sft.py --batch_size 4')=='full_sft'
+    assert parse('python run_linear.py trainer/train_pretrain.py')=='pretrain'

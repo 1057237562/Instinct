@@ -1,170 +1,164 @@
-# cuBLASLt 分支：调度框架与 WebUI 功能契约
+# 原生 cuBLASLt / Triton 训练
 
-分支 `experimental/dense-cublaslt-fp8` 基于 `experimental/dense-triton-fp8`。
-最终验收范围是 **`scripts/config_webui.py` 的全部功能，唯一排除项是
-`use_compile` / `compile_mode`（torch.compile）**。CUDA Graph 是独立调度能力，仍在范围内。
+分支：`experimental/dense-cublaslt-fp8`。
+入口：`trainer/train_cublas.py`；WebUI 的 **Training backend → cublas**。
+模型、反向传播、优化器和 GPU reward 推理均使用直接 CUDA Driver API、cuBLASLt 与
+Triton，不在训练进程导入 PyTorch / TorchAO，也不调用 `torch.compile`。
 
-当前交付是框架阶段：一个 Dense block 的 cuBLASLt Linear 前向/dX/dW、
-Triton 非 GEMM 算子、固定缓冲区调度，以及完整配置范围的检查与缺口报告。
-**尚不是完整 LLM trainer，也没有完成 WebUI 功能对等。** 原有 WebUI 仍启动原有
-PyTorch trainer；不能用“接受配置”或回退到 PyTorch 来表示新后端已实现该功能。
+代码已接通完整训练流程，可以进入实卡验收。当前环境没有 CUDA GPU：这里的测试
+覆盖 CPU interpreter 数值、接口和离线编译，不能证明真实 GPU 正确性、FP8 收敛或 MFU。
 
-## 已有底座
+## 实现范围
 
-| 部件 | 实现 |
+| 功能 | 实现位置与行为 |
 |---|---|
-| CUDA 上下文和内存 | 继承直接 Driver API launcher；运行路径不导入 Torch/TorchAO |
-| Linear 前向/dX/dW | 官方头文件构建的 C++ cuBLASLt shim；FP32/BF16/FP16 和 tensorwise FP8 |
-| FP8 recipe | 激活/权重 E4M3，反向 dY E5M2，FP32 accumulation，关闭 fast accumulation；反量化 scale 在 GPU 上取倒数 |
-| Layout | 统一 column-major TN；按 16 补齐，转置输入按需 pack，结果按需 crop；已对齐前向避免输入 pack |
-| 计划缓存 | 按 shape、dtype、stream、workspace、SM hint 缓存候选/选中算法 |
-| 默认调度 | 单 stream，32 MiB workspace，选择首个可执行 heuristic；不计时调优 |
-| 可选调度 | 低优先级 dW stream，独立 workspace；event 依赖与步末 join；可选 dW SM hint |
-| 重放 | `backend.build(callback)` 准备一次；记录 kernel/GEMM/event，固定地址重放；可选 CUDA Graph capture |
-| 复用 | 同一 block 的 Q/K/V 输入量化和 gate/up 输入量化复用；scale/pack 缓存有跨 stream event 依赖 |
+| Dense / MoE | `model.py`：embedding、层堆叠、共享/独立 LM head、masked shifted CE；MoE top-k 只执行选中 token 的专家计算，并保留 router auxiliary gradient |
+| Linear | `recurrent.py`：因果 depthwise conv、Gated DeltaNet、FP32 recurrent state、显式反向；每 16 token 重计算局部状态，支持流式 cache |
+| Looped | encoder/body/output 分区、共享 body、选择性门、confidence head、阈值/上限、随机监督深度、单调性/深度/增益奖励、自蒸馏和 teacher stop-grad |
+| 激活与位置 | SiLU / exact-erf GELU / ReLU、RMSNorm、RoPE / YaRN 全部导出参数、attention/residual/embedding dropout |
+| Attention | 无 dropout、head_dim≤128 时可用 fused causal GQA；其他形状及 decode 使用 cuBLAS matmul + Triton softmax；支持 padding mask |
+| 重计算 | 0 关闭、1 attention/FFN、2 整层；RNG seed/counter 与 FP8 scale 在重算时重建 |
+| Early Exit | 按 **1-based** 层号增加共享 head 的训练 CE |
+| 精度 | FP32/BF16/FP16 参数与激活，FP32 optimizer state / gradient accumulation，FP16 动态 loss scale、overflow skip / 梯度清零 |
+| FP8 | E4M3 前向输入/权重、E5M2 dY、tensorwise current amax scaling、FP32 GEMM accumulation；不依赖 TorchAO |
+| KV cache | FP32/BF16/FP16、per-(batch,head) scaled E4M3/E5M2；扩展、重排、reset |
+| 优化器 | fused AdamW、factored Adafactor、Muon 矩阵 Newton–Schulz + 非矩阵 AdamW；累积、裁剪、cosine LR |
+| 八种入口 | pretrain、full_sft、LoRA、DPO、PPO、GRPO/CISPO、Agent RL、distillation |
+| 数据 | Rust tokenizers + Jinja chat template、索引 JSONL、mini/normal、assistant label mask、chosen/rejected、工具消息 |
+| RL | 原生采样、reference/value models、GAE、clipping/KL、组归一化、多轮工具观测零 policy mask；本地 InternLM2 reward safetensors 推理 |
+| 保存恢复 | 原子 `.npz`，模型/LoRA、optimizer、待累积梯度、reference/teacher/critic、采样顺序、RNG、loss scale；原生精确续训要求配置与数据批次设置保持一致 |
+| WebUI | 原有 presets、模型 JSON 导入/导出、架构图、参数估计保留；新后端启动、日志/指标、刷新恢复、权重发现与续训已接通 |
+| 调度 | workspace / heuristic plan cache、可选候选算法计时、独立 dW stream、event 依赖；原单 block 固定 buffer / CUDA Graph 实验保留 |
 
-`dw_sm_target` 是 cuBLASLt heuristic 提示，stream priority 也不是硬件分区或抢占保证。
-双 stream 默认关闭：两个 GEMM 争抢 Tensor Core/带宽时可能更慢，不能预设收益。
-所有输入 pack 都是正确性优先的通用实现，尚未优化转置访存或融合。
+`config.py` 的 `implementation_ready` 与 `training_ready` 是不同字段。前者表示代码
+已实现；后者保留为实卡与收敛验收门槛，因此当前 `plan_cublas --require_ready` 仍返回 2。
+实际 runner 不因缺少远程 GPU 验收而禁止用户运行。
 
-arena 保留准备期间分配的所有 buffer；replay 本身不分配新 arena buffer。
-这不是按张量存活期复用内存的 allocator。重复调用分配式 forward/backward 会继续增长，
-训练循环应重放固定计划；改变 shape 应新建 backend/context。CUDA Graph、库内部内存不计入
-`arena_bytes`，需同时观察 `device_free_bytes` 和系统显存统计。
+### Looped 的兼容边界
 
-cuBLAS 的反量化乘法与 Triton 原始除法、以及不同 GEMM reduction 顺序会引入舍入差异。
-精度目标是相同 FP8 格式/缩放规则/累加策略与数值容差、收敛对照，**没有声明与 TorchAO
-逐 bit 一致**。也没有证据说明 Windows 下观察到的 2 GiB 会全部消失；CUDA context、
-cuBLAS 和驱动仍有自己的开销。
+原 `model_instinct_loop.py` 是旧的 `prelude + loop_iters + coda` 模型，没有读取 WebUI
+中的多数 LoopUS 控件。新后端实现这些控件，**不能将旧 Looped checkpoint 当作同一
+结构直接载入**。可以加载相同层命名的 Dense/MoE 基座；新 gate / confidence 参数初始化，
+然后训练并保存原生 checkpoint。
 
-## 功能验收清单
+新 Looped 按 token 用严格 `q > q_threshold` 冻结状态，确保因果训练与 decode 可对齐；
+KV cache 开启时仍填充所有循环深度的 cache。训练目标为最终 CE，加随机 K 个深度的
+CE / confidence BCE / monotonicity，再加 survival-chain 深度成本、可选深度增益及 KD。
+`n_supervision` 控制质量损失采样，body 的递归梯度仍贯通；长循环建议重计算模式 2。
+这是一套明确的新实现，未宣称与旧 Looped 文件或论文实验逐数值相同。
 
-机器可读契约在 `model/dense_cublas/config.py`。以下全部属于要求，不是可选删减项。
-当前实现和计划要求分别标记，未接通的功能不可启动新后端训练。
+### FP8 和显存
 
-| WebUI 功能 | 当前状态 | 新后端验收内容 |
-|---|---|---|
-| Dense 配置、层数、词表、权重共享 | 单 block 已有；完整模型待实现 | embedding、任意层堆叠、末层 norm、LM head、shifted/masked CE、共享梯度 |
-| GQA/MHA、head 数和维度、RMSNorm | 部分已有 | 所有合法 UI shape；目前 block 限偶数 head_dim ≤ 128 |
-| silu/gelu/relu | 仅 silu 已有 | 三种 gated FFN 前反向及专家复用 |
-| dropout | 待实现 | attention/residual dropout，训练/评估切换，RNG 保存和重放 |
-| RoPE/YaRN | rotary kernel 已有，配置表生成待接 | theta、最大长度、beta_fast/slow、factor、原长度、attention_factor |
-| flash_attn | 因果 online GQA 已有，开关语义待接 | 开/关路径数值、mask、dropout 对等 |
-| MoE | 待实现 | 专家数量/宽度、top-k、归一化、router auxiliary loss 及反向 |
-| GatedDeltaNet (Linear) | 待实现 | depthwise conv、状态递推及反向、头/维度配置、full-attention interval |
-| Looped (LoopUS) | 待实现 | encoder/body/output 分区、共享参数、q/最大步数、监督、beta、深度奖励、自蒸馏、teacher stop-grad |
-| Early Exit | 待实现 | 中间层共享 head 的 CE、权重、共享梯度累加 |
-| 参数/激活精度 | kernel 基础已有，训练策略待接 | FP32/BF16/FP16 组合、master weights、scaler/overflow、FP8 recipe |
-| KV cache 精度 | 待实现 | FP32/BF16/FP16/E4M3/E5M2，per-(batch,head) scale、扩展/重排/清空 |
-| 重计算模式 0/1/2 | 待实现 | 无重算/attention+FFN 选择重算/整层；RNG 与 FP8 scale 一致；实际降低显存 |
-| AdamW/Adafactor/Muon | 待实现 | 更新公式、状态、梯度累积/裁剪、lr schedule、保存恢复 |
-| Pretrain / Full SFT | 待实现 | tokenizer、数据批次、mini/normal、序列长度、label mask、完整 step |
-| LoRA | 待实现 | 低秩矩阵反向、冻结基座、adapter 保存/加载/merge |
-| DPO | 待实现 | chosen/rejected、参考模型、log-prob 与 loss 梯度 |
-| PPO | 待实现 | rollout、reward/reference/value、GAE、policy/value 更新 |
-| GRPO/CISPO | 待实现 | 多样本、组优势、ratio/clip、KL、mask 和训练变体 |
-| Agent RL | 待实现 | 多轮工具交互、reward、边界/mask、更新 |
-| Distillation | 待实现 | teacher/student 加载、KD 温度及 loss、stop-grad |
-| 基础权重、保存、续训 | 待实现 | auto/显式选择、原子保存、optimizer/RNG/sampler/scaler 恢复；.pth 转换与 GPU 运行分离 |
-| WebUI 操作和展示 | 原 UI 保留，新后端待接 | presets、导入/导出、架构图/参数估计、启动/状态、日志/历史/指标、权重发现 |
-| torch.compile | 明确排除 | 配置报告列出被排除字段；不导入或调用 Torch 编译链 |
+`--fp8 auto` 在 SM89+ 开启 FP8，SM80/86 使用所选高精度；`--fp8 1` 强制开启。
+FP8 与 TorchAO 的目标是相同格式/缩放/累加策略及可接受的误差、收敛，**不是 bitwise 相同**。
+Tensor Core reduction、cuBLAS 的反量化乘法和 BF16 rounding 均可能产生差异。
 
-落地顺序：① 当前 Dense 调度底座；② 完整 Dense LM、精度/激活/dropout/RoPE、
-重计算、优化器、数据/续训和 pretrain/SFT；③ MoE/Linear/Looped/Early Exit/KV/LoRA；
-④ DPO/PPO/GRPO/Agent/KD；⑤ WebUI 新后端启动与组合回归。
-非标准架构和训练目标都保留为明确模块边界，不应塞进 cuBLAS shim。
+动态训练 arena 会回收中间 buffer，空闲缓存默认最多 256 MiB：
+`--allocator_cache_mib 0` 可关闭空闲缓存，代价是更多 cudaMalloc/free。
+报告同时包含 live / cached / Driver free bytes。CUDA context、Triton modules、cuBLAS
+内部缓存不等于 tensor arena；移除 Torch 不能保证 Windows 上观察到的 2 GiB 全部消失。
 
-## 无 GPU 的配置检查
+## 安装与构建
 
-从仓库根目录运行，读取 WebUI 导出的模型 JSON：
+从仓库根目录运行。需要 NVIDIA SM80+、CUDA Toolkit ≥12.8、C++17、CMake ≥3.21。
+直接 launcher 固定 Triton **3.4.x ABI**；Windows 还需 MSVC 及兼容的 triton-windows。
+本环境没有验证 Windows 的构建、加载或 kernel 执行。
 
 ```bash
-python -m experiments.plan_cublas --config_path trainer/config_pretrain.json
-python -m experiments.plan_cublas --config_path trainer/config_pretrain.json --require_ready
-```
-
-第一条只生成覆盖报告，不加载 Triton/CUDA/Torch。第二条检查能否训练，**当前返回 2**，
-列出 blocker。非法或未知配置返回 1。不存在“忽略不支持配置并启动 Dense”的回退。
-
-训练面板设置可单独放入 JSON，通过 `--training_path` 传入。例如：
-
-```json
-{
-  "train_type": "full_sft",
-  "dataset_size": "mini",
-  "batch_size": 32,
-  "max_seq_len": 768,
-  "optimizer": "muon",
-  "param_dtype": "fp32",
-  "activation_dtype": "bfloat16",
-  "kv_cache_dtype": "fp8_e4m3",
-  "use_grad_checkpoint": 2,
-  "from_resume": false,
-  "base_weight": "auto"
-}
-```
-
-契约测试直接执行 WebUI 的纯配置构造/导出函数，覆盖四种架构、MoE 组合、YaRN 和
-Early Exit；校验所有导出字段都登记了归属。训练类型/优化器选项也与真实 UI 核对。
-
-## 实卡构建和入口
-
-要求：NVIDIA GPU、CUDA Toolkit ≥ 12.8、C++17/CMake ≥ 3.21、NumPy、Triton **3.4.x**。
-BF16 路径需要 SM80+，FP8 需要 SM89+。Windows 还需可用且与 launcher ABI 相容的
-Triton 安装；本环境没有验证 Windows 构建/执行。
-
-```bash
+pip install -r requirements-cublas.txt
 cmake -S model/dense_cublas/native -B model/dense_cublas/native/build -DCMAKE_BUILD_TYPE=Release
 cmake --build model/dense_cublas/native/build --config Release
-
-# 单 stream 基线；奇数 token 数检查 padding/crop
-python -m experiments.smoke_dense_cublas --fp8 0 --seq_len 17
-python -m experiments.smoke_dense_cublas --fp8 1 --seq_len 17
-
-# 在基线数值通过后，分别启用选项，避免混淆收益来源
-python -m experiments.smoke_dense_cublas --fp8 1 --overlap_dw
-python -m experiments.smoke_dense_cublas --fp8 1 --tune
-python -m experiments.smoke_dense_cublas --fp8 1 --overlap_dw --cuda_graph
 ```
 
-CMake 命令也适用于安装了 MSVC 和 CUDA 的 Windows shell。默认查找 Linux `.so` 或
-Windows `build/Release/instinct_cublaslt.dll`；自定义构建路径用 `--library` 或
-`INSTINCT_CUBLASLT_BRIDGE`。Windows 通过 `CUDA_PATH/bin` 查找 CUDA DLL。
+自动查找 `native/build/libinstinct_cublaslt.so` 或 Windows `build/Release/instinct_cublaslt.dll`。
+也可设置 `INSTINCT_CUBLASLT_BRIDGE` 指向产物。WebUI 继续使用项目原有 Streamlit 依赖。
 
-smoke 入口检查一个 block 的输出/11 组参数梯度是否有限、重放是否稳定、arena 是否增长。
-输出包含每条命令所属 stream、候选算法/workspace、显存统计。它没有 optimizer，
-不是端到端训练，也不提供 MFU 结论。
+## 建议的实卡验收顺序
 
-`ExecutionPlan` 对 buffer 地址、shape、dtype 固定。要换输入/权重，用
-`backend.copy_from_numpy(tensor, values)` 同步并原地更新已有 buffer；不能用新 Tensor
-地址替换。BF16/FP8 上传要求对应 uint16/uint8 原始编码，此接口不进行量化。
-准备/调优在 graph capture 前完成。双 stream
-计划在步末汇合，外部消费结果需要同步或接在 main stream 上；不能并发重放同一计划。
-
-## 验证边界与后续实卡工作
-
-本线上环境没有 CUDA GPU：已做 C++ 官方头文件语法检查、Python 检查、Triton
-interpreter 的 pack/crop/scale、完整 block 数值及调度依赖测试。测试 GEMM 使用 Torch
-参考替身，**没有实际执行 cuBLAS**；替身只存在测试文件中。原生测试明确 skip，不能据此
-认定 FP8 精度、Windows 支持、真实并发或 CUDA Graph 已通过。
+先跑 FP32 单 stream 数值参考，再启用低精度、FP8、重计算及并发。
+`--reference` 会启动隔离的 **CPU-only PyTorch 子进程**生成参考值；GPU 主进程仍拒绝 Torch。
+该参考需要可用的 torch / datasets / transformers 测试依赖；常规 native 训练不需要它们。
 
 ```bash
-TRITON_INTERPRET=1 python -m pytest -q tests/test_dense_cublas.py tests/test_cublas_webui_contract.py
-# 实卡及 shim 构建完成后，去掉 TRITON_INTERPRET：
-python -m pytest -q tests/test_dense_cublas.py
+python -m experiments.validate_cublas_training --fp8 0 --dtype fp32 --reference
+python -m experiments.validate_cublas_training --fp8 0 --dtype bf16
+python -m experiments.validate_cublas_training --fp8 1 --dtype bf16
+python -m experiments.validate_cublas_training --fp8 1 --dtype bf16 --checkpoint 2 --dropout 0.1
+python -m experiments.validate_cublas_training --fp8 1 --dtype bf16 --overlap_dw
+python -m experiments.validate_cublas_training --architecture moe --fp8 0 --dtype fp32 --reference
+python -m experiments.validate_cublas_training --architecture linear --fp8 0 --dtype fp32 --reference
+python -m experiments.validate_cublas_training --architecture looped --checkpoint 2
+python -m experiments.validate_cublas_training --kv_cache_dtype fp8_e4m3 --dtype bf16
 ```
 
-实卡阶段先做 native FP8/BF16 的前反向参考对照和 compute-sanitizer；随后在同一硬件、
-形状和精度下测单 stream 基线，再分别比较候选算法、workspace、dW 并发/SM hint 和
-CUDA Graph。记录 warmup 后稳态 step 时间、峰值/常驻显存与硬件/驱动/CUDA 版本。
-完整 trainer 和收敛验证通过后再报告 tokens/s、模型 FLOPs 和 MFU，不能由孤立 GEMM
-峰值或本环境离线编译推导训练提速。
+FP8 需要 SM89+。FP32 CPU oracle 默认 atol=3e-4 / rtol=3e-3；BF16/FP8 与高精度对照需要
+另外明确容差（`--atol`、`--rtol`），不能用放宽容差替代长期收敛检查。
+验证脚本检查完整前反向/更新、非有限值、续训一致性、cache decode、live 内存是否增长，
+输出 JSON 包含硬件架构、每步时间、内存和 cuBLAS 候选算法。首次 step 包含 JIT/tuning。
 
-API 依据：[NVIDIA cuBLAS 12.8 文档](https://docs.nvidia.com/cuda/archive/12.8.2/cublas/index.html#cublasltmatmul)
-和 [NVIDIA FP8 cuBLASLt 示例](https://github.com/NVIDIA/CUDALibrarySamples/tree/master/cuBLASLt/LtFp8Matmul)。
-本环境仅用官方 cuBLAS 12.9 头文件进行了 C++ 语法检查，没有链接或执行原生库。
+继续用 compute-sanitizer 检查越界；再用真实数据跑短训练，对照 loss、gradient norm、
+若干百/千步验证集曲线。GRPO/PPO/Agent 还需本地 `../internlm2-1_8b-reward` 的完整
+safetensors / config / SentencePiece 文件；真实 reward 模型和 tokenizer 的整机对照留待实卡，
+这里仅验证了小尺寸 grouped-QKV reward 数学路径，没有下载 1.8B 权重。
+Agent 的天气、时间、汇率等沿用原仓库的**模拟训练环境**，不是实时服务。
 
-本次验证结果：新后端/配置契约加现有 Dense/Triton/checkpoint/flag 回归共 **71 passed、
-10 skipped**；skip 涉及无 CUDA GPU 或 interpreter 的原生 FP8/BF16 限制。新增
-pack/crop/scale kernel 在 SM89/90/120 上分别完成 9 个离线编译 specialization，
-共 27 个，编译进程未导入 Torch。Python 编译检查和 `git diff --check` 通过。
+## 启动训练
+
+```bash
+python trainer/train_cublas.py --train_type pretrain --config_path trainer/config_pretrain.json --from_weight none --fp8 auto --batch_size 4 --max_seq_len 256 --accumulation_steps 4 --use_grad_checkpoint 2
+python trainer/train_cublas.py --train_type full_sft --config_path trainer/config_full_sft.json --from_weight out/pretrain_768.npz
+python trainer/train_cublas.py --train_type pretrain --config_path trainer/config_pretrain.json --from_resume 1
+```
+
+数据路径沿用原项目，其他入口用 `--train_type lora|dpo|ppo|grpo|agent|distillation`。
+蒸馏指定 `--from_teacher_weight`，teacher/student 必须使用同一 tokenizer token-ID 语义。
+LoRA 默认仅方阵 Linear，与原目标模块规则一致；保存完整模型及 `_adapter.npz`，
+API 提供 adapter load 和 merge。RL rollout/current policy 概率统一禁用 dropout。
+
+WebUI 中选择 `cublas` 后会禁用 compile 控件，其他原有配置继续生效。
+`.pth` 基础权重首次加载会由独立 CPU 进程转换；也可预先转换，使用不安装 Torch 的训练环境：
+
+```bash
+python scripts/convert_cublas_checkpoint.py --input out/pretrain_768.pth --output out/pretrain_768.npz
+python scripts/convert_cublas_checkpoint.py --input out/full_sft_768.npz --output out/full_sft_768.pth
+```
+
+转换器只转换权重，不把旧 Torch optimizer/resume 状态冒充原生续训状态。
+输出命名为 `out/{save_weight}_{hidden_size}{_moe}.npz` 和
+`checkpoints/{save_weight}_{hidden_size}{_moe}_resume.npz`。
+Ctrl+C 请求会在当前 batch 完成后保存；强制杀进程只能恢复最近一次完整 checkpoint。
+
+## 当前验证与后续 MFU 工作
+
+本环境合计 **115 项通过、10 项跳过**（核心回归加 WebUI/LoRA/oracle 补测）。
+完成 CPU interpreter / PyTorch oracle 回归；原生 GPU、BF16 Tensor Core 和 FP8 cast
+测试因无 GPU 或 interpreter 的 rounding 限制跳过。数值覆盖完整 Dense/MoE/Linear、
+checkpoint/dropout、三个 optimizer、八种训练模式及续训、KD/DPO/GRPO/CISPO/PPO 梯度、
+GAE、工具观测 mask、原生 tokenizer、reward 数学路径、内存/event 回收。
+
+```bash
+TRITON_INTERPRET=1 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m pytest -q tests/test_cublas_training.py tests/test_cublas_webui_contract.py tests/test_dense_cublas.py tests/test_dense_triton.py tests/test_dense_model.py tests/test_checkpoint_ffn.py tests/test_flag_threading.py
+python -m experiments.compile_cublas_training --arch 89
+```
+
+新增 kernel 有 51 个 specialization，已分别离线编译 SM89 / SM90 / SM120（合计 153）；
+这只检查 compiler / launcher ABI，不能代替 GPU 执行。
+
+实卡优化优先级：
+
+1. 固定模型、batch×seq、精度，记录 warmup 后 tokens/s、显存及 Nsight 时间线；把 JIT、
+   数据准备、保存和 reward rollout 时间与训练 step 分开统计。
+2. 比较 `--workspace_mib`、`--candidates`、`--tune`、`--overlap_dw`、`--dw_sm_target`。
+   现通用 autograd 为保证依赖正确会及时 join dW；进一步跨层重叠应由时间线指导。
+3. 将 MoE 路由索引的 host 同步换成 GPU prefix-sum / compact dispatch，增加 grouped GEMM。
+4. 为 dropout / decode 的通用 attention、depthwise conv、recurrent chunk、optimizer reductions
+   加融合内核；当前通用 attention 会物化 S²，长序列应优先 fused 路径。
+5. 缓存常量、减少临时 broadcast/copy，给动态训练建立固定 bucket 的 buffer/liveness 计划；
+   再扩展整步 CUDA Graph。现有 CUDA Graph 仅覆盖 `smoke_dense_cublas` 的固定 block 实验。
+6. 检查 FP8 相对 BF16 的精度/收敛，最后测 MFU。`--peak_tflops` 只给 Dense 近似
+   `6 * parameters * tokens/s / peak`；MoE/Looped/RL 必须按实际激活参数、循环深度和阶段重新计数。
+
+API/格式依据：
+[NVIDIA cuBLASLt](https://docs.nvidia.com/cuda/archive/12.8.2/cublas/index.html#cublasltmatmul)、
+[NVIDIA FP8 示例](https://github.com/NVIDIA/CUDALibrarySamples/tree/master/cuBLASLt/LtFp8Matmul)、
+[InternLM2 reward 官方实现](https://huggingface.co/internlm/internlm2-1_8b-reward/blob/main/modeling_internlm2.py)。

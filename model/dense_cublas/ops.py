@@ -99,7 +99,7 @@ class CublasDenseOps(DenseOps):
                             (cp, out), ROWS=l.m, COLS=l.n, PAD_COLS=l.np)
         return out
 
-    def linear_backward(self, saved, dy):
+    def linear_backward(self, saved, dy, need_dx=True, need_dw=True):
         shape, input_dtype, weight_dtype, qx, qw, scales = saved
         if dy.shape != (*shape[:-1], qw.shape[0]) or dy.dtype != input_dtype:
             raise ValueError('Linear gradient shape/dtype does not match its forward')
@@ -110,7 +110,9 @@ class CublasDenseOps(DenseOps):
         prior = self._role
         try:
             self._role = 'dX'
-            dx = self.mm(qdy, qw, scales=dx_scales, out_dtype=dy.dtype)
+            dx = self.mm(qdy, qw, scales=dx_scales, out_dtype=dy.dtype) if need_dx else None
+            if not need_dw:
+                return None if dx is None else dx.view(*shape), None
             ready = None
             if self.backend.weight_stream != self.backend.main_stream:
                 ready = self.backend.create_event()
@@ -120,7 +122,7 @@ class CublasDenseOps(DenseOps):
                 if self.backend.weight_stream != self.backend.main_stream:
                     self.backend.wait_event(ready)
                 dw = self.mm(qdy, qx, transpose_a=True, scales=dw_scales, out_dtype=weight_dtype)
-            return dx.view(*shape), dw
+            return None if dx is None else dx.view(*shape), dw
         finally:
             self._role = prior
 

@@ -15,7 +15,7 @@ import torch.nn.functional as F
 pytest.importorskip('triton')
 from model.dense_triton import elementwise as ew
 from model.dense_triton.ops import BlockConfig, DenseBlock, DenseOps
-from model.dense_triton.runtime import Tensor
+from model.dense_triton.runtime import Tensor, Scalar
 
 
 INTERPRET = os.environ.get('TRITON_INTERPRET') == '1'
@@ -38,7 +38,7 @@ class ReferenceBackend:
         return Tensor(tuple(value.shape), dtype, value, self)
 
     def launch(self, fn, grid, args, **constants):
-        fn[grid](*[t.storage.view(t.shape) for t in args], **constants,
+        fn[grid](*[t.value if isinstance(t, Scalar) else t.storage.view(t.shape) for t in args], **constants,
                  enable_fp_fusion=False, num_warps=4, num_stages=2)
 
 

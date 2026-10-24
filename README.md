@@ -4,6 +4,10 @@
 
 所有核心算法(Pretrain / SFT / LoRA / DPO / PPO / GRPO / CISPO / Agentic RL / 蒸馏)均用 PyTorch 原生实现,不依赖 `trl` / `peft` 等高层封装,每一行代码都可读、可改、可复现。
 
+> 本分支新增 **cuBLASLt + Triton 原生训练后端**，训练进程不依赖 Torch/TorchAO。
+> WebUI 可选择 `cublas`；构建、实卡验收和功能边界见 [原生训练文档](docs/dense_cublas.md)。
+> 代码已通过 CPU 数值与离线编译检查，真实 GPU 正确性、FP8 收敛和 MFU 仍需验证。
+
 ---
 
 ## 特性

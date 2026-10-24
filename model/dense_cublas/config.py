@@ -1,8 +1,8 @@
 """WebUI compatibility contract and honest readiness reporting (stdlib only).
 
 All config_webui features are acceptance requirements except torch.compile.
-Parsing a setting does NOT implement it. No training runner is advertised until
-the required feature implementations and native validation are complete.
+Implementation availability and real-GPU acceptance are reported separately.
+The native runner is available; target-GPU validation remains required.
 """
 from copy import deepcopy
 from dataclasses import asdict, dataclass
@@ -59,49 +59,49 @@ FEATURES = {
         'Forward/dX/dW of all seven projections and RMSNorm/RoPE/GQA/SwiGLU/residuals match reference; native GPU tests pass.'),
     'scheduler': Feature('implemented_gpu_unverified', ('dense_block',),
         'Stable buffers, plan/workspace cache, single/dual stream event DAG, optional tuning/graph replay pass on target GPU.'),
-    'model': Feature('pending', ('dense_block',),
+    'model': Feature('implemented_gpu_unverified', ('dense_block',),
         'Embedding + arbitrary layer stack + final norm/LM head + shifted masked CE; tied and untied weights accumulate correctly.'),
-    'activations': Feature('partial', ('dense_block',),
-        'Silu (present), exact project GELU and ReLU forward/backward agree for all Dense/expert FFNs.'),
-    'dropout': Feature('pending', ('model',),
+    'activations': Feature('implemented_gpu_unverified', ('dense_block',),
+        'Silu, exact project GELU and ReLU forward/backward agree for all Dense/expert FFNs.'),
+    'dropout': Feature('implemented_gpu_unverified', ('model',),
         'Match attention/residual dropout; save RNG seed/counter and reproduce masks during recompute/resume; disable in eval.'),
-    'rope': Feature('partial', ('dense_block',),
-        'Rotary kernels present; generate project-compatible RoPE/YaRN tables including all five scaling controls and decode offsets.'),
-    'attention': Feature('partial', ('dense_block',),
-        'Causal GQA present; flash_attn on/off paths match masks, dropout and supported WebUI head sizes in forward/backward.'),
-    'precision': Feature('partial', ('dense_block',),
+    'rope': Feature('implemented_gpu_unverified', ('dense_block',),
+        'Generate project-compatible RoPE/YaRN tables including all five scaling controls and decode offsets.'),
+    'attention': Feature('implemented_gpu_unverified', ('dense_block',),
+        'flash_attn on/off paths match masks, dropout and supported WebUI head sizes in forward/backward.'),
+    'precision': Feature('implemented_gpu_unverified', ('dense_block',),
         'FP32/BF16/FP16 activation/parameter combinations, FP8 E4M3 forward/E5M2 gradients, FP32 accumulation; optimizer state/loss scaling and convergence validated.'),
-    'recompute': Feature('pending', ('model', 'dropout'),
+    'recompute': Feature('implemented_gpu_unverified', ('model', 'dropout'),
         'Modes 0/1/2: none/selective attention+FFN/full layer; fewer live activations, correct replay RNG and FP8 scales.'),
-    'moe': Feature('pending', ('model', 'activations'),
+    'moe': Feature('implemented_gpu_unverified', ('model', 'activations'),
         'Top-k routing, gather/scatter, expert GEMMs, optional top-k renormalization and router auxiliary loss/gradients; Dense/MoE combinations supported.'),
-    'linear': Feature('pending', ('model',),
+    'linear': Feature('implemented_gpu_unverified', ('model',),
         'GatedDeltaNet convolution + state recurrence forward/backward, configurable heads/dimensions and full-attention intervals; streaming state parity.'),
-    'looped': Feature('pending', ('model',),
+    'looped': Feature('implemented_gpu_unverified', ('model',),
         'Encoder/body/output partitions, repeated shared-weight gradient accumulation, q threshold/cap, supervision, depth/monotonicity rewards, self-distillation and teacher gradients.'),
-    'early_exit': Feature('pending', ('model',),
+    'early_exit': Feature('implemented_gpu_unverified', ('model',),
         'Intermediate shared-head CE at configured layers and weighted losses; accumulate shared head and backbone gradients.'),
-    'kv_cache': Feature('pending', ('model', 'precision'),
+    'kv_cache': Feature('implemented_gpu_unverified', ('model', 'precision'),
         'FP32/BF16/FP16 and per-(batch,head) scaled E4M3/E5M2 decode cache, growth/reorder/reset and full-prefix parity.'),
-    'optimizer': Feature('pending', ('model', 'precision'),
+    'optimizer': Feature('implemented_gpu_unverified', ('model', 'precision'),
         'AdamW/Adafactor/Muon updates and states match project references; gradient accumulation, clipping, schedules and finite/overflow handling.'),
-    'checkpoint_io': Feature('pending', ('optimizer',),
+    'checkpoint_io': Feature('implemented_gpu_unverified', ('optimizer',),
         'Base weight selection, atomic save/resume of parameters, optimizer, RNG, sampler and scaler; documented .pth import/export outside CUDA runtime.'),
-    'training': Feature('pending', ('model', 'optimizer', 'checkpoint_io'),
+    'training': Feature('implemented_gpu_unverified', ('model', 'optimizer', 'checkpoint_io'),
         'Pretrain/SFT batching, tokenization, mini/normal data, padding/loss masks, accumulation, logging and complete train/eval steps without Torch.'),
-    'lora': Feature('pending', ('training',),
+    'lora': Feature('implemented_gpu_unverified', ('training',),
         'Low-rank projections/gradients, frozen base weights, adapter optimizer/save/load/merge; same target modules as train_lora.'),
-    'dpo': Feature('pending', ('training',),
+    'dpo': Feature('implemented_gpu_unverified', ('training',),
         'Chosen/rejected log probabilities, frozen reference, DPO loss and gradients match train_dpo.'),
-    'ppo': Feature('pending', ('training', 'kv_cache'),
+    'ppo': Feature('implemented_gpu_unverified', ('training', 'kv_cache'),
         'Rollout sampling, reward/reference/value models, GAE, clipped objectives and value updates match train_ppo.'),
-    'grpo': Feature('pending', ('training', 'kv_cache'),
+    'grpo': Feature('implemented_gpu_unverified', ('training', 'kv_cache'),
         'Group rollouts/rewards, normalized advantages, masks, importance ratios and GRPO/CISPO loss variants match train_grpo.'),
-    'agent': Feature('pending', ('grpo',),
+    'agent': Feature('implemented_gpu_unverified', ('grpo',),
         'Multi-turn tool rollout boundaries, rewards, masks and updates match train_agent; tool orchestration remains host-side.'),
-    'distillation': Feature('pending', ('training',),
+    'distillation': Feature('implemented_gpu_unverified', ('training',),
         'Separate teacher/student weights, temperature-scaled KD and label CE, teacher stop-gradient and checkpoint behavior.'),
-    'webui': Feature('pending', ('training',),
+    'webui': Feature('implemented_gpu_unverified', ('training',),
         'Backend-aware start/status/logs/history/metrics and weight discovery, presets, import/export, parameter estimates and diagrams; preserve existing PyTorch workflows.'),
 }
 
@@ -125,7 +125,7 @@ def _choice(values, key, choices):
 def _layer_list(model, key):
     if key in model:
         layers = model[key]
-        if not isinstance(layers, list) or any(type(i) is not int or i < 0 or i >= model['num_hidden_layers'] for i in layers):
+        if not isinstance(layers, list) or any(type(i) is not int or i < (1 if key == 'early_exit_layers' else 0) or i >= model['num_hidden_layers'] + (1 if key == 'early_exit_layers' else 0) for i in layers):
             raise ValueError(f'{key} must contain valid layer indices')
         if len(layers) != len(set(layers)):
             raise ValueError(f'{key} contains duplicate layers')
@@ -189,6 +189,13 @@ class WebUIRequest:
             _positive(model, ('num_experts', 'num_experts_per_tok', 'moe_intermediate_size'))
             if model.get('num_experts_per_tok', 1) > model.get('num_experts', 4):
                 raise ValueError('num_experts_per_tok exceeds num_experts')
+        if model['model_architecture'] == 'moe': model['use_moe'] = True
+        if 'q_threshold' in model and not 0 <= model['q_threshold'] <= 1:
+            raise ValueError('q_threshold must be in [0, 1]')
+        _positive(model, ('distill_temperature',))
+        for key in ('early_exit_loss_weight', 'router_aux_loss_coef', 'depth_reward', 'depth_gain_reward', 'distill_weight', 'beta'):
+            if key in model and (not isinstance(model[key], (int,float)) or not math.isfinite(model[key]) or model[key] < 0):
+                raise ValueError(key + ' must be finite and nonnegative')
         training = dict(train_type='pretrain', dataset_size='mini', batch_size=32, max_seq_len=768,
                         optimizer='adamw', param_dtype='fp32', activation_dtype='bfloat16',
                         kv_cache_dtype='fp32', from_resume=False, base_weight='auto') | training
@@ -244,9 +251,11 @@ class WebUIRequest:
                 'excluded_torch_compile': self.excluded, 'training_ready': not blockers,
                 'blockers': blockers, 'required_features': needed,
                 'all_webui_requirements': {key: asdict(value) for key, value in FEATURES.items()},
-                'note': 'Configuration coverage is a contract, not runtime feature completion. Native training is not implemented yet.'}
+                'implementation_ready': all(FEATURES[key].status.startswith('implemented') or FEATURES[key].status == 'validated' for key in needed),
+                'native_runner': 'trainer/train_cublas.py',
+                'note': 'Native training is implemented. training_ready remains false until target-GPU acceptance and convergence checks pass; see docs/dense_cublas.md.'}
 
     def require_training_ready(self):
         report = self.report()
         if not report['training_ready']:
-            raise NotImplementedError('cuBLAS training is not ready: ' + ', '.join(report['blockers']))
+            raise RuntimeError('cuBLAS target-GPU acceptance is not complete: ' + ', '.join(report['blockers']))

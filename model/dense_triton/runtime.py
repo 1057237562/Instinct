@@ -20,6 +20,17 @@ ITEMSIZE = {'fp32': 4, 'bf16': 2, 'fp16': 2, 'fp8e4nv': 1, 'fp8e5': 1,
             'i32': 4, 'i64': 8}
 
 
+@dataclass(frozen=True)
+class Scalar:
+    """A runtime scalar kernel argument; changing its value does not recompile."""
+    value: object
+    kind: str = 'fp32'
+
+    @property
+    def dtype(self):
+        return 'scalar:' + self.kind
+
+
 @dataclass
 class Tensor:
     shape: tuple
@@ -52,7 +63,7 @@ def compile_kernel(fn, dtypes, constants, arch=89):
     names = [name for name in fn.arg_names if name not in constants]
     if len(names) != len(dtypes):
         raise ValueError(f'{fn.__name__}: runtime argument count does not match signature')
-    source = ASTSource(fn, signature={n: '*' + t for n, t in zip(names, dtypes)},
+    source = ASTSource(fn, signature={n: t.removeprefix('scalar:') if t.startswith('scalar:') else '*' + t for n, t in zip(names, dtypes)},
                        constexprs=constants)
     # Explicit target avoids GPUDriver.__init__, which otherwise imports torch.
     return triton.compile(source, target=GPUTarget('cuda', arch, 32),
@@ -174,7 +185,8 @@ class CudaBackend:
         if not 1 <= len(grid) <= 3 or any(g <= 0 for g in grid):
             raise ValueError('launch grid must have 1..3 positive dimensions')
         for arg in args:
-            self._check_tensor(arg)
+            if not isinstance(arg, Scalar):
+                self._check_tensor(arg)
         constants = constants_for(fn, constants)
         key = (fn.__name__, tuple(a.dtype for a in args), tuple(sorted(constants.items())))
         if key not in self._cache:
@@ -193,7 +205,9 @@ class CudaBackend:
             self._cache[key] = (function, meta)
         function, meta = self._cache[key]
         # Triton 3.4 adds a global-scratch pointer even when its size is zero.
-        values = [ct.c_uint64(arg.storage) for arg in args] + [ct.c_uint64(0)]
+        scalar_types = {'fp32': ct.c_float, 'i32': ct.c_int32, 'i64': ct.c_int64}
+        values = [scalar_types[arg.kind](arg.value) if isinstance(arg, Scalar)
+                  else ct.c_uint64(arg.storage) for arg in args] + [ct.c_uint64(0)]
         params = (ct.c_void_p * len(values))(*[ct.addressof(v) for v in values])
         grid = tuple(grid) + (1,) * (3 - len(grid))
         self._launch(function, *grid, meta.num_warps * 32, 1, 1, meta.shared, self.stream, params, None)
