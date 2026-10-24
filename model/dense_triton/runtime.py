@@ -67,6 +67,7 @@ class CudaBackend:
         self._modules = []
         self._cache = {}
         self._context = None
+        self.stream = None  # Optional explicit stream; default behavior stays unchanged.
 
     def _bind(self, name, types):
         func = getattr(self.lib, name)
@@ -195,7 +196,7 @@ class CudaBackend:
         values = [ct.c_uint64(arg.storage) for arg in args] + [ct.c_uint64(0)]
         params = (ct.c_void_p * len(values))(*[ct.addressof(v) for v in values])
         grid = tuple(grid) + (1,) * (3 - len(grid))
-        self._launch(function, *grid, meta.num_warps * 32, 1, 1, meta.shared, None, params, None)
+        self._launch(function, *grid, meta.num_warps * 32, 1, 1, meta.shared, self.stream, params, None)
 
     def synchronize(self):
         self._check()

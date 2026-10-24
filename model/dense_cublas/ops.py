@@ -1,0 +1,138 @@
+"""Drop-in Dense operations: cuBLASLt Linear plus existing Triton kernels."""
+from contextlib import contextmanager
+import triton
+
+from model.dense_triton.ops import DenseOps, DenseBlock
+from .layout import plan_layout
+from . import kernels
+
+
+class CublasDenseOps(DenseOps):
+    def __init__(self, backend, fp8=True):
+        super().__init__(backend, fp8)
+        self._reuse = None
+        self._role = 'forward'
+
+    @contextmanager
+    def reuse_scope(self, cache=None):
+        prior, self._reuse = self._reuse, {} if cache is None else cache
+        try:
+            yield self._reuse
+        finally:
+            self._reuse = prior
+
+    @staticmethod
+    def _key(tensor):
+        # Storage identity is stable for CUDA pointers and reference-test buffers.
+        pointer = tensor.storage if isinstance(tensor.storage, int) else id(tensor.storage)
+        return pointer, tensor.shape, tensor.dtype
+
+    def _cached(self, key, create):
+        if self._reuse is None:
+            return create()
+        if key not in self._reuse:
+            result = create()
+            event = None
+            if self.backend.weight_stream != self.backend.main_stream:
+                event = self.backend.create_event()
+                self.backend.record_event(event)
+            self._reuse[key] = (result, self.backend.stream, event)
+        result, producer, event = self._reuse[key]
+        if producer != self.backend.stream:
+            self.backend.wait_event(event)
+        return result
+
+    def quantize(self, x, dtype='fp8e4nv'):
+        # Q/K/V share one normalized activation cast; gate/up share another.
+        return self._cached(('quant', self._key(x), dtype),
+                            lambda: super(CublasDenseOps, self).quantize(x, dtype))
+
+    def _inverse(self, scale):
+        if scale.dtype != 'fp32' or scale.numel != 1:
+            raise ValueError('quantization scale must be a device FP32 scalar')
+        def create():
+            out = self.empty((1,), 'fp32')
+            self.backend.launch(kernels.inverse_scale, (1,), (scale, out))
+            return out
+        return self._cached(('inverse', self._key(scale)), create)
+
+    def _pack(self, x, rows, cols, pr, pc, strides, needed):
+        if not needed:
+            return x
+        def create():
+            out = self.empty((pr, pc), x.dtype)
+            self.backend.launch(kernels.pack_matrix, (triton.cdiv(pr * pc, 256),), (x, out),
+                                ROWS=rows, COLS=cols, PAD_ROWS=pr, PAD_COLS=pc,
+                                STRIDE_ROW=strides[0], STRIDE_COL=strides[1])
+            return out
+        return self._cached(('pack', self._key(x), rows, cols, pr, pc, strides), create)
+
+    def mm(self, a, b, transpose_a=False, transpose_b=False, scales=None, out_dtype='fp32'):
+        fp8 = a.dtype.startswith('fp8') or b.dtype.startswith('fp8')
+        if fp8 and (scales is None or a.dtype not in ('fp8e4nv', 'fp8e5') or b.dtype not in ('fp8e4nv', 'fp8e5')):
+            raise ValueError('FP8 GEMM requires two FP8 operands and multiplication scales')
+        if not fp8 and (a.dtype != b.dtype or scales is not None):
+            raise ValueError('unscaled cuBLASLt GEMM requires matching high-precision operands')
+        if not fp8 and a.dtype not in ('fp32', 'bf16', 'fp16'):
+            raise ValueError('GEMM inputs must be FP32/BF16/FP16 or scaled FP8')
+        if a.dtype == b.dtype == 'fp8e5':
+            raise ValueError('cuBLASLt does not support E5M2 x E5M2 for this path')
+        if out_dtype not in ('fp32', 'bf16', 'fp16'):
+            raise ValueError('GEMM output must be FP32/BF16/FP16')
+        layout = plan_layout(a.shape, b.shape, transpose_a, transpose_b)
+        l = layout
+        ap = self._pack(a, l.m, l.k, l.mp, l.kp, l.a_stride, l.a_pack)
+        bp = self._pack(b, l.n, l.k, l.np, l.kp, l.b_transpose_stride, l.b_pack)
+        # Regular cuBLASLt GEMMs support same-type or FP32 outputs. Independent
+        # parameter/activation precision may request e.g. FP32 -> BF16 dW:
+        # accumulate into FP32 and cast (fused into crop when padding is needed).
+        gemm_dtype = out_dtype if fp8 or out_dtype in (a.dtype, 'fp32') else 'fp32'
+        cp = self.empty((l.mp, l.np), gemm_dtype)
+        sa, sb = (self._inverse(s) for s in scales) if scales is not None else (None, None)
+        # C^T = B^T @ A^T. Column-major TN returns the desired row-major C,
+        # avoiding an output transpose (only crop when dimensions were padded).
+        self.backend.matmul(bp, ap, cp, sb, sa, l.np, l.mp, l.kp, role=self._role)
+        if (l.mp, l.np) == (l.m, l.n):
+            return self.cast(cp, out_dtype)
+        out = self.empty((l.m, l.n), out_dtype)
+        self.backend.launch(kernels.unpack_matrix, (triton.cdiv(l.m * l.n, 256),),
+                            (cp, out), ROWS=l.m, COLS=l.n, PAD_COLS=l.np)
+        return out
+
+    def linear_backward(self, saved, dy):
+        shape, input_dtype, weight_dtype, qx, qw, scales = saved
+        if dy.shape != (*shape[:-1], qw.shape[0]) or dy.dtype != input_dtype:
+            raise ValueError('Linear gradient shape/dtype does not match its forward')
+        dy = dy.view(dy.numel // dy.shape[-1], dy.shape[-1])
+        qdy, sdy = self.quantize(dy, 'fp8e5') if scales is not None else (dy, None)
+        dx_scales = (sdy, scales[1]) if scales is not None else None
+        dw_scales = (sdy, scales[0]) if scales is not None else None
+        prior = self._role
+        try:
+            self._role = 'dX'
+            dx = self.mm(qdy, qw, scales=dx_scales, out_dtype=dy.dtype)
+            ready = None
+            if self.backend.weight_stream != self.backend.main_stream:
+                ready = self.backend.create_event()
+                self.backend.record_event(ready)
+            self._role = 'dW'
+            with self.backend.on_stream(self.backend.weight_stream):
+                if self.backend.weight_stream != self.backend.main_stream:
+                    self.backend.wait_event(ready)
+                dw = self.mm(qdy, qx, transpose_a=True, scales=dw_scales, out_dtype=weight_dtype)
+            return dx.view(*shape), dw
+        finally:
+            self._role = prior
+
+
+class ScheduledDenseBlock(DenseBlock):
+    """Caches are scoped to one saved block, so later forwards cannot use stale casts."""
+    def forward(self, x, cos, sin, mask=None):
+        with self.ops.reuse_scope() as cache:
+            y, saved = super().forward(x, cos, sin, mask)
+            saved['_cublas_reuse'] = cache
+            return y, saved
+
+    def backward(self, saved, dy):
+        with self.ops.reuse_scope(saved['_cublas_reuse']):
+            return super().backward(saved, dy)

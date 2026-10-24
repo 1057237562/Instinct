@@ -40,3 +40,6 @@ Thumbs.db
 
 # ===== WebUI 本地面板状态（用户参数持久化，不入库） =====
 trainer/webui_state.json
+
+# Native experimental backend build products
+model/dense_cublas/native/build/
