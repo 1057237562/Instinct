@@ -36,7 +36,7 @@ MODEL_FIELDS = {
     'early_exit': ('early_exit_layers', 'early_exit_loss_weight'),
 }
 TRAINING_FIELDS = {
-    'training': ('train_type', 'dataset_size', 'batch_size', 'max_seq_len'),
+    'training': ('train_type', 'dataset_size', 'batch_size', 'max_seq_len', 'num_workers', 'prefetch_factor', 'pin_memory'),
     'optimizer': ('optimizer',),
     'precision': ('param_dtype', 'activation_dtype'),
     'kv_cache': ('kv_cache_dtype',),
@@ -68,7 +68,7 @@ FEATURES = {
     'rope': Feature('implemented_gpu_unverified', ('dense_block',),
         'Generate project-compatible RoPE/YaRN tables including all five scaling controls and decode offsets.'),
     'attention': Feature('implemented_gpu_unverified', ('dense_block',),
-        'flash_attn on/off paths match masks, dropout and supported WebUI head sizes in forward/backward.'),
+        'Fused causal GQA supports dropout and head dimensions through 256 with deterministic recomputation; larger heads/decode retain the general path.'),
     'precision': Feature('implemented_gpu_unverified', ('dense_block',),
         'FP32/BF16/FP16 activation/parameter combinations, FP8 E4M3 forward/E5M2 gradients, FP32 accumulation; optimizer state/loss scaling and convergence validated.'),
     'recompute': Feature('implemented_gpu_unverified', ('model', 'dropout'),
@@ -86,9 +86,9 @@ FEATURES = {
     'optimizer': Feature('implemented_gpu_unverified', ('model', 'precision'),
         'AdamW/Adafactor/Muon updates and states match project references; gradient accumulation, clipping, schedules and finite/overflow handling.'),
     'checkpoint_io': Feature('implemented_gpu_unverified', ('optimizer',),
-        'Base weight selection, atomic save/resume of parameters, optimizer, RNG, sampler and scaler; documented .pth import/export outside CUDA runtime.'),
+        'Base weight selection, atomic save/resume of parameters, optimizer, RNG, sampler and scaler; legacy .pth model/optimizer/scaler/scheduler/progress conversion outside CUDA runtime, with explicit reporting of unsaved RNG/partial-gradient limits.'),
     'training': Feature('implemented_gpu_unverified', ('model', 'optimizer', 'checkpoint_io'),
-        'Pretrain/SFT batching, tokenization, mini/normal data, padding/loss masks, accumulation, logging and complete train/eval steps without Torch.'),
+        'Spawn-worker prefetch, bounded pinned upload staging, deterministic batch augmentation; Pretrain/SFT tokenization, mini/normal data, padding/loss masks, accumulation, logging and complete train/eval steps without Torch.'),
     'lora': Feature('implemented_gpu_unverified', ('training',),
         'Low-rank projections/gradients, frozen base weights, adapter optimizer/save/load/merge; same target modules as train_lora.'),
     'dpo': Feature('implemented_gpu_unverified', ('training',),
@@ -198,14 +198,17 @@ class WebUIRequest:
                 raise ValueError(key + ' must be finite and nonnegative')
         training = dict(train_type='pretrain', dataset_size='mini', batch_size=32, max_seq_len=768,
                         optimizer='adamw', param_dtype='fp32', activation_dtype='bfloat16',
-                        kv_cache_dtype='fp32', from_resume=False, base_weight='auto') | training
+                        kv_cache_dtype='fp32', from_resume=False, base_weight='auto', num_workers=8, prefetch_factor=2, pin_memory=True) | training
         _choice(training, 'train_type', TRAIN_TYPES)
         _choice(training, 'dataset_size', ('mini', 'normal'))
         _choice(training, 'optimizer', OPTIMIZERS)
         _choice(training, 'param_dtype', ('fp32', 'bf16', 'fp16'))
         _choice(training, 'activation_dtype', ('fp32', 'bfloat16', 'float16'))
         _choice(training, 'kv_cache_dtype', ('fp32', 'bf16', 'fp16', 'fp8_e4m3', 'fp8_e5m2'))
-        _positive(training, ('batch_size', 'max_seq_len'))
+        _positive(training, ('batch_size', 'max_seq_len','prefetch_factor'))
+        if type(training['num_workers']) is not int or training['num_workers']<0:raise ValueError('num_workers must be a nonnegative integer')
+        if type(training['prefetch_factor']) is not int:raise ValueError('prefetch_factor must be an integer')
+        if not isinstance(training['pin_memory'],bool):raise ValueError('pin_memory must be boolean')
         for values, names in ((model, ('head_dim', 'intermediate_size', 'max_position_embeddings',
                                       'num_experts', 'num_experts_per_tok', 'moe_intermediate_size',
                                       'full_attention_interval', 'linear_conv_kernel_dim',

@@ -5,6 +5,7 @@ Backend contract: empty(shape, dtype, zero=False), launch(fn, grid, buffers,
 saved contexts and frees/reuses their buffers; no hidden global activation tape.
 """
 from dataclasses import dataclass
+from .runtime import Scalar
 import triton
 
 from . import attention as attn
@@ -156,33 +157,36 @@ class DenseOps:
                             (gate, up, dy, dg, du), SIZE=gate.numel, BLOCK=256)
         return dg, du
 
-    def attention(self, q, k, v, mask=None):
+    def attention(self, q, k, v, mask=None, dropout=0., seed=0, counter=0):
         if len(q.shape) != 4 or len(k.shape) != 4 or k.shape != v.shape:
             raise ValueError('GQA requires [batch, seq, heads, dim] inputs')
         b, s, hq, d = q.shape
-        if k.shape[:2] != (b, s) or k.shape[3] != d or hq % k.shape[2] or d > 128:
-            raise ValueError('GQA shapes mismatch; head_dim must be <= 128')
+        if k.shape[:2] != (b, s) or k.shape[3] != d or hq % k.shape[2] or d > 256:
+            raise ValueError('GQA shapes mismatch; head_dim must be <= 256')
         if q.dtype != k.dtype or q.dtype != v.dtype or q.dtype not in ('fp32', 'bf16', 'fp16'):
             raise ValueError('attention uses matching FP32/BF16/FP16 inputs')
         if mask is not None and (mask.shape != (b, s) or mask.dtype not in ('i32', 'i64')):
             raise ValueError('attention mask must be integer [batch, seq]')
-        options = dict(SEQ=s, HQ=hq, HKV=k.shape[2], DIM=d, SCALE=d ** -0.5,
+        if not 0 <= dropout < 1:
+            raise ValueError('attention dropout must be in [0, 1)')
+        tile = 16 if d > 128 else 32
+        options = dict(BM=tile, BN=tile, DROPOUT=float(dropout), SEQ=s, HQ=hq, HKV=k.shape[2], DIM=d, SCALE=d ** -0.5,
                        HAS_MASK=mask is not None, BD=max(16, triton.next_power_of_2(d)))
         out, lse = self.empty(q.shape, q.dtype), self.empty((b, hq, s), 'fp32')
         mask = mask if mask is not None else q
-        self.backend.launch(attn.forward, (triton.cdiv(s, 32), b * hq), (q, k, v, mask, out, lse), **options)
-        return out, (q, k, v, mask, out, lse, options)
+        self.backend.launch(attn.forward, (triton.cdiv(s, tile), b * hq), (q, k, v, mask, out, lse, Scalar(seed, 'i32'), Scalar(counter, 'i64')), **options)
+        return out, (q, k, v, mask, out, lse, options, seed, counter)
 
     def attention_backward(self, saved, dy):
-        q, k, v, mask, out, lse, options = saved
+        q, k, v, mask, out, lse, options, seed, counter = saved
         if dy.shape != q.shape or dy.dtype != q.dtype:
             raise ValueError('attention gradient must match its output shape and dtype')
         b, s, hq, _ = q.shape
         dq, dk, dv = [self.empty(x.shape, x.dtype) for x in (q, k, v)]
-        self.backend.launch(attn.backward_q, (triton.cdiv(s, 32), b * hq),
-                            (q, k, v, mask, out, lse, dy, dq), **options)
-        self.backend.launch(attn.backward_kv, (triton.cdiv(s, 32), b * k.shape[2]),
-                            (q, k, v, mask, out, lse, dy, dk, dv), **options)
+        self.backend.launch(attn.backward_q, (triton.cdiv(s, options['BM']), b * hq),
+                            (q, k, v, mask, out, lse, dy, dq, Scalar(seed, 'i32'), Scalar(counter, 'i64')), **options)
+        self.backend.launch(attn.backward_kv, (triton.cdiv(s, options['BN']), b * k.shape[2]),
+                            (q, k, v, mask, out, lse, dy, dk, dv, Scalar(seed, 'i32'), Scalar(counter, 'i64')), **options)
         return dq, dk, dv
 
 

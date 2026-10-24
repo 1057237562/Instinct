@@ -78,6 +78,8 @@ class CudaBackend:
         self._modules = []
         self._cache = {}
         self._context = None
+        self.pin_memory = False
+        self._host_pointer, self._host_capacity = None, 0
         self.stream = None  # Optional explicit stream; default behavior stays unchanged.
 
     def _bind(self, name, types):
@@ -160,7 +162,21 @@ class CudaBackend:
         if values.dtype not in mapping:
             raise ValueError('upload accepts float32/float16/int32/int64; use a cast kernel for BF16')
         result = self.empty(values.shape, mapping[values.dtype])
-        self._htod(result.storage, values.ctypes.data, values.nbytes)
+        if self.pin_memory and values.nbytes <= 16 * 1024 * 1024:
+            # Bound host-locked memory; unusually large weight uploads stay pageable.
+            # Pinned staging is owned by this CUDA context and reused only after
+            # the synchronous HtoD completes. CPU workers can prefetch meanwhile.
+            if self._host_pointer is None or self._host_capacity < values.nbytes:
+                allocate = self._bind('cuMemHostAlloc', [ct.POINTER(ct.c_void_p), ct.c_size_t, ct.c_uint])
+                self._host_free = self._bind('cuMemFreeHost', [ct.c_void_p])
+                pointer = ct.c_void_p()
+                allocate(ct.byref(pointer), values.nbytes, 0)
+                if self._host_pointer is not None: self._host_free(self._host_pointer)
+                self._host_pointer, self._host_capacity = pointer, values.nbytes
+            ct.memmove(self._host_pointer, values.ctypes.data, values.nbytes)
+            self._htod(result.storage, self._host_pointer, values.nbytes)
+        else:
+            self._htod(result.storage, values.ctypes.data, values.nbytes)
         return result
 
     def to_numpy(self, tensor):
@@ -221,6 +237,7 @@ class CudaBackend:
         free, total = ct.c_size_t(), ct.c_size_t()
         self._meminfo(ct.byref(free), ct.byref(total))
         return {'arena_bytes': sum(n for _, n in self._allocations),
+                'host_pinned_bytes': self._host_capacity,
                 'device_free_bytes': free.value, 'device_total_bytes': total.value}
 
     def __exit__(self, exc_type, exc, traceback):
@@ -230,6 +247,10 @@ class CudaBackend:
             self.synchronize()
         except Exception as failure:
             error = failure
+        if self._host_pointer is not None:
+            try: self._host_free(self._host_pointer)
+            except Exception as failure: error = error or failure
+            self._host_pointer, self._host_capacity = None, 0
         for callback, values in [(self._free, [p for p, _ in self._allocations]),
                                  (self._unload, self._modules)]:
             for value in reversed(values):

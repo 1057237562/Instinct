@@ -117,3 +117,20 @@ def test_webui_recovers_native_mode_without_invalid_selectbox_value():
     assert parse('python -u trainer/train_cublas.py --train_type grpo --fp8 auto')=='cublas:grpo'
     assert parse('python trainer/train_full_sft.py --batch_size 4')=='full_sft'
     assert parse('python run_linear.py trainer/train_pretrain.py')=='pretrain'
+
+
+def test_native_resume_discovers_old_pth_and_native_npz(tmp_path):
+    import os
+    repo=tmp_path/'repo';(repo/'scripts').mkdir(parents=True);(repo/'checkpoints').mkdir()
+    pth=repo/'checkpoints'/'pretrain_20260101_8_resume.pth';pth.touch()
+    names={'_latest_checkpoint_prefix','_default_weight_prefix'}
+    nodes=[n for n in SOURCE.body if isinstance(n,ast.FunctionDef) and n.name in names]
+    scope={'os':os,'__file__':str(repo/'scripts'/'config_webui.py'),
+        'st':SimpleNamespace(session_state={'runtime_backend':'cublas'}),'_DEFAULT_WEIGHT_PREFIX':{'pretrain':'pretrain'}}
+    exec(compile(ast.Module(body=nodes,type_ignores=[]),'<checkpoint-discovery>','exec'),scope)
+    discover=scope['_latest_checkpoint_prefix']
+    assert discover('pretrain',8,False)=='pretrain_20260101'
+    native=repo/'checkpoints'/'pretrain_20260102_8_resume.npz';native.touch();os.utime(native,(pth.stat().st_mtime+10,)*2)
+    assert discover('pretrain',8,False)=='pretrain_20260102'
+    scope['st'].session_state['runtime_backend']='pytorch'
+    assert discover('pretrain',8,False)=='pretrain_20260101'

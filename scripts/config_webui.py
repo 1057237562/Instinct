@@ -1176,13 +1176,14 @@ def _latest_checkpoint_prefix(train_type, hidden_size, use_moe, arch_tag=""):
     dim_suffix = f"_{hidden_size}{'_moe' if use_moe else ''}"
     matches = []
     for f in os.listdir(ckpt_dir):
-        extension = "_resume.npz" if st.session_state.get("runtime_backend", "pytorch") == "cublas" else "_resume.pth"
-        if not f.endswith(extension):
+        extensions = ("_resume.npz", "_resume.pth") if st.session_state.get("runtime_backend", "pytorch") == "cublas" else ("_resume.pth",)
+        extension = next((suffix for suffix in extensions if f.endswith(suffix)), None)
+        if extension is None:
             continue
         stem = f[: -len(extension)]
         if stem.endswith(dim_suffix):
             prefix = stem[: -len(dim_suffix)]
-            if prefix.startswith(f"{train_type}_"):
+            if prefix == _default_weight_prefix(train_type) or prefix.startswith(f"{_default_weight_prefix(train_type)}_"):
                 if arch_tag:
                     if not prefix.endswith(arch_tag):
                         continue
@@ -1802,6 +1803,9 @@ with st.sidebar:
         if st.session_state.get("runtime_backend", "pytorch") == "cublas":
             st.selectbox("FP8 projection training", ["auto", "0", "1"], key="native_fp8",
                          help="auto: SM89+ 启用 E4M3 前向/E5M2 反向；SM80/86 使用所选 BF16/FP16/FP32。")
+            st.number_input("Data workers", min_value=0, max_value=32, value=8, key="native_num_workers")
+            st.number_input("Prefetch batches per worker", min_value=1, max_value=8, value=2, key="native_prefetch_factor")
+            st.checkbox("Pinned upload memory", value=True, key="native_pin_memory")
             st.caption("原生路径尚待实卡验收；首次启动会编译 Triton kernels。")
         train_type = st.selectbox(
             "Training type",
@@ -1820,7 +1824,7 @@ with st.sidebar:
                     st.session_state._pending_config_load = json.load(f)
                 st.rerun()
         st.checkbox("Resume from checkpoint (--from_resume)", value=False, key="from_resume",
-                    help="Auto-detect checkpoints/{weight}_{dim}{_moe}_resume.pth (PyTorch) or _resume.npz (cuBLAS)")
+                    help="Auto-detect checkpoints/{weight}_{dim}{_moe}_resume.pth (PyTorch) or _resume.npz (cuBLAS); native backend can also import legacy .pth optimizer/scaler state")
         _weight_files = _available_weight_files()
         _auto_label = "auto (newest matching base)"
         _base_options = ["none (from scratch)", _auto_label] + _weight_files
@@ -1979,7 +1983,10 @@ if st.session_state.get("train_triggered", False):
                     from_weight = os.path.join(os.path.dirname(trainer_dir), from_weight)
                 if native_backend:
                     cmd = [sys.executable, "-u", script_path, "--train_type", train_type,
-                           "--fp8", st.session_state.get("native_fp8", "auto")]
+                           "--fp8", st.session_state.get("native_fp8", "auto"),
+                           "--num_workers", str(st.session_state.get("native_num_workers", 8)),
+                           "--prefetch_factor", str(st.session_state.get("native_prefetch_factor", 2)),
+                           "--pin_memory", "1" if st.session_state.get("native_pin_memory", True) else "0"]
                 elif cfg.get("model_architecture") == "linear":
                     # linear 架构必须经 run_linear.py 的 sys.modules 劫持启动，直接跑 trainer 会静默回退到标准 Transformer
                     runner = os.path.join(os.path.dirname(trainer_dir), "run_linear.py")

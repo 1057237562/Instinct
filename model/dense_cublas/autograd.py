@@ -68,8 +68,8 @@ class Engine:
 
     def array(self, array, dtype=None, requires_grad=False, name=None):
         array = np.asarray(array)
-        if array.dtype.kind == 'f': array = array.astype(np.float32)
-        elif array.dtype.kind in 'biu': array = array.astype(np.int64)
+        if array.dtype.kind == 'f': array = array.astype(np.float32, copy=False)
+        elif array.dtype.kind in 'biu': array = array.astype(np.int64, copy=False)
         if not array.shape: array = array.reshape(1)
         data = self.backend.from_numpy(array)
         if dtype: data = self.ops.cast(data, dtype)
@@ -265,8 +265,12 @@ class Engine:
         return self._node(out, (weight,), backward)
 
     def attention(self, q, k, v, mask=None, dropout=0., training=True, flash=True, start=0):
-        if flash and not (training and dropout) and start == 0 and q.shape[1] == k.shape[1] and q.shape[-1] <= 128:
-            out, saved = self.ops.attention(q.data, k.data, v.data, None if mask is None else mask.data)
+        if flash and start == 0 and q.shape[1] == k.shape[1] and q.shape[-1] <= 256:
+            probability = dropout if training else 0.
+            counter = self.counter
+            if probability: self.counter += q.shape[0] * q.shape[2] * q.shape[1] ** 2
+            out, saved = self.ops.attention(q.data, k.data, v.data, None if mask is None else mask.data,
+                                            dropout=probability, seed=self.seed, counter=counter)
             return self._node(out, (q, k, v), lambda g: self.ops.attention_backward(saved, self.ops.cast(g, q.dtype)))
         b, seq, heads, dim = q.shape
         kv_heads, length = k.shape[2], k.shape[1]

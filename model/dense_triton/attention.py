@@ -1,18 +1,20 @@
-"""Causal GQA with online softmax and recomputed backward, dropout=0.
+"""Causal GQA with online softmax and recomputed backward, deterministic attention dropout.
 
 Layout is [batch, sequence, heads, head_dim], matching Instinct. No repeated
 K/V heads and no [sequence, sequence] saved tensor. KV gradients sum query
 head groups in registers, avoiding atomics. These are correctness-first tiles;
-hardware-specific scheduling/autotuning remains a benchmark-driven follow-up.
+Dropout addresses use a 64-bit logical [batch, head, query, key] counter,
+so masks remain reproducible across tiling/recompute without wrapping at 2**32.
+Hardware-specific scheduling/autotuning remains a benchmark-driven follow-up.
 """
 import triton
 import triton.language as tl
 
 
 @triton.jit
-def forward(Q, K, V, MASK, O, LSE, SEQ: tl.constexpr, HQ: tl.constexpr,
+def forward(Q, K, V, MASK, O, LSE, seed, offset, SEQ: tl.constexpr, HQ: tl.constexpr,
             HKV: tl.constexpr, DIM: tl.constexpr, SCALE: tl.constexpr,
-            HAS_MASK: tl.constexpr, BM: tl.constexpr = 32,
+            HAS_MASK: tl.constexpr, DROPOUT: tl.constexpr = 0., BM: tl.constexpr = 32,
             BN: tl.constexpr = 32, BD: tl.constexpr = 128):
     qh = tl.program_id(1) % HQ
     batch = tl.program_id(1) // HQ
@@ -41,7 +43,13 @@ def forward(Q, K, V, MASK, O, LSE, SEQ: tl.constexpr, HQ: tl.constexpr,
         alpha = tl.exp(maxval - safe_max)
         p = tl.where(allowed, tl.exp(scores - safe_max[:, None]), 0.0)
         acc = acc * alpha[:, None]
-        acc = tl.dot(p.to(q.dtype), v, acc, input_precision="ieee")
+        if DROPOUT > 0.:
+            index = ((batch * HQ + qh) * SEQ + m[:, None]).to(tl.int64) * SEQ + nn[None, :] + offset
+            kept = tl.rand(seed, index) >= DROPOUT
+            pd = tl.where(kept, p / (1. - DROPOUT), 0.)
+        else:
+            pd = p
+        acc = tl.dot(pd.to(q.dtype), v, acc, input_precision="ieee")
         denom = denom * alpha + tl.sum(p, 1)
         maxval = new_max
     out = acc / tl.where(denom > 0, denom, 1.0)[:, None]
@@ -51,9 +59,9 @@ def forward(Q, K, V, MASK, O, LSE, SEQ: tl.constexpr, HQ: tl.constexpr,
 
 
 @triton.jit
-def backward_q(Q, K, V, MASK, O, LSE, DO, DQ, SEQ: tl.constexpr,
+def backward_q(Q, K, V, MASK, O, LSE, DO, DQ, seed, offset, SEQ: tl.constexpr,
                HQ: tl.constexpr, HKV: tl.constexpr, DIM: tl.constexpr,
-               SCALE: tl.constexpr, HAS_MASK: tl.constexpr,
+               SCALE: tl.constexpr, HAS_MASK: tl.constexpr, DROPOUT: tl.constexpr = 0.,
                BM: tl.constexpr = 32, BN: tl.constexpr = 32, BD: tl.constexpr = 128):
     qh = tl.program_id(1) % HQ
     batch = tl.program_id(1) // HQ
@@ -82,15 +90,19 @@ def backward_q(Q, K, V, MASK, O, LSE, DO, DQ, SEQ: tl.constexpr,
         scores = tl.dot(q, k, input_precision="ieee") * SCALE
         p = tl.where(allowed, tl.exp(scores - lse[:, None]), 0.0)
         dp = tl.dot(do, v, input_precision="ieee")
+        if DROPOUT > 0.:
+            index = ((batch * HQ + qh) * SEQ + m[:, None]).to(tl.int64) * SEQ + nn[None, :] + offset
+            kept = tl.rand(seed, index) >= DROPOUT
+            dp = tl.where(kept, dp / (1. - DROPOUT), 0.)
         ds = (p * (dp - delta[:, None]) * SCALE).to(q.dtype)
         dq = tl.dot(ds, tl.trans(k), dq, input_precision="ieee")
     tl.store(DQ + qo, dq, mask)
 
 
 @triton.jit
-def backward_kv(Q, K, V, MASK, O, LSE, DO, DK, DV, SEQ: tl.constexpr,
+def backward_kv(Q, K, V, MASK, O, LSE, DO, DK, DV, seed, offset, SEQ: tl.constexpr,
                 HQ: tl.constexpr, HKV: tl.constexpr, DIM: tl.constexpr,
-                SCALE: tl.constexpr, HAS_MASK: tl.constexpr,
+                SCALE: tl.constexpr, HAS_MASK: tl.constexpr, DROPOUT: tl.constexpr = 0.,
                 BM: tl.constexpr = 32, BN: tl.constexpr = 32, BD: tl.constexpr = 128):
     kh = tl.program_id(1) % HKV
     batch = tl.program_id(1) // HKV
@@ -122,8 +134,15 @@ def backward_kv(Q, K, V, MASK, O, LSE, DO, DK, DV, SEQ: tl.constexpr,
             scores = tl.dot(q, tl.trans(k), input_precision="ieee") * SCALE
             p = tl.where(allowed, tl.exp(scores - lse[:, None]), 0.0)
             dp = tl.dot(do, tl.trans(v), input_precision="ieee")
+            if DROPOUT > 0.:
+                index = ((batch * HQ + qh) * SEQ + mm[:, None]).to(tl.int64) * SEQ + n[None, :] + offset
+                kept = tl.rand(seed, index) >= DROPOUT
+                dp = tl.where(kept, dp / (1. - DROPOUT), 0.)
+                pd = tl.where(kept, p / (1. - DROPOUT), 0.)
+            else:
+                pd = p
             ds = (p * (dp - delta[:, None]) * SCALE).to(q.dtype)
             dk = tl.dot(tl.trans(ds), q, dk, input_precision="ieee")
-            dv = tl.dot(tl.trans(p.to(q.dtype)), do, dv, input_precision="ieee")
+            dv = tl.dot(tl.trans(pd.to(q.dtype)), do, dv, input_precision="ieee")
     tl.store(DK + ko, dk, kmask)
     tl.store(DV + ko, dv, kmask)

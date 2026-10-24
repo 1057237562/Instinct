@@ -16,7 +16,8 @@ SYSTEM_PROMPTS=[
 
 class Tokenizer:
     def __init__(self,path='./model'):
-        path=Path(path);self.raw=RustTokenizer.from_file(str(path/'tokenizer.json'))
+        self.path=str(Path(path).resolve())
+        path=Path(self.path);self.raw=RustTokenizer.from_file(str(path/'tokenizer.json'))
         self.config=json.loads((path/'tokenizer_config.json').read_text(encoding='utf-8'))
         def token(key):
             t=self.config[key];return t['content'] if isinstance(t,dict) else t
@@ -27,6 +28,10 @@ class Tokenizer:
         env.globals['raise_exception']=lambda message:(_ for _ in ()).throw(ValueError(message))
         self.template=env.from_string(self.config['chat_template'])
         self.assistant=self.encode(self.bos_token+'assistant\n');self.terminator=self.encode(self.eos_token+'\n')
+
+    def __reduce__(self):
+        # Recreate the Jinja environment in spawned workers (lambdas are not picklable).
+        return type(self), (self.path,)
 
     def encode(self,text):return self.raw.encode(text,add_special_tokens=False).ids
     def decode(self,ids,skip_special_tokens=False):return self.raw.decode([int(x) for x in ids],skip_special_tokens=skip_special_tokens)

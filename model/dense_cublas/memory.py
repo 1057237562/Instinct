@@ -9,8 +9,9 @@ import triton
 
 
 class TrainingBackend(CublasBackend):
-    def __init__(self, *args, pool_limit_mib=256, **kwargs):
+    def __init__(self, *args, pool_limit_mib=256, pin_memory=True, **kwargs):
         super().__init__(*args, **kwargs)
+        self.pin_memory = pin_memory
         self._pool, self._live, self._serial = {}, {}, 0
         self._pool_bytes = 0
         self.pool_limit = int(pool_limit_mib * 1024 * 1024)

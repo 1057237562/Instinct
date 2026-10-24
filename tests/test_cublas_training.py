@@ -221,7 +221,7 @@ def test_end_to_end_native_trainer_modes(tmp_path,mode):
     messages=[{'role':'user','content':'a'},{'role':'assistant','content':'bc'}]
     row={'text':'abc','conversations':messages,'chosen':messages,'rejected':[messages[0],{'role':'assistant','content':'de'}],'gt':[]}
     data=tmp_path/'data.jsonl';data.write_text(json.dumps(row)+'\n'+json.dumps(row)+'\n')
-    argv=['--train_type',mode,'--config_path',str(config_path),'--data_path',str(data),'--from_weight',str(base_path),
+    argv=['--num_workers','0','--train_type',mode,'--config_path',str(config_path),'--data_path',str(data),'--from_weight',str(base_path),
         '--dtype','fp32','--fp8','0','--batch_size','1','--max_seq_len','5','--accumulation_steps','2',
         '--max_gen_len','2','--max_total_len','8','--num_generations','2','--ppo_update_iters','1','--mini_batch_size','1',
         '--save_dir',str(tmp_path/'out'),'--checkpoint_dir',str(tmp_path/'checkpoints'),'--max_steps','1']

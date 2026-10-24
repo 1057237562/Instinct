@@ -25,6 +25,8 @@ class Optimizer:
         self.betas,self.eps,self.momentum,self.ns_steps=betas,eps,momentum,ns_steps
         self.scale=65536. if loss_scaling else 1.;self.loss_scaling=loss_scaling
         self.good_steps,self.updates,self.accumulated=0,0,0
+        self.growth_factor,self.backoff_factor,self.growth_interval=2.,.5,2000
+        self.param_options,self.scheduler={},None
         self.present=set();self.state={};self.gradients={}
         for p in self.parameters:
             self.gradients[p]=engine.full(p.shape,0.)
@@ -56,7 +58,7 @@ class Optimizer:
 
     def step(self,lr=None):
         if not self.accumulated:return {'updated':False,'grad_norm':0.}
-        e=self.e;lr=self.lr if lr is None else lr
+        e=self.e;requested_lr=lr;lr=self.lr if lr is None else lr
         mark=e.backend.mark()
         with e.no_grad():
             divisor=1./(self.scale*self.accumulated)
@@ -64,7 +66,7 @@ class Optimizer:
             squares=sum((self.gradients[p]*divisor*self.gradients[p]*divisor).sum() for p in self.present)
             norm=math.sqrt(max(e.item(squares),0.)) if self.present else 0.
             if not math.isfinite(norm):
-                if self.loss_scaling:self.scale=max(self.scale/2.,1.);self.good_steps=0
+                if self.loss_scaling:self.scale=self.scale*self.backoff_factor;self.good_steps=0
                 self.zero_grad();e.backend.release_since(mark)
                 return {'updated':False,'grad_norm':norm,'loss_scale':self.scale}
             scale=divisor*min(1.,self.grad_clip/(norm+1.e-6)) if self.grad_clip>0 else divisor
@@ -72,13 +74,20 @@ class Optimizer:
                 if p not in self.present:continue
                 local=e.backend.mark();state=self.state[p];state['step']+=1;t=state['step']
                 grad=self.gradients[p];w=p.cast('fp32')
+                options=self.param_options.get(p.name,{})
+                decay=options.get('weight_decay',self.weight_decay)
+                rate_lr=options.get('lr',lr) if requested_lr is None else lr
+                if self.scheduler:
+                    rate_lr=self.scheduler['_last_lr'][options.get('group',0)]
+                local_scale=-scale if options.get('maximize',False) else scale
                 if 'm' in state:
-                    b1,b2=self.betas
-                    args=(p.data,grad.data,state['m'].data,state['v'].data)+tuple(Scalar(v) for v in (lr,self.weight_decay,b1,b2,1.-b1**t,1.-b2**t,self.eps,scale))
+                    b1,b2=options.get('betas',self.betas)
+                    args=(p.data,grad.data,state['m'].data,state['v'].data)+tuple(Scalar(v) for v in (rate_lr,decay,b1,b2,1.-b1**t,1.-b2**t,options.get('eps',self.eps),local_scale))
                     e.backend.launch(adamw_update,(triton.cdiv(p.size,256),),args,N=p.size)
                 elif self.kind=='adafactor':
-                    g=grad*scale;square=g*g;rate=t**-.8
-                    eps1={'fp32':2**-23,'fp16':2**-10,'bf16':2**-7}[p.dtype]
+                    g=grad*local_scale;square=g*g;rate=t**options.get('beta2_decay',-.8)
+                    eps1,eps2=options.get('eps',(None,1.e-3))
+                    if eps1 is None:eps1={'fp32':2**-23,'fp16':2**-10,'bf16':2**-7}[p.dtype]
                     if 'row' in state:
                         row,col=state['row'],state['col']
                         e.copy(row,row*(1.-rate)+square.mean(-1,True)*rate)
@@ -87,29 +96,60 @@ class Optimizer:
                     else:
                         variance=state['variance'];e.copy(variance,variance*(1.-rate)+square*rate)
                     update=g*e.binary(variance,eps1*eps1,'max').rsqrt()
-                    denom=e.binary((update*update).mean().sqrt(),1.,'max')
-                    alpha=e.binary((w*w).mean().sqrt(),1.e-3,'max')*min(lr,t**-.5)
-                    e.copy(p,w*(1.-lr*self.weight_decay)-update*alpha/denom)
+                    denom=e.binary((update*update).mean().sqrt()/options.get('d',1.),1.,'max')
+                    alpha=e.binary((w*w).mean().sqrt(),eps2,'max')*min(rate_lr,t**-.5)
+                    e.copy(p,w*(1.-rate_lr*decay)-update*alpha/denom)
                 else:
-                    g=grad*scale;buf=state['momentum'];e.copy(buf,buf*self.momentum+g)
-                    g=g+buf*self.momentum
+                    g=grad*local_scale;buf=state['momentum']
+                    momentum=options.get('momentum',self.momentum)
+                    nesterov=options.get('nesterov',True)
+                    native_muon=options.get('variant')=='torch_muon'
+                    if native_muon:
+                        e.copy(buf,buf*momentum+g*(1.-momentum))
+                        g=g*(1.-momentum)+buf*momentum if nesterov else buf
+                        g=g.cast('bf16')
+                    elif momentum:
+                        e.copy(buf,buf*momentum+g)
+                        g=g+buf*momentum if nesterov else buf
                     transpose=g.shape[0]>g.shape[1]
                     z=g.T if transpose else g
-                    z=z/((z*z).sum().sqrt()+1.e-7)
-                    for _ in range(self.ns_steps):
-                        a=z@z.T;b=a*(-4.775)+a@a*2.0315;z=z*3.4445+b@z
+                    norm=(z.cast('fp32')*z.cast('fp32')).sum().sqrt()
+                    if native_muon:
+                        # torch.optim.Muon normalizes and iterates in BF16.
+                        norm=e.binary(norm.cast('bf16'),options.get('eps',1.e-7),'max')
+                        z=(z/norm).cast('bf16')
+                    else:z=z/(norm+1.e-7)
+                    ca,cb,cc=options.get('ns_coefficients',(3.4445,-4.775,2.0315))
+                    for _ in range(options.get('ns_steps',self.ns_steps)):
+                        a=z@z.T
+                        if native_muon:
+                            # addmm scales/sums in FP32 before the output BF16 cast.
+                            b=(a.cast('fp32')*cb+(a.cast('fp32')@a.cast('fp32'))*cc).cast('bf16')
+                            z=(z.cast('fp32')*ca+(b.cast('fp32')@z.cast('fp32'))).cast('bf16')
+                        else:
+                            b=a*cb+a@a*cc;z=z*ca+b@z
                     if transpose:z=z.T
-                    # Matches trainer_utils.MuonFallback's weight_decay scaling.
-                    e.copy(p,(w-z*(lr*self.weight_decay))*(1.-lr*self.weight_decay))
+                    if native_muon:
+                        adjust=options.get('adjust_lr_fn')
+                        factor=.2*math.sqrt(max(p.shape)) if adjust=='match_rms_adamw' else math.sqrt(max(1.,p.shape[0]/p.shape[1]))
+                        e.copy(p,w*(1.-rate_lr*decay)-z.cast('fp32')*(rate_lr*factor))
+                    else:
+                        factor=1. if options.get('orthogonalize_scale','weight_decay')=='lr' else decay
+                        e.copy(p,(w-z*(rate_lr*factor))*(1.-rate_lr*decay))
                 e.backend.release_since(local)
             self.updates+=1;self.good_steps+=1
-            if self.loss_scaling and self.good_steps%2000==0:self.scale=min(self.scale*2.,2.**24)
+            if self.loss_scaling and self.good_steps%self.growth_interval==0:self.scale*=self.growth_factor
+            if self.scheduler:
+                sched=self.scheduler;sched['last_epoch']+=1
+                sched['_step_count']=sched.get('_step_count',0)+1
+                sched['_last_lr']=[sched['eta_min']+(base-sched['eta_min'])*(1.+math.cos(math.pi*sched['last_epoch']/sched['T_max']))/2. for base in sched['base_lrs']]
+                for options in self.param_options.values():options['lr']=sched['_last_lr'][options.get('group',0)]
             self.zero_grad()
         e.backend.release_since(mark)
         return {'updated':True,'grad_norm':norm,'loss_scale':self.scale}
 
     def metadata(self):
-        return {k:getattr(self,k) for k in ('kind','lr','weight_decay','grad_clip','betas','eps','momentum','ns_steps','scale','loss_scaling','good_steps','updates','accumulated')}
+        return {k:getattr(self,k) for k in ('kind','lr','weight_decay','grad_clip','betas','eps','momentum','ns_steps','scale','loss_scaling','good_steps','updates','accumulated','growth_factor','backoff_factor','growth_interval','param_options','scheduler')}
 
 
 def cosine_lr(step,total,maximum):

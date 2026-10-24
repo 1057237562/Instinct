@@ -26,7 +26,7 @@ def run(args):
     from model.dense_cublas.optim import Optimizer
     from model.dense_cublas import checkpoint
     config=dict(hidden_size=32,num_hidden_layers=2,vocab_size=67,num_attention_heads=2,num_key_value_heads=1,
-        head_dim=16,intermediate_size=48,max_position_embeddings=128,flash_attn=bool(args.flash_attn),
+        head_dim=args.head_dim,intermediate_size=48,max_position_embeddings=128,flash_attn=bool(args.flash_attn),
         model_architecture=args.architecture,use_grad_checkpoint=args.checkpoint,dropout=args.dropout,
         num_experts=3,num_experts_per_tok=2,moe_intermediate_size=48,full_attention_interval=2,
         linear_key_head_dim=16,linear_value_head_dim=16,linear_num_key_heads=1,linear_num_value_heads=2,
@@ -98,11 +98,13 @@ if __name__=='__main__':
     p.add_argument('--optimizer',choices=['adamw','adafactor','muon'],default='adamw')
     p.add_argument('--checkpoint',type=int,choices=[0,1,2],default=0);p.add_argument('--dropout',type=float,default=0.)
     p.add_argument('--kv_cache_dtype',choices=['fp32','bf16','fp16','fp8_e4m3','fp8_e5m2'],default='fp32')
+    p.add_argument('--head_dim',type=int,default=16)
     p.add_argument('--flash_attn',type=int,choices=[0,1],default=1);p.add_argument('--steps',type=int,default=5)
     p.add_argument('--workspace_mib',type=int,default=32);p.add_argument('--allocator_cache_mib',type=int,default=256)
     p.add_argument('--reference',action='store_true',help='compare initial logits/loss/gradients with an isolated CPU PyTorch process')
     p.add_argument('--atol',type=float,default=3e-4);p.add_argument('--rtol',type=float,default=3e-3)
     p.add_argument('--overlap_dw',action='store_true');p.add_argument('--tune',action='store_true')
     args=p.parse_args()
+    if args.head_dim<2 or args.head_dim%2:p.error('head_dim must be positive and even')
     if args.steps<2:p.error('at least two steps are needed for memory checks')
     print(json.dumps(run(args),indent=2))
