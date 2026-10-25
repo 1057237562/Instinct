@@ -25,18 +25,26 @@ def run(arch):
                 compile(g.grouped_mm,[a,dtype,'fp32','i32',scale,scale],N=96,K=160,TRANSPOSE_W=transpose,FP8=fp8)
         compile(g.grouped_dw,[dtype,'fp8e5' if fp8 else dtype,'fp32','i32',scale,scale],N=96,K=160,FP8=fp8)
     for dtype in ('bf16','fp16'):
+        compile(g.grouped_mm,[dtype,dtype,dtype,'i32',dtype,dtype],N=2432,K=768,FP8=False,BM=64,BN=64)
+        compile(g.grouped_mm,[dtype,dtype,dtype,'i32',dtype,dtype],N=768,K=2432,TRANSPOSE_W=True,FP8=False,BM=64,BN=64)
+        compile(g.grouped_dw,[dtype,dtype,'fp32','i32',dtype,dtype],N=2432,K=768,FP8=False,BN=32,BK=64)
+        compile(g.grouped_mm,['fp8e4nv','fp8e4nv',dtype,'i32','fp32','fp32'],N=2432,K=768,FP8=True,BM=64,BN=64)
+        compile(g.grouped_mm,['fp8e5','fp8e4nv',dtype,'i32','fp32','fp32'],N=768,K=2432,TRANSPOSE_W=True,FP8=True,BM=64,BN=64)
+        compile(g.grouped_dw,['fp8e4nv','fp8e5','fp32','i32','fp32','fp32'],N=2432,K=768,FP8=True,BN=32,BK=64)
         compile(g.grouped_mm,['fp8e4nv','fp8e4nv',dtype,'i32','fp32','fp32'],N=96,K=160,FP8=True)
         compile(g.grouped_mm,['fp8e5','fp8e4nv',dtype,'i32','fp32','fp32'],N=160,K=96,TRANSPOSE_W=True,FP8=True)
         compile(g.grouped_dw,['fp8e4nv','fp8e5',dtype,'i32','fp32','fp32'],N=96,K=160,FP8=True)
     for dtype in ('fp32','bf16','fp16'):
         for weights in (False,True):
+            compile(g.expert_amax_partials,[dtype,'i32','fp32'],WIDTH=768,ROWS=2048,WEIGHTS=weights,TILES=1536)
             for gradient in (False,True):
                 compile(g.expert_scale,[dtype,'i32','fp32'],WIDTH=96,ROWS=160,WEIGHTS=weights,LIMIT=57344. if gradient else 448.)
                 compile(g.expert_quantize,[dtype,'fp8e5' if gradient else 'fp8e4nv','i32','fp32'],WIDTH=96,ROWS=160,WEIGHTS=weights)
         compile(s.adamw,[dtype,'fp32','fp32','fp32','i64','fp32','fp32'],INDEX=0,N=513,Decay=.01,B1=.9,B2=.999,Eps=1e-8)
     compile(s.accumulate,['fp32']*3,N=513)
     compile(s.statistics,['fp32','fp32','i64','fp32'],Clip=1.,Accumulation=8,LossScaling=True,Growth=2.,Backoff=.5,Interval=2000)
-    compile(s.advance_one,['i64','fp32'],INDEX=0)
+    compile(s.advance_steps,['i64','fp32','i64'],N=200)
+    compile(g.expert_amax_finish,['fp32','fp32'],TILES=1536,LIMIT=448.)
     assert 'torch' not in sys.modules
     return dict(arch=arch,specializations=len(results),max_shared_bytes=max(x['shared'] for x in results),torch_imported=False)
 

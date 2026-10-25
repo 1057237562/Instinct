@@ -52,7 +52,7 @@ struct Plan {
 
 API const char* instinct_lt_error() { return error.c_str(); }
 API uint64_t instinct_lt_version() { return cublasLtGetVersion(); }
-API int instinct_lt_abi() { return 1; }
+API int instinct_lt_abi() { return 2; }
 
 API int instinct_lt_create(void** out) {
     GUARD_BEGIN
@@ -70,11 +70,11 @@ API int instinct_lt_destroy(void* handle) {
     GUARD_END
 }
 
-// Always column-major TN: op(A)[m,k] @ B[k,n] -> C[m,n]. All leading
-// dimensions are natural; Python prepares/transposes/pads the logical tensors.
+// Column-major op(A)[m,k] @ op(B)[k,n] -> C[m,n]. High-precision inputs
+// use natural leading dimensions directly; FP8 uses explicitly packed TN.
 API int instinct_lt_plan(void* handle, int64_t m, int64_t n, int64_t k,
                          int a_type, int b_type, int out_type, uint64_t workspace,
-                         int max_candidates, int sm_target, void** out) {
+                         int max_candidates, int sm_target, int transpose_a, int transpose_b, void** out) {
     GUARD_BEGIN
     if (!out || !handle || m <= 0 || n <= 0 || k <= 0 || max_candidates < 1 || max_candidates > 64)
         throw std::invalid_argument("invalid matmul plan arguments");
@@ -86,9 +86,14 @@ API int instinct_lt_plan(void* handle, int64_t m, int64_t n, int64_t k,
         throw std::invalid_argument("FP8 requires E4M3/E4M3 or E4M3/E5M2 operands");
     if (out_type < 0 || out_type > 2)
         throw std::invalid_argument("output must be FP32/BF16/FP16");
+    if ((transpose_a != 0 && transpose_a != 1) || (transpose_b != 0 && transpose_b != 1))
+        throw std::invalid_argument("transpose flags must be zero or one");
+    if (plan->fp8 && (!transpose_a || transpose_b))
+        throw std::invalid_argument("FP8 requires column-major TN");
     auto compute = a_type == 0 && b_type == 0 ? CUBLAS_COMPUTE_32F_PEDANTIC : CUBLAS_COMPUTE_32F;
     LT(cublasLtMatmulDescCreate(&plan->operation, compute, CUDA_R_32F));
-    cublasOperation_t transa = CUBLAS_OP_T, transb = CUBLAS_OP_N;
+    cublasOperation_t transa = transpose_a ? CUBLAS_OP_T : CUBLAS_OP_N;
+    cublasOperation_t transb = transpose_b ? CUBLAS_OP_T : CUBLAS_OP_N;
     LT(cublasLtMatmulDescSetAttribute(plan->operation, CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(transa)));
     LT(cublasLtMatmulDescSetAttribute(plan->operation, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(transb)));
     if (plan->fp8) {
@@ -97,8 +102,10 @@ API int instinct_lt_plan(void* handle, int64_t m, int64_t n, int64_t k,
     }
     if (sm_target > 0)
         LT(cublasLtMatmulDescSetAttribute(plan->operation, CUBLASLT_MATMUL_DESC_SM_COUNT_TARGET, &sm_target, sizeof(sm_target)));
-    LT(cublasLtMatrixLayoutCreate(&plan->a, dtype(a_type), k, m, k));
-    LT(cublasLtMatrixLayoutCreate(&plan->b, dtype(b_type), k, n, k));
+    const int64_t ar = transpose_a ? k : m, ac = transpose_a ? m : k;
+    const int64_t br = transpose_b ? n : k, bc = transpose_b ? k : n;
+    LT(cublasLtMatrixLayoutCreate(&plan->a, dtype(a_type), ar, ac, ar));
+    LT(cublasLtMatrixLayoutCreate(&plan->b, dtype(b_type), br, bc, br));
     LT(cublasLtMatrixLayoutCreate(&plan->c, dtype(out_type), m, n, m));
     LT(cublasLtMatmulPreferenceCreate(&plan->preference));
     size_t limit = static_cast<size_t>(workspace);

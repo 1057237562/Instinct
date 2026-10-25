@@ -46,6 +46,62 @@ def binary(A, B, OUT, SHAPE: tl.constexpr, AS: tl.constexpr, BS: tl.constexpr,
 
 
 @triton.jit
+def binary_scalar(A, OUT, value, N: tl.constexpr, OP: tl.constexpr, BLOCK: tl.constexpr = 256):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    a = tl.load(A + i, i < N, 0).to(tl.float32)
+    if OP == 'add': y = a + value
+    elif OP == 'mul': y = a * value
+    elif OP == 'div': y = a / value
+    elif OP == 'max': y = tl.maximum(a, value)
+    elif OP == 'min': y = tl.minimum(a, value)
+    elif OP == 'gt': y = a > value
+    elif OP == 'ge': y = a >= value
+    elif OP == 'eq': y = a == value
+    tl.store(OUT + i, y, i < N)
+
+
+@triton.jit
+def scalar_extreme_backward(A, G, OUT, value, N: tl.constexpr, MAXIMUM: tl.constexpr, BLOCK: tl.constexpr = 256):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    a = tl.load(A + i, i < N, 0).to(tl.float32)
+    g = tl.load(G + i, i < N, 0).to(tl.float32)
+    active = a > value if MAXIMUM else a < value
+    tl.store(OUT + i, g * (active.to(tl.float32) + (a == value).to(tl.float32) * .5), i < N)
+
+
+@triton.jit
+def squared_norm_partials(G, OUT, Scale, scale, N: tl.constexpr, OFFSET: tl.constexpr,
+                          DEVICE_SCALE: tl.constexpr, BLOCK: tl.constexpr = 1024):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    if DEVICE_SCALE: scale = tl.load(Scale)
+    g = tl.load(G + i, i < N, 0).to(tl.float32) * scale
+    tl.store(OUT + OFFSET + tl.program_id(0), tl.sum(g * g, 0))
+
+
+@triton.jit
+def sum_partials(X, OUT, N: tl.constexpr, BLOCK: tl.constexpr = 1024):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    tl.store(OUT + tl.program_id(0), tl.sum(tl.load(X + i, i < N, 0.).to(tl.float32), 0))
+
+
+@triton.jit
+def cross_entropy_recompute(Logits, Labels, Losses, Valid, DY, G, Denom,
+                            VOCAB: tl.constexpr, BLOCK: tl.constexpr, BACKWARD: tl.constexpr):
+    row=tl.program_id(0);col=tl.arange(0,BLOCK)
+    label=tl.load(Labels+row);valid=(label>=0)&(label<VOCAB)
+    x=tl.load(Logits+row*VOCAB+col,col<VOCAB,-float('inf')).to(tl.float32)
+    maximum=tl.max(x,0);exponent=tl.exp(x-maximum);total=tl.sum(exponent,0)
+    if BACKWARD:
+        scale=tl.load(G)/tl.maximum(tl.load(Denom),1.)
+        grad=tl.where(valid,(exponent/total-(col==label).to(tl.float32))*scale,0.)
+        tl.store(DY+row*VOCAB+col,grad,col<VOCAB)
+    else:
+        target=tl.sum(tl.where(col==label,x,0.),0)
+        tl.store(Losses+row,tl.where(valid,maximum+tl.log(total)-target,0.))
+        tl.store(Valid+row,valid.to(tl.float32))
+
+
+@triton.jit
 def unary(X, OUT, N: tl.constexpr, OP: tl.constexpr, BLOCK: tl.constexpr = 256):
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     x = tl.load(X + i, i < N, 0).to(tl.float32)

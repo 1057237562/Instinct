@@ -123,7 +123,19 @@ class Engine:
 
     def binary(self, a, b, op):
         scalar = not isinstance(b, Value)
-        if scalar: b = self.full((1,), b)
+        if scalar:
+            dtype = 'fp32' if op in ('gt', 'ge', 'eq') else a.dtype
+            out = self.backend.empty(a.shape, dtype)
+            self.backend.launch(tk.binary_scalar, (triton.cdiv(a.size, 256),),
+                                (a.data, out, Scalar(float(b))), N=a.size, OP=op)
+            def backward(g):
+                if op == 'add': return (g,)
+                if op in ('mul', 'div'): return (self.binary(self.wrap(g), b, op).data,)
+                dx = self.backend.empty(a.shape, 'fp32')
+                self.backend.launch(tk.scalar_extreme_backward, (triton.cdiv(a.size, 256),),
+                                    (a.data, g, dx, Scalar(float(b))), N=a.size, MAXIMUM=op == 'max')
+                return (dx,)
+            return self.wrap(out) if op in ('gt', 'ge', 'eq') else self._node(out, (a,), backward)
         shape = tuple(np.broadcast_shapes(a.shape, b.shape))
         dtype = a.dtype if scalar or a.dtype == b.dtype else 'fp32'
         if op in ('gt', 'ge', 'eq'): dtype = 'fp32'
@@ -132,16 +144,40 @@ class Engine:
             SHAPE=shape, AS=self._broadcast_strides(a.shape, shape), BS=self._broadcast_strides(b.shape, shape), N=out.numel, OP=op)
         def backward(g):
             g = self.wrap(g)
-            if op == 'add': ga, gb = g, g
-            elif op == 'mul': ga, gb = g * b, g * a
-            elif op == 'div': ga, gb = g / b, -g * a / (b * b)
+            need_a, need_b = a.requires_grad, b.requires_grad
+            if op == 'add': ga, gb = (g if need_a else None), (g if need_b else None)
+            elif op == 'mul': ga, gb = (g * b if need_a else None), (g * a if need_b else None)
+            elif op == 'div': ga, gb = (g / b if need_a else None), (-g * a / (b * b) if need_b else None)
             elif op in ('min', 'max'):
                 cmp = self.binary(a, b, 'gt') if op == 'max' else self.binary(b, a, 'gt')
                 part = cmp + self.binary(a, b, 'eq') * 0.5
-                ga, gb = g * part, g * (1. - part)
+                ga, gb = (g * part if need_a else None), (g * (1. - part) if need_b else None)
             else: return None, None
-            return self.sum_to(ga, a.shape).data, self.sum_to(gb, b.shape).data
+            return (None if ga is None else self.sum_to(ga, a.shape).data,
+                    None if gb is None else self.sum_to(gb, b.shape).data)
         return self.wrap(out) if op in ('gt', 'ge', 'eq') else self._node(out, (a, b), backward)
+
+    def squared_norm(self, values, scale=1.):
+        """Optimizer-only reduction: O(N/1024) scratch, no full-size products."""
+        values = list(values)
+        if not values: return self.full((1,), 0.)
+        sizes = [triton.cdiv(x.size, 1024) for x in values]
+        partials = self.backend.empty((sum(sizes),), 'fp32')
+        device_scale = isinstance(scale, Value)
+        scale_data = scale.data if device_scale else values[0].data
+        offset = 0
+        for value, blocks in zip(values, sizes):
+            self.backend.launch(tk.squared_norm_partials, (blocks,),
+                (value.data, partials, scale_data, Scalar(1. if device_scale else scale)),
+                N=value.size, OFFSET=offset, DEVICE_SCALE=device_scale)
+            offset += blocks
+        # A single CTA scanning ~200k partials becomes another serial tail.
+        # Reduce hierarchically so every CTA reads at most 1024 elements.
+        while partials.numel > 1:
+            reduced = self.backend.empty((triton.cdiv(partials.numel, 1024),), 'fp32')
+            self.backend.launch(tk.sum_partials, (reduced.numel,), (partials, reduced), N=partials.numel)
+            partials = reduced
+        return self.wrap(partials)
 
     def unary(self, x, op):
         out = self.backend.empty(x.shape, x.dtype)
@@ -164,7 +200,11 @@ class Engine:
             data = self.backend.empty(tuple(shape), 'fp32')
             self.backend.launch(tk.reduce_axis, (m * k,), (current.data, data), M=m, N=n, K=k, OP=op)
             def backward(g, src=current, reduced=data, axis=a):
-                gradient = self.full(src.shape, 1.) * self.wrap(g)
+                dx = self.backend.empty(src.shape, 'fp32')
+                ss = list(strides(reduced.shape)); ss[axis] = 0
+                self.backend.launch(tk.strided_copy, (triton.cdiv(src.size, 256),), (g, dx),
+                                    SHAPE=src.shape, STRIDES=tuple(ss), OFFSET=0, N=src.size)
+                gradient = self.wrap(dx)
                 if op == 'max':
                     equal = self.binary(src, self.wrap(reduced), 'eq')
                     gradient = gradient * equal / equal.sum(axis, True)
@@ -210,11 +250,11 @@ class Engine:
             else: raise TypeError('only slices and integer indices are supported')
         return self._mapped(x, shape or (1,), ss or (0,), offset)
 
-    def cat(self, values, axis=0):
+    def cat(self, values, axis=0, dtype=None):
         shape = list(values[0].shape)
         axis %= len(shape)
         shape[axis] = sum(x.shape[axis] for x in values)
-        out = self.backend.empty(tuple(shape), values[0].dtype)
+        out = self.backend.empty(tuple(shape), dtype or values[0].dtype)
         starts, start = [], 0
         for x in values:
             if any(d != shape[i] for i, d in enumerate(x.shape) if i != axis): raise ValueError('cat dimensions mismatch')
@@ -380,8 +420,20 @@ class Engine:
     def log_probs(self, logits, labels): return self.gather_last(self.softmax(logits, log=True), labels)
 
     def ce(self, logits, labels):
-        valid = self.binary(labels, 0., 'ge') * self.binary(self.full((1,), logits.shape[-1]), labels, 'gt')
-        return -(self.log_probs(logits, labels) * valid).sum() / self.binary(valid.sum(), 1., 'max')
+        rows,vocab=labels.size,logits.shape[-1]
+        if logits.size!=rows*vocab:raise ValueError('CE labels/logits shape mismatch')
+        losses=self.backend.empty((rows,),'fp32');counts=self.backend.empty((rows,),'fp32')
+        options=dict(VOCAB=vocab,BLOCK=triton.next_power_of_2(vocab))
+        self.backend.launch(tk.cross_entropy_recompute,(rows,),
+            (logits.data,labels.data,losses,counts,logits.data,losses,counts),BACKWARD=False,**options)
+        denom=self.wrap(counts).sum()
+        loss=self.wrap(losses).sum()/self.binary(denom,1.,'max')
+        def backward(g):
+            dx=self.backend.empty(logits.shape,'fp32')
+            self.backend.launch(tk.cross_entropy_recompute,(rows,),
+                (logits.data,labels.data,losses,counts,dx,g,denom.data),BACKWARD=True,**options)
+            return (dx,)
+        return self._node(loss.data,(logits,),backward)
 
     def dropout(self, x, probability, training=True):
         if not training or probability == 0: return x
@@ -402,8 +454,12 @@ class Engine:
             WIDTH=x.shape[-1], TOPK=k, BLOCK=triton.next_power_of_2(x.shape[-1]))
         return self.wrap(out)
 
-    def vjp(self, output, gradient=None, inputs=None):
+    def vjp(self, output, gradient=None, inputs=None, leaf_callback=None):
         """Reverse traversal, accumulating tied/shared parameters exactly once."""
+        mark=self.backend.mark()
+        recycle=(getattr(self.backend,'recycle_vjp',False)
+                 and self.backend.weight_stream==self.backend.main_stream)
+        requested=set(inputs or ());finished={}
         ordered, seen, stack = [], set(), [(output, False)]
         while stack:
             node, expanded = stack.pop()
@@ -412,6 +468,17 @@ class Engine:
             seen.add(node); stack.append((node, True))
             if node.node:
                 stack.extend((p, False) for p in node.node[0] if p.requires_grad)
+        # A DFS leaf can appear very late in reverse order despite its last
+        # actual consumer being finished. Drain leaf gradients at last use,
+        # rather than retaining every layer's expert dW until traversal ends.
+        early_consume=leaf_callback is not None and self.backend.weight_stream==self.backend.main_stream
+        users={}
+        if early_consume:
+            for value in ordered:
+                if value.node:
+                    for parent in value.node[0]:
+                        if parent.requires_grad and parent.node is None:
+                            users[parent]=users.get(parent,0)+1
         with self.no_grad():
             gradients = {output: [gradient if gradient is not None else self.full(output.shape, 1.).data]}
             def materialize(value):
@@ -424,17 +491,34 @@ class Engine:
                 gradients[value]=[] if result is None else [result]
                 return result
             for value in reversed(ordered):
-                if value.node is None or value not in gradients:continue
+                if value not in gradients:continue
                 g=materialize(value)
-                parents, backward = value.node
-                local = backward(g)
-                if len(local) != len(parents): raise RuntimeError('VJP returned wrong gradient count')
-                for parent, grad in zip(parents, local):
-                    if parent.requires_grad and grad is not None:
-                        gradients.setdefault(parent,[]).append(grad)
+                if value in requested:finished[value]=g
+                if value.node is None:
+                    consumed=leaf_callback is not None and leaf_callback(value,g)
+                    if not consumed and inputs is None:finished[value]=g
+                else:
+                    parents, backward = value.node
+                    local = backward(g)
+                    if len(local) != len(parents): raise RuntimeError('VJP returned wrong gradient count')
+                    for parent, grad in zip(parents, local):
+                        if parent.requires_grad and grad is not None:
+                            gradients.setdefault(parent,[]).append(grad)
+                    if early_consume:
+                        for parent in parents:
+                            if parent in users:
+                                users[parent]-=1
+                                if users[parent]==0 and parent not in requested and parent in gradients:
+                                    leaf_grad=materialize(parent)
+                                    if leaf_callback(parent,leaf_grad):gradients.pop(parent,None)
+                gradients.pop(value,None)
+                if recycle:
+                    pending=[part.data if isinstance(part,PendingGradient) else part
+                             for parts in gradients.values() for part in parts]
+                    self.backend.release_since(mark,keep=(*pending,*finished.values()))
             # Parameter gradients are consumed only after all dX work has been queued.
-            if inputs is not None: return tuple(materialize(x) for x in inputs)
-            return {value:materialize(value) for value in list(gradients) if value.node is None and value.requires_grad}
+            if inputs is not None:return tuple(finished.get(x) for x in inputs)
+            return finished
 
     def checkpoint(self, fn, x, parameters):
         """Discard forward temporaries; reproduce RNG and regenerate a local VJP."""

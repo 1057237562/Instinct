@@ -33,9 +33,11 @@ class ExecutionPlan:
     def __init__(self, backend, commands, outputs):
         self.backend, self.commands, self.outputs = backend, tuple(commands), outputs
         self.graph, self.graph_exec = None, None
+        self.capture_count,self.replay_count=0,0
 
     def replay(self):
         self.backend._check()
+        self.replay_count+=1
         if self.graph_exec:
             self.backend._graph_launch(self.graph_exec, self.backend.main_stream)
         else:
@@ -70,6 +72,7 @@ class ExecutionPlan:
             b._graph_destroy(graph)
             raise
         self.graph, self.graph_exec = graph, executable
+        self.capture_count+=1
 
     def describe(self):
         return [{'index': i, 'lane': c.lane, 'operation': c.label} for i, c in enumerate(self.commands)]
@@ -85,6 +88,7 @@ class CublasBackend(CudaBackend):
         super().__init__(device)
         self.config, self.library = config, library
         self.native = None
+        self.direct_layout = True
         self.main_stream = self.weight_stream = None
         self._events, self._streams, self._plans = [], [], {}
         self._commands = None
@@ -123,6 +127,7 @@ class CublasBackend(CudaBackend):
             if self.config.dw_sm_target > sm_count.value:
                 raise ValueError('dw_sm_target exceeds the physical GPU SM count')
             self.native = NativeLt(self.library)
+            self.direct_layout = self.native.abi >= 2
             size = self.config.workspace_mib * 1024 * 1024
             for stream in set((self.main_stream, self.weight_stream)):
                 self.workspaces[stream] = super().empty((size // 4,), 'fp32') if size else None
@@ -181,18 +186,44 @@ class CublasBackend(CudaBackend):
 
         BF16/FP8 inputs use raw uint16/uint8 bits; this method does not quantize.
         """
+        self.copy_many_from_numpy((tensor,),(values,))
+
+    def copy_many_from_numpy(self, tensors, arrays):
+        """One pair of transfer fences for the whole replay input/control batch."""
         import numpy as np
-        self._check_tensor(tensor)
+        self._check()
         if self._commands is not None:
             raise RuntimeError('host updates cannot be recorded in a prepared plan')
-        values = np.ascontiguousarray(values)
-        dtype = {'fp32': 'float32', 'fp16': 'float16', 'bf16': 'uint16',
-                 'fp8e4nv': 'uint8', 'fp8e5': 'uint8', 'i32': 'int32', 'i64': 'int64'}[tensor.dtype]
-        if values.shape != tensor.shape or values.dtype != np.dtype(dtype):
-            raise ValueError(f'upload requires shape {tensor.shape} and dtype {dtype}')
+        tensors,arrays=tuple(tensors),tuple(arrays)
+        if len(tensors)!=len(arrays):raise ValueError('upload batch lengths differ')
+        prepared=[]
+        for tensor,values in zip(tensors,arrays):
+            self._check_tensor(tensor,check_context=False)
+            values=np.ascontiguousarray(values)
+            dtype={'fp32':'float32','fp16':'float16','bf16':'uint16',
+                   'fp8e4nv':'uint8','fp8e5':'uint8','i32':'int32','i64':'int64'}[tensor.dtype]
+            if values.shape!=tensor.shape or values.dtype!=np.dtype(dtype):
+                raise ValueError(f'upload requires shape {tensor.shape} and dtype {dtype}')
+            prepared.append((tensor,values))
+        if not prepared:return
         self.synchronize()
-        self._htod(tensor.storage, values.ctypes.data, values.nbytes)
+        for tensor,values in prepared:self._htod(tensor.storage,values.ctypes.data,values.nbytes)
         self.synchronize()
+
+    def to_numpy_many(self,tensors):
+        """Download replay statistics/loss after one fence, preserving dtypes."""
+        import numpy as np
+        tensors=tuple(tensors)
+        self.synchronize();results=[]
+        for tensor in tensors:
+            self._check_tensor(tensor,check_context=False)
+            dtype={'fp32':'float32','fp16':'float16','bf16':'uint16',
+                   'fp8e4nv':'uint8','fp8e5':'uint8','i32':'int32','i64':'int64'}[tensor.dtype]
+            array=np.empty(tensor.shape,dtype=dtype)
+            self._dtoh(array.ctypes.data,tensor.storage,array.nbytes)
+            if tensor.dtype=='bf16':array=(array.astype(np.uint32)<<16).view(np.float32)
+            results.append(array)
+        return tuple(results)
 
     def create_event(self, timing=False):
         event = ct.c_void_p()
@@ -231,6 +262,7 @@ class CublasBackend(CudaBackend):
         finally:
             self._commands = None
         self.execution_plan = plan
+        if hasattr(self,'seal_plan_allocations'):self.seal_plan_allocations()
         return plan
 
     def time_call(self, callback, stream, repeats=1):
@@ -252,23 +284,29 @@ class CublasBackend(CudaBackend):
                 self._event_destroy(end)
             self._event_destroy(start)
 
-    def matmul(self, a, b, out, scale_a, scale_b, m, n, k, role='gemm'):
-        if a.shape != (m, k) or b.shape != (n, k) or out.shape != (n, m):
-            raise ValueError('TN GEMM buffers do not match the planned dimensions')
+    def matmul(self, a, b, out, scale_a, scale_b, m, n, k, role='gemm',
+               transpose_a=True, transpose_b=False):
+        self._check()
+        ashape = (m, k) if transpose_a else (k, m)
+        bshape = (k, n) if transpose_b else (n, k)
+        if a.shape != ashape or b.shape != bshape or out.shape != (n, m):
+            raise ValueError('GEMM buffers do not match the planned dimensions/transposes')
+        if (a.dtype.startswith('fp8') or b.dtype.startswith('fp8')) and (not transpose_a or transpose_b):
+            raise ValueError('FP8 requires column-major TN')
         for tensor in (a, b, out):
-            self._check_tensor(tensor)
+            self._check_tensor(tensor,check_context=False)
             if tensor.storage % 256:
                 raise ValueError('cuBLASLt plans require base allocations aligned to 256 bytes')
         for tensor in (scale_a, scale_b):
             if tensor is not None:
-                self._check_tensor(tensor)
+                self._check_tensor(tensor,check_context=False)
                 if tensor.dtype != 'fp32' or tensor.numel != 1:
                     raise ValueError('cuBLASLt tensorwise scale must be a device FP32 scalar')
         stream = self.stream
         is_dw = stream == self.weight_stream and stream != self.main_stream
         hint = self.config.dw_sm_target if is_dw else 0
         size = self.config.workspace_mib * 1024 * 1024
-        key = (m, n, k, a.dtype, b.dtype, out.dtype, size, hint, stream)
+        key = (m, n, k, a.dtype, b.dtype, out.dtype, size, hint, stream, transpose_a, transpose_b)
         workspace = self.workspaces[stream]
         pointers = (a.storage, b.storage, out.storage,
                     None if scale_a is None else scale_a.storage,
@@ -276,7 +314,7 @@ class CublasBackend(CudaBackend):
                     None if workspace is None else workspace.storage, size, stream)
         if key not in self._plans:
             plan, candidates = self.native.create_plan(m, n, k, a.dtype, b.dtype, out.dtype,
-                                                       size, self.config.candidates, hint)
+                                                       size, self.config.candidates, hint, transpose_a, transpose_b)
             # Drain competing work so one-off tuning isn't biased by outstanding dW.
             # All this happens during build, never inside capture/replay.
             self.synchronize()
@@ -301,12 +339,14 @@ class CublasBackend(CudaBackend):
             best = min(winners, key=lambda c: c.get('median_ms', c['index']))
             self._plans[key] = (plan, best['index'], {'shape_mnk': [m, n, k], 'types': [a.dtype, b.dtype, out.dtype],
                     'lane': 'dW' if is_dw else 'main', 'sm_target': hint,
+                    'transpose_ab': [transpose_a, transpose_b],
                     'selected_index': best['index'], 'candidates': candidates})
         plan, index, _ = self._plans[key]
         self._submit('cublasLt:' + role, lambda: self.native.run(plan, index, *pointers))
 
     def tuning_report(self):
-        return {'cublas_version': self.native.version, 'workspace_bytes_per_stream': self.config.workspace_mib * 1024 * 1024,
+        return {'cublas_version': self.native.version, 'bridge_abi': self.native.abi,
+                'direct_layout': self.direct_layout, 'workspace_bytes_per_stream': self.config.workspace_mib * 1024 * 1024,
                 'streams': len(self._streams), 'plans': [record for _, _, record in self._plans.values()]}
 
     def __exit__(self, exc_type, exc, traceback):

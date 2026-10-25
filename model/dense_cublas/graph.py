@@ -75,27 +75,29 @@ class StepGraph:
         self.steps=self.e.array(np.asarray([optimizer.state[p]['step'] for p in optimizer.parameters],np.int64))
         def prepare():
             loss=loss_fn(self.inputs)
-            grads=self.e.vjp(loss*self.stats[0])
-            self.parameters=[p for p in optimizer.parameters if p in grads]
+            present=set()
+            def consume(p,g):
+                if p in optimizer.gradients:
+                    self.b.launch(accumulate,(triton.cdiv(p.size,256),),(g,optimizer.gradients[p].data,self.control.data),N=p.size)
+                    present.add(p)
+                return True
+            self.e.vjp(loss*self.stats[0],leaf_callback=consume)
+            self.parameters=[p for p in optimizer.parameters if p in present]
             with self.e.no_grad():
                 divisor=1./(self.stats[0]*(self.counts[0].cast('fp32')+1.))
-                squares=self.e.full((1,),0.)
-                for p in self.parameters:
-                    g=optimizer.gradients[p]
-                    self.b.launch(accumulate,(triton.cdiv(p.size,256),),(grads[p],g.data,self.control.data),N=p.size)
-                    scaled=g*divisor;squares=squares+(scaled*scaled).sum()
+                squares=self.e.squared_norm((optimizer.gradients[p] for p in self.parameters),divisor)
                 self.b.launch(statistics,(1,),(squares.data,self.control.data,self.counts.data,self.stats.data),
                     Clip=optimizer.grad_clip,Accumulation=accumulation,LossScaling=optimizer.loss_scaling,
                     Growth=optimizer.growth_factor,Backoff=optimizer.backoff_factor,Interval=optimizer.growth_interval)
                 for i,p in enumerate(optimizer.parameters):
-                    if p not in grads:continue
+                    if p not in present:continue
                     state=optimizer.state[p]
                     self.b.launch(adamw,(triton.cdiv(p.size,256),),(p.data,optimizer.gradients[p].data,state['m'].data,state['v'].data,self.steps.data,self.control.data,self.stats.data),
                         INDEX=i,N=p.size,Decay=optimizer.weight_decay,B1=optimizer.betas[0],B2=optimizer.betas[1],Eps=optimizer.eps)
                 # Only used parameters advance, so preserve the eager optimizer's unused-parameter semantics.
-                for i,p in enumerate(optimizer.parameters):
-                    if p in grads:
-                        self.b.launch(advance_one,(1,),(self.steps.data,self.stats.data),INDEX=i)
+                used=self.e.array(np.asarray([int(p in present) for p in optimizer.parameters],np.int64))
+                self.b.launch(advance_steps,(triton.cdiv(used.size,256),),
+                    (self.steps.data,self.stats.data,used.data),N=used.size)
             return loss
         self.plan=self.b.build(prepare)
         # Buffers/events referenced by the replay must survive dynamic eager fallbacks.
@@ -104,20 +106,25 @@ class StepGraph:
 
     def run(self,batch,lr,force=False):
         if tuple(x.shape for x in batch)!=self.shape:raise ValueError('CUDA Graph batch shape changed')
-        for tensor,array in zip(self.inputs,batch):self.b.copy_from_numpy(tensor.data,np.asarray(array,np.int64))
         opt=self.opt
-        self.b.copy_from_numpy(self.control.data,np.asarray([lr,1.,force],np.float32))
-        self.b.copy_from_numpy(self.counts.data,np.asarray([opt.accumulated,opt.updates,opt.good_steps],np.int64))
-        self.b.copy_from_numpy(self.stats.data,np.asarray([opt.scale,0.,0.,0.,0.],np.float32))
-        self.b.copy_from_numpy(self.steps.data,np.asarray([opt.state[p]['step'] for p in opt.parameters],np.int64))
-        loss=self.plan.replay();self.b.synchronize()
-        count=self.e.numpy(self.counts);stats=self.e.numpy(self.stats);steps=self.e.numpy(self.steps)
+        self.b.copy_many_from_numpy(
+            tuple(t.data for t in self.inputs)+(self.control.data,self.counts.data,self.stats.data,self.steps.data),
+            tuple(np.asarray(array,np.int64) for array in batch)+(
+                np.asarray([lr,1.,force],np.float32),
+                np.asarray([opt.accumulated,opt.updates,opt.good_steps],np.int64),
+                np.asarray([opt.scale,0.,0.,0.,0.],np.float32),
+                np.asarray([opt.state[p]['step'] for p in opt.parameters],np.int64)))
+        loss=self.plan.replay()
+        count,stats,steps,loss_value=self.b.to_numpy_many((self.counts.data,self.stats.data,self.steps.data,loss.data))
         opt.accumulated,opt.updates,opt.good_steps=map(int,count)
         opt.scale=float(stats[0]);opt.present=set(self.parameters) if opt.accumulated else set()
         for p,step in zip(opt.parameters,steps):opt.state[p]['step']=int(step)
-        return self.e.item(loss)
+        return float(loss_value.reshape(-1)[0])
 
 
 @triton.jit
-def advance_one(Steps,Stats,INDEX:tl.constexpr):
-    if tl.load(Stats+3)!=0:tl.store(Steps+INDEX,tl.load(Steps+INDEX)+1)
+def advance_steps(Steps,Stats,Used,N:tl.constexpr,B:tl.constexpr=256):
+    if tl.load(Stats+3)!=0:
+        i=tl.program_id(0)*B+tl.arange(0,B)
+        active=(i<N)&(tl.load(Used+i,i<N,0)!=0)
+        tl.store(Steps+i,tl.load(Steps+i,active,0)+1,active)

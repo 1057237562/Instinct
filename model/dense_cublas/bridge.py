@@ -33,13 +33,15 @@ class NativeLt:
         ptr, integer, u64 = ct.c_void_p, ct.c_int, ct.c_uint64
         self._error = self._bind('error', [], ct.c_char_p)
         self._abi = self._bind('abi', [], integer)
-        if self._abi() != 1:
+        self.abi = int(self._abi())
+        if self.abi not in (1, 2):
             raise RuntimeError('cuBLASLt bridge ABI mismatch; rebuild the native library')
         self.version = int(self._bind('version', [], u64)())
         self._create = self._bind('create', [ct.POINTER(ptr)])
         self._destroy = self._bind('destroy', [ptr])
         self._plan = self._bind('plan', [ptr] + [ct.c_int64] * 3 + [integer] * 3
-                                + [u64, integer, integer, ct.POINTER(ptr)])
+                                + [u64, integer, integer] + ([integer] * 2 if self.abi >= 2 else [])
+                                + [ct.POINTER(ptr)])
         self._plan_destroy = self._bind('plan_destroy', [ptr])
         self._count = self._bind('candidate_count', [ptr])
         self._info = self._bind('candidate_info', [ptr, integer, ct.POINTER(u64), ct.POINTER(integer), ct.POINTER(ct.c_float)])
@@ -57,10 +59,14 @@ class NativeLt:
         if result != 0:
             raise LtError(self._error().decode('utf-8', errors='replace'))
 
-    def create_plan(self, m, n, k, a_dtype, b_dtype, out_dtype, workspace_bytes, candidates, sm_target):
+    def create_plan(self, m, n, k, a_dtype, b_dtype, out_dtype, workspace_bytes, candidates, sm_target,
+                    transpose_a=True, transpose_b=False):
         plan = ct.c_void_p()
+        if self.abi == 1 and (not transpose_a or transpose_b):
+            raise RuntimeError('direct GEMM layouts require rebuilding the cuBLASLt bridge (ABI 2)')
+        flags = (int(transpose_a), int(transpose_b)) if self.abi >= 2 else ()
         self.check(self._plan(self.handle, m, n, k, DTYPES[a_dtype], DTYPES[b_dtype], DTYPES[out_dtype],
-                              workspace_bytes, candidates, sm_target, ct.byref(plan)))
+                              workspace_bytes, candidates, sm_target, *flags, ct.byref(plan)))
         self.plans.append(plan)
         info = []
         for i in range(self._count(plan)):

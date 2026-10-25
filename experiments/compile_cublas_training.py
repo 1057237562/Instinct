@@ -19,6 +19,14 @@ def run(arch):
     compile(k.fill,['fp32','scalar:fp32'],N=513)
     for op in ('add','mul','div','max','min','gt','ge','eq'):
         compile(k.binary,['bf16','fp32','fp32'],SHAPE=(2,3,7),AS=(21,7,1),BS=(0,0,1),N=42,OP=op)
+        compile(k.binary_scalar,['bf16','bf16','scalar:fp32'],N=513,OP=op)
+    for maximum in (False,True):
+        compile(k.scalar_extreme_backward,['bf16','fp32','fp32','scalar:fp32'],N=513,MAXIMUM=maximum)
+    for device_scale in (False,True):
+        compile(k.squared_norm_partials,['fp32','fp32','fp32','scalar:fp32'],N=4099,OFFSET=3,DEVICE_SCALE=device_scale)
+    compile(k.sum_partials,['fp32','fp32'],N=193001)
+    for backward in (False,True):
+        compile(k.cross_entropy_recompute,['bf16','i64','fp32','fp32','fp32','fp32','fp32'],VOCAB=6400,BLOCK=8192,BACKWARD=backward)
     for op in ('neg','exp','log','sqrt','rsqrt','sigmoid','silu','relu','gelu','softplus','abs'):
         compile(k.unary,['bf16','bf16'],N=513,OP=op)
         compile(k.unary_backward,['bf16','bf16','fp32','bf16'],N=513,OP=op)

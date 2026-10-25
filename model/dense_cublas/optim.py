@@ -14,6 +14,7 @@ def adamw_update(P,G,M,V,lr,decay,b1,b2,bc1,bc2,epsilon,scale,N:tl.constexpr,BLO
     v=b2*tl.load(V+i,valid,0)+(1.-b2)*g*g
     p=tl.load(P+i,valid,0).to(tl.float32)*(1.-lr*decay)-lr*(m/bc1)/(tl.sqrt(v/bc2)+epsilon)
     tl.store(P+i,p,valid);tl.store(M+i,m,valid);tl.store(V+i,v,valid)
+    tl.store(G+i,0.,valid)
 
 
 class Optimizer:
@@ -42,8 +43,13 @@ class Optimizer:
             self.state[p]=state
 
     def backward(self,loss):
-        gradients=self.e.vjp(loss*self.scale)
-        self.accumulate(gradients)
+        def consume(parameter,gradient):
+            if parameter in self.gradients:
+                self.e.copy(self.gradients[parameter],self.e.wrap(gradient),add=True)
+                self.present.add(parameter)
+            return True
+        self.e.vjp(loss*self.scale,leaf_callback=consume)
+        self.accumulated+=1
 
     def accumulate(self,gradients):
         for p,g in gradients.items():
@@ -51,8 +57,9 @@ class Optimizer:
             self.e.copy(self.gradients[p],self.e.wrap(g),add=True);self.present.add(p)
         self.accumulated+=1
 
-    def zero_grad(self):
+    def zero_grad(self,already_cleared=()):
         for p in self.present:
+            if p in already_cleared:continue
             g=self.gradients[p]
             self.e.backend.launch(tk.fill,(triton.cdiv(g.size,256),),(g.data,Scalar(0.)),N=g.size)
         self.present.clear();self.accumulated=0
@@ -62,10 +69,11 @@ class Optimizer:
         if self.distributed:self.distributed.gradients(self)
         e=self.e;requested_lr=lr;lr=self.lr if lr is None else lr
         mark=e.backend.mark()
+        cleared=set()
         with e.no_grad():
             divisor=1./(self.scale*self.accumulated)
             # Scalar transfer for overflow/clip decisions; gradients stay on device.
-            squares=sum((self.gradients[p]*divisor*self.gradients[p]*divisor).sum() for p in self.present)
+            squares=e.squared_norm((self.gradients[p] for p in self.parameters if p in self.present),divisor)
             norm=math.sqrt(max(e.item(squares),0.)) if self.present else 0.
             if not math.isfinite(norm):
                 if self.loss_scaling:self.scale=self.scale*self.backoff_factor;self.good_steps=0
@@ -75,7 +83,7 @@ class Optimizer:
             for p in self.parameters:
                 if p not in self.present:continue
                 local=e.backend.mark();state=self.state[p];state['step']+=1;t=state['step']
-                grad=self.gradients[p];w=p.cast('fp32')
+                grad=self.gradients[p]
                 options=self.param_options.get(p.name,{})
                 decay=options.get('weight_decay',self.weight_decay)
                 rate_lr=options.get('lr',lr) if requested_lr is None else lr
@@ -86,7 +94,9 @@ class Optimizer:
                     b1,b2=options.get('betas',self.betas)
                     args=(p.data,grad.data,state['m'].data,state['v'].data)+tuple(Scalar(v) for v in (rate_lr,decay,b1,b2,1.-b1**t,1.-b2**t,options.get('eps',self.eps),local_scale))
                     e.backend.launch(adamw_update,(triton.cdiv(p.size,256),),args,N=p.size)
+                    cleared.add(p)
                 elif self.kind=='adafactor':
+                    w=p.cast('fp32')
                     g=grad*local_scale;square=g*g;rate=t**options.get('beta2_decay',-.8)
                     eps1,eps2=options.get('eps',(None,1.e-3))
                     if eps1 is None:eps1={'fp32':2**-23,'fp16':2**-10,'bf16':2**-7}[p.dtype]
@@ -102,6 +112,7 @@ class Optimizer:
                     alpha=e.binary((w*w).mean().sqrt(),eps2,'max')*min(rate_lr,t**-.5)
                     e.copy(p,w*(1.-rate_lr*decay)-update*alpha/denom)
                 else:
+                    w=p.cast('fp32')
                     g=grad*local_scale;buf=state['momentum']
                     momentum=options.get('momentum',self.momentum)
                     nesterov=options.get('nesterov',True)
@@ -146,7 +157,7 @@ class Optimizer:
                 sched['_step_count']=sched.get('_step_count',0)+1
                 sched['_last_lr']=[sched['eta_min']+(base-sched['eta_min'])*(1.+math.cos(math.pi*sched['last_epoch']/sched['T_max']))/2. for base in sched['base_lrs']]
                 for options in self.param_options.values():options['lr']=sched['_last_lr'][options.get('group',0)]
-            self.zero_grad()
+            self.zero_grad(already_cleared=cleared)
         e.backend.release_since(mark)
         return {'updated':True,'grad_norm':norm,'loss_scale':self.scale}
 

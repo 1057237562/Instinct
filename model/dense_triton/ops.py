@@ -183,10 +183,17 @@ class DenseOps:
             raise ValueError('attention gradient must match its output shape and dtype')
         b, s, hq, _ = q.shape
         dq, dk, dv = [self.empty(x.shape, x.dtype) for x in (q, k, v)]
+        # dKV visits each query row for many KV tiles. Compute sum(dO*O)
+        # once per row instead of repeatedly loading O and reducing head_dim.
+        delta = self.empty((b, hq, s), 'fp32')
+        self.backend.launch(attn.backward_delta, (b * s * hq,), (out, dy, delta),
+                            SEQ=s, HQ=hq, DIM=q.shape[-1], BD=options['BD'])
         self.backend.launch(attn.backward_q, (triton.cdiv(s, options['BM']), b * hq),
-                            (q, k, v, mask, out, lse, dy, dq, Scalar(seed, 'i32'), Scalar(counter, 'i64')), **options)
+                            (q, k, v, mask, delta, lse, dy, dq, Scalar(seed, 'i32'), Scalar(counter, 'i64')),
+                            PRECOMPUTED_DELTA=True, **options)
         self.backend.launch(attn.backward_kv, (triton.cdiv(s, options['BN']), b * k.shape[2]),
-                            (q, k, v, mask, out, lse, dy, dk, dv, Scalar(seed, 'i32'), Scalar(counter, 'i64')), **options)
+                            (q, k, v, mask, delta, lse, dy, dk, dv, Scalar(seed, 'i32'), Scalar(counter, 'i64')),
+                            PRECOMPUTED_DELTA=True, **options)
         return dq, dk, dv
 
 

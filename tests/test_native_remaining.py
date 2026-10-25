@@ -85,6 +85,9 @@ def test_fused_projection_linear_ce_matches_loss_and_all_gradients(chunk):
 
 class ReplayBackend(HostBackend):
     def copy_from_numpy(self,tensor,array):tensor.storage.copy_(torch.from_numpy(np.asarray(array).copy()))
+    def copy_many_from_numpy(self,tensors,arrays):
+        for tensor,array in zip(tensors,arrays):self.copy_from_numpy(tensor,array)
+    def to_numpy_many(self,tensors):return tuple(self.to_numpy(tensor) for tensor in tensors)
     def pin_since(self,mark):pass
     def release_since(self,mark,keep=()):
         if self._commands is None and self.execution_plan is None:super().release_since(mark,keep)

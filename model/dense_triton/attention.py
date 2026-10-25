@@ -59,10 +59,22 @@ def forward(Q, K, V, MASK, O, LSE, seed, offset, SEQ: tl.constexpr, HQ: tl.const
 
 
 @triton.jit
+def backward_delta(O, DO, Delta, SEQ: tl.constexpr, HQ: tl.constexpr,
+                   DIM: tl.constexpr, BD: tl.constexpr):
+    row = tl.program_id(0)
+    batch, token, head = row // (SEQ * HQ), (row // HQ) % SEQ, row % HQ
+    d = tl.arange(0, BD)
+    o = tl.load(O + row * DIM + d, d < DIM, 0.).to(tl.float32)
+    do = tl.load(DO + row * DIM + d, d < DIM, 0.).to(tl.float32)
+    tl.store(Delta + (batch * HQ + head) * SEQ + token, tl.sum(o * do, 0))
+
+
+@triton.jit
 def backward_q(Q, K, V, MASK, O, LSE, DO, DQ, seed, offset, SEQ: tl.constexpr,
                HQ: tl.constexpr, HKV: tl.constexpr, DIM: tl.constexpr,
                SCALE: tl.constexpr, HAS_MASK: tl.constexpr, DROPOUT: tl.constexpr = 0.,
-               BM: tl.constexpr = 32, BN: tl.constexpr = 32, BD: tl.constexpr = 128):
+               BM: tl.constexpr = 32, BN: tl.constexpr = 32, BD: tl.constexpr = 128,
+               PRECOMPUTED_DELTA: tl.constexpr = False):
     qh = tl.program_id(1) % HQ
     batch = tl.program_id(1) // HQ
     kh = qh // (HQ // HKV)
@@ -73,8 +85,11 @@ def backward_q(Q, K, V, MASK, O, LSE, DO, DQ, seed, offset, SEQ: tl.constexpr,
     mask = (m[:, None] < SEQ) & (d[None, :] < DIM)
     q = tl.load(Q + qo, mask, other=0)
     do = tl.load(DO + qo, mask, other=0)
-    o = tl.load(O + qo, mask, other=0).to(tl.float32)
-    delta = tl.sum(do.to(tl.float32) * o, 1)
+    if PRECOMPUTED_DELTA:
+        delta = tl.load(O + (batch * HQ + qh) * SEQ + m, m < SEQ, 0.)
+    else:
+        o = tl.load(O + qo, mask, other=0).to(tl.float32)
+        delta = tl.sum(do.to(tl.float32) * o, 1)
     lse = tl.load(LSE + (batch * HQ + qh) * SEQ + m, m < SEQ, other=float("inf"))
     dq = tl.full((BM, BD), 0, tl.float32)
     for start in range(0, tl.minimum((tl.program_id(0) + 1) * BM, SEQ), BN):
@@ -103,7 +118,8 @@ def backward_q(Q, K, V, MASK, O, LSE, DO, DQ, seed, offset, SEQ: tl.constexpr,
 def backward_kv(Q, K, V, MASK, O, LSE, DO, DK, DV, seed, offset, SEQ: tl.constexpr,
                 HQ: tl.constexpr, HKV: tl.constexpr, DIM: tl.constexpr,
                 SCALE: tl.constexpr, HAS_MASK: tl.constexpr, DROPOUT: tl.constexpr = 0.,
-                BM: tl.constexpr = 32, BN: tl.constexpr = 32, BD: tl.constexpr = 128):
+                BM: tl.constexpr = 32, BN: tl.constexpr = 32, BD: tl.constexpr = 128,
+                PRECOMPUTED_DELTA: tl.constexpr = False):
     kh = tl.program_id(1) % HKV
     batch = tl.program_id(1) // HKV
     n = tl.program_id(0) * BN + tl.arange(0, BN)
@@ -127,8 +143,11 @@ def backward_kv(Q, K, V, MASK, O, LSE, DO, DK, DV, seed, offset, SEQ: tl.constex
             qmask = (mm[:, None] < SEQ) & (d[None, :] < DIM)
             q = tl.load(Q + qo, qmask, other=0)
             do = tl.load(DO + qo, qmask, other=0)
-            o = tl.load(O + qo, qmask, other=0).to(tl.float32)
-            delta = tl.sum(do.to(tl.float32) * o, 1)
+            if PRECOMPUTED_DELTA:
+                delta = tl.load(O + (batch * HQ + qh) * SEQ + mm, mm < SEQ, 0.)
+            else:
+                o = tl.load(O + qo, qmask, other=0).to(tl.float32)
+                delta = tl.sum(do.to(tl.float32) * o, 1)
             lse = tl.load(LSE + (batch * HQ + qh) * SEQ + mm, mm < SEQ, other=float("inf"))
             allowed = (mm[:, None] >= n[None, :]) & (mm[:, None] < SEQ) & valid[None, :]
             scores = tl.dot(q, tl.trans(k), input_precision="ieee") * SCALE

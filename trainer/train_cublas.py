@@ -370,12 +370,19 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
                         tokens=batch[0].size
                     if not graph_used and (optimizer.accumulated>=args.accumulation_steps or begin+args.batch_size>=len(order)):optimizer.step(current_lr)
                     progress['steps']+=1;progress['cursor']=min(begin+args.batch_size,len(order))
-                    backend.synchronize();elapsed=time.perf_counter()-step_start;rate=tokens/max(elapsed,1e-9)
+                    # Graph.run already waits for its statistics/loss download.
+                    if not graph_used:backend.synchronize()
+                    elapsed=time.perf_counter()-step_start;rate=tokens/max(elapsed,1e-9)
                     backend.release_since(mark)
                     if group.rank==0 and (progress['steps']%args.log_interval==0 or progress['cursor']==len(order)):
                         eta=(time.perf_counter()-started)/max(progress['steps'],1)*(total_steps-progress['steps'])/60.
                         print(f'Epoch:[{epoch+1}/{args.epochs}]({math.ceil(progress["cursor"]/args.batch_size)}/{total_batches}), loss: {last_loss:.6f}, learning_rate: {current_lr:.8f}, epoch_time: {eta:.3f}min, tokens/s: {rate:.1f}',flush=True)
                         metrics={'loss':last_loss,'learning_rate':current_lr,'tokens_per_second':rate,'step':progress['steps']}
+                        if step_graph is not None:
+                            metrics.update(cuda_graph_captures=step_graph.plan.capture_count,
+                                           cuda_graph_replays=step_graph.plan.replay_count,
+                                           cuda_graph_commands=len(step_graph.plan.commands))
+                            print(f'CUDA Graph: captures={step_graph.plan.capture_count}, replays={step_graph.plan.replay_count}, commands={len(step_graph.plan.commands)}',flush=True)
                         if args.peak_tflops:
                             metrics['estimated_mfu']=6*sum(p.size for p in model.parameters(False))*rate/(args.peak_tflops*1e12)
                         if logger:logger.log(metrics)

@@ -104,10 +104,12 @@ reduce-overhead 训练损失曲线一致），确认配置公平。
    警告），多图重录导致输出缓冲复用冲突。workaround：开启
    `torch._inductor.config.triton.cudagraph_skip_dynamic_graphs`（动态子图退出
    graph 捕获），reduce-overhead 才可与现有 MoE 组合训练，代价是图覆盖面缩小。
-3. **原生 `--cuda_graph` 与动态 MoE dispatch 组合 = 重捕风暴**：每步重新捕捉整图，
+3. **原生旧图路径吞吐严重下降，最初的“重捕风暴”归因未获源码支持**：
    40 步均值 ~222 tok/s（比不开 graph 慢 10×）；`fuse_projections` 叠加时直接 OOM。
-   两条技术栈共同的结构性痛点：现有 MoE 实现需要固定形状 dispatch path 才能吃到
-   CUDA graph 红利。
+   后续审计发现：`StepGraph` 只构建一次，原生 MoE 已使用固定容量、设备端 offsets，
+   不存在由路由 token 数触发的逐步重新捕获。旧分配器在录制期间禁止回收临时张量，
+   同形状静态审计得到约 12.70 GiB arena，显著超过 8 GiB；WDDM 溢出是更合理的
+   待实卡验证解释。优化与审计口径见 [native_throughput_optimization.md](native_throughput_optimization.md)。
 4. **原生 ckpt=0 在 8GB 卡上靠 WDDM 溢出而非 OOM 存活**：判别信号是
    `device_free==0`；显存规划应把"物理可分配"按 ~7GB（8151 − 上下文/桌面）估计。
 
@@ -119,9 +121,10 @@ reduce-overhead 训练损失曲线一致），确认配置公平。
 | 显存 | torch（小幅） | allocated 少 ~550MiB，reserved 持平 |
 | 稳健性 | torch（需 1 行修复 + 1 个 inductor 开关）；native ckpt=1 默认可用 |
 
-原生的价值定位在零 torch 依赖（autograd/torch 生态解耦、可审计的显存账本与
-32MiB workspace），而非性能与显存。若要让两条路线都吃到 CUDA graph 收益，
-候选方向是为 `model_instinct` 的 MoE 增加固定形状（padding 型）dispatch path。
+以上结论对应本报告中的旧版本实测。后续原生实现已经改动分配器、GEMM 布局、
+优化器归约和专家调度；尚未重新进行实卡测速，因此不能将旧吞吐数字用于评价新版，
+也不能根据静态审计宣布新版已经超过 PyTorch。`model_instinct` 的 PyTorch MoE
+仍可调查固定形状 dispatch；原生路径已有该能力。
 
 ## 复现
 

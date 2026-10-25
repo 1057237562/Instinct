@@ -9,6 +9,7 @@ import triton
 
 
 class TrainingBackend(CublasBackend):
+    recycle_vjp = True
     def __init__(self, *args, pool_limit_mib=256, pin_memory=True, **kwargs):
         super().__init__(*args, **kwargs)
         self.pin_memory = pin_memory
@@ -18,6 +19,10 @@ class TrainingBackend(CublasBackend):
         if self.pool_limit < 0: raise ValueError('pool_limit_mib must be nonnegative')
         self._event_pool, self._live_events = [], {}
         self._pinned=set();self._pinned_events=set()
+        self._plan_storage=set()
+        self._uploading_constant=False
+        self._live_bytes=self._peak_live_bytes=0
+        self.allocator_stats=dict(requests=0,pool_hits=0,releases=0,empty_releases=0,release_syncs=0)
 
     def empty(self, shape, dtype='fp32', zero=False):
         self._check()
@@ -27,17 +32,40 @@ class TrainingBackend(CublasBackend):
         if dtype.startswith('fp8') and self.arch < 89:
             raise RuntimeError('Native FP8 requires compute capability >= 8.9')
         size = math.prod(shape) * ITEMSIZE[dtype]
-        pool = self._pool.get(size)
+        constant=self._uploading_constant and self._commands is not None
+        # Synchronous HtoD does not order itself after non-blocking compute
+        # streams. A host upload must use a fresh address, otherwise it could
+        # overwrite pooled storage while an earlier main-stream reader runs.
+        # Fixed replay inputs use copy_many_from_numpy with explicit fences.
+        pool = None if self._uploading_constant else self._pool.get(size)
         if pool:
             tensor = Tensor(shape, dtype, pool.pop(), self)
             self._pool_bytes -= size
+            self.allocator_stats['pool_hits']+=1
         else:
             tensor = super().empty(shape, dtype, zero=False)
         self._serial += 1
         self._live[tensor.storage] = (self._serial, size)
+        self._live_bytes+=size
+        self._peak_live_bytes=max(self._peak_live_bytes,self._live_bytes)
+        self.allocator_stats['requests']+=1
+        if self._commands is not None:self._plan_storage.add(tensor.storage)
+        # Host constants are uploaded only during preparation, never replayed.
+        # They cannot alias earlier OR later tape scratch: earlier commands
+        # would overwrite the supposedly immutable value on the next replay.
+        if constant:self._pinned.add(tensor.storage)
         if zero:
             self.launch(tk.fill, (triton.cdiv(tensor.numel, 256),), (tensor, Scalar(0.)), N=tensor.numel)
         return tensor
+
+    @contextmanager
+    def host_constants(self):
+        previous,self._uploading_constant=self._uploading_constant,True
+        try:yield
+        finally:self._uploading_constant=previous
+
+    def from_numpy(self,values):
+        with self.host_constants():return super().from_numpy(values)
 
     def mark(self):
         return self._serial
@@ -53,19 +81,50 @@ class TrainingBackend(CublasBackend):
         self._pinned.update(p for p,(serial,size) in self._live.items() if serial>mark)
         self._pinned_events.update(event for event,serial in self._live_events.items() if serial>mark)
 
+    def seal_plan_allocations(self):
+        """Protect every address in the tape, including scratch recycled in build.
+
+        Within a single-stream plan the same address can serve disjoint tensor
+        lifetimes. After build it must not be lent to an unrelated eager step.
+        """
+        self._pinned.update(self._plan_storage)
+        for size,pool in self._pool.items():
+            retained=[]
+            for pointer in pool:
+                if pointer in self._plan_storage:
+                    self._serial+=1;self._live[pointer]=(self._serial,size)
+                    self._pool_bytes-=size;self._live_bytes+=size
+                else:retained.append(pointer)
+            pool[:]=retained
+        self._peak_live_bytes=max(self._peak_live_bytes,self._live_bytes)
+        self._plan_storage.clear()
+
     def release_since(self, mark, keep=()):
-        if self._commands is not None:return  # Preparation retains a fixed-address arena until context exit.
-        self.synchronize()  # Includes optional dW stream and all prior consumers.
+        self.allocator_stats['releases']+=1
+        single_stream=self.stream==self.main_stream==self.weight_stream
+        # Multi-stream tapes keep their original conservative arena. Eager dW
+        # overlap still fences all consumers before any buffer/event is reused.
+        if self._commands is not None and not single_stream:return
         retained = {t.storage for t in keep if t is not None}|self._pinned
-        for pointer, (serial, size) in list(self._live.items()):
-            if serial > mark and pointer not in retained:
-                self._pool.setdefault(size, []).append(pointer)
-                self._pool_bytes += size
-                del self._live[pointer]
-        for event, serial in list(self._live_events.items()):
-            if serial > mark and event not in self._pinned_events:
-                self._event_pool.append(event)
-                del self._live_events[event]
+        allocations=[(pointer,size) for pointer,(serial,size) in self._live.items() if serial>mark and pointer not in retained]
+        events=[event for event,serial in self._live_events.items() if serial>mark and event not in self._pinned_events]
+        if not allocations and not events:
+            self.allocator_stats['empty_releases']+=1
+            return
+        # Main-stream reuse is ordered after earlier readers by CUDA itself;
+        # a host/context barrier at every checkpoint/parameter is unnecessary.
+        if not single_stream:
+            self.synchronize();self.allocator_stats['release_syncs']+=1
+        for pointer,size in allocations:
+            self._pool.setdefault(size, []).append(pointer)
+            self._pool_bytes += size;self._live_bytes-=size
+            del self._live[pointer]
+        for event in events:
+            self._event_pool.append(event)
+            del self._live_events[event]
+        # Recorded addresses must survive capture. Their lifetimes may alias,
+        # but no cuMemFree is allowed until the owning plan/context is closed.
+        if self._commands is not None:return
         # Dynamic MoE token counts and decode lengths must not grow the cache
         # without a bound. Release unused buffers, never active tensors.
         freed = set()
@@ -80,9 +139,11 @@ class TrainingBackend(CublasBackend):
             self._allocations[:] = [(p, n) for p, n in self._allocations if p.value not in freed]
 
     def memory(self):
-        return super().memory() | {'live_bytes': sum(n for _, n in self._live.values()),
+        return super().memory() | {'live_bytes': self._live_bytes,
+                                  'peak_live_bytes':self._peak_live_bytes,
                                   'cached_bytes': self._pool_bytes,
-                                  'cached_limit_bytes': self.pool_limit}
+                                  'cached_limit_bytes': self.pool_limit,
+                                  'allocator_stats':dict(self.allocator_stats)}
 
     @contextmanager
     def temporary(self):

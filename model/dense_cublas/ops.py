@@ -79,14 +79,25 @@ class CublasDenseOps(DenseOps):
             raise ValueError('cuBLASLt does not support E5M2 x E5M2 for this path')
         if out_dtype not in ('fp32', 'bf16', 'fp16'):
             raise ValueError('GEMM output must be FP32/BF16/FP16')
-        layout = plan_layout(a.shape, b.shape, transpose_a, transpose_b)
+        # BF16/FP16/FP32 support all transpose combinations directly. Describe
+        # the existing row-major operands as column-major transposes; dX/dW
+        # need no physical transpose, padding, or output crop. SM120 FP8 still
+        # requires TN, so keep its explicitly packed/aligned path below.
+        direct = not fp8 and self.backend.direct_layout
+        layout = plan_layout(a.shape, b.shape, transpose_a, transpose_b,
+                             alignment=1 if direct else 16)
         l = layout
+        gemm_dtype = out_dtype if fp8 or out_dtype in (a.dtype, 'fp32') else 'fp32'
+        if direct:
+            out = self.empty((l.m, l.n), gemm_dtype)
+            self.backend.matmul(b, a, out, None, None, l.n, l.m, l.k,
+                                role=self._role, transpose_a=transpose_b, transpose_b=transpose_a)
+            return self.cast(out, out_dtype)
         ap = self._pack(a, l.m, l.k, l.mp, l.kp, l.a_stride, l.a_pack)
         bp = self._pack(b, l.n, l.k, l.np, l.kp, l.b_transpose_stride, l.b_pack)
         # Regular cuBLASLt GEMMs support same-type or FP32 outputs. Independent
         # parameter/activation precision may request e.g. FP32 -> BF16 dW:
         # accumulate into FP32 and cast (fused into crop when padding is needed).
-        gemm_dtype = out_dtype if fp8 or out_dtype in (a.dtype, 'fp32') else 'fp32'
         cp = self.empty((l.mp, l.np), gemm_dtype)
         sa, sb = (self._inverse(s) for s in scales) if scales is not None else (None, None)
         # C^T = B^T @ A^T. Column-major TN returns the desired row-major C,

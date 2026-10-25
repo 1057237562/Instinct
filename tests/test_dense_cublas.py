@@ -58,12 +58,16 @@ class ScheduleOracle(CublasBackend, ReferenceBackend):
         assert event in self._recorded
         self.events.append(('wait', event, stream))
 
-    def matmul(self, a, b, out, sa, sb, m, n, k, role='gemm'):
-        assert a.shape == (m, k) and b.shape == (n, k) and out.shape == (n, m)
+    def matmul(self, a, b, out, sa, sb, m, n, k, role='gemm', transpose_a=True, transpose_b=False):
+        assert a.shape == ((m, k) if transpose_a else (k, m))
+        assert b.shape == ((k, n) if transpose_b else (n, k)) and out.shape == (n, m)
         if not a.dtype.startswith('fp8'):
             assert out.dtype in (a.dtype, 'fp32')
         def execute():
-            value = b.storage.view(n, k).float() @ a.storage.view(m, k).float().T
+            aa, bb = a.storage.view(a.shape).float(), b.storage.view(b.shape).float()
+            if transpose_a: aa = aa.T
+            if transpose_b: bb = bb.T
+            value = bb @ aa
             if sa is not None:
                 value *= sa.storage.float() * sb.storage.float()
             out.storage.copy_(value.to(out.storage.dtype))

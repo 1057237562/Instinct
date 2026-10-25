@@ -8,6 +8,7 @@ kernels instead of silently launching an incompatible binary.
 import ctypes as ct
 from dataclasses import dataclass
 import inspect
+from functools import lru_cache
 import math
 import os
 
@@ -48,10 +49,15 @@ class Tensor:
         return Tensor(tuple(shape), self.dtype, self.storage, self.owner)
 
 
+@lru_cache(maxsize=None)
+def _constant_defaults(fn):
+    return {name: p.default for name, p in inspect.signature(fn.fn).parameters.items()
+            if p.default is not inspect.Parameter.empty}
+
+
 def constants_for(fn, values):
     """Fill constexpr defaults without initializing Triton's default driver."""
-    result = {name: p.default for name, p in inspect.signature(fn.fn).parameters.items()
-              if p.default is not inspect.Parameter.empty}
+    result = dict(_constant_defaults(fn))
     result.update(values)
     return result
 
@@ -192,17 +198,18 @@ class CudaBackend:
         # FP8 is returned as raw bytes, avoiding a dependency on a framework dtype.
         return result
 
-    def _check_tensor(self, tensor):
-        self._check()
+    def _check_tensor(self, tensor, *, check_context=True):
+        if check_context:self._check()
         if tensor.owner is not self:
             raise ValueError('tensor belongs to a different backend/context')
 
     def launch(self, fn, grid, args, **constants):
         if not 1 <= len(grid) <= 3 or any(g <= 0 for g in grid):
             raise ValueError('launch grid must have 1..3 positive dimensions')
+        self._check()
         for arg in args:
             if not isinstance(arg, Scalar):
-                self._check_tensor(arg)
+                self._check_tensor(arg,check_context=False)
         constants = constants_for(fn, constants)
         key = (fn.__name__, tuple(a.dtype for a in args), tuple(sorted(constants.items())))
         if key not in self._cache:

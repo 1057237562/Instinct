@@ -50,6 +50,26 @@ def expert_scale(X,Offsets,Scale,WIDTH:tl.constexpr,WEIGHTS:tl.constexpr,ROWS:tl
 
 
 @triton.jit
+def expert_amax_partials(X,Offsets,Partials,WIDTH:tl.constexpr,WEIGHTS:tl.constexpr,
+                         ROWS:tl.constexpr,TILES:tl.constexpr,B:tl.constexpr=1024):
+    expert=tl.program_id(1);tile=tl.program_id(0)
+    if WEIGHTS:begin=expert*ROWS;end=begin+ROWS
+    else:begin=tl.load(Offsets+expert);end=tl.load(Offsets+expert+1)
+    i=tile*B+tl.arange(0,B)
+    value=tl.load(X+begin*WIDTH+i,i<(end-begin)*WIDTH,0.).to(tl.float32)
+    tl.store(Partials+expert*TILES+tile,tl.max(tl.abs(value),0))
+
+
+@triton.jit
+def expert_amax_finish(Partials,Scale,TILES:tl.constexpr,LIMIT:tl.constexpr,B:tl.constexpr=256):
+    expert=tl.program_id(0);i=tl.arange(0,B);maximum=tl.full((B,),0.,tl.float32)
+    for tile in range(tl.cdiv(TILES,B)):
+        index=tile*B+i
+        maximum=tl.maximum(maximum,tl.load(Partials+expert*TILES+index,index<TILES,0.))
+    tl.store(Scale+expert,LIMIT/tl.maximum(tl.max(maximum,0),1.e-12))
+
+
+@triton.jit
 def expert_quantize(X,Y,Offsets,Scale,WIDTH:tl.constexpr,WEIGHTS:tl.constexpr,ROWS:tl.constexpr,B:tl.constexpr=256):
     expert=tl.program_id(1)
     if WEIGHTS:begin=expert*ROWS;end=begin+ROWS
@@ -102,24 +122,36 @@ def dispatch(e, selected, topk):
     return e.wrap(ids),e.wrap(routes),offsets
 
 
-def linear(e,x,weight,offsets,max_tokens):
+def linear(e,x,weight,offsets,max_tokens,weight_dtype=None):
     experts,n,k=weight.shape;fp8=e.ops.fp8
+    weight_dtype=weight_dtype or weight.dtype
     w=weight if fp8 else e.cast(weight,x.dtype);out=e.backend.empty((x.shape[0],n),x.dtype)
     def quantize(value,width,rows,weights=False,gradient=False):
         if not fp8:return value,value
+        mark=e.backend.mark()
         scale=e.backend.empty((experts,),'fp32')
         quant=e.backend.empty(value.shape,'fp8e5' if gradient else 'fp8e4nv')
         options=dict(WIDTH=width,ROWS=rows,WEIGHTS=weights)
-        e.backend.launch(expert_scale,(experts,),(value,offsets,scale),LIMIT=57344. if gradient else 448.,**options)
+        limit=57344. if gradient else 448.
+        if rows*width>=8192:
+            tiles=triton.cdiv(rows*width,1024)
+            partials=e.backend.empty((experts,tiles),'fp32')
+            e.backend.launch(expert_amax_partials,(tiles,experts),(value,offsets,partials),TILES=tiles,**options)
+            e.backend.launch(expert_amax_finish,(experts,),(partials,scale),TILES=tiles,LIMIT=limit)
+        else:e.backend.launch(expert_scale,(experts,),(value,offsets,scale),LIMIT=limit,**options)
         e.backend.launch(expert_quantize,(triton.cdiv(rows*width,256),experts),(value,quant,offsets,scale),**options)
+        e.backend.release_since(mark,keep=(quant,scale))
         return quant,scale
     qx,sx=quantize(x.data,k,max_tokens);qw,sw=quantize(w.data,k,n,True)
-    e.backend.launch(grouped_mm,(triton.cdiv(max_tokens,16),triton.cdiv(n,32),experts),(qx,qw,out,offsets,sx,sw),N=n,K=k,FP8=fp8)
+    wide=x.dtype in ('bf16','fp16') and min(max_tokens,n,k)>=64
+    bm,bn=(64,64) if wide else (16,32)
+    e.backend.launch(grouped_mm,(triton.cdiv(max_tokens,bm),triton.cdiv(n,bn),experts),(qx,qw,out,offsets,sx,sw),N=n,K=k,FP8=fp8,BM=bm,BN=bn)
     def backward(g):
         dy=e.ops.cast(g,x.dtype);qdy,sdy=quantize(dy,n,max_tokens,gradient=True)
-        dx=e.backend.empty(x.shape,x.dtype);dw=e.backend.empty(weight.shape,weight.dtype)
-        e.backend.launch(grouped_mm,(triton.cdiv(max_tokens,16),triton.cdiv(k,32),experts),(qdy,qw,dx,offsets,sdy,sw),N=k,K=n,TRANSPOSE_W=True,FP8=fp8)
-        e.backend.launch(grouped_dw,(triton.cdiv(n,16),triton.cdiv(k,32),experts),(qx,qdy,dw,offsets,sx,sdy),N=n,K=k,FP8=fp8)
+        dx=e.backend.empty(x.shape,x.dtype);dw=e.backend.empty(weight.shape,weight_dtype)
+        e.backend.launch(grouped_mm,(triton.cdiv(max_tokens,bm),triton.cdiv(k,bn),experts),(qdy,qw,dx,offsets,sdy,sw),N=k,K=n,TRANSPOSE_W=True,FP8=fp8,BM=bm,BN=bn)
+        wn,wk=(32,64) if wide else (16,32)
+        e.backend.launch(grouped_dw,(triton.cdiv(n,wn),triton.cdiv(k,wk),experts),(qx,qdy,dw,offsets,sx,sdy),N=n,K=k,FP8=fp8,BN=wn,BK=wk)
         return dx,dw
     return e._node(out,(x,weight),backward)
 
@@ -135,7 +167,11 @@ def feed_forward(model,flat,weights,selected,prefix):
             if key in model.adapters:
                 a,b=model.adapters[key];w=w+b@a
             values.append(w.reshape(1,*w.shape))
-        return linear(e,x,e.cat(values),offsets,flat.shape[0])
+        # Stack directly into compute precision: avoid writing and rereading a
+        # full FP32 expert bank just to cast it. dW keeps parameter precision.
+        bank=e.cat(values,dtype=None if e.ops.fp8 else x.dtype)
+        return linear(e,x,bank,offsets,flat.shape[0],weight_dtype=values[0].dtype)
     gate,up=project(tokens,'gate_proj'),project(tokens,'up_proj')
-    y=project(e.unary(gate,c['hidden_act'])*up,'down_proj')
+    activated=e.swiglu(gate,up) if c['hidden_act']=='silu' else e.unary(gate,c['hidden_act'])*up
+    y=project(activated,'down_proj')
     return e.scatter_rows((y*scale).cast('fp32'),ids,flat.shape[0])
