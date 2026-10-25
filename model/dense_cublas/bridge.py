@@ -15,7 +15,12 @@ class NativeLt:
     def __init__(self, path=None):
         self._dll_dirs = []
         if os.name == 'nt' and os.environ.get('CUDA_PATH'):
-            self._dll_dirs.append(os.add_dll_directory(str(Path(os.environ['CUDA_PATH']) / 'bin')))
+            cuda_bin = Path(os.environ['CUDA_PATH']) / 'bin'
+            self._dll_dirs.append(os.add_dll_directory(str(cuda_bin)))
+            # CUDA >= 13 ships cuBLAS DLLs in bin/x64
+            x64 = cuda_bin / 'x64'
+            if (x64 / 'cublasLt64.dll').is_file() or any(x64.glob('cublasLt64*.dll')):
+                self._dll_dirs.append(os.add_dll_directory(str(x64)))
         root = Path(__file__).parent / 'native' / 'build'
         selected = path or os.environ.get('INSTINCT_CUBLASLT_BRIDGE')
         candidates = [Path(selected)] if selected else [root / 'libinstinct_cublaslt.so',
