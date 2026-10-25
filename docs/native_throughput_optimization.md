@@ -1,5 +1,7 @@
 # 原生 cuBLASLt/Triton 吞吐与显存优化
 
+后续针对 Dense 的精度转换、融合算子与批量优化器优化，见 [Dense 提交与吞吐优化](dense_schedule_optimization.md)。本文保留第一轮的基线与结果。
+
 基线：`1ed4740d1710d068470486639db80582a92e8365`。本轮按要求不运行实卡测试。以下数值来自真实模型、VJP、优化器和图构建代码的**形状/分配/命令审计**，不是 tok/s、CUDA 时序模拟或实测显存。原始输出见 [native_optimization_audit.json](native_optimization_audit.json)，审计器见 [profile_native_schedule.py](../experiments/profile_native_schedule.py)。
 
 ## 对照结果

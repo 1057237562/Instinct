@@ -41,6 +41,8 @@ class Optimizer:
             elif kind=='muon' and len(p.shape)==2: state['momentum']=engine.full(p.shape,0.)
             else: state.update(m=engine.full(p.shape,0.),v=engine.full(p.shape,0.))
             self.state[p]=state
+        from .multi_tensor import MultiTensorPlan
+        self.multi_tensor=MultiTensorPlan.create(self)
 
     def backward(self,loss):
         def consume(parameter,gradient):
@@ -48,7 +50,7 @@ class Optimizer:
                 self.e.copy(self.gradients[parameter],self.e.wrap(gradient),add=True)
                 self.present.add(parameter)
             return True
-        self.e.vjp(loss*self.scale,leaf_callback=consume)
+        self.e.vjp(loss,self.e.full(loss.shape,self.scale).data,leaf_callback=consume)
         self.accumulated+=1
 
     def accumulate(self,gradients):
@@ -70,17 +72,27 @@ class Optimizer:
         e=self.e;requested_lr=lr;lr=self.lr if lr is None else lr
         mark=e.backend.mark()
         cleared=set()
+        bulk=(self.multi_tensor is not None and len(self.present)==len(self.parameters)
+              and not self.param_options and not self.scheduler
+              and len({self.state[p]['step'] for p in self.parameters})==1)
         with e.no_grad():
             divisor=1./(self.scale*self.accumulated)
             # Scalar transfer for overflow/clip decisions; gradients stay on device.
-            squares=e.squared_norm((self.gradients[p] for p in self.parameters if p in self.present),divisor)
+            squares=(self.multi_tensor.squared_norm(divisor) if bulk else
+                     e.squared_norm((self.gradients[p] for p in self.parameters if p in self.present),divisor))
             norm=math.sqrt(max(e.item(squares),0.)) if self.present else 0.
             if not math.isfinite(norm):
                 if self.loss_scaling:self.scale=self.scale*self.backoff_factor;self.good_steps=0
                 self.zero_grad();e.backend.release_since(mark)
                 return {'updated':False,'grad_norm':norm,'loss_scale':self.scale}
             scale=divisor*min(1.,self.grad_clip/(norm+1.e-6)) if self.grad_clip>0 else divisor
+            if bulk:
+                t=self.state[self.parameters[0]]['step']+1
+                self.multi_tensor.update(self,lr,scale,step=t)
+                for p in self.parameters:self.state[p]['step']=t
+                cleared.update(self.parameters)
             for p in self.parameters:
+                if bulk:break
                 if p not in self.present:continue
                 local=e.backend.mark();state=self.state[p];state['step']+=1;t=state['step']
                 grad=self.gradients[p]

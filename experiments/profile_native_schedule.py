@@ -39,7 +39,7 @@ def main():
             self.arch=120;self.main_stream=self.weight_stream=self.stream=1
             self.address=256;self.raw={};self.peak=0;self.syncs=0;self.mallocs=0
             self.operations=Counter();self.event=0
-            self.ctas=Counter();self.copy_bytes=Counter();self.gemm_flops=0
+            self.ctas=Counter();self.copy_bytes=Counter();self.casts=Counter();self.gemm_flops=0
             self.peak_live=0;self.last_operation='parameters';self.peak_allocation=None;self.shapes={};self.peak_groups={}
             def malloc(out,size):
                 self.address+=(size+255)//256*256
@@ -76,6 +76,12 @@ def main():
                 self.copy_bytes['gemm_crop']+=constants['ROWS']*constants['COLS']*(ITEMSIZE[values[0].dtype]+ITEMSIZE[values[1].dtype])
             elif fn.__name__=='strided_copy':
                 self.copy_bytes['strided_copy']+=constants['N']*(ITEMSIZE[values[0].dtype]+ITEMSIZE[values[1].dtype])
+            elif fn.__name__=='cast':
+                self.copy_bytes['cast']+=constants['SIZE']*(ITEMSIZE[values[0].dtype]+ITEMSIZE[values[1].dtype])
+                self.casts[str(values[0].shape)+' '+values[0].dtype+'->'+values[1].dtype]+=1
+            elif fn.__name__=='projection_cast':
+                for i in range(3):
+                    self.copy_bytes['projection_cast']+=constants['N'+str(i)]*(ITEMSIZE[values[i].dtype]+ITEMSIZE[values[i+3].dtype])
             if fn.__name__ in ('grouped_mm','grouped_dw'):
                 self.gemm_flops+=2*values[0].shape[0]*constants['N']*constants['K']
             self._submit('triton:'+fn.__name__,lambda:None)
@@ -104,7 +110,7 @@ def main():
     b=MetadataBackend();e=Engine(b,fp8=args.fp8);m=MetadataModel(e,config)
     m.loss_chunk_size=args.loss_chunk
     opt=Optimizer(e,m.parameters());persistent=sum(b.raw.values())
-    b.operations.clear();b.ctas.clear();b.copy_bytes.clear();b.gemm_flops=0
+    b.operations.clear();b.ctas.clear();b.copy_bytes.clear();b.casts.clear();b.gemm_flops=0
     b.syncs=b.mallocs=0;b.peak=persistent
     batch=np.ones((args.batch,args.seq),np.int64)
     if args.mode=='graph':
@@ -125,7 +131,8 @@ def main():
         peak_live_bytes=b.peak_live,peak_allocation=b.peak_allocation,
         largest_live_groups_at_peak=b.peak_groups,
         host_synchronizations=b.syncs,driver_allocations=b.mallocs,
-        dispatches=sum(b.operations.values()),operations=dict(b.operations),
+        dispatches=sum((tape_operations if tape_operations is not None else b.operations).values()),
+        preparation_dispatches=sum(b.operations.values()),operations=dict(b.operations),casts_by_shape=dict(b.casts),
         triton_ctas=dict(b.ctas),explicit_copy_bytes=dict(b.copy_bytes),gemm_flops=b.gemm_flops,
         tape_operations=None if tape_operations is None else dict(tape_operations),
         limitations='Shape/schedule audit only; no GPU execution, measured speed, library/context memory or numerical validation')

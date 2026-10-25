@@ -17,6 +17,30 @@ def accumulate(G,A,Control,N:tl.constexpr,B:tl.constexpr=256):
 
 
 @triton.jit
+def accumulate_norm(G,A,Control,Counts,Stats,Partials,N:tl.constexpr,OFFSET:tl.constexpr,B:tl.constexpr=1024):
+    if tl.load(Control+1)!=0:
+        i=tl.program_id(0)*B+tl.arange(0,B)
+        g=tl.load(A+i,i<N,0)+tl.load(G+i,i<N,0)
+        tl.store(A+i,g,i<N)
+        scale=1./(tl.load(Stats)*(tl.load(Counts)+1))
+        value=g*scale
+        tl.store(Partials+OFFSET+tl.program_id(0),tl.sum(value*value,0))
+
+
+@triton.jit
+def accumulate_small(Table,Control,Counts,Stats,Partials,B:tl.constexpr=1024):
+    if tl.load(Control+1)!=0:
+        row=Table+tl.program_id(0)*4;i=tl.arange(0,B)
+        source=tl.load(row).to(tl.pointer_type(tl.float32))
+        target=tl.load(row+1).to(tl.pointer_type(tl.float32))
+        n=tl.load(row+2);offset=tl.load(row+3)
+        g=tl.load(source+i,i<n,0)+tl.load(target+i,i<n,0)
+        tl.store(target+i,g,i<n)
+        scale=1./(tl.load(Stats)*(tl.load(Counts)+1));value=g*scale
+        tl.store(Partials+offset,tl.sum(value*value,0))
+
+
+@triton.jit
 def statistics(Square,Control,Counts,Stats,Clip:tl.constexpr,Accumulation:tl.constexpr,
                LossScaling:tl.constexpr,Growth:tl.constexpr,Backoff:tl.constexpr,Interval:tl.constexpr):
     tl.store(Stats+3,0.);tl.store(Stats+4,0.)
@@ -73,23 +97,46 @@ class StepGraph:
         self.counts=self.e.array(np.asarray([optimizer.accumulated,optimizer.updates,optimizer.good_steps],np.int64))
         self.stats=self.e.array(np.asarray([optimizer.scale,0.,0.,0.,0.],np.float32))
         self.steps=self.e.array(np.asarray([optimizer.state[p]['step'] for p in optimizer.parameters],np.int64))
+        offsets={};total=0
+        for p in optimizer.parameters:
+            offsets[p]=total;total+=triton.cdiv(p.size,1024)
+        # Unused parameters keep their zero slots; used slots are overwritten on
+        # every replay while accumulating, so there is no second gradient scan.
+        self.norm_partials=self.e.full((total,),0.)
         def prepare():
             loss=loss_fn(self.inputs)
             present=set()
+            small={p for p in optimizer.parameters if p.size<=1024} if optimizer.multi_tensor is not None else set()
             def consume(p,g):
+                if p in small:return False
                 if p in optimizer.gradients:
-                    self.b.launch(accumulate,(triton.cdiv(p.size,256),),(g,optimizer.gradients[p].data,self.control.data),N=p.size)
+                    self.b.launch(accumulate_norm,(triton.cdiv(p.size,1024),),
+                        (g,optimizer.gradients[p].data,self.control.data,self.counts.data,self.stats.data,self.norm_partials.data),
+                        N=p.size,OFFSET=offsets[p])
                     present.add(p)
                 return True
-            self.e.vjp(loss*self.stats[0],leaf_callback=consume)
+            retained=self.e.vjp(loss,self.stats[0].data,leaf_callback=consume)
+            if retained:
+                rows=[]
+                for p,g in retained.items():
+                    if p not in small:continue
+                    rows.append([g.storage,optimizer.gradients[p].data.storage,p.size,offsets[p]])
+                    present.add(p)
+                if rows:
+                    table=self.e.array(np.asarray(rows,np.int64))
+                    self.b.launch(accumulate_small,(len(rows),),
+                        (table.data,self.control.data,self.counts.data,self.stats.data,self.norm_partials.data))
             self.parameters=[p for p in optimizer.parameters if p in present]
             with self.e.no_grad():
-                divisor=1./(self.stats[0]*(self.counts[0].cast('fp32')+1.))
-                squares=self.e.squared_norm((optimizer.gradients[p] for p in self.parameters),divisor)
+                squares=self.e.sum_partials(self.norm_partials.data)
                 self.b.launch(statistics,(1,),(squares.data,self.control.data,self.counts.data,self.stats.data),
                     Clip=optimizer.grad_clip,Accumulation=accumulation,LossScaling=optimizer.loss_scaling,
                     Growth=optimizer.growth_factor,Backoff=optimizer.backoff_factor,Interval=optimizer.growth_interval)
+                bulk=optimizer.multi_tensor is not None and len(present)==len(optimizer.parameters)
+                if bulk:
+                    optimizer.multi_tensor.update(optimizer,0.,0.,steps=self.steps.data,control=self.control.data,stats=self.stats.data)
                 for i,p in enumerate(optimizer.parameters):
+                    if bulk:break
                     if p not in present:continue
                     state=optimizer.state[p]
                     self.b.launch(adamw,(triton.cdiv(p.size,256),),(p.data,optimizer.gradients[p].data,state['m'].data,state['v'].data,self.steps.data,self.control.data,self.stats.data),

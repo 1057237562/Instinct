@@ -5,6 +5,8 @@ import triton
 from model.dense_triton.ops import DenseOps, DenseBlock
 from .layout import plan_layout
 from . import kernels
+from . import fused
+from model.dense_triton import elementwise as ew
 
 
 class CublasDenseOps(DenseOps):
@@ -46,6 +48,48 @@ class CublasDenseOps(DenseOps):
         # Q/K/V share one normalized activation cast; gate/up share another.
         return self._cached(('quant', self._key(x), dtype),
                             lambda: super(CublasDenseOps, self).quantize(x, dtype))
+
+    def norm_rotary(self,x,weight,cos,sin,eps=1.e-6,start=0):
+        if len(x.shape)!=4 or x.shape[-1]%2 or weight.shape!=(x.shape[-1],):
+            raise ValueError('fused Q/K norm+RoPE requires [batch,seq,heads,even dim]')
+        b,s,h,d=x.shape
+        if d>8192 or eps<=0 or cos.shape!=sin.shape or cos.shape[1:]!=(d,) or start<0 or start+s>cos.shape[0]:
+            raise ValueError('invalid normalization or RoPE tables')
+        out=self.empty(x.shape,x.dtype);r=self.empty((b*s*h,),'fp32')
+        options=dict(N=d,SEQ=s,HEADS=h,START=start,BLOCK=triton.next_power_of_2(d))
+        self.backend.launch(fused.norm_rotary_forward,(b*s*h,),(x,weight,cos,sin,out,r),EPS=eps,**options)
+        return out,(x,weight,cos,sin,r,options)
+
+    def norm_rotary_backward(self,saved,g):
+        x,w,cos,sin,r,options=saved;rows=x.numel//x.shape[-1];groups=min(rows,128)
+        dx=self.empty(x.shape,x.dtype);dw=self.empty(w.shape,w.dtype)
+        partial=self.empty((groups,x.shape[-1]),'fp32')
+        self.backend.launch(fused.norm_rotary_backward,(groups,),(x,w,r,cos,sin,g,dx,partial),M=rows,GROUPS=groups,**options)
+        self.backend.launch(ew._rms_reduce_dw,(triton.cdiv(x.shape[-1],64),),(partial,dw),
+                            N=x.shape[-1],GROUPS=groups,BLOCK_G=triton.next_power_of_2(groups),BLOCK_N=64)
+        return dx,dw
+
+    def linears(self,x,weights):
+        # Q/K/V and gate/up keep separate GEMMs and parameter identities, while
+        # sharing one cast launch. No concatenated master weights or output slices.
+        if x.dtype not in ('fp32','bf16','fp16') or any(w.dtype not in ('fp32','bf16','fp16') for w in weights):
+            raise ValueError('projections require high-precision activations and weights')
+        if (self.fp8 or len(weights) not in (2,3) or len({w.dtype for w in weights})!=1
+                or weights[0].dtype==x.dtype):
+            return [self.linear(x,w) for w in weights]
+        if any(len(w.shape)!=2 or w.shape[1]!=x.shape[-1] for w in weights):
+            raise ValueError('projection input/weight shapes differ')
+        converted=[self.empty(w.shape,x.dtype) for w in weights]
+        inputs=list(weights);outputs=list(converted);sizes=[w.numel for w in weights]
+        if len(weights)==2:inputs.append(weights[0]);outputs.append(converted[0]);sizes.append(0)
+        self.backend.launch(fused.projection_cast,(sum(triton.cdiv(n,256) for n in sizes),),
+                            (*inputs,*outputs),N0=sizes[0],N1=sizes[1],N2=sizes[2])
+        matrix=x.view(x.numel//x.shape[-1],x.shape[-1]);result=[]
+        for weight,qw in zip(weights,converted):
+            y=self.mm(matrix,qw,transpose_b=True,out_dtype=x.dtype)
+            saved=(x.shape,x.dtype,weight.dtype,matrix,qw,None)
+            result.append((y.view(*x.shape[:-1],weight.shape[0]),saved))
+        return result
 
     def _inverse(self, scale):
         if scale.dtype != 'fp32' or scale.numel != 1:

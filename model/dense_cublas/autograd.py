@@ -19,8 +19,9 @@ def strides(shape):
 
 
 class Value:
-    def __init__(self, engine, data, requires_grad=False, node=None, name=None):
+    def __init__(self, engine, data, requires_grad=False, node=None, name=None, gradient_dtype='fp32'):
         self.engine, self.data, self.requires_grad, self.node, self.name = engine, data, requires_grad, node, name
+        self.gradient_dtype = gradient_dtype
 
     @property
     def shape(self): return self.data.shape
@@ -89,9 +90,10 @@ class Engine:
 
     def item(self, value): return float(self.numpy(value).reshape(-1)[0])
 
-    def _node(self, data, parents, backward):
+    def _node(self, data, parents, backward, gradient_dtype='fp32'):
         required = self.recording and any(x.requires_grad for x in parents)
-        return Value(self, data, required, (tuple(parents), backward) if required else None)
+        return Value(self, data, required, (tuple(parents), backward) if required else None,
+                     gradient_dtype=gradient_dtype)
 
     @contextmanager
     def no_grad(self):
@@ -101,7 +103,7 @@ class Engine:
 
     def cast(self, x, dtype):
         if x.dtype == dtype: return x
-        return self._node(self.ops.cast(x.data, dtype), (x,), lambda g: (self.ops.cast(g, x.dtype),))
+        return self._node(self.ops.cast(x.data, dtype), (x,), lambda g: (self.ops.cast(g, x.dtype),), 'preserve')
 
     def reshape(self, x, shape):
         shape = list(shape)
@@ -109,7 +111,7 @@ class Engine:
             index = shape.index(-1)
             shape[index] = x.size // -math.prod(shape)
         if not shape: shape = [1]
-        return self._node(x.data.view(*shape), (x,), lambda g: (g.view(*x.shape),))
+        return self._node(x.data.view(*shape), (x,), lambda g: (g.view(*x.shape),), 'preserve')
 
     def _broadcast_strides(self, shape, output):
         aligned = (1,) * (len(output) - len(shape)) + shape
@@ -171,6 +173,9 @@ class Engine:
                 (value.data, partials, scale_data, Scalar(1. if device_scale else scale)),
                 N=value.size, OFFSET=offset, DEVICE_SCALE=device_scale)
             offset += blocks
+        return self.sum_partials(partials)
+
+    def sum_partials(self,partials):
         # A single CTA scanning ~200k partials becomes another serial tail.
         # Reduce hierarchically so every CTA reads at most 1024 elements.
         while partials.numel > 1:
@@ -282,6 +287,13 @@ class Engine:
 
     def linear(self, x, weight):
         out, saved = self.ops.linear(x.data, weight.data)
+        return self._linear_node(x,weight,out,saved)
+
+    def linears(self,x,weights):
+        return [self._linear_node(x,w,out,saved) for w,(out,saved)
+                in zip(weights,self.ops.linears(x.data,[w.data for w in weights]))]
+
+    def _linear_node(self,x,weight,out,saved):
         def backward(g):
             result = self.ops.linear_backward(saved, self.ops.cast(g, x.dtype), x.requires_grad, weight.requires_grad)
             dx,dw=result
@@ -290,7 +302,7 @@ class Engine:
                 with self.backend.on_stream(self.backend.weight_stream):self.backend.record_event(event)
                 dw=PendingGradient(dw,event)
             return dx,dw
-        return self._node(out, (x, weight), backward)
+        return self._node(out, (x, weight), backward, x.dtype)
 
     def linear_ce(self, x, weight, labels, chunk_size=256):
         """Chunked projection + fused CE; recompute logits in VJP, never retain T×V."""
@@ -328,17 +340,34 @@ class Engine:
             return dx.data.view(*shape),dw.data
         return self._node(loss.data,(x,weight),backward)
 
-    def swiglu(self,gate,up):
+    def swiglu(self,gate,up,round_gate=False):
+        if round_gate:
+            from .fused import rounded_swiglu
+            if gate.shape!=up.shape or gate.dtype!=up.dtype:raise ValueError('SwiGLU inputs differ')
+            out=self.backend.empty(gate.shape,gate.dtype)
+            self.backend.launch(rounded_swiglu,(triton.cdiv(gate.size,256),),
+                (gate.data,up.data,out,out,out,out),N=gate.size,BACKWARD=False)
+            def backward(g):
+                dg=self.backend.empty(gate.shape,gate.dtype)
+                du=self.backend.empty(up.shape,'fp32')
+                self.backend.launch(rounded_swiglu,(triton.cdiv(gate.size,256),),
+                    (gate.data,up.data,out,g,dg,du),N=gate.size,BACKWARD=True)
+                return dg,du
+            return self._node(out,(gate,up),backward,'preserve')
         out,saved=self.ops.swiglu(gate.data,up.data)
-        return self._node(out,(gate,up),lambda g:self.ops.swiglu_backward(saved,self.ops.cast(g,gate.dtype)))
+        return self._node(out,(gate,up),lambda g:self.ops.swiglu_backward(saved,self.ops.cast(g,gate.dtype)),gate.dtype)
 
     def norm(self, x, weight, eps=1e-6):
         out, saved = self.ops.norm(x.data, weight.data, eps)
-        return self._node(out, (x, weight), lambda g: self.ops.norm_backward(saved, self.ops.cast(g, x.dtype)))
+        return self._node(out, (x, weight), lambda g: self.ops.norm_backward(saved, self.ops.cast(g, x.dtype)),x.dtype)
 
     def rotary(self, x, cos, sin, start=0):
         out = self.ops.rotary(x.data, cos.data, sin.data, start=start)
         return self._node(out, (x,), lambda g: (self.ops.rotary(g, cos.data, sin.data, start=start, backward=True),))
+
+    def norm_rotary(self,x,weight,cos,sin,eps=1.e-6,start=0):
+        out,saved=self.ops.norm_rotary(x.data,weight.data,cos.data,sin.data,eps,start)
+        return self._node(out,(x,weight),lambda g:self.ops.norm_rotary_backward(saved,g),'preserve')
 
     def embedding(self, weight, ids):
         shape = (*ids.shape, weight.shape[1])
@@ -359,7 +388,7 @@ class Engine:
             if probability: self.counter += q.shape[0] * q.shape[2] * q.shape[1] ** 2
             out, saved = self.ops.attention(q.data, k.data, v.data, None if mask is None else mask.data,
                                             dropout=probability, seed=self.seed, counter=counter)
-            return self._node(out, (q, k, v), lambda g: self.ops.attention_backward(saved, self.ops.cast(g, q.dtype)))
+            return self._node(out, (q, k, v), lambda g: self.ops.attention_backward(saved, self.ops.cast(g, q.dtype)),q.dtype)
         b, seq, heads, dim = q.shape
         kv_heads, length = k.shape[2], k.shape[1]
         # The general path also handles arbitrary head dimensions and decode offsets.
@@ -419,11 +448,16 @@ class Engine:
 
     def log_probs(self, logits, labels): return self.gather_last(self.softmax(logits, log=True), labels)
 
-    def ce(self, logits, labels):
+    def ce(self, logits, labels, shift=False):
         rows,vocab=labels.size,logits.shape[-1]
         if logits.size!=rows*vocab:raise ValueError('CE labels/logits shape mismatch')
+        seq=1
+        if shift:
+            if len(logits.shape)!=3 or labels.shape!=logits.shape[:2] or labels.shape[1]<2:
+                raise ValueError('shifted CE requires [batch,seq>=2,vocab] logits and [batch,seq] labels')
+            seq=labels.shape[1];rows=labels.shape[0]*(seq-1)
         losses=self.backend.empty((rows,),'fp32');counts=self.backend.empty((rows,),'fp32')
-        options=dict(VOCAB=vocab,BLOCK=triton.next_power_of_2(vocab))
+        options=dict(VOCAB=vocab,BLOCK=triton.next_power_of_2(vocab),SHIFT=shift,SEQ=seq)
         self.backend.launch(tk.cross_entropy_recompute,(rows,),
             (logits.data,labels.data,losses,counts,logits.data,losses,counts),BACKWARD=False,**options)
         denom=self.wrap(counts).sum()
@@ -483,11 +517,17 @@ class Engine:
             gradients = {output: [gradient if gradient is not None else self.full(output.shape, 1.).data]}
             def materialize(value):
                 parts=gradients.get(value,[]);result=None
+                target='fp32' if value.node is None or value in requested else value.gradient_dtype
                 for part in parts:
                     if isinstance(part,PendingGradient):
                         self.backend.wait_event(part.event);part=part.data
-                    part=self.ops.cast(part,'fp32')
+                    # Keep accumulation in FP32. A single incoming gradient can
+                    # go directly to a kernel's declared input precision, without
+                    # a BF16 -> FP32 -> BF16 round trip. Metadata views preserve it.
+                    dtype='fp32' if len(parts)>1 else (part.dtype if target=='preserve' else target)
+                    part=self.ops.cast(part,dtype)
                     result=part if result is None else (self.wrap(result)+self.wrap(part)).data
+                if result is not None and target!='preserve':result=self.ops.cast(result,target)
                 gradients[value]=[] if result is None else [result]
                 return result
             for value in reversed(ordered):

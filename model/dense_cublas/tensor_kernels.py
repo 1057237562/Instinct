@@ -86,15 +86,21 @@ def sum_partials(X, OUT, N: tl.constexpr, BLOCK: tl.constexpr = 1024):
 
 @triton.jit
 def cross_entropy_recompute(Logits, Labels, Losses, Valid, DY, G, Denom,
-                            VOCAB: tl.constexpr, BLOCK: tl.constexpr, BACKWARD: tl.constexpr):
+                            VOCAB: tl.constexpr, BLOCK: tl.constexpr, BACKWARD: tl.constexpr,
+                            SHIFT: tl.constexpr=False, SEQ: tl.constexpr=1):
     row=tl.program_id(0);col=tl.arange(0,BLOCK)
-    label=tl.load(Labels+row);valid=(label>=0)&(label<VOCAB)
-    x=tl.load(Logits+row*VOCAB+col,col<VOCAB,-float('inf')).to(tl.float32)
+    source=row
+    if SHIFT:source=(row//(SEQ-1))*SEQ+row%(SEQ-1)
+    label=tl.load(Labels+source+(1 if SHIFT else 0));valid=(label>=0)&(label<VOCAB)
+    x=tl.load(Logits+source*VOCAB+col,col<VOCAB,-float('inf')).to(tl.float32)
     maximum=tl.max(x,0);exponent=tl.exp(x-maximum);total=tl.sum(exponent,0)
     if BACKWARD:
         scale=tl.load(G)/tl.maximum(tl.load(Denom),1.)
         grad=tl.where(valid,(exponent/total-(col==label).to(tl.float32))*scale,0.)
-        tl.store(DY+row*VOCAB+col,grad,col<VOCAB)
+        tl.store(DY+source*VOCAB+col,grad,col<VOCAB)
+        if SHIFT:
+            if row%(SEQ-1)==SEQ-2:
+                tl.store(DY+(source+1)*VOCAB+col,0.,col<VOCAB)
     else:
         target=tl.sum(tl.where(col==label,x,0.),0)
         tl.store(Losses+row,tl.where(valid,maximum+tl.log(total)-target,0.))

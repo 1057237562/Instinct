@@ -116,6 +116,7 @@ class Model:
         if c['model_architecture'] == 'looped_legacy' and c['loop_iters']:
             self._parameter('model.loop_pos_embed.weight', (c['loop_iters'], h), zeros=True)
         self.cos, self.sin = (engine.array(x) for x in rope_tables(c))
+        self._zero_aux = engine.full((1,), 0.)
 
     def _parameter(self, name, shape, ones=False, zeros=False, array=None):
         if array is None: array = np.ones(shape) if ones else np.zeros(shape) if zeros else self.rng.normal(0., .02, shape)
@@ -164,9 +165,10 @@ class Model:
         return out
 
     def projections(self,x,names):
-        if not self.fuse_projections or any(name in self.adapters for name in names):
+        if any(name in self.adapters for name in names):
             return [self.linear(x,name) for name in names]
         weights=[self.params[name] for name in names]
+        if not self.fuse_projections:return self.e.linears(x,weights)
         joined=self.e.linear(x,self.e.cat(weights,0))
         result=[];begin=0
         for weight in weights:
@@ -216,9 +218,9 @@ class Model:
         b,s,_ = x.shape; d, hq, hkv = c['head_dim'], c['num_attention_heads'], c['num_key_value_heads']
         with e.ops.reuse_scope():
             q,k,v=self.projections(x,[p+name+'_proj.weight' for name in ('q','k','v')])
-            q=self.norm(q.reshape(b,s,hq,d),p+'q_norm.weight')
-            k=self.norm(k.reshape(b,s,hkv,d),p+'k_norm.weight');v=v.reshape(b,s,hkv,d)
-        q, k = e.rotary(q, self.cos, self.sin, start), e.rotary(k, self.cos, self.sin, start)
+        q=e.norm_rotary(q.reshape(b,s,hq,d),self.params[p+'q_norm.weight'],self.cos,self.sin,c['rms_norm_eps'],start)
+        k=e.norm_rotary(k.reshape(b,s,hkv,d),self.params[p+'k_norm.weight'],self.cos,self.sin,c['rms_norm_eps'],start)
+        v=v.reshape(b,s,hkv,d)
         if cache and cache_key in cache:
             pk,pv = cache[cache_key]
             k, v = e.cat([self._unpack_cache(pk), k],1), e.cat([self._unpack_cache(pv), v],1)
@@ -229,12 +231,12 @@ class Model:
     def ffn(self, x, prefix):
         with self.e.ops.reuse_scope():
             gate, up = self.projections(x,[prefix+'gate_proj.weight',prefix+'up_proj.weight'])
-        activated=self.e.swiglu(gate,up) if self.fuse_projections and self.config['hidden_act']=='silu' else self.e.unary(gate,self.config['hidden_act'])*up
+        activated=self.e.swiglu(gate,up,round_gate=not self.fuse_projections) if self.config['hidden_act']=='silu' else self.e.unary(gate,self.config['hidden_act'])*up
         return self.linear(activated,prefix+'down_proj.weight')
 
     def feed_forward(self, x, i):
         e,c,p = self.e,self.config,self.layer_prefixes[i]+'mlp.'
-        if not c['use_moe']: return self.ffn(x,p), e.full((1,),0.)
+        if not c['use_moe']: return self.ffn(x,p), self._zero_aux
         flat = x.reshape(-1,x.shape[-1])
         scores = e.softmax(self.linear(flat,p+'gate.weight').cast('fp32'))
         selected = e.topk_mask(scores,c['num_experts_per_tok'])
@@ -251,6 +253,16 @@ class Model:
         checkpoint = c['use_grad_checkpoint'] if self.training and new_cache is None else 0
         ps = [v for k,v in self.params.items() if k.startswith(p) and v.requires_grad]
         def attention(z): return self.attention(self.norm(z,p+'input_layernorm.weight'),i,mask,cache,new_cache,start,cache_key)
+        if not c['use_moe']:
+            # Dense has no router auxiliary output. Do not pack an extra zero
+            # into every checkpoint's activation, then copy/slice it back out.
+            def dense_mlp(z): return self.ffn(self.norm(z,p+'post_attention_layernorm.weight'),p+'mlp.')
+            def dense_whole(z):
+                z=z+attention(z)
+                return z+dense_mlp(z)
+            if checkpoint==2:return e.checkpoint(dense_whole,x,ps),self._zero_aux
+            x=x+(e.checkpoint(attention,x,ps) if checkpoint==1 else attention(x))
+            return x+(e.checkpoint(dense_mlp,x,ps) if checkpoint==1 else dense_mlp(x)),self._zero_aux
         def mlp(z):
             value,aux = self.feed_forward(self.norm(z,p+'post_attention_layernorm.weight'),i)
             return e.cat([value.reshape(-1),aux.reshape(1)],0)
@@ -274,14 +286,15 @@ class Model:
         if use_cache and self.training: raise ValueError('KV cache is an evaluation-only operation')
         new_cache = {'position':start+ids.shape[1]} if use_cache else None
         x=e.dropout(e.embedding(self.params['model.embed_tokens.weight'],ids).cast(self.activation_dtype),c['dropout'],self.training)
-        aux,early,depth=e.full((1,),0.),[],1
+        aux,early,depth=self._zero_aux,[],1
         def run(layers, value, suffix=''):
             nonlocal aux
             for i in layers:
                 inference_mark=e.backend.mark() if not e.recording else None
-                value,a=self.block(value,i,attention_mask,cache,new_cache,start,str(i)+suffix); aux=aux+a
+                value,a=self.block(value,i,attention_mask,cache,new_cache,start,str(i)+suffix)
+                if a is not self._zero_aux:aux=aux+a
                 if labels is not None and self.training and i+1 in c['early_exit_layers']:
-                    early.append(e.ce(self.head(value)[:,:-1],labels[:,1:]))
+                    early.append(e.ce(self.head(value),labels,shift=True))
                 if inference_mark is not None:
                     e.backend.release_since(inference_mark,keep=(value.data,aux.data,*self.cache_tensors(new_cache),*(v.data for v in early)))
             return value
@@ -302,7 +315,7 @@ class Model:
         hidden=self.norm(x,'model.norm.weight')
         fused=labels is not None and self.loss_chunk_size>0 and not return_logits and 'lm_head.weight' not in self.adapters
         logits=self.linear(hidden,'lm_head.weight') if return_logits or (labels is not None and not fused) else None
-        loss=e.linear_ce(hidden[:,:-1],self.params['lm_head.weight'],labels[:,1:],self.loss_chunk_size) if fused else (None if labels is None else e.ce(logits[:,:-1],labels[:,1:]))
+        loss=e.linear_ce(hidden[:,:-1],self.params['lm_head.weight'],labels[:,1:],self.loss_chunk_size) if fused else (None if labels is None else e.ce(logits,labels,shift=True))
         if loss is not None and early: loss=loss+sum(early)*c['early_exit_loss_weight']/len(early)
         return Output(logits,hidden,aux,loss,new_cache,depth)
 
