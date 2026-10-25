@@ -22,6 +22,7 @@ from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from model.flash_attn_4 import flash_attention
 from model.kv_cache_quant import parse_cache, make_cache
 from model.checkpointing import recompute_attention, checkpoint_ffn
+from model.checkpoint_profiles import validate_checkpoint_profile
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,9 @@ class InstinctConfig(PretrainedConfig):
         self.kv_cache_dtype = kwargs.get("kv_cache_dtype", "fp32")
         # Gradient Checkpointing configs
         self.use_grad_checkpoint = kwargs.get("use_grad_checkpoint", 0)
+        self.checkpoint_profile = validate_checkpoint_profile(kwargs.get("checkpoint_profile"), supported=False)
+        if self.checkpoint_profile == "off":
+            self.use_grad_checkpoint = 0
         self.num_attention_heads = kwargs.get("num_attention_heads", 8)
         self.num_key_value_heads = kwargs.get("num_key_value_heads", 4)
         self.head_dim = kwargs.get("head_dim", self.hidden_size // self.num_attention_heads)

@@ -1,0 +1,149 @@
+{
+  "mode": "simulate",
+  "torch_version": "2.8.0+cpu",
+  "batch": 4,
+  "seq": 4096,
+  "config": {
+    "hidden_size": 768,
+    "num_hidden_layers": 16,
+    "num_attention_heads": 8,
+    "num_key_value_heads": 2,
+    "vocab_size": 6400,
+    "dropout": 0.0,
+    "max_position_embeddings": 32768,
+    "tie_word_embeddings": true,
+    "flash_attn": false
+  },
+  "dtype": "bf16_autocast_fp32_parameters_adamw_foreach",
+  "overhead_gib": 2.0,
+  "reserve_fraction": 0.1,
+  "flop_convention": "GEMM + full-square SDPA FMA=2; excludes pointwise/reductions; not execution time",
+  "limitations": "Fake CPU SDPA tensor lifetimes approximate CUDA SDPA; no allocator cache, opaque kernel workspace, compile, FA4, DDP or early-exit losses",
+  "rows": [
+    {
+      "profile": "off",
+      "peak_bytes": 70697785856,
+      "persistent_bytes": 2176619520,
+      "forward_live_bytes": 68469131776,
+      "forward_peak_bytes": 69654713856,
+      "backward_peak_bytes": 70697785856,
+      "forward_flops": 7170447900672,
+      "step_flops": 21511343702016,
+      "op_flops": {
+        "aten.mm": 11615739052032,
+        "aten.bmm": 9895604649984
+      },
+      "peak_gib": 65.84244394302368,
+      "required_capacity_gib": 75.3804932700263,
+      "extra_compute_percent": 0.0,
+      "memory_saved_percent": 0.0,
+      "tflops_saved_vs_ckpt4": 6.030134083584,
+      "compute_saved_percent_vs_ckpt4": 21.894736842105264,
+      "tflops_saved_per_total_gib_vs_ckpt4": 0.09158429916122396,
+      "tflops_saved_per_extra_gib_vs_ckpt4": 0.1063644863870123,
+      "pareto_efficient": true
+    },
+    {
+      "profile": "ckpt1",
+      "peak_bytes": 13158488576,
+      "persistent_bytes": 2176619520,
+      "forward_live_bytes": 7093881344,
+      "forward_peak_bytes": 12062791168,
+      "backward_peak_bytes": 13158488576,
+      "forward_flops": 7170447900672,
+      "step_flops": 24809878585344,
+      "op_flops": {
+        "aten.mm": 11615739052032,
+        "aten.bmm": 13194139533312
+      },
+      "peak_gib": 12.254797458648682,
+      "required_capacity_gib": 15.83866384294298,
+      "extra_compute_percent": 15.333932315064391,
+      "memory_saved_percent": 81.38769352296022,
+      "tflops_saved_vs_ckpt4": 2.731599200256,
+      "compute_saved_percent_vs_ckpt4": 9.91812865497076,
+      "tflops_saved_per_total_gib_vs_ckpt4": 0.22290039549598636,
+      "tflops_saved_per_extra_gib_vs_ckpt4": 0.8796093022207999,
+      "pareto_efficient": true,
+      "marginal_tflops_per_gib_vs_next_tier": 0.8796093022207999
+    },
+    {
+      "profile": "ckpt2",
+      "peak_bytes": 10767735296,
+      "persistent_bytes": 2176619520,
+      "forward_live_bytes": 4543744512,
+      "forward_peak_bytes": 9672037888,
+      "backward_peak_bytes": 10767735296,
+      "forward_flops": 7170447900672,
+      "step_flops": 26768383672320,
+      "op_flops": {
+        "aten.mm": 13574244139008,
+        "aten.bmm": 13194139533312
+      },
+      "peak_gib": 10.028234958648682,
+      "required_capacity_gib": 13.364705509609646,
+      "extra_compute_percent": 24.438454627133876,
+      "memory_saved_percent": 84.76934579262193,
+      "tflops_saved_vs_ckpt4": 0.77309411328,
+      "compute_saved_percent_vs_ckpt4": 2.807017543859649,
+      "tflops_saved_per_total_gib_vs_ckpt4": 0.07709174311011312,
+      "tflops_saved_per_extra_gib_vs_ckpt4": 0.8796093022208,
+      "pareto_efficient": true,
+      "marginal_tflops_per_gib_vs_next_tier": 0.8796093022208
+    },
+    {
+      "profile": "ckpt3",
+      "peak_bytes": 9824016896,
+      "persistent_bytes": 2176619520,
+      "forward_live_bytes": 3537111552,
+      "forward_peak_bytes": 8690570752,
+      "backward_peak_bytes": 9824016896,
+      "forward_flops": 7170447900672,
+      "step_flops": 27541477785600,
+      "op_flops": {
+        "aten.mm": 14347338252288,
+        "aten.bmm": 13194139533312
+      },
+      "peak_gib": 9.149328708648682,
+      "required_capacity_gib": 12.388143009609646,
+      "extra_compute_percent": 28.03234501347709,
+      "memory_saved_percent": 86.10420853064629,
+      "tflops_saved_vs_ckpt4": 0.0,
+      "compute_saved_percent_vs_ckpt4": 0.0,
+      "tflops_saved_per_total_gib_vs_ckpt4": 0.0,
+      "tflops_saved_per_extra_gib_vs_ckpt4": null,
+      "pareto_efficient": true,
+      "marginal_tflops_per_gib_vs_next_tier": null
+    },
+    {
+      "profile": "ckpt4",
+      "peak_bytes": 9824016896,
+      "persistent_bytes": 2176619520,
+      "forward_live_bytes": 3537111552,
+      "forward_peak_bytes": 8690570752,
+      "backward_peak_bytes": 9824016896,
+      "forward_flops": 7170447900672,
+      "step_flops": 27541477785600,
+      "op_flops": {
+        "aten.mm": 14347338252288,
+        "aten.bmm": 13194139533312
+      },
+      "peak_gib": 9.149328708648682,
+      "required_capacity_gib": 12.388143009609646,
+      "extra_compute_percent": 28.03234501347709,
+      "memory_saved_percent": 86.10420853064629,
+      "tflops_saved_vs_ckpt4": 0.0,
+      "compute_saved_percent_vs_ckpt4": 0.0,
+      "tflops_saved_per_total_gib_vs_ckpt4": 0.0,
+      "tflops_saved_per_extra_gib_vs_ckpt4": null,
+      "pareto_efficient": true
+    }
+  ],
+  "recommendations": {
+    "8": null,
+    "10": null,
+    "12": null,
+    "16": "ckpt1",
+    "24": "ckpt1"
+  }
+}

@@ -58,6 +58,8 @@ def flash_attention(
     v: torch.Tensor,
     dropout_p: float = 0.0,
     is_causal: bool = True,
+    *,
+    allow_fa4: bool = True,
 ) -> torch.Tensor:
     """Fused attention 快路径。
 
@@ -66,11 +68,12 @@ def flash_attention(
         k, v: (batch, seqlen, kv_heads, head_dim)
         dropout_p: attention dropout 概率(训练时)
         is_causal: 是否因果掩码
+        allow_fa4: False 强制走 PyTorch SDPA，供可识别 ATen 算子的 SAC 策略使用
 
     Returns:
         (batch, seqlen, nheads, head_dim)
     """
-    fa4 = _get_fa4()
+    fa4 = _get_fa4() if allow_fa4 else None
     if (
         fa4 is not None
         and q.is_cuda

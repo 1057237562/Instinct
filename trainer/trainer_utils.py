@@ -49,6 +49,8 @@ def config_from_args(args, **overrides):
     overrides.setdefault('param_dtype', getattr(args, 'param_dtype', 'fp32'))
     overrides.setdefault('kv_cache_dtype', getattr(args, 'kv_cache_dtype', 'fp32'))
     overrides.setdefault("use_grad_checkpoint", int(getattr(args, "use_grad_checkpoint", 0)))
+    if getattr(args, "checkpoint_profile", None) is not None:
+        overrides.setdefault("checkpoint_profile", args.checkpoint_profile)
     hidden_size = overrides.pop('hidden_size', getattr(args, 'hidden_size', 768))
     num_hidden_layers = overrides.pop('num_hidden_layers', getattr(args, 'num_hidden_layers', 8))
     use_moe = overrides.pop('use_moe', bool(getattr(args, 'use_moe', 0)))

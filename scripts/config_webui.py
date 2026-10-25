@@ -568,10 +568,18 @@ def build_config_dict() -> dict:
         "inference_rope_scaling": st.session_state.get("inference_rope_scaling", False),
         "use_moe": st.session_state.get("use_moe", False),
         "use_grad_checkpoint": st.session_state.get("use_grad_checkpoint", 0),
+        "checkpoint_profile": (
+            st.session_state.get("checkpoint_profile", "legacy")
+            if st.session_state.get("runtime_backend", "pytorch") == "pytorch"
+            and st.session_state.get("model_architecture", "standard") == "standard"
+            and not st.session_state.get("use_moe", False) else "legacy"
+        ),
         "rms_norm_eps": st.session_state.get("rms_norm_eps", 1e-6),
         "flash_attn": st.session_state.get("flash_attn", True),
         "intermediate_size": compute_intermediate_size(st.session_state.get("hidden_size", 768)),
     }
+    if d["checkpoint_profile"] == "legacy":
+        d.pop("checkpoint_profile")
 
     # head_dim
     h = d["hidden_size"]
@@ -679,6 +687,8 @@ def gen_python_code(cfg: dict) -> str:
 
     if cfg.get("use_grad_checkpoint"):
         params.append(("use_grad_checkpoint", cfg.get("use_grad_checkpoint")))
+    if cfg.get("checkpoint_profile", "legacy") != "legacy":
+        params.append(("checkpoint_profile", repr(cfg["checkpoint_profile"])))
 
     if cfg["inference_rope_scaling"]:
         params.append(("inference_rope_scaling", "True"))
@@ -749,6 +759,9 @@ def gen_config_json(cfg: dict) -> str:
             out[k] = int(cfg[k])
         else:
             out[k] = cfg.get(k)
+
+    if cfg.get("checkpoint_profile", "legacy") != "legacy":
+        out["checkpoint_profile"] = cfg["checkpoint_profile"]
 
     if cfg.get("inference_rope_scaling") and cfg.get("rope_scaling"):
         out["inference_rope_scaling"] = True
@@ -822,6 +835,7 @@ def load_config_to_session(config_dict: dict):
     st.session_state.inference_rope_scaling = config_dict.get("inference_rope_scaling", False)
     st.session_state.use_moe = config_dict.get("use_moe", False)
     st.session_state.use_grad_checkpoint = config_dict.get("use_grad_checkpoint", 0)
+    st.session_state.checkpoint_profile = config_dict.get("checkpoint_profile", "legacy") or "legacy"
     st.session_state.rms_norm_eps = config_dict.get("rms_norm_eps", 1e-6)
     st.session_state.flash_attn = config_dict.get("flash_attn", True)
 
@@ -1919,11 +1933,29 @@ with st.sidebar:
                  "消除 kernel launch 间隙，小模型首选（MoE 动态路由可能部分 fallback，无碍）；"
                  "max-autotune=极限调优，编译极慢",
         )
+        profile_supported = (st.session_state.get("runtime_backend", "pytorch") == "pytorch"
+                             and st.session_state.get("model_architecture", "standard") == "standard"
+                             and not st.session_state.get("use_moe", False))
+        profile_labels = {
+            "legacy": "兼容旧配置（使用下方 0/1/2）", "off": "关闭检查点",
+            "ckpt1": "ckpt1 · 显存充足：保留投影与融合注意力",
+            "ckpt2": "ckpt2 · 均衡：重算 FFN 投影",
+            "ckpt3": "ckpt3 · 小显存：只保留融合注意力",
+            "ckpt4": "ckpt4 · 最小显存：整层重算",
+        }
         st.selectbox(
-            "梯度检查点模式（0关闭/1选择性/2整层）",
+            "PyTorch Dense 显存档位", list(profile_labels),
+            index=list(profile_labels).index(st.session_state.get("checkpoint_profile", "legacy")),
+            key="checkpoint_profile", format_func=profile_labels.get,
+            disabled=not profile_supported,
+            help="ckpt1→ckpt4 显存递减、重算递增。容量门槛取决于 batch、序列长度和注意力后端；请用 experiments/profile_checkpoint_profiles.py 生成预算表。",
+        )
+        st.selectbox(
+            "旧梯度检查点模式（兼容配置）",
             [0, 1, 2],
             index=st.session_state.get("use_grad_checkpoint", 0),
             key="use_grad_checkpoint",
+            disabled=profile_supported and st.session_state.get("checkpoint_profile", "legacy") != "legacy",
             help="Gradient checkpointing mode: 0 = off, 1 = selectively recompute "
                  "attention/FFN activations, 2 = full-layer checkpointing.",
         )
@@ -2057,7 +2089,10 @@ if st.session_state.get("train_triggered", False):
                     cmd.extend(["--use_compile", "1"])
                     cmd.extend(["--compile_mode", st.session_state.get("compile_mode", "reduce-overhead")])
                 grad_ckpt = st.session_state.get("use_grad_checkpoint", 0)
-                if grad_ckpt:
+                profile = cfg.get("checkpoint_profile", "legacy")
+                if not native_backend and profile != "legacy":
+                    cmd.extend(["--checkpoint_profile", profile])
+                elif grad_ckpt:
                     cmd.extend(["--use_grad_checkpoint", str(grad_ckpt)])
                 if train_type == "lora":
                     cmd.extend(["--lora_name", save_prefix])

@@ -15,6 +15,7 @@ from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from model.flash_attn_4 import flash_attention
 from model.kv_cache_quant import parse_cache, make_cache
 from model.checkpointing import recompute_attention, checkpoint_ffn
+from model.checkpoint_profiles import checkpoint_layer, validate_checkpoint_profile
 
 # ═══════════════════════════════════════════════════════════════
 # InstinctConfig
@@ -38,6 +39,9 @@ class InstinctConfig(PretrainedConfig):
         self.kv_cache_dtype = kwargs.get("kv_cache_dtype", "fp32")
         # Gradient Checkpointing configs
         self.use_grad_checkpoint = kwargs.get("use_grad_checkpoint", 0)
+        self.checkpoint_profile = validate_checkpoint_profile(kwargs.get("checkpoint_profile"), supported=not use_moe)
+        if self.checkpoint_profile != "legacy":
+            self.use_grad_checkpoint = 0
         self.num_attention_heads = kwargs.get("num_attention_heads", 8)
         self.num_key_value_heads = kwargs.get("num_key_value_heads", 4)
         self.head_dim = kwargs.get("head_dim", self.hidden_size // self.num_attention_heads)
@@ -133,6 +137,7 @@ class Attention(nn.Module):
         self.kv_cache_dtype = getattr(config, 'kv_cache_dtype', 'fp32')
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention') and config.flash_attn
         self.use_grad_checkpoint = getattr(config, "use_grad_checkpoint", 0)
+        self.checkpoint_profile = getattr(config, "checkpoint_profile", "legacy")
 
     def forward(self, x, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
         bsz, seq_len, _ = x.shape
@@ -154,7 +159,11 @@ class Attention(nn.Module):
                 and (not self.is_causal or past_key_value is None)
                 and (attention_mask is None or torch.all(attention_mask == 1))):
             # FA4 / SDPA fused fast path: 输入输出布局 (bs, seq, heads, hd),kernel 内部处理 GQA
-            output = flash_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=self.is_causal)
+            output = flash_attention(
+                xq, xk, xv, dropout_p=self.dropout if self.training else 0.0,
+                is_causal=self.is_causal,
+                allow_fa4=not (self.training and self.checkpoint_profile.startswith("ckpt")),
+            )
             output = output.reshape(bsz, seq_len, -1)
         else:
             if self.use_grad_checkpoint == 1 and self.training and past_key_value is None:
@@ -227,7 +236,7 @@ class InstinctBlock(nn.Module):
             self.input_layernorm(hidden_states), position_embeddings,
             past_key_value, use_cache, attention_mask
         )
-        hidden_states += residual
+        hidden_states = hidden_states + residual
         normed = self.post_attention_layernorm(hidden_states)
         if self.use_grad_checkpoint == 1 and self.training:
             ffn_out, aux = checkpoint_ffn(self.mlp, normed)
@@ -254,27 +263,38 @@ class InstinctModel(nn.Module):
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
-    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, **kwargs):
-        batch_size, seq_length = input_ids.shape
-        if hasattr(past_key_values, 'layers'): past_key_values = None
-        past_key_values = past_key_values or [None] * len(self.layers)
-        start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
-        hidden_states = self.dropout(self.embed_tokens(input_ids))
+    def _ensure_rope_buffers(self, device):
         # Recompute RoPE buffers lost during meta-device init (transformers>=5.x)
         if self.freqs_cos[0, 0] == 0:
             freqs_cos, freqs_sin = precompute_freqs_cis(
                 dim=self.config.head_dim, end=self.config.max_position_embeddings,
                 rope_base=self.config.rope_theta, rope_scaling=self.config.rope_scaling,
             )
-            self.freqs_cos, self.freqs_sin = freqs_cos.to(hidden_states.device), freqs_sin.to(hidden_states.device)
+            self.freqs_cos, self.freqs_sin = freqs_cos.to(device), freqs_sin.to(device)
+
+    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, **kwargs):
+        batch_size, seq_length = input_ids.shape
+        if hasattr(past_key_values, 'layers'): past_key_values = None
+        past_key_values = past_key_values or [None] * len(self.layers)
+        start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
+        hidden_states = self.dropout(self.embed_tokens(input_ids))
+        self._ensure_rope_buffers(hidden_states.device)
         position_embeddings = (self.freqs_cos[start_pos:start_pos + seq_length], self.freqs_sin[start_pos:start_pos + seq_length])
         presents, intermediates = [], []
         aux_loss = hidden_states.new_zeros(1).squeeze()
         return_intermediate = kwargs.pop("return_intermediate", False)
         exit_check_fn = kwargs.pop("exit_check_fn", None)
         layer_callback = kwargs.pop("layer_callback", None)
+        profile = self.config.checkpoint_profile
+        use_profile_checkpoint = (
+            profile.startswith("ckpt") and self.training and torch.is_grad_enabled()
+            and not use_cache and all(p is None for p in past_key_values)
+        )
         for layer, past_key_value in zip(self.layers, past_key_values):
-            if self.config.use_grad_checkpoint == 2 and self.training:
+            if use_profile_checkpoint:
+                hidden_states, present = checkpoint_layer(
+                    layer, hidden_states, position_embeddings, attention_mask, profile)
+            elif self.config.use_grad_checkpoint == 2 and self.training:
                 # Pass the module directly, not a closure over it: torch's non-reentrant
                 # checkpoint mis-differentiates parameterized closures composed over 2+
                 # layers (wrong grads in the first block). The MoE aux_loss attribute
