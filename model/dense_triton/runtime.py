@@ -18,7 +18,7 @@ from triton.compiler import ASTSource
 
 
 ITEMSIZE = {'fp32': 4, 'bf16': 2, 'fp16': 2, 'fp8e4nv': 1, 'fp8e5': 1,
-            'i32': 4, 'i64': 8}
+            'i32': 4, 'i64': 8, 'u16': 2}
 
 
 @dataclass(frozen=True)
@@ -164,7 +164,7 @@ class CudaBackend:
         import numpy as np
         values = np.ascontiguousarray(values)
         mapping = {np.dtype('float32'): 'fp32', np.dtype('float16'): 'fp16',
-                   np.dtype('int32'): 'i32', np.dtype('int64'): 'i64'}
+                   np.dtype('int32'): 'i32', np.dtype('int64'): 'i64', np.dtype('uint16'): 'u16'}
         if values.dtype not in mapping:
             raise ValueError('upload accepts float32/float16/int32/int64; use a cast kernel for BF16')
         result = self.empty(values.shape, mapping[values.dtype])
@@ -189,7 +189,7 @@ class CudaBackend:
         import numpy as np
         self._check_tensor(tensor)
         dtype = {'fp32': 'float32', 'fp16': 'float16', 'bf16': 'uint16',
-                 'fp8e4nv': 'uint8', 'fp8e5': 'uint8', 'i32': 'int32', 'i64': 'int64'}[tensor.dtype]
+                 'fp8e4nv': 'uint8', 'fp8e5': 'uint8', 'i32': 'int32', 'i64': 'int64', 'u16': 'uint16'}[tensor.dtype]
         result = np.empty(tensor.shape, dtype=dtype)
         self.synchronize()
         self._dtoh(result.ctypes.data, tensor.storage, result.nbytes)

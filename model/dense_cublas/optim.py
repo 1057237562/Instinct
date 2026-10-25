@@ -19,9 +19,17 @@ def adamw_update(P,G,M,V,lr,decay,b1,b2,bc1,bc2,epsilon,scale,N:tl.constexpr,BLO
 
 class Optimizer:
     def __init__(self,engine,parameters,kind='adamw',lr=5e-4,weight_decay=.01,grad_clip=1.,
-                 betas=(.9,.999),eps=1e-8,loss_scaling=False,momentum=.95,ns_steps=5):
+                 betas=(.9,.999),eps=1e-8,loss_scaling=False,momentum=.95,ns_steps=5,
+                 muon_mantissa=False,muon_momentum_dtype='fp32',muon_batch_size=16,muon_workspace_mb=512):
         if kind not in ('adamw','adafactor','muon'): raise ValueError('unknown optimizer')
         self.e,self.parameters,self.kind=engine,list(parameters),kind
+        self.muon_mantissa=bool(muon_mantissa);self.muon_momentum_dtype=muon_momentum_dtype
+        self.muon_batch_size=muon_batch_size;self.muon_workspace_mb=muon_workspace_mb
+        if self.muon_mantissa and kind != 'muon':raise ValueError('mantissa requires Muon')
+        if muon_momentum_dtype not in ('fp32','bf16') or (muon_momentum_dtype=='bf16' and not self.muon_mantissa):
+            raise ValueError('BF16 momentum requires Muon mantissa')
+        if muon_batch_size<1 or muon_workspace_mb<=0:raise ValueError('Muon chunk limits must be positive')
+        from .muon import hidden_matrix
         self.lr,self.weight_decay,self.grad_clip=lr,weight_decay,grad_clip
         self.betas,self.eps,self.momentum,self.ns_steps=betas,eps,momentum,ns_steps
         self.scale=65536. if loss_scaling else 1.;self.loss_scaling=loss_scaling
@@ -31,18 +39,26 @@ class Optimizer:
         self.distributed=None
         self.present=set();self.state={};self.gradients={}
         for p in self.parameters:
-            self.gradients[p]=engine.full(p.shape,0.)
+            split=self.muon_mantissa and hidden_matrix(p.name,p.shape)
+            if self.muon_mantissa and p.dtype != ('bf16' if split else 'fp32'):
+                raise ValueError('mantissa requires BF16 hidden matrices and FP32 companion parameters')
+            self.gradients[p]=engine.full(p.shape,0.,'bf16' if split else 'fp32')
             state={'step':0}
             if kind=='adafactor':
                 if len(p.shape)>1:
                     state['row']=engine.full((*p.shape[:-1],1),0.)
                     state['col']=engine.full((*p.shape[:-2],1,p.shape[-1]),0.)
                 else: state['variance']=engine.full(p.shape,0.)
-            elif kind=='muon' and len(p.shape)==2: state['momentum']=engine.full(p.shape,0.)
+            elif split:
+                state['momentum']=engine.full(p.shape,0.,muon_momentum_dtype)
+                state['mantissa']=engine.full(p.shape,0.,'u16')
+            elif kind=='muon' and len(p.shape)==2 and not self.muon_mantissa: state['momentum']=engine.full(p.shape,0.)
             else: state.update(m=engine.full(p.shape,0.),v=engine.full(p.shape,0.))
             self.state[p]=state
         from .multi_tensor import MultiTensorPlan
         self.multi_tensor=MultiTensorPlan.create(self)
+        from .muon import MuonPlan
+        self.muon_plan=MuonPlan(self) if self.muon_mantissa else None
 
     def backward(self,loss):
         def consume(parameter,gradient):
@@ -86,6 +102,10 @@ class Optimizer:
                 self.zero_grad();e.backend.release_since(mark)
                 return {'updated':False,'grad_norm':norm,'loss_scale':self.scale}
             scale=divisor*min(1.,self.grad_clip/(norm+1.e-6)) if self.grad_clip>0 else divisor
+            if self.muon_plan:
+                if self.param_options or self.scheduler:
+                    raise ValueError('split-weight Muon does not accept legacy per-parameter optimizer recipes')
+                self.muon_plan.step([p for p in self.parameters if p in self.present and 'mantissa' in self.state[p]],lr,scale)
             if bulk:
                 t=self.state[self.parameters[0]]['step']+1
                 self.multi_tensor.update(self,lr,scale,step=t)
@@ -94,6 +114,7 @@ class Optimizer:
             for p in self.parameters:
                 if bulk:break
                 if p not in self.present:continue
+                if 'mantissa' in self.state[p]:continue
                 local=e.backend.mark();state=self.state[p];state['step']+=1;t=state['step']
                 grad=self.gradients[p]
                 options=self.param_options.get(p.name,{})
@@ -174,7 +195,7 @@ class Optimizer:
         return {'updated':True,'grad_norm':norm,'loss_scale':self.scale}
 
     def metadata(self):
-        return {k:getattr(self,k) for k in ('kind','lr','weight_decay','grad_clip','betas','eps','momentum','ns_steps','scale','loss_scaling','good_steps','updates','accumulated','growth_factor','backoff_factor','growth_interval','param_options','scheduler')}
+        return {k:getattr(self,k) for k in ('kind','lr','weight_decay','grad_clip','betas','eps','momentum','ns_steps','scale','loss_scaling','good_steps','updates','accumulated','growth_factor','backoff_factor','growth_interval','param_options','scheduler','muon_mantissa','muon_momentum_dtype')}
 
 
 def cosine_lr(step,total,maximum):

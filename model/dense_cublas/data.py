@@ -121,30 +121,42 @@ class PackedPretrain:
     Adjacent training windows overlap by one token so every next-token target
     is trained once. This intentionally allows context across document EOS.
     """
-    def __init__(self,dataset,cache_dir):
+    def __init__(self,dataset,cache_dir,isolate_documents=False):
         import os
         import tempfile
         self.path,self.tokenizer,self.mode,self.max_length=dataset.path,dataset.tokenizer,'pretrain',dataset.max_length
         self.rng=dataset.rng
+        self.isolate_documents=isolate_documents
         digest=hashlib.sha256()
         with self.path.open('rb') as f:
             for block in iter(lambda:f.read(1<<20),b''):digest.update(block)
-        digest.update((self.tokenizer.cache_namespace+':packed-v1').encode())
+        digest.update((self.tokenizer.cache_namespace+(':packed-isolated-v2' if isolate_documents else ':packed-v1')).encode())
         root=Path(cache_dir);root.mkdir(parents=True,exist_ok=True)
         self.token_path=root/(digest.hexdigest()+'.tokens')
-        if not self.token_path.exists():
+        self.boundary_path=root/(digest.hexdigest()+'.ends.npy')
+        if not self.token_path.exists() or (isolate_documents and not self.boundary_path.exists()):
             fd,temp=tempfile.mkstemp(dir=root,suffix='.tmp')
             try:
+                ends=[];total=0
                 with os.fdopen(fd,'wb') as f:
                     for index in range(len(dataset)):
                         ids=[self.tokenizer.bos]+self.tokenizer.encode(str(dataset.row(index)['text']))+[self.tokenizer.eos]
                         f.write(np.asarray(ids,np.int64).tobytes())
+                        total+=len(ids);ends.append(total)
                     f.flush();os.fsync(f.fileno())
                 os.replace(temp,self.token_path)
+                if isolate_documents:
+                    fd2,temp2=tempfile.mkstemp(dir=root,suffix='.tmp')
+                    try:
+                        with os.fdopen(fd2,'wb') as f:
+                            np.save(f,np.asarray(ends,np.int64));f.flush();os.fsync(f.fileno())
+                        os.replace(temp2,self.boundary_path)
+                    finally:
+                        if os.path.exists(temp2):os.unlink(temp2)
             finally:
                 if os.path.exists(temp):os.unlink(temp)
-        self._tokens=None
-    def __getstate__(self):return self.__dict__|{'_tokens':None}
+        self._tokens=None;self._ends=None
+    def __getstate__(self):return self.__dict__|{'_tokens':None,'_ends':None}
     @property
     def tokens(self):
         if self._tokens is None:self._tokens=np.memmap(self.token_path,dtype=np.int64,mode='r')
@@ -157,8 +169,22 @@ class PackedPretrain:
             tokens=self.tokens[begin:begin+self.max_length]
             ids=np.full(self.max_length,self.tokenizer.pad,np.int64);ids[:len(tokens)]=tokens
             labels=ids.copy();labels[len(tokens):]=-100
-            rows.append((ids,labels))
-        return tuple(np.stack(values) for values in zip(*rows))
+            if self.isolate_documents:
+                if self._ends is None:self._ends=np.load(self.boundary_path,mmap_mode='r')
+                segments=np.full(self.max_length,-1,np.int64)
+                segments[:len(tokens)]=np.searchsorted(self._ends,np.arange(begin,begin+len(tokens)),side='right')
+                labels[0]=-100
+                labels[1:][segments[1:]!=segments[:-1]]=-100
+                rows.append((ids,labels,segments))
+            else:rows.append((ids,labels))
+        batch=tuple(np.stack(values) for values in zip(*rows))
+        if self.isolate_documents:
+            segments=batch[2]
+            # Full one-document rows already have plain causal isolation and
+            # zero-based positions; avoid the packed kernel/metadata overhead.
+            if np.all(segments>=0) and np.all(segments==segments[:,:1]):
+                return batch[:2]
+        return batch
 
 
 def bucket_order(dataset,order,window=256):
@@ -176,9 +202,9 @@ def bucket_order(dataset,order,window=256):
 
 def trim_batch(batch,pad,buckets):
     if not buckets or not isinstance(batch,tuple):return batch
-    ids,labels=batch
+    ids,labels=batch[:2]
     used=np.nonzero((ids!=pad)|(labels!=-100))[1]
     length=max(2,int(used.max())+1 if used.size else 2)
     target=next((size for size in buckets if size>=length),ids.shape[1])
     target=min(target,ids.shape[1])
-    return np.ascontiguousarray(ids[:,:target]),np.ascontiguousarray(labels[:,:target])
+    return tuple(np.ascontiguousarray(array[:,:target]) for array in batch)

@@ -53,7 +53,8 @@ class CublasDenseOps(DenseOps):
         if len(x.shape)!=4 or x.shape[-1]%2 or weight.shape!=(x.shape[-1],):
             raise ValueError('fused Q/K norm+RoPE requires [batch,seq,heads,even dim]')
         b,s,h,d=x.shape
-        if d>8192 or eps<=0 or cos.shape!=sin.shape or cos.shape[1:]!=(d,) or start<0 or start+s>cos.shape[0]:
+        packed_tables = start == -1 and cos.shape == (b*s,d)
+        if d>8192 or eps<=0 or cos.shape!=sin.shape or cos.shape[1:]!=(d,) or (not packed_tables and (start<0 or start+s>cos.shape[0])):
             raise ValueError('invalid normalization or RoPE tables')
         out=self.empty(x.shape,x.dtype);r=self.empty((b*s*h,),'fp32')
         options=dict(N=d,SEQ=s,HEADS=h,START=start,BLOCK=triton.next_power_of_2(d))
@@ -90,6 +91,17 @@ class CublasDenseOps(DenseOps):
             saved=(x.shape,x.dtype,weight.dtype,matrix,qw,None)
             result.append((y.view(*x.shape[:-1],weight.shape[0]),saved))
         return result
+
+    def linear_saved(self, x, weight):
+        """Rebuild VJP operands without repeating a selectively saved GEMM."""
+        matrix = x.view(x.numel // x.shape[-1], x.shape[-1])
+        if self.fp8:
+            qx, sx = self.quantize(matrix)
+            qw, sw = self.quantize(weight)
+            scales = sx, sw
+        else:
+            qx, qw, scales = matrix, self.cast(weight, x.dtype), None
+        return x.shape, x.dtype, weight.dtype, qx, qw, scales
 
     def _inverse(self, scale):
         if scale.dtype != 'fp32' or scale.numel != 1:

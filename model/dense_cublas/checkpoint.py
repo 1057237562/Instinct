@@ -17,7 +17,7 @@ def snapshot(model,optimizer=None,progress=None,rng=None,extra_models=None,extra
     metadata=dict(format='instinct-cublas-v1',config=model.config,progress=progress or {},
         engine_rng={'seed':model.e.seed,'counter':model.e.counter},rng=None if rng is None else rng.bit_generator.state,
         precision=dict(param_dtype=model.param_dtype,activation_dtype=model.activation_dtype,kv_cache_dtype=model.kv_cache_dtype),
-        fp8=model.e.ops.fp8,optimizers={})
+        fp8=model.e.ops.fp8,fp8_filter=model.e.fp8_filter,optimizers={})
     for group,m in models.items():
         for name,p in m.params.items():
             if not adapters_only or '.lora.' in name:arrays[f'{group}/{name}']=m.e.numpy(p).astype(np.float32)
@@ -27,7 +27,8 @@ def snapshot(model,optimizer=None,progress=None,rng=None,extra_models=None,extra
         for p,state in opt.state.items():
             info['steps'][p.name]=state['step']
             for name,value in state.items():
-                if name!='step':arrays[f'optimizer/{group}/{p.name}/{name}']=opt.e.numpy(value).astype(np.float32)
+                if name!='step':
+                    arrays[f'optimizer/{group}/{p.name}/{name}']=opt.e.numpy(value).astype(np.uint16 if value.dtype=='u16' else np.float32)
             arrays[f'gradient/{group}/{p.name}']=opt.e.numpy(opt.gradients[p]).astype(np.float32)
         metadata['optimizers'][group]=info
     arrays['__metadata__']=np.asarray(json.dumps(metadata,default=_json,ensure_ascii=False))
@@ -86,6 +87,8 @@ def load(path,model,optimizer=None,rng=None,extra_models=None,extra_optimizers=N
             precision=dict(param_dtype=model.param_dtype,activation_dtype=model.activation_dtype,kv_cache_dtype=model.kv_cache_dtype)
             if meta.get('precision') != precision or meta.get('fp8') != model.e.ops.fp8:
                 raise ValueError('precision/FP8 recipe differs from the native resume checkpoint')
+            if meta.get('fp8_filter','eligible')!=model.e.fp8_filter:
+                raise ValueError('FP8 filter differs from the native resume checkpoint')
         # Validate all names/shapes before mutating any device buffers.
         assignments=[]
         for group,m in models.items():
@@ -102,11 +105,16 @@ def load(path,model,optimizer=None,rng=None,extra_models=None,extra_optimizers=N
             if opt is None:continue
             info=meta.get('optimizers',{}).get(group)
             if not info or info['kind']!=opt.kind:raise ValueError('optimizer type/state does not match resume checkpoint')
+            if (info.get('muon_mantissa',False)!=opt.muon_mantissa or
+                    info.get('muon_momentum_dtype','fp32')!=opt.muon_momentum_dtype):
+                raise ValueError('Muon mantissa/momentum precision differs from resume checkpoint')
             for p,state in opt.state.items():
                 for name,value in state.items():
                     if name=='step':continue
                     key=f'optimizer/{group}/{p.name}/{name}'
                     if key not in z or tuple(z[key].shape)!=value.shape:raise ValueError('missing or incompatible optimizer state: '+key)
+                    if value.dtype=='u16' and z[key].dtype!=np.uint16:
+                        raise ValueError('mantissa must contain raw uint16 state: '+key)
                     assignments.append((value,key))
                 assignments.append((opt.gradients[p],f'gradient/{group}/{p.name}'))
         for target,key in assignments:
@@ -114,7 +122,9 @@ def load(path,model,optimizer=None,rng=None,extra_models=None,extra_optimizers=N
                 raise ValueError('missing or incompatible checkpoint tensor: '+key)
         for target,key in assignments:
             mark=e.backend.mark()
-            with e.no_grad():e.copy(target,e.array(z[key]))
+            with e.no_grad():
+                source=e.wrap(e.backend.from_numpy(z[key])) if target.dtype=='u16' else e.array(z[key])
+                e.copy(target,source)
             e.backend.release_since(mark)
         for group,opt in optimizers.items():
             if opt is None:continue

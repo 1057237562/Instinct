@@ -65,9 +65,15 @@ class Output:
 
 
 class Model:
-    def __init__(self, engine, config, param_dtype='fp32', activation_dtype='bf16', kv_cache_dtype='fp32', seed=42):
+    def __init__(self, engine, config, param_dtype='fp32', activation_dtype='bf16', kv_cache_dtype='fp32', seed=42, muon_mantissa=False):
         self.e, self.config = engine, configuration(config)
+        if self.config['use_grad_checkpoint'] in (3, 4) and (
+                self.config['model_architecture'] != 'standard' or self.config['use_moe']):
+            raise ValueError('native ckpt3/4 require standard Dense')
         self.param_dtype, self.activation_dtype, self.kv_cache_dtype = param_dtype, activation_dtype, kv_cache_dtype
+        self.muon_mantissa=bool(muon_mantissa)
+        if self.muon_mantissa and param_dtype != 'bf16':
+            raise ValueError('Muon mantissa requires BF16 hidden parameters')
         self.params, self.adapters, self.training = {}, {}, True
         self.fuse_projections=False
         self.loss_chunk_size=0
@@ -121,7 +127,9 @@ class Model:
     def _parameter(self, name, shape, ones=False, zeros=False, array=None):
         if array is None: array = np.ones(shape) if ones else np.zeros(shape) if zeros else self.rng.normal(0., .02, shape)
         mark = self.e.backend.mark()
-        self.params[name] = self.e.array(np.asarray(array, np.float32), self.param_dtype, True, name)
+        from .muon import hidden_matrix
+        dtype = 'fp32' if self.muon_mantissa and not hidden_matrix(name,shape) else self.param_dtype
+        self.params[name] = self.e.array(np.asarray(array, np.float32), dtype, True, name)
         self.e.backend.release_since(mark, keep=(self.params[name].data,))
         return self.params[name]
 
@@ -158,6 +166,7 @@ class Model:
         self.adapters.clear()
 
     def linear(self, x, name):
+        if self.muon_mantissa:x=x.cast(self.activation_dtype)
         out = self.e.linear(x, self.params[name])
         if name in self.adapters:
             a, b = self.adapters[name]
@@ -165,6 +174,7 @@ class Model:
         return out
 
     def projections(self,x,names):
+        if self.muon_mantissa:x=x.cast(self.activation_dtype)
         if any(name in self.adapters for name in names):
             return [self.linear(x,name) for name in names]
         weights=[self.params[name] for name in names]
@@ -212,20 +222,22 @@ class Model:
         visit(cache)
         return out
 
-    def attention(self, x, i, mask, cache, new_cache, start, cache_key):
+    def attention(self, x, i, mask, cache, new_cache, start, cache_key, packed=None):
         if self.is_linear(i): return self.linear_attention(x, i, cache, new_cache, cache_key)
         e, c, p = self.e, self.config, self.layer_prefixes[i]+'self_attn.'
         b,s,_ = x.shape; d, hq, hkv = c['head_dim'], c['num_attention_heads'], c['num_key_value_heads']
         with e.ops.reuse_scope():
             q,k,v=self.projections(x,[p+name+'_proj.weight' for name in ('q','k','v')])
-        q=e.norm_rotary(q.reshape(b,s,hq,d),self.params[p+'q_norm.weight'],self.cos,self.sin,c['rms_norm_eps'],start)
-        k=e.norm_rotary(k.reshape(b,s,hkv,d),self.params[p+'k_norm.weight'],self.cos,self.sin,c['rms_norm_eps'],start)
+        cos, sin = packed if packed is not None else (self.cos, self.sin)
+        rope_start = -1 if packed is not None else start
+        q=e.norm_rotary(q.reshape(b,s,hq,d),self.params[p+'q_norm.weight'],cos,sin,c['rms_norm_eps'],rope_start)
+        k=e.norm_rotary(k.reshape(b,s,hkv,d),self.params[p+'k_norm.weight'],cos,sin,c['rms_norm_eps'],rope_start)
         v=v.reshape(b,s,hkv,d)
         if cache and cache_key in cache:
             pk,pv = cache[cache_key]
             k, v = e.cat([self._unpack_cache(pk), k],1), e.cat([self._unpack_cache(pv), v],1)
         if new_cache is not None: new_cache[cache_key] = (self._pack_cache(k), self._pack_cache(v))
-        out = e.attention(q,k,v,mask,c['dropout'],self.training,c['flash_attn'],start).reshape(b,s,hq*d)
+        out = e.attention(q,k,v,mask,c['dropout'],self.training,c['flash_attn'],start,packed=packed is not None).reshape(b,s,hq*d)
         return e.dropout(self.linear(out,p+'o_proj.weight'),c['dropout'],self.training)
 
     def ffn(self, x, prefix):
@@ -247,12 +259,12 @@ class Model:
         aux = (selected.mean(0)*scores.mean(0)).sum()*c['num_experts']*c['router_aux_loss_coef'] if self.training else e.full((1,),0.)
         return out.reshape(*x.shape).cast(x.dtype),aux
 
-    def block(self, x, i, mask=None, cache=None, new_cache=None, start=0, cache_key=None):
+    def block(self, x, i, mask=None, cache=None, new_cache=None, start=0, cache_key=None, packed=None):
         e,c,p = self.e,self.config,self.layer_prefixes[i]
         cache_key = str(i) if cache_key is None else cache_key
         checkpoint = c['use_grad_checkpoint'] if self.training and new_cache is None else 0
         ps = [v for k,v in self.params.items() if k.startswith(p) and v.requires_grad]
-        def attention(z): return self.attention(self.norm(z,p+'input_layernorm.weight'),i,mask,cache,new_cache,start,cache_key)
+        def attention(z): return self.attention(self.norm(z,p+'input_layernorm.weight'),i,mask,cache,new_cache,start,cache_key,packed)
         if not c['use_moe']:
             # Dense has no router auxiliary output. Do not pack an extra zero
             # into every checkpoint's activation, then copy/slice it back out.
@@ -260,6 +272,13 @@ class Model:
             def dense_whole(z):
                 z=z+attention(z)
                 return z+dense_mlp(z)
+            if checkpoint in (3, 4):
+                if self.fuse_projections or self.adapters:
+                    raise ValueError('native ckpt3/4 require separate Dense projections without LoRA')
+                from .selective import ReplayCache, recipe_plan
+                selected = (recipe_plan(c, x.shape, self.activation_dtype, i) if checkpoint == 4
+                            else ReplayCache({v.name for v in ps if len(v.shape) == 2}, c['dropout'] == 0.))
+                return e.checkpoint(dense_whole, x, ps, selected), self._zero_aux
             if checkpoint==2:return e.checkpoint(dense_whole,x,ps),self._zero_aux
             x=x+(e.checkpoint(attention,x,ps) if checkpoint==1 else attention(x))
             return x+(e.checkpoint(dense_mlp,x,ps) if checkpoint==1 else dense_mlp(x)),self._zero_aux
@@ -276,7 +295,7 @@ class Model:
         f,a = unpack(e.checkpoint(mlp,x,ps) if checkpoint == 1 else mlp(x))
         return x+f,a
 
-    def __call__(self, ids, labels=None, attention_mask=None, cache=None, use_cache=False, return_logits=True):
+    def __call__(self, ids, labels=None, attention_mask=None, cache=None, use_cache=False, return_logits=True, sequence_ids=None):
         e,c = self.e,self.config
         if not isinstance(ids, Value): ids = e.array(np.asarray(ids,np.int64))
         if labels is not None and not isinstance(labels,Value): labels=e.array(np.asarray(labels,np.int64))
@@ -285,13 +304,23 @@ class Model:
         if start+ids.shape[1]>c['max_position_embeddings']: raise ValueError('sequence exceeds configured RoPE table')
         if use_cache and self.training: raise ValueError('KV cache is an evaluation-only operation')
         new_cache = {'position':start+ids.shape[1]} if use_cache else None
-        x=e.dropout(e.embedding(self.params['model.embed_tokens.weight'],ids).cast(self.activation_dtype),c['dropout'],self.training)
+        packed = None
+        if sequence_ids is not None:
+            if c['model_architecture'] != 'standard' or use_cache or cache is not None or not c['flash_attn']:
+                raise ValueError('packed training requires standard architecture, fused attention and no KV cache')
+            if not isinstance(sequence_ids, Value): sequence_ids=e.array(np.asarray(sequence_ids,np.int64))
+            if sequence_ids.shape != ids.shape: raise ValueError('sequence_ids shape differs from input IDs')
+            from .packing import metadata
+            attention_mask, positions, labels = metadata(e, sequence_ids, labels, attention_mask)
+            packed = tuple(e.embedding(t, positions).reshape(-1, c['head_dim']) for t in (self.cos, self.sin))
+        embedded=e.embedding(self.params['model.embed_tokens.weight'],ids)
+        x=e.dropout(embedded if self.muon_mantissa else embedded.cast(self.activation_dtype),c['dropout'],self.training)
         aux,early,depth=self._zero_aux,[],1
         def run(layers, value, suffix=''):
             nonlocal aux
             for i in layers:
                 inference_mark=e.backend.mark() if not e.recording else None
-                value,a=self.block(value,i,attention_mask,cache,new_cache,start,str(i)+suffix)
+                value,a=self.block(value,i,attention_mask,cache,new_cache,start,str(i)+suffix,packed)
                 if a is not self._zero_aux:aux=aux+a
                 if labels is not None and self.training and i+1 in c['early_exit_layers']:
                     early.append(e.ce(self.head(value),labels,shift=True))

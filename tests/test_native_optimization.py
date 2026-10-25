@@ -58,7 +58,7 @@ class ReusingBackend(TrainingBackend):
 
     def from_numpy(self, array):
         array = np.ascontiguousarray(array)
-        dtype = {'float32':'fp32', 'int64':'i64', 'int32':'i32', 'float16':'fp16'}[str(array.dtype)]
+        dtype = {'float32':'fp32', 'int64':'i64', 'int32':'i32', 'float16':'fp16', 'uint16':'u16'}[str(array.dtype)]
         with self.host_constants(): result = self.empty(array.shape, dtype)
         self.cpu(result).storage.copy_(torch.from_numpy(array.copy()))
         return result

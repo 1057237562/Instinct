@@ -23,6 +23,7 @@ def norm_rotary_forward(X, W, COS, SIN, Y, R, N: tl.constexpr, EPS: tl.constexpr
                         BLOCK: tl.constexpr):
     row=tl.program_id(0);d=tl.arange(0,BLOCK);mask=d<N
     other_d=(d+N//2)%N;pos=(row//HEADS)%SEQ+START
+    if START == -1: pos=row//HEADS
     x=tl.load(X+row*N+d,mask,0).to(tl.float32)
     w=tl.load(W+d,mask,0).to(tl.float32)
     r=tl.rsqrt(tl.sum(x*x,0)/N+EPS)
@@ -48,6 +49,7 @@ def norm_rotary_backward(X, W, R, COS, SIN, G, DX, PARTIAL_DW,
     w=tl.load(W+d,mask,0).to(tl.float32);dw=tl.full((BLOCK,),0.,tl.float32)
     for row in range(group,M,GROUPS):
         pos=(row//HEADS)%SEQ+START
+        if START == -1: pos=row//HEADS
         g=tl.load(G+row*N+d,mask,0).to(tl.float32)
         partner=tl.load(G+row*N+other_d,mask,0).to(tl.float32)
         cos=tl.load(COS+pos*N+d,mask,0).to(tl.float32)

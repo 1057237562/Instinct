@@ -64,9 +64,12 @@ class PendingGradient:
 
 
 class Engine:
-    def __init__(self, backend, fp8=False, seed=42):
+    def __init__(self, backend, fp8=False, seed=42, fp8_filter='eligible'):
         self.backend, self.ops = backend, CublasDenseOps(backend, fp8)
         self.recording, self.seed, self.counter = True, int(seed), 0
+        self.replay_cache = None
+        if fp8_filter not in ('auto','eligible'):raise ValueError('unknown FP8 filter')
+        self.fp8_filter=fp8_filter
 
     def wrap(self, data, requires_grad=False, name=None):
         return Value(self, data, requires_grad, name=name)
@@ -286,10 +289,30 @@ class Engine:
         return self._node(out, (a, b), backward)
 
     def linear(self, x, weight):
-        out, saved = self.ops.linear(x.data, weight.data)
+        previous=self.ops.fp8
+        if self.fp8_filter=='auto':
+            n,k=weight.shape
+            self.ops.fp8=previous and n%16==0 and k%16==0 and not (k<=4096 and n<=1024) and 'lm_head' not in (weight.name or '') and 'embed_tokens' not in (weight.name or '')
+        try:
+            return self._selected_linear(x,weight)
+        finally:
+            self.ops.fp8=previous
+
+    def _selected_linear(self,x,weight):
+        cache = self.replay_cache
+        selected = cache is not None and weight.name in cache.linear_names
+        if selected and cache.replay:
+            out = cache.values[weight.name]
+            saved = self.ops.linear_saved(x.data, weight.data)
+        else:
+            out, saved = self.ops.linear(x.data, weight.data)
+            if selected:
+                cache.values[weight.name] = out
         return self._linear_node(x,weight,out,saved)
 
     def linears(self,x,weights):
+        if self.replay_cache is not None or self.fp8_filter=='auto':
+            return [self.linear(x, w) for w in weights]
         return [self._linear_node(x,w,out,saved) for w,(out,saved)
                 in zip(weights,self.ops.linears(x.data,[w.data for w in weights]))]
 
@@ -381,14 +404,22 @@ class Engine:
             return (dw,)
         return self._node(out, (weight,), backward)
 
-    def attention(self, q, k, v, mask=None, dropout=0., training=True, flash=True, start=0):
+    def attention(self, q, k, v, mask=None, dropout=0., training=True, flash=True, start=0, packed=False):
+        """Packed masks are canonical start offsets from packing.metadata."""
         if flash and start == 0 and q.shape[1] == k.shape[1] and q.shape[-1] <= 256:
             probability = dropout if training else 0.
             counter = self.counter
             if probability: self.counter += q.shape[0] * q.shape[2] * q.shape[1] ** 2
+            cache = self.replay_cache
+            selected = cache is not None and cache.attention and probability == 0.
+            cached = cache.values['attention'] if selected and cache.replay else None
             out, saved = self.ops.attention(q.data, k.data, v.data, None if mask is None else mask.data,
-                                            dropout=probability, seed=self.seed, counter=counter)
+                                            dropout=probability, seed=self.seed, counter=counter, cached=cached, packed=packed)
+            if selected and not cache.replay:
+                cache.values['attention'] = (saved[4], saved[5])
             return self._node(out, (q, k, v), lambda g: self.ops.attention_backward(saved, self.ops.cast(g, q.dtype)),q.dtype)
+        if packed:
+            raise ValueError('packed attention requires fused attention, head_dim <= 256 and no decode cache')
         b, seq, heads, dim = q.shape
         kv_heads, length = k.shape[2], k.shape[1]
         # The general path also handles arbitrary head dimensions and decode offsets.
@@ -560,17 +591,25 @@ class Engine:
             if inputs is not None:return tuple(finished.get(x) for x in inputs)
             return finished
 
-    def checkpoint(self, fn, x, parameters):
+    def checkpoint(self, fn, x, parameters, selective=None):
         """Discard forward temporaries; reproduce RNG and regenerate a local VJP."""
         if not self.recording: return fn(x)
         mark, seed, counter = self.backend.mark(), self.seed, self.counter
-        with self.no_grad(): out = fn(x)
-        self.backend.release_since(mark, keep=(out.data,))
+        previous = self.replay_cache
+        try:
+            self.replay_cache = selective
+            with self.no_grad(): out = fn(x)
+        finally:
+            self.replay_cache = previous
+        retained = selective.tensors() if selective is not None else ()
+        self.backend.release_since(mark, keep=(out.data, *retained))
         parents = (x, *parameters)
         def backward(g):
             mark = self.backend.mark()
-            prior = self.recording, self.seed, self.counter
+            prior = self.recording, self.seed, self.counter, self.replay_cache
             self.recording, self.seed, self.counter = True, seed, counter
+            self.replay_cache = selective
+            if selective is not None: selective.replay = True
             try:
                 leaf = self.wrap(x.data, True)
                 regenerated = fn(leaf)
@@ -578,7 +617,7 @@ class Engine:
                 self.backend.release_since(mark, keep=result)
                 return result
             finally:
-                self.recording, self.seed, self.counter = prior
+                self.recording, self.seed, self.counter, self.replay_cache = prior
         return self._node(out.data, parents, backward)
 
     def copy(self, target, source, scale=1., add=False):

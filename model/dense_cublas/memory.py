@@ -5,14 +5,18 @@ from model.dense_triton.runtime import Tensor, ITEMSIZE
 from . import tensor_kernels as tk
 from model.dense_triton.runtime import Scalar
 import math
+import ctypes as ct
 import triton
 
 
 class TrainingBackend(CublasBackend):
     recycle_vjp = True
-    def __init__(self, *args, pool_limit_mib=256, pin_memory=True, **kwargs):
+    def __init__(self, *args, pool_limit_mib=256, pin_memory=True, allocator_backend='driver', **kwargs):
         super().__init__(*args, **kwargs)
         self.pin_memory = pin_memory
+        if allocator_backend not in ('driver','async'):raise ValueError('unknown native allocator backend')
+        self.allocator_backend=allocator_backend
+        self._async_pointers=set();self._async_pool=None
         self._pool, self._live, self._serial = {}, {}, 0
         self._pool_bytes = 0
         self.pool_limit = int(pool_limit_mib * 1024 * 1024)
@@ -23,6 +27,46 @@ class TrainingBackend(CublasBackend):
         self._uploading_constant=False
         self._live_bytes=self._peak_live_bytes=0
         self.allocator_stats=dict(requests=0,pool_hits=0,releases=0,empty_releases=0,release_syncs=0)
+
+    def __enter__(self):
+        super().__enter__()
+        if self.allocator_backend=='driver':return self
+        try:
+            supported=ct.c_int()
+            self._bind('cuDeviceGetAttribute',[ct.POINTER(ct.c_int),ct.c_int,ct.c_int])(ct.byref(supported),115,self._dev)
+            if not supported.value:raise RuntimeError('device does not support stream-ordered CUDA allocation')
+            self._sync_malloc,self._sync_free=self._malloc,self._free
+            allocate=self._bind('cuMemAllocAsync',[ct.POINTER(ct.c_uint64),ct.c_size_t,ct.c_void_p])
+            release=self._bind('cuMemFreeAsync',[ct.c_uint64,ct.c_void_p])
+            pool=ct.c_void_p()
+            self._bind('cuDeviceGetDefaultMemPool',[ct.POINTER(ct.c_void_p),ct.c_int])(ct.byref(pool),self._dev)
+            self._async_pool=pool
+            self._pool_attribute=self._bind('cuMemPoolGetAttribute',[ct.c_void_p,ct.c_int,ct.c_void_p])
+            def malloc(out,size):
+                # Synchronous host uploads are outside the compute stream.
+                # Keep those allocations synchronous; all device temporaries
+                # use the current stream and its existing event dependencies.
+                if self._uploading_constant:return self._sync_malloc(out,size)
+                allocate(out,size,self.stream)
+                self._async_pointers.add(ct.cast(out,ct.POINTER(ct.c_uint64))[0])
+            def free(pointer):
+                address=pointer.value if hasattr(pointer,'value') else pointer
+                if address in self._async_pointers:
+                    release(address,self.stream);self._async_pointers.remove(address)
+                else:self._sync_free(pointer)
+            self._malloc,self._free=malloc,free
+        except Exception as exc:
+            self.__exit__(type(exc),exc,exc.__traceback__)
+            raise
+        return self
+
+    def __exit__(self,exc_type,exc,traceback):
+        if hasattr(self,'_sync_free'):
+            # cuMemFree is valid for async allocations after synchronization.
+            # Restore it before CublasBackend destroys the compute streams.
+            self.synchronize()
+            self._malloc,self._free=self._sync_malloc,self._sync_free
+        return super().__exit__(exc_type,exc,traceback)
 
     def empty(self, shape, dtype='fp32', zero=False):
         self._check()
@@ -139,11 +183,17 @@ class TrainingBackend(CublasBackend):
             self._allocations[:] = [(p, n) for p, n in self._allocations if p.value not in freed]
 
     def memory(self):
-        return super().memory() | {'live_bytes': self._live_bytes,
+        result=super().memory() | {'live_bytes': self._live_bytes,
                                   'peak_live_bytes':self._peak_live_bytes,
                                   'cached_bytes': self._pool_bytes,
                                   'cached_limit_bytes': self.pool_limit,
                                   'allocator_stats':dict(self.allocator_stats)}
+        if self._async_pool is not None:
+            for name,attribute in (('async_reserved_bytes',5),('async_peak_reserved_bytes',6),
+                                   ('async_used_bytes',7),('async_peak_used_bytes',8)):
+                value=ct.c_uint64();self._pool_attribute(self._async_pool,attribute,ct.byref(value))
+                result[name]=value.value
+        return result
 
     @contextmanager
     def temporary(self):

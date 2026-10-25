@@ -220,7 +220,7 @@ def test_end_to_end_native_trainer_modes(tmp_path,mode):
     e=Engine(backend);base=Model(e,config,activation_dtype='fp32');base_path=tmp_path/'base.npz';checkpoint.save(base_path,base)
     messages=[{'role':'user','content':'a'},{'role':'assistant','content':'bc'}]
     row={'text':'abc','conversations':messages,'chosen':messages,'rejected':[messages[0],{'role':'assistant','content':'de'}],'gt':[]}
-    data=tmp_path/'data.jsonl';data.write_text(json.dumps(row)+'\n'+json.dumps(row)+'\n')
+    data=tmp_path/'data.jsonl';data.write_text((json.dumps(row)+'\n')*4)
     argv=['--num_workers','0','--train_type',mode,'--config_path',str(config_path),'--data_path',str(data),'--from_weight',str(base_path),
         '--dtype','fp32','--fp8','0','--batch_size','1','--max_seq_len','5','--accumulation_steps','2',
         '--max_gen_len','2','--max_total_len','8','--num_generations','2','--ppo_update_iters','1','--mini_batch_size','1',
@@ -229,13 +229,15 @@ def test_end_to_end_native_trainer_modes(tmp_path,mode):
     class Reward:
         def get_score(self,messages,text):return len(text)*.1
     result=train(parser().parse_args(argv),backend,ToyTokenizer(),Reward())
-    assert np.isfinite(result['loss']) and result['steps']==1
+    completed=1 if mode=='ppo' else 2
+    assert np.isfinite(result['loss']) and result['steps']==completed
     meta=checkpoint.metadata(result['resume'])
-    assert meta['progress']['cursor']==1
-    # Resume the remaining partial batch/accumulation, using a new optimizer.
-    args=parser().parse_args(argv+['--from_resume','1','--max_steps','2'])
+    assert meta['progress']['cursor']==completed
+    assert meta['optimizers']['model']['accumulated']==0
+    # The stop request waits for the applied update; resume from that boundary.
+    args=parser().parse_args(argv+['--from_resume','1','--max_steps','4'])
     result=train(args,backend,ToyTokenizer(),Reward())
-    assert result['steps']==2 and np.isfinite(result['loss'])
+    assert result['steps']==4 and np.isfinite(result['loss'])
 
 
 @kernel_test

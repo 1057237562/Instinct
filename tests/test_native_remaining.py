@@ -225,7 +225,8 @@ def test_pending_weight_gradients_join_after_cross_layer_dx():
     assert len(dx)==2 and min(waits)>max(dx)
 
 
-def test_copy_prefetch_double_buffer_dependency_and_lifetime():
+@pytest.mark.parametrize('fields',[2,3])
+def test_copy_prefetch_double_buffer_dependency_and_lifetime(fields):
     import ctypes as ct
     from contextlib import contextmanager
     from model.dense_cublas.prefetch import DevicePrefetch
@@ -256,10 +257,11 @@ def test_copy_prefetch_double_buffer_dependency_and_lifetime():
         @contextmanager
         def on_stream(self,stream):yield
     backend=Backend();e=Engine(backend)
-    source=[(i,(np.full((1,3+i%2),i,np.int64),np.full((1,3+i%2),i+1,np.int64))) for i in range(5)]
-    with DevicePrefetch(e,1,4,True) as prefetch:
+    source=[(i,tuple(np.full((1,3+i%2),i+j,np.int64) for j in range(fields))) for i in range(5)]
+    with DevicePrefetch(e,1,4,True,fields=fields) as prefetch:
         for begin,cpu,device in prefetch.batches(source):
+            assert len(device)==fields
             for expected,value in zip(cpu,device):
                 actual=np.ctypeslib.as_array((ct.c_int64*expected.size).from_address(value.data.storage)).reshape(expected.shape)
                 np.testing.assert_array_equal(actual,expected)
-    assert len(backend.freed)==4
+    assert len(backend.freed)==2*fields

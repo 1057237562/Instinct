@@ -4,7 +4,7 @@ import numpy as np
 
 
 class DevicePrefetch:
-    def __init__(self,engine,batch_size,sequence_length,enabled=False):
+    def __init__(self,engine,batch_size,sequence_length,enabled=False,fields=2):
         self.e,self.b,self.enabled=engine,engine.backend,enabled
         self.slots=[]
         if not enabled:return
@@ -18,7 +18,7 @@ class DevicePrefetch:
             for _ in range(2):
                 slot={'device':[],'host':[],'ready':b.create_event()}
                 self.slots.append(slot)
-                for _ in range(2):
+                for _ in range(fields):
                     ptr=p();self.alloc(ct.byref(ptr),capacity*8,0);slot['host'].append(ptr)
                     slot['device'].append(b.empty((capacity,),'i64'))
         except BaseException:self.close();raise

@@ -24,7 +24,7 @@ MODEL_FIELDS = {
     'dropout': ('dropout',),
     'rope': ('max_position_embeddings', 'rope_theta', 'inference_rope_scaling', 'rope_scaling'),
     'attention': ('flash_attn',),
-    'recompute': ('use_grad_checkpoint',),
+    'recompute': ('use_grad_checkpoint','selective_cache_mib'),
     'moe': ('use_moe', 'num_experts', 'num_experts_per_tok', 'moe_intermediate_size',
             'norm_topk_prob', 'router_aux_loss_coef'),
     'linear': ('full_attention_interval', 'linear_conv_kernel_dim', 'linear_key_head_dim',
@@ -37,7 +37,7 @@ MODEL_FIELDS = {
 }
 TRAINING_FIELDS = {
     'training': ('train_type', 'dataset_size', 'batch_size', 'max_seq_len', 'num_workers', 'prefetch_factor', 'pin_memory'),
-    'optimizer': ('optimizer',),
+    'optimizer': ('optimizer','muon_mantissa','muon_momentum_dtype','muon_batch_size','muon_workspace_mb'),
     'precision': ('param_dtype', 'activation_dtype'),
     'kv_cache': ('kv_cache_dtype',),
     'checkpoint_io': ('from_resume', 'base_weight'),
@@ -176,7 +176,11 @@ class WebUIRequest:
         for key in ('prelude_layers','loop_iters','coda_layers'):
             if key in model and (type(model[key]) is not int or model[key]<0):raise ValueError(key+' must be a nonnegative integer')
         _choice(model, 'hidden_act', ('silu', 'gelu', 'relu'))
-        _choice(model, 'use_grad_checkpoint', (0, 1, 2))
+        _choice(model, 'use_grad_checkpoint', (0, 1, 2, 3, 4))
+        if 'selective_cache_mib' in model and (type(model['selective_cache_mib']) is not int or model['selective_cache_mib']<0):
+            raise ValueError('selective_cache_mib must be a nonnegative integer')
+        if model['use_grad_checkpoint'] in (3, 4) and (model['model_architecture'] != 'standard' or model.get('use_moe')):
+            raise ValueError('native ckpt3/4 require standard Dense')
         if not isinstance(model['dropout'], (int, float)) or not 0 <= model['dropout'] < 1:
             raise ValueError('dropout must be in [0, 1)')
         rope = model.get('rope_scaling')
@@ -204,6 +208,12 @@ class WebUIRequest:
         _choice(training, 'train_type', TRAIN_TYPES)
         _choice(training, 'dataset_size', ('mini', 'normal'))
         _choice(training, 'optimizer', OPTIMIZERS)
+        if training.get('muon_mantissa') and (training['optimizer']!='muon' or training['param_dtype']!='bf16'):
+            raise ValueError('Muon mantissa requires optimizer=muon and BF16 parameters')
+        _choice(training,'muon_momentum_dtype',('fp32','bf16'))
+        if training.get('muon_momentum_dtype')=='bf16' and not training.get('muon_mantissa'):
+            raise ValueError('BF16 Muon momentum requires mantissa')
+        _positive(training,('muon_batch_size','muon_workspace_mb'))
         _choice(training, 'param_dtype', ('fp32', 'bf16', 'fp16'))
         _choice(training, 'activation_dtype', ('fp32', 'bfloat16', 'float16'))
         _choice(training, 'kv_cache_dtype', ('fp32', 'bf16', 'fp16', 'fp8_e4m3', 'fp8_e5m2'))
@@ -221,8 +231,10 @@ class WebUIRequest:
                 if key in values and (type(values[key]) is not int or values[key] <= 0):
                     raise ValueError(f'{key} must be a positive integer')
         if 'use_grad_checkpoint' in training:
-            _choice(training, 'use_grad_checkpoint', (0, 1, 2))
+            _choice(training, 'use_grad_checkpoint', (0, 1, 2, 3, 4))
             model['use_grad_checkpoint'] = training['use_grad_checkpoint']
+        if model['use_grad_checkpoint'] in (3,4) and (model['model_architecture']!='standard' or model['use_moe']):
+            raise ValueError('native ckpt3/4 require standard Dense')
         return cls(model, training, excluded)
 
     def required_features(self):

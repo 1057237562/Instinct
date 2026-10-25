@@ -61,3 +61,33 @@ def test_pin_staging_reused_without_touching_worker_arrays():
         a=np.arange(n,dtype=np.int64);d.from_numpy(a)
         assert d.uploads[-1]==a.tobytes()
     assert len(d.allocations)==2 and len(d.freed)==1 and d._host_capacity==160
+
+
+def test_isolated_packing_keeps_all_within_document_targets_and_resume(tmp_path):
+    from model.dense_cublas.data import PackedPretrain,trim_batch
+    from tests.test_cublas_training import ToyTokenizer
+    tokenizer=ToyTokenizer();tokenizer.cache_namespace='test-isolated-v2'
+    path=tmp_path/'packed.jsonl'
+    texts=['abc','de','fghijkl','mn']
+    path.write_text('\n'.join(json.dumps({'text':t}) for t in texts),encoding='utf-8')
+    source=JsonlDataset(path,tokenizer,'pretrain',6)
+    packed=PackedPretrain(source,tmp_path/'cache',isolate_documents=True)
+    order=list(range(len(packed)))
+    with BatchLoader(packed,0) as loader:
+        all_batches=list(loader.batches(order,2))
+        resumed=list(loader.batches(order,2,cursor=2))
+    targets=sum(np.count_nonzero(batch[1][:,1:]!=-100) for _,batch in all_batches)
+    expected=sum(len(tokenizer.encode(text))+1 for text in texts)
+    assert targets==expected
+    for (_,a),(_,b) in zip(all_batches[1:],resumed):
+        for x,y in zip(a,b):np.testing.assert_array_equal(x,y)
+    for _,batch in all_batches:
+        ids,labels,segments=batch
+        assert np.all(labels[:,1:][segments[:,1:]!=segments[:,:-1]]==-100)
+        trimmed=trim_batch(batch,tokenizer.pad,[4,6])
+        assert len(trimmed)==3 and all(x.shape==trimmed[0].shape for x in trimmed)
+    again=PackedPretrain(source,tmp_path/'cache',isolate_documents=True)
+    for x,y in zip(again.batch(order),packed.batch(order)):np.testing.assert_array_equal(x,y)
+    path2=tmp_path/'one_doc.jsonl';path2.write_text(json.dumps({'text':'abcdefghijklmnop'}))
+    single=PackedPretrain(JsonlDataset(path2,tokenizer,'pretrain',6),tmp_path/'cache',isolate_documents=True)
+    assert len(single.batch([0,1]))==2

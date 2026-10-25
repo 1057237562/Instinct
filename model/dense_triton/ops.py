@@ -39,16 +39,20 @@ class DenseOps:
         if dtype not in ('fp8e4nv', 'fp8e5') or x.dtype not in ('fp32', 'bf16', 'fp16'):
             raise ValueError('expected high-precision input and E4M3/E5M2 output')
         count = triton.cdiv(x.numel, 1024)
-        if not 0 < count <= 65536:
-            raise ValueError('tensorwise amax supports 1..67108864 elements')
+        if count <= 0:
+            raise ValueError('tensorwise amax requires a nonempty tensor')
         maximum = 448.0 if dtype == 'fp8e4nv' else 57344.0
         partial = self.empty((count,), 'fp32')
         scale = self.empty((1,), 'fp32')
         out = self.empty(x.shape, dtype)
         self.backend.launch(lin.amax_partial, (count,), (x, partial), SIZE=x.numel, BLOCK=1024)
+        while count > 1024:
+            reduced = self.empty((triton.cdiv(count,1024),), 'fp32')
+            self.backend.launch(lin.amax_partial, (reduced.numel,), (partial,reduced), SIZE=count,BLOCK=1024)
+            partial,count = reduced,reduced.numel
         self.backend.launch(lin.scale_from_amax, (1,), (partial, scale), COUNT=count,
                             FP8_MAX=maximum, BLOCK=triton.next_power_of_2(count))
-        self.backend.launch(lin.quantize, (count,), (x, scale, out),
+        self.backend.launch(lin.quantize, (triton.cdiv(x.numel,1024),), (x, scale, out),
                             SIZE=x.numel, FP8_MAX=maximum, BLOCK=1024)
         return out, scale
 
@@ -157,7 +161,7 @@ class DenseOps:
                             (gate, up, dy, dg, du), SIZE=gate.numel, BLOCK=256)
         return dg, du
 
-    def attention(self, q, k, v, mask=None, dropout=0., seed=0, counter=0):
+    def attention(self, q, k, v, mask=None, dropout=0., seed=0, counter=0, cached=None, packed=False):
         if len(q.shape) != 4 or len(k.shape) != 4 or k.shape != v.shape:
             raise ValueError('GQA requires [batch, seq, heads, dim] inputs')
         b, s, hq, d = q.shape
@@ -170,11 +174,16 @@ class DenseOps:
         if not 0 <= dropout < 1:
             raise ValueError('attention dropout must be in [0, 1)')
         tile = 16 if d > 128 else 32
+        tile = getattr(self.backend,'attention_tile',None) or tile
+        if tile not in (16,32,64):raise ValueError('attention tile must be 16, 32 or 64')
         options = dict(BM=tile, BN=tile, DROPOUT=float(dropout), SEQ=s, HQ=hq, HKV=k.shape[2], DIM=d, SCALE=d ** -0.5,
-                       HAS_MASK=mask is not None, BD=max(16, triton.next_power_of_2(d)))
-        out, lse = self.empty(q.shape, q.dtype), self.empty((b, hq, s), 'fp32')
+                       HAS_MASK=mask is not None, BD=max(16, triton.next_power_of_2(d)), PACKED=packed,
+                       PACKED_SKIP=getattr(self.backend,'packed_skip',True))
+        if packed and mask is None: raise ValueError('packed attention requires segment IDs')
+        out, lse = cached if cached is not None else (self.empty(q.shape, q.dtype), self.empty((b, hq, s), 'fp32'))
         mask = mask if mask is not None else q
-        self.backend.launch(attn.forward, (triton.cdiv(s, tile), b * hq), (q, k, v, mask, out, lse, Scalar(seed, 'i32'), Scalar(counter, 'i64')), **options)
+        if cached is None:
+            self.backend.launch(attn.forward, (triton.cdiv(s, tile), b * hq), (q, k, v, mask, out, lse, Scalar(seed, 'i32'), Scalar(counter, 'i64')), **options)
         return out, (q, k, v, mask, out, lse, options, seed, counter)
 
     def attention_backward(self, saved, dy):

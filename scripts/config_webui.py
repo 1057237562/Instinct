@@ -165,6 +165,9 @@ PRESETS = {
         "linear_num_value_heads": 8,
     },
 }
+sys.path.insert(0,os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.native_v2_recipe import model_config as _native_v2_model, ui_values as _native_v2_ui
+PRESETS['Instinct V2 (native ckpt4)'] = PRESETS['instinct-3'] | _native_v2_model() | _native_v2_ui()
 
 # ═══════════════════════════════════════════════════════════════
 # CSS — dark theme, clean modern look
@@ -568,6 +571,7 @@ def build_config_dict() -> dict:
         "inference_rope_scaling": st.session_state.get("inference_rope_scaling", False),
         "use_moe": st.session_state.get("use_moe", False),
         "use_grad_checkpoint": st.session_state.get("use_grad_checkpoint", 0),
+        "selective_cache_mib": st.session_state.get("native_selective_cache_mib",1792),
         "checkpoint_profile": (
             st.session_state.get("checkpoint_profile", "legacy")
             if st.session_state.get("runtime_backend", "pytorch") == "pytorch"
@@ -576,7 +580,9 @@ def build_config_dict() -> dict:
         ),
         "rms_norm_eps": st.session_state.get("rms_norm_eps", 1e-6),
         "flash_attn": st.session_state.get("flash_attn", True),
-        "intermediate_size": compute_intermediate_size(st.session_state.get("hidden_size", 768)),
+        "intermediate_size": (st.session_state.get("intermediate_size", compute_intermediate_size(st.session_state.get("hidden_size", 768)))
+                              if st.session_state.get("intermediate_override", False)
+                              else compute_intermediate_size(st.session_state.get("hidden_size", 768))),
     }
     if d["checkpoint_profile"] == "legacy":
         d.pop("checkpoint_profile")
@@ -753,6 +759,7 @@ def gen_config_json(cfg: dict) -> str:
         "flash_attn",
         "use_moe",
         "use_grad_checkpoint",
+        "selective_cache_mib",
     ]
     for k in keys:
         if k == "rope_theta":
@@ -835,6 +842,9 @@ def load_config_to_session(config_dict: dict):
     st.session_state.inference_rope_scaling = config_dict.get("inference_rope_scaling", False)
     st.session_state.use_moe = config_dict.get("use_moe", False)
     st.session_state.use_grad_checkpoint = config_dict.get("use_grad_checkpoint", 0)
+    st.session_state.native_selective_cache_mib = config_dict.get("selective_cache_mib",1792)
+    st.session_state.intermediate_size = config_dict.get("intermediate_size", compute_intermediate_size(st.session_state.hidden_size))
+    st.session_state.intermediate_override = st.session_state.intermediate_size != compute_intermediate_size(st.session_state.hidden_size)
     st.session_state.checkpoint_profile = config_dict.get("checkpoint_profile", "legacy") or "legacy"
     st.session_state.rms_norm_eps = config_dict.get("rms_norm_eps", 1e-6)
     st.session_state.flash_attn = config_dict.get("flash_attn", True)
@@ -1345,19 +1355,12 @@ with st.sidebar:
 
     # ── Model Preset ──
     with st.expander("Model Preset", expanded=True):
-        preset_options = [
-            "instinct-3",
-            "instinct-3-moe",
-            "instinct2-small",
-            "instinct2",
-            "instinct-linear",
-            "Custom",
-        ]
+        preset_options = [*PRESETS,"Custom"]
         current_preset = st.session_state.preset
         default_idx = (
             preset_options.index(current_preset)
             if current_preset in preset_options
-            else 5
+            else len(preset_options)-1
         )
         chosen = st.radio(
             "Quick-select preset",
@@ -1847,6 +1850,17 @@ with st.sidebar:
             st.number_input('Linear CE chunk tokens (0 disables)',min_value=0,value=0,key='native_loss_chunk_size')
             st.text_input('Token cache SQLite path',value='',key='native_token_cache')
             st.checkbox('Pretraining token packing',key='native_packing')
+            st.checkbox('Packed document isolation + reset RoPE',key='native_packed_attention')
+            st.selectbox('FP8 projection filter',['eligible','auto'],key='native_fp8_filter')
+            st.selectbox('CUDA allocator',['driver','async'],key='native_allocator_backend')
+            st.number_input('ckpt4 saved-output budget MiB',min_value=0,value=1792,key='native_selective_cache_mib')
+            st.checkbox('Muon BF16 high bits + uint16 mantissa',key='native_muon_mantissa')
+            st.selectbox('Muon momentum storage',['fp32','bf16'],key='native_muon_momentum_dtype')
+            st.number_input('Muon matrices per chunk',min_value=1,value=16,key='native_muon_batch_size')
+            st.number_input('Muon temporary workspace MiB',min_value=1,value=512,key='native_muon_workspace_mb')
+            st.number_input('Learning rate',min_value=0.0,value=0.0005,format='%.6f',key='learning_rate')
+            st.number_input('Weight decay',min_value=0.0,value=0.01,format='%.4f',key='weight_decay')
+            st.number_input('Allocator cache MiB',min_value=0,value=256,key='native_allocator_cache_mib')
             st.number_input('Length sorting window (0 disables)',min_value=0,value=0,key='native_length_bucket')
             st.text_input('Sequence buckets, comma separated',value='',key='native_sequence_buckets')
             st.checkbox('Copy stream prefetch',key='native_copy_prefetch')
@@ -1950,15 +1964,22 @@ with st.sidebar:
             disabled=not profile_supported,
             help="ckpt1→ckpt4 显存递减、重算递增。容量门槛取决于 batch、序列长度和注意力后端；请用 experiments/profile_checkpoint_profiles.py 生成预算表。",
         )
+        native_ckpt = st.session_state.get("runtime_backend", "pytorch") == "cublas"
+        ckpt_choices = [0,1,2,3,4] if native_ckpt else [0,1,2]
         st.selectbox(
-            "旧梯度检查点模式（兼容配置）",
-            [0, 1, 2],
-            index=st.session_state.get("use_grad_checkpoint", 0),
+            "原生梯度检查点模式" if native_ckpt else "旧梯度检查点模式（兼容配置）",
+            ckpt_choices,
+            index=ckpt_choices.index(st.session_state.get("use_grad_checkpoint",0)) if st.session_state.get("use_grad_checkpoint",0) in ckpt_choices else 0,
             key="use_grad_checkpoint",
             disabled=profile_supported and st.session_state.get("checkpoint_profile", "legacy") != "legacy",
             help="Gradient checkpointing mode: 0 = off, 1 = selectively recompute "
-                 "attention/FFN activations, 2 = full-layer checkpointing.",
+                 "attention/FFN activations, 2 = full layer; native 3 = save projections/attention, 4 = V2 bounded selective replay.",
         )
+        st.checkbox('Override Dense FFN width',key='intermediate_override')
+        if st.session_state.get('intermediate_override'):
+            st.number_input('Dense intermediate size',min_value=64,step=64,
+                            value=compute_intermediate_size(st.session_state.get('hidden_size',768)),
+                            key='intermediate_size')
         st.selectbox(
             "参数精度 (param_dtype)",
             ["fp32", "bf16", "fp16"],
@@ -2001,6 +2022,8 @@ with st.sidebar:
             st.success("Training completed")
         elif st.session_state.get("train_status") == "failed":
             st.error("Failed to start training")
+        elif st.session_state.get("train_status") == "paused":
+            st.info("Training paused; full resume state saved.")
 
 # ═══════════════════════════════════════════════════════════════
 # ═══ MAIN AREA ═══
@@ -2055,12 +2078,17 @@ if st.session_state.get("train_triggered", False):
                     if st.session_state.get('native_gpus',1)>1:
                         cmd[2]=os.path.join(trainer_dir,'launch_cublas.py')
                         cmd.extend(['--nproc_per_node',str(st.session_state.native_gpus)])
-                    for key in ('fuse_projections','packing','copy_prefetch','async_checkpoint','overlap_dw','cuda_graph'):
+                    for key in ('fuse_projections','packing','packed_attention','copy_prefetch','async_checkpoint','overlap_dw','cuda_graph'):
                         if st.session_state.get('native_'+key,False):cmd.append('--'+key)
                     for key in ('loss_chunk_size','length_bucket'):
                         cmd.extend(['--'+key,str(st.session_state.get('native_'+key,0))])
                     for key in ('token_cache','sequence_buckets'):
                         if st.session_state.get('native_'+key):cmd.extend(['--'+key,st.session_state['native_'+key]])
+                    for key,default in (('fp8_filter','eligible'),('muon_momentum_dtype','fp32'),('muon_batch_size',16),('muon_workspace_mb',512),('allocator_backend','driver'),('selective_cache_mib',1792),('allocator_cache_mib',256)):
+                        cmd.extend(['--'+key,str(st.session_state.get('native_'+key,default))])
+                    cmd.extend(['--learning_rate',str(st.session_state.get('learning_rate',0.0005)),
+                                '--weight_decay',str(st.session_state.get('weight_decay',0.01))])
+                    cmd.extend(['--muon_mantissa','1' if st.session_state.get('native_muon_mantissa',False) else '0'])
                 elif cfg.get("model_architecture") == "linear":
                     # linear 架构必须经 run_linear.py 的 sys.modules 劫持启动，直接跑 trainer 会静默回退到标准 Transformer
                     runner = os.path.join(os.path.dirname(trainer_dir), "run_linear.py")
@@ -2137,7 +2165,7 @@ if st.session_state.get("train_triggered", False):
 if st.session_state.get("train_status") == "running":
     proc = st.session_state.get("train_proc")
     if proc is not None and proc.poll() is not None:
-        st.session_state.train_status = "success" if proc.poll() == 0 else "failed"
+        st.session_state.train_status = "success" if proc.poll() == 0 else "paused" if proc.poll() == 42 else "failed"
 
 cfg = build_config_dict()
 breakdown = calc_params(cfg)

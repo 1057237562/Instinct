@@ -79,7 +79,8 @@ def test_compile_is_only_exclusion_and_unsupported_features_are_visible():
     ({'num_attention_heads': 3, 'num_key_value_heads': 2}, {}),
     ({'head_dim': 7}, {}), ({'early_exit_layers': [9]}, {}),
     ({'rope_scaling': {'factor': -2}}, {}), ({}, {'batch_size': 1.5}),
-    ({'hidden_act': 'bad'}, {}), ({'use_grad_checkpoint': 3}, {}),
+    ({'hidden_act': 'bad'}, {}), ({'use_grad_checkpoint': 5}, {}),
+    ({'use_grad_checkpoint':4,'use_moe':True}, {}),
 ])
 def test_invalid_settings_are_not_silently_downgraded(config, training):
     with pytest.raises(ValueError):

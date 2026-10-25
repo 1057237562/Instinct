@@ -23,7 +23,7 @@ DEVICE = 'cpu' if INTERPRET else 'cuda'
 kernel_test = pytest.mark.skipif(not INTERPRET and not torch.cuda.is_available(), reason='requires interpreter or CUDA')
 DTYPES = {'fp32': torch.float32, 'bf16': torch.bfloat16, 'fp16': torch.float16,
           'fp8e4nv': torch.float8_e4m3fn, 'fp8e5': torch.float8_e5m2,
-          'i32': torch.int32, 'i64': torch.int64}
+          'i32': torch.int32, 'i64': torch.int64, 'u16': torch.uint16}
 
 
 class ReferenceBackend:

@@ -40,6 +40,11 @@ def parser():
     p.add_argument('--param_dtype',choices=['fp32','bf16','fp16'],default='fp32')
     p.add_argument('--kv_cache_dtype',choices=['fp32','bf16','fp16','fp8_e4m3','fp8_e5m2'],default='fp32')
     p.add_argument('--fp8',choices=['auto','0','1'],default='auto')
+    p.add_argument('--fp8_filter',choices=['auto','eligible'],default='eligible')
+    p.add_argument('--muon_mantissa',type=int,choices=[0,1],default=0)
+    p.add_argument('--muon_momentum_dtype',choices=['fp32','bf16'],default='fp32')
+    p.add_argument('--muon_batch_size',type=int,default=16)
+    p.add_argument('--muon_workspace_mb',type=float,default=512)
     p.add_argument('--optimizer',choices=['adamw','adafactor','muon'],default='adamw')
     p.add_argument('--learning_rate',type=float,default=None);p.add_argument('--weight_decay',type=float,default=.01)
     p.add_argument('--epochs',type=int,default=1);p.add_argument('--batch_size',type=int,default=32)
@@ -47,6 +52,7 @@ def parser():
     p.add_argument('--num_workers',type=int,default=8);p.add_argument('--prefetch_factor',type=int,default=2)
     p.add_argument('--token_cache',help='SQLite tokenization cache path')
     p.add_argument('--packing',action='store_true',help='EOS-delimited pretraining token packing')
+    p.add_argument('--packed_attention',action='store_true',help='Isolate packed documents, reset RoPE and mask cross-document labels')
     p.add_argument('--packing_cache',default='./cache/native_tokens')
     p.add_argument('--length_bucket',type=int,default=0,help='Sort lengths within shuffled windows of this size')
     p.add_argument('--sequence_buckets',default='',help='Comma separated sequence lengths')
@@ -69,6 +75,8 @@ def parser():
     p.add_argument('--max_steps',type=int,default=0);p.add_argument('--use_wandb',action='store_true');p.add_argument('--wandb_project',default='Instinct-cuBLAS')
     p.add_argument('--peak_tflops',type=float,default=0.)
     p.add_argument('--allocator_cache_mib',type=int,default=256)
+    p.add_argument('--allocator_backend',choices=['driver','async'],default='driver')
+    p.add_argument('--selective_cache_mib',type=int)
     p.add_argument('--workspace_mib',type=int,default=32);p.add_argument('--candidates',type=int,default=8)
     p.add_argument('--tune',action='store_true');p.add_argument('--overlap_dw',action='store_true');p.add_argument('--dw_sm_target',type=int,default=0)
     p.add_argument('--beta',type=float,default=.1);p.add_argument('--alpha',type=float,default=.5);p.add_argument('--temperature',type=float,default=1.)
@@ -90,6 +98,9 @@ def read_config(args):
     if args.use_looped and raw.get('model_architecture') not in ('looped','looped_legacy'):raw['model_architecture']='looped_legacy'
     if any(k in raw for k in ('prelude_layers','loop_iters','coda_layers')) and raw.get('model_architecture','looped')=='looped':raw['model_architecture']='looped_legacy'
     if args.early_exit==0:raw['early_exit_layers']=[]
+    if args.selective_cache_mib is not None:
+        if args.selective_cache_mib<0:raise ValueError('selective cache budget must be nonnegative')
+        raw['selective_cache_mib']=args.selective_cache_mib
     request=WebUIRequest.from_dicts(raw,dict(train_type=args.train_type,batch_size=args.batch_size,max_seq_len=args.max_seq_len,
         optimizer=args.optimizer,param_dtype=args.param_dtype,activation_dtype=args.dtype,kv_cache_dtype=args.kv_cache_dtype,num_workers=args.num_workers,prefetch_factor=args.prefetch_factor,pin_memory=bool(args.pin_memory)))
     for key in ('epochs','batch_size','max_seq_len','accumulation_steps','log_interval','save_interval','max_gen_len','max_total_len','max_turns','num_generations','ppo_update_iters','mini_batch_size'):
@@ -98,6 +109,14 @@ def read_config(args):
         if getattr(args,key) is not None and getattr(args,key)<1:raise ValueError(key+' must be positive')
     if args.num_workers < 0 or args.prefetch_factor < 1:raise ValueError('invalid data worker/prefetch settings')
     if args.packing and args.train_type!='pretrain':raise ValueError('packing is defined for pretraining only')
+    if args.packed_attention and not args.packing:raise ValueError('packed_attention requires packing')
+    if args.muon_mantissa and (args.optimizer!='muon' or args.param_dtype!='bf16'):
+        raise ValueError('Muon mantissa requires optimizer=muon and param_dtype=bf16')
+    if args.muon_momentum_dtype=='bf16' and not args.muon_mantissa:
+        raise ValueError('BF16 Muon momentum requires mantissa')
+    if args.muon_workspace_mb<=0 or args.muon_batch_size<1:raise ValueError('invalid Muon chunk limits')
+    if request.model['use_grad_checkpoint'] in (3,4) and (args.fuse_projections or args.train_type=='lora'):
+        raise ValueError('native ckpt3/4 require separate Dense projections without LoRA')
     if args.length_bucket<0:raise ValueError('length_bucket must be nonnegative')
     if args.copy_prefetch and args.train_type in ('ppo','grpo','agent'):raise ValueError('copy_prefetch expects supervised token batches')
     if args.cuda_graph and (args.train_type not in ('pretrain','full_sft','lora') or args.copy_prefetch):raise ValueError('CUDA Graph supports supervised CE; use its fixed input uploads without copy_prefetch')
@@ -166,7 +185,9 @@ def critic_values(model,ids,mask):
 
 
 def supervised_step(args,model,batch,reference=None,teacher=None):
-    e=model.e;ids,labels=batch;out=model(ids,labels,return_logits=args.train_type in ('dpo','distillation'))
+    e=model.e;ids,labels=batch[:2]
+    out=model(ids,labels,return_logits=args.train_type in ('dpo','distillation'),
+              sequence_ids=batch[2] if len(batch)==3 else None)
     if args.train_type=='dpo':
         policy=objectives.sequence_logps(e,out.logits[:,:-1],labels[:,1:] if hasattr(labels,'data') and not isinstance(labels,np.ndarray) else e.array(labels[:,1:]))
         with e.no_grad():ref=reference(ids)
@@ -235,20 +256,20 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
     if backend is None:
         from model.dense_cublas.memory import TrainingBackend
         from model.dense_cublas.backend import ScheduleConfig
-        backend_context=TrainingBackend(int(args.device.removeprefix('cuda:')),ScheduleConfig(workspace_mib=args.workspace_mib,candidates=args.candidates,tune=args.tune,overlap_dw=args.overlap_dw,dw_sm_target=args.dw_sm_target),pool_limit_mib=args.allocator_cache_mib, pin_memory=bool(args.pin_memory))
+        backend_context=TrainingBackend(int(args.device.removeprefix('cuda:')),ScheduleConfig(workspace_mib=args.workspace_mib,candidates=args.candidates,tune=args.tune,overlap_dw=args.overlap_dw,dw_sm_target=args.dw_sm_target),pool_limit_mib=args.allocator_cache_mib, pin_memory=bool(args.pin_memory), allocator_backend=args.allocator_backend)
     else:backend_context=nullcontext(backend)
     rng=np.random.default_rng(args.seed);tokenizer=tokenizer or Tokenizer(args.tokenizer_path,args.token_cache)
     suffix='_mini' if args.dataset_size=='mini' else ''
     default_data={'pretrain':f'pretrain_t2t{suffix}','full_sft':f'sft_t2t{suffix}','distillation':f'sft_t2t{suffix}',
         'lora':'lora_medical','dpo':'dpo','ppo':'rlaif','grpo':'rlaif','agent':'agent_rl'}
     data=JsonlDataset(args.data_path or './dataset/'+default_data[args.train_type]+'.jsonl',tokenizer,args.train_type,args.max_seq_len,rng)
-    if args.packing:data=PackedPretrain(data,args.packing_cache)
+    if args.packing:data=PackedPretrain(data,args.packing_cache,isolate_documents=args.packed_attention)
     buckets=sorted(set(int(x) for x in args.sequence_buckets.split(',') if x))
     if any(x<2 or x>args.max_seq_len for x in buckets):raise ValueError('sequence_buckets must be between 2 and max_seq_len')
     with backend_context as backend, ProcessGroup(backend,args.distributed_backend) as group, BatchLoader(data,args.num_workers,args.prefetch_factor,args.seed) as loader, checkpoint.AsyncCheckpointer(args.async_checkpoint) as saver:
         fp8=args.fp8=='1' or (args.fp8=='auto' and getattr(backend,'arch',0)>=89)
-        e=Engine(backend,fp8=fp8,seed=args.seed+group.rank)
-        model=Model(e,config,args.param_dtype,dtype,args.kv_cache_dtype,args.seed)
+        e=Engine(backend,fp8=fp8,seed=args.seed+group.rank,fp8_filter=args.fp8_filter)
+        model=Model(e,config,args.param_dtype,dtype,args.kv_cache_dtype,args.seed,muon_mantissa=args.muon_mantissa)
         model.fuse_projections=args.fuse_projections;model.loss_chunk_size=args.loss_chunk_size
         if args.loss_chunk_size<0:raise ValueError('loss_chunk_size must be nonnegative')
         if args.train_type=='lora':model.add_lora(args.lora_rank)
@@ -276,13 +297,15 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
         if args.train_type=='ppo':
             critic=Model(e,config,args.param_dtype,dtype,args.kv_cache_dtype,args.seed);copy_parameters(model,critic)
             critic._parameter('value_head.weight',(1,config['hidden_size']));critic._parameter('value_head.bias',(1,),zeros=True)
-        optimizer=Optimizer(e,model.parameters(),args.optimizer,lr,args.weight_decay,args.grad_clip,loss_scaling=dtype=='fp16')
+        optimizer=Optimizer(e,model.parameters(),args.optimizer,lr,args.weight_decay,args.grad_clip,loss_scaling=dtype=='fp16',
+                            muon_mantissa=args.muon_mantissa,muon_momentum_dtype=args.muon_momentum_dtype,
+                            muon_batch_size=args.muon_batch_size,muon_workspace_mb=args.muon_workspace_mb)
         if critic:critic_optimizer=Optimizer(e,critic.parameters(),args.optimizer,args.critic_learning_rate,args.weight_decay,args.grad_clip,loss_scaling=dtype=='fp16')
         optimizer.distributed=group
         if critic_optimizer:critic_optimizer.distributed=group
         extra_models={k:v for k,v in {'reference':reference,'teacher':teacher,'critic':critic}.items() if v is not None}
         extra_optimizers={'critic':critic_optimizer} if critic_optimizer else {}
-        progress={'epoch':0,'cursor':0,'order':None,'steps':0,'dataset_size':len(data),'dataset_path':str(data.path.resolve()),'batch_size':args.batch_size,'accumulation_steps':args.accumulation_steps,'train_type':args.train_type,'data_seed':args.seed,'loader_version':1,'sampler_version':2,'world_size':group.world,'data_options':dict(packing=args.packing,length_bucket=args.length_bucket,sequence_buckets=buckets),'compute_options':dict(fuse_projections=args.fuse_projections,loss_chunk_size=args.loss_chunk_size)}
+        progress={'epoch':0,'cursor':0,'order':None,'steps':0,'dataset_size':len(data),'dataset_path':str(data.path.resolve()),'batch_size':args.batch_size,'accumulation_steps':args.accumulation_steps,'train_type':args.train_type,'data_seed':args.seed,'loader_version':1,'sampler_version':2,'world_size':group.world,'data_options':dict(packing=args.packing,length_bucket=args.length_bucket,sequence_buckets=buckets,packed_attention=args.packed_attention),'compute_options':dict(fuse_projections=args.fuse_projections,loss_chunk_size=args.loss_chunk_size)}
         if args.from_resume:
             if resume_source.suffix=='.pth':
                 from model.dense_cublas.legacy_checkpoint import import_resume
@@ -290,7 +313,8 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
             progress=checkpoint.load(resume,model,optimizer,rng,extra_models,extra_optimizers)
             imported=checkpoint.metadata(resume).get('legacy_import')
             if imported:progress['legacy_import']=imported
-            if progress.get('data_options',dict(packing=False,length_bucket=0,sequence_buckets=[]))!=dict(packing=args.packing,length_bucket=args.length_bucket,sequence_buckets=buckets):raise ValueError('data packing/buckets changed since resume')
+            progress.get('data_options',{}).setdefault('packed_attention',False)
+            if progress.get('data_options',dict(packing=False,length_bucket=0,sequence_buckets=[],packed_attention=False))!=dict(packing=args.packing,length_bucket=args.length_bucket,sequence_buckets=buckets,packed_attention=args.packed_attention):raise ValueError('data packing/buckets changed since resume')
             compute_options=dict(fuse_projections=args.fuse_projections,loss_chunk_size=args.loss_chunk_size)
             if imported:progress['compute_options']=compute_options
             if progress.get('compute_options',dict(fuse_projections=False,loss_chunk_size=0))!=compute_options:raise ValueError('native precision-affecting execution options changed since resume')
@@ -331,13 +355,13 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
             def request_stop(signum,frame):
                 nonlocal stop_requested
                 stop_requested=True
-                print('Stop requested; finishing this batch before saving native resume state.',flush=True)
+                print('Pause requested; finishing the accumulated optimizer update before saving native resume state.',flush=True)
             signal.signal(signal.SIGINT,request_stop)
         def save_all():
-            if group.rank==0:saver.save(weights,model)
+            if group.rank==0:saver.save(weights,model,progress=progress)
             if group.rank==0 and args.train_type=='lora':saver.save(weights.with_name(weights.stem+'_adapter.npz'),model,adapters_only=True)
             saver.save(resume,model,optimizer,progress,rng,extra_models,extra_optimizers)
-        prefetch=DevicePrefetch(e,args.batch_size*(2 if args.train_type=='dpo' else 1),args.max_seq_len,args.copy_prefetch)
+        prefetch=DevicePrefetch(e,args.batch_size*(2 if args.train_type=='dpo' else 1),args.max_seq_len,args.copy_prefetch,fields=3 if args.packed_attention else 2)
         step_graph=None
         try:
             for epoch in range(progress['epoch'],args.epochs):
@@ -389,8 +413,18 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
                     if progress['steps']%args.save_interval==0:
                         save_all()
                     stop_file=os.environ.get('INSTINCT_STOP_FILE')
-                    if group.any(stop_requested or bool(stop_file and Path(stop_file).exists())) or (args.max_steps and progress['steps']>=args.max_steps):
-                        save_all();return {'weights':str(weights),'resume':str(resume),'loss':last_loss,'steps':progress['steps']}
+                    pause_requested = stop_requested or bool(stop_file and Path(stop_file).exists()) or Path(args.checkpoint_dir,'.pause_request').exists()
+                    pause_requested = group.any(pause_requested)
+                    limit_reached = group.any(bool(args.max_steps and progress['steps']>=args.max_steps))
+                    if (pause_requested or limit_reached) and optimizer.accumulated==0:
+                        save_all();saver.flush()
+                        assert checkpoint.metadata(resume)['progress']['steps']==progress['steps']
+                        if group.rank==0:assert checkpoint.metadata(weights)['progress']['steps']==progress['steps']
+                        if pause_requested:
+                            request=Path(args.checkpoint_dir,'.pause_request')
+                            if group.rank==0 and request.exists():request.unlink()
+                            print(f'Native training paused: verified full state at step {progress["steps"]}.',flush=True)
+                        return {'weights':str(weights),'resume':str(resume),'loss':last_loss,'steps':progress['steps'],'paused':bool(pause_requested)}
                 progress.update(epoch=epoch+1,cursor=0,order=None)
                 save_all()
         finally:
@@ -407,4 +441,6 @@ if __name__=='__main__':
     from experiments.smoke_dense_triton import RejectTorch
     if 'torch' in sys.modules or 'torchao' in sys.modules:raise RuntimeError('start native training in a fresh process')
     sys.meta_path.insert(0,RejectTorch())
-    print(train(parser().parse_args()),flush=True)
+    result=train(parser().parse_args())
+    print(result,flush=True)
+    if result.get('paused'):raise SystemExit(42)
