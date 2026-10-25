@@ -54,6 +54,9 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
         labels = labels.to(args.device)
         last_step = step
         set_cosine_lr(optimizer, epoch, step, iters, args)
+        # CUDA(G)raph 模式下必须标记每步边界，否则 graph 输出缓冲被下一轮覆写，backward 读到脏数据
+        if args.use_compile == 1:
+            torch.compiler.cudagraph_mark_step_begin()
 
         with autocast_ctx:
             res = model(input_ids, labels=labels, early_exit=bool(args.early_exit))
