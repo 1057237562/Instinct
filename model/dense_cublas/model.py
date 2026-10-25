@@ -22,6 +22,9 @@ def configuration(values):
         exit_in_training=False, beta=.5, distill_weight=0., distill_temperature=2.,
         teacher_stop_grad=True, depth_gain_reward=False)
     cfg.update(values)
+    if cfg['model_architecture'] == 'looped_legacy':
+        for key, value in dict(prelude_layers=1, loop_iters=8, coda_layers=1, use_input_injection=True).items():
+            cfg.setdefault(key, value)
     cfg.setdefault('head_dim', cfg['hidden_size'] // cfg['num_attention_heads'])
     cfg.setdefault('intermediate_size', math.ceil(math.pi * cfg['hidden_size'] / 64) * 64)
     cfg.setdefault('moe_intermediate_size', cfg['intermediate_size'])
@@ -66,11 +69,17 @@ class Model:
         self.e, self.config = engine, configuration(config)
         self.param_dtype, self.activation_dtype, self.kv_cache_dtype = param_dtype, activation_dtype, kv_cache_dtype
         self.params, self.adapters, self.training = {}, {}, True
+        self.fuse_projections=False
+        self.loss_chunk_size=0
         self.rng = np.random.default_rng(seed)
         c, h = self.config, self.config['hidden_size']
         self._parameter('model.embed_tokens.weight', (c['vocab_size'], h))
-        for i in range(c['num_hidden_layers']):
-            p = f'model.layers.{i}.'
+        self.layer_prefixes = [f'model.layers.{i}.' for i in range(c['num_hidden_layers'])]
+        if c['model_architecture'] == 'looped_legacy':
+            self.layer_prefixes = ([f'model.prelude.{i}.' for i in range(c['prelude_layers'])]
+                + (['model.loop_block.'] if c['loop_iters'] else [])
+                + [f'model.coda.{i}.' for i in range(c['coda_layers'])])
+        for i, p in enumerate(self.layer_prefixes):
             for name in ('input_layernorm.weight', 'post_attention_layernorm.weight'): self._parameter(p + name, (h,), ones=True)
             if self.is_linear(i):
                 kh, vh, dk, dv = (c[k] for k in ('linear_num_key_heads', 'linear_num_value_heads', 'linear_key_head_dim', 'linear_value_head_dim'))
@@ -104,6 +113,8 @@ class Model:
             self._parameter('model.loop_gate.weight', (h,h), zeros=True)
             self._parameter('model.loop_gate.dt_bias', (h,), ones=True)
             self._parameter('model.loop_gate.A_log', (h,), zeros=True)
+        if c['model_architecture'] == 'looped_legacy' and c['loop_iters']:
+            self._parameter('model.loop_pos_embed.weight', (c['loop_iters'], h), zeros=True)
         self.cos, self.sin = (engine.array(x) for x in rope_tables(c))
 
     def _parameter(self, name, shape, ones=False, zeros=False, array=None):
@@ -152,6 +163,16 @@ class Model:
             out = out + self.e.linear(self.e.linear(x, a), b)
         return out
 
+    def projections(self,x,names):
+        if not self.fuse_projections or any(name in self.adapters for name in names):
+            return [self.linear(x,name) for name in names]
+        weights=[self.params[name] for name in names]
+        joined=self.e.linear(x,self.e.cat(weights,0))
+        result=[];begin=0
+        for weight in weights:
+            result.append(joined[...,begin:begin+weight.shape[0]]);begin+=weight.shape[0]
+        return result
+
     def norm(self, x, name): return self.e.norm(x, self.params[name], self.config['rms_norm_eps'])
     def head(self, x): return self.linear(self.norm(x, 'model.norm.weight'), 'lm_head.weight')
 
@@ -191,12 +212,12 @@ class Model:
 
     def attention(self, x, i, mask, cache, new_cache, start, cache_key):
         if self.is_linear(i): return self.linear_attention(x, i, cache, new_cache, cache_key)
-        e, c, p = self.e, self.config, f'model.layers.{i}.self_attn.'
+        e, c, p = self.e, self.config, self.layer_prefixes[i]+'self_attn.'
         b,s,_ = x.shape; d, hq, hkv = c['head_dim'], c['num_attention_heads'], c['num_key_value_heads']
         with e.ops.reuse_scope():
-            q = self.norm(self.linear(x, p+'q_proj.weight').reshape(b,s,hq,d), p+'q_norm.weight')
-            k = self.norm(self.linear(x, p+'k_proj.weight').reshape(b,s,hkv,d), p+'k_norm.weight')
-            v = self.linear(x, p+'v_proj.weight').reshape(b,s,hkv,d)
+            q,k,v=self.projections(x,[p+name+'_proj.weight' for name in ('q','k','v')])
+            q=self.norm(q.reshape(b,s,hq,d),p+'q_norm.weight')
+            k=self.norm(k.reshape(b,s,hkv,d),p+'k_norm.weight');v=v.reshape(b,s,hkv,d)
         q, k = e.rotary(q, self.cos, self.sin, start), e.rotary(k, self.cos, self.sin, start)
         if cache and cache_key in cache:
             pk,pv = cache[cache_key]
@@ -207,34 +228,25 @@ class Model:
 
     def ffn(self, x, prefix):
         with self.e.ops.reuse_scope():
-            gate, up = self.linear(x,prefix+'gate_proj.weight'), self.linear(x,prefix+'up_proj.weight')
-        return self.linear(self.e.unary(gate,self.config['hidden_act'])*up,prefix+'down_proj.weight')
+            gate, up = self.projections(x,[prefix+'gate_proj.weight',prefix+'up_proj.weight'])
+        activated=self.e.swiglu(gate,up) if self.fuse_projections and self.config['hidden_act']=='silu' else self.e.unary(gate,self.config['hidden_act'])*up
+        return self.linear(activated,prefix+'down_proj.weight')
 
     def feed_forward(self, x, i):
-        e,c,p = self.e,self.config,f'model.layers.{i}.mlp.'
+        e,c,p = self.e,self.config,self.layer_prefixes[i]+'mlp.'
         if not c['use_moe']: return self.ffn(x,p), e.full((1,),0.)
         flat = x.reshape(-1,x.shape[-1])
         scores = e.softmax(self.linear(flat,p+'gate.weight').cast('fp32'))
         selected = e.topk_mask(scores,c['num_experts_per_tok'])
         weights = scores * selected
         if c['norm_topk_prob']: weights = weights / (weights.sum(-1,True)+1.e-20)
-        out = e.full(flat.shape,0.)
-        # Compact only selected tokens. Routing IDs are nondifferentiable; host
-        # transfer is O(tokens*experts), never weights or activations.
-        dispatch = e.numpy(selected)
-        for expert in range(c['num_experts']):
-            ids = np.flatnonzero(dispatch[:,expert]).astype(np.int64)
-            if not ids.size: continue
-            index = e.array(ids)
-            tokens = e.embedding(flat,index)
-            weight = e.embedding(weights,index)[:,expert].reshape(-1,1)
-            result = self.ffn(tokens,p+f'experts.{expert}.') * weight
-            out = out + e.scatter_rows(result.cast('fp32'),index,flat.shape[0])
+        from .grouped import feed_forward
+        out = feed_forward(self,flat,weights,selected,p)
         aux = (selected.mean(0)*scores.mean(0)).sum()*c['num_experts']*c['router_aux_loss_coef'] if self.training else e.full((1,),0.)
         return out.reshape(*x.shape).cast(x.dtype),aux
 
     def block(self, x, i, mask=None, cache=None, new_cache=None, start=0, cache_key=None):
-        e,c,p = self.e,self.config,f'model.layers.{i}.'
+        e,c,p = self.e,self.config,self.layer_prefixes[i]
         cache_key = str(i) if cache_key is None else cache_key
         checkpoint = c['use_grad_checkpoint'] if self.training and new_cache is None else 0
         ps = [v for k,v in self.params.items() if k.startswith(p) and v.requires_grad]
@@ -275,9 +287,22 @@ class Model:
             return value
         if c['model_architecture']=='looped':
             x,aux_loop,depth=self.looped(x,run,labels,use_cache); aux=aux+aux_loop
+        elif c['model_architecture']=='looped_legacy':
+            # Original input injection shares the prelude graph (it is not detached).
+            x=run(range(c['prelude_layers']),x); injected=x
+            loop_aux=aux
+            for step in range(c['loop_iters']):
+                signal=self.params['model.loop_pos_embed.weight'][step]
+                x=run([c['prelude_layers']],x+signal+(injected if c['use_input_injection'] else 0.),f':loop{step}')
+                # The original collects shared block auxiliary loss once, from its last invocation.
+                if step+1<c['loop_iters']:aux=loop_aux
+            begin=c['prelude_layers']+bool(c['loop_iters'])
+            x=run(range(begin,len(self.layer_prefixes)),x);depth=c['loop_iters']
         else: x=run(range(c['num_hidden_layers']),x)
-        hidden=self.norm(x,'model.norm.weight');logits=self.linear(hidden,'lm_head.weight') if return_logits or labels is not None else None
-        loss=None if labels is None else e.ce(logits[:,:-1],labels[:,1:])
+        hidden=self.norm(x,'model.norm.weight')
+        fused=labels is not None and self.loss_chunk_size>0 and not return_logits and 'lm_head.weight' not in self.adapters
+        logits=self.linear(hidden,'lm_head.weight') if return_logits or (labels is not None and not fused) else None
+        loss=e.linear_ce(hidden[:,:-1],self.params['lm_head.weight'],labels[:,1:],self.loss_chunk_size) if fused else (None if labels is None else e.ce(logits[:,:-1],labels[:,1:]))
         if loss is not None and early: loss=loss+sum(early)*c['early_exit_loss_weight']/len(early)
         return Output(logits,hidden,aux,loss,new_cache,depth)
 

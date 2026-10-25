@@ -17,6 +17,7 @@ class TrainingBackend(CublasBackend):
         self.pool_limit = int(pool_limit_mib * 1024 * 1024)
         if self.pool_limit < 0: raise ValueError('pool_limit_mib must be nonnegative')
         self._event_pool, self._live_events = [], {}
+        self._pinned=set();self._pinned_events=set()
 
     def empty(self, shape, dtype='fp32', zero=False):
         self._check()
@@ -48,18 +49,21 @@ class TrainingBackend(CublasBackend):
         self._live_events[event] = self._serial
         return event
 
+    def pin_since(self,mark):
+        self._pinned.update(p for p,(serial,size) in self._live.items() if serial>mark)
+        self._pinned_events.update(event for event,serial in self._live_events.items() if serial>mark)
+
     def release_since(self, mark, keep=()):
-        if self._commands is not None or self.execution_plan is not None:
-            raise RuntimeError('dynamic buffer recycling cannot be mixed with a captured execution plan')
+        if self._commands is not None:return  # Preparation retains a fixed-address arena until context exit.
         self.synchronize()  # Includes optional dW stream and all prior consumers.
-        retained = {t.storage for t in keep if t is not None}
+        retained = {t.storage for t in keep if t is not None}|self._pinned
         for pointer, (serial, size) in list(self._live.items()):
             if serial > mark and pointer not in retained:
                 self._pool.setdefault(size, []).append(pointer)
                 self._pool_bytes += size
                 del self._live[pointer]
         for event, serial in list(self._live_events.items()):
-            if serial > mark:
+            if serial > mark and event not in self._pinned_events:
                 self._event_pool.append(event)
                 del self._live_events[event]
         # Dynamic MoE token counts and decode lengths must not grow the cache

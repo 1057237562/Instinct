@@ -58,6 +58,10 @@ class Value:
     def __getitem__(self, key): return self.engine.slice(self, key)
 
 
+class PendingGradient:
+    def __init__(self, data, event):self.data,self.event=data,event
+
+
 class Engine:
     def __init__(self, backend, fp8=False, seed=42):
         self.backend, self.ops = backend, CublasDenseOps(backend, fp8)
@@ -240,9 +244,53 @@ class Engine:
         out, saved = self.ops.linear(x.data, weight.data)
         def backward(g):
             result = self.ops.linear_backward(saved, self.ops.cast(g, x.dtype), x.requires_grad, weight.requires_grad)
-            if weight.requires_grad: self.backend.finish_backward()
-            return result
+            dx,dw=result
+            if dw is not None and self.backend.weight_stream!=self.backend.main_stream:
+                event=self.backend.create_event()
+                with self.backend.on_stream(self.backend.weight_stream):self.backend.record_event(event)
+                dw=PendingGradient(dw,event)
+            return dx,dw
         return self._node(out, (x, weight), backward)
+
+    def linear_ce(self, x, weight, labels, chunk_size=256):
+        """Chunked projection + fused CE; recompute logits in VJP, never retain T×V."""
+        shape=x.shape;flat=x.reshape(-1,shape[-1]);target=labels.reshape(-1)
+        rows,vocab=flat.shape[0],weight.shape[0]
+        if target.size!=rows or chunk_size<1:raise ValueError('invalid linear CE shape/chunk')
+        valid=self.binary(target,0.,'ge')*self.binary(self.full((1,),vocab),target,'gt')
+        denom=self.binary(valid.sum(),1.,'max').detach()
+        def chunk(begin,end):
+            xx=flat[begin:end];yy=target[begin:end]
+            logits,saved=self.ops.linear(xx.data,weight.data)
+            losses=self.backend.empty((end-begin,),'fp32');counts=self.backend.empty(losses.shape,'fp32')
+            dy=self.backend.empty((end-begin,vocab),'fp32')
+            self.backend.launch(ew.cross_entropy,(end-begin,),(logits,yy.data,losses,counts,dy),VOCAB=vocab,BLOCK=triton.next_power_of_2(vocab))
+            return losses,dy,saved
+        loss=self.full((1,),0.)
+        with self.no_grad():
+            for begin in range(0,rows,chunk_size):
+                mark=self.backend.mark()
+                losses,_,_=chunk(begin,min(begin+chunk_size,rows))
+                self.copy(loss,self.wrap(losses).sum()/denom,add=True)
+                self.backend.release_since(mark)
+        def backward(g):
+            dx=self.full(flat.shape,0.);dw=self.full(weight.shape,0.)
+            for begin in range(0,rows,chunk_size):
+                end=min(begin+chunk_size,rows);mark=self.backend.mark()
+                _,dy,saved=chunk(begin,end)
+                dy=(self.wrap(dy)*self.wrap(g)/denom).cast(x.dtype)
+                gx,gw=self.ops.linear_backward(saved,dy.data)
+                self.backend.finish_backward()
+                self.backend.launch(tk.strided_copy,(triton.cdiv((end-begin)*shape[-1],256),),(gx,dx.data),
+                    SHAPE=(end-begin,shape[-1]),STRIDES=(shape[-1],1),OFFSET=begin*shape[-1],N=(end-begin)*shape[-1],REVERSE=True)
+                self.copy(dw,self.wrap(gw),add=True)
+                self.backend.release_since(mark)
+            return dx.data.view(*shape),dw.data
+        return self._node(loss.data,(x,weight),backward)
+
+    def swiglu(self,gate,up):
+        out,saved=self.ops.swiglu(gate.data,up.data)
+        return self._node(out,(gate,up),lambda g:self.ops.swiglu_backward(saved,self.ops.cast(g,gate.dtype)))
 
     def norm(self, x, weight, eps=1e-6):
         out, saved = self.ops.norm(x.data, weight.data, eps)
@@ -365,20 +413,28 @@ class Engine:
             if node.node:
                 stack.extend((p, False) for p in node.node[0] if p.requires_grad)
         with self.no_grad():
-            gradients = {output: gradient if gradient is not None else self.full(output.shape, 1.).data}
+            gradients = {output: [gradient if gradient is not None else self.full(output.shape, 1.).data]}
+            def materialize(value):
+                parts=gradients.get(value,[]);result=None
+                for part in parts:
+                    if isinstance(part,PendingGradient):
+                        self.backend.wait_event(part.event);part=part.data
+                    part=self.ops.cast(part,'fp32')
+                    result=part if result is None else (self.wrap(result)+self.wrap(part)).data
+                gradients[value]=[] if result is None else [result]
+                return result
             for value in reversed(ordered):
-                g = gradients.get(value)
-                if g is None or value.node is None: continue
+                if value.node is None or value not in gradients:continue
+                g=materialize(value)
                 parents, backward = value.node
                 local = backward(g)
                 if len(local) != len(parents): raise RuntimeError('VJP returned wrong gradient count')
                 for parent, grad in zip(parents, local):
-                    if not parent.requires_grad or grad is None: continue
-                    grad = self.ops.cast(grad, 'fp32')
-                    if parent in gradients: grad = (self.wrap(grad) + self.wrap(gradients[parent])).data
-                    gradients[parent] = grad
-            if inputs is not None: return tuple(gradients.get(x) for x in inputs)
-            return {value: grad for value, grad in gradients.items() if value.node is None and value.requires_grad}
+                    if parent.requires_grad and grad is not None:
+                        gradients.setdefault(parent,[]).append(grad)
+            # Parameter gradients are consumed only after all dX work has been queued.
+            if inputs is not None: return tuple(materialize(x) for x in inputs)
+            return {value:materialize(value) for value in list(gradients) if value.node is None and value.requires_grad}
 
     def checkpoint(self, fn, x, parameters):
         """Discard forward temporaries; reproduce RNG and regenerate a local VJP."""

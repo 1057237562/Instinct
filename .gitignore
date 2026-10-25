@@ -43,3 +43,7 @@ trainer/webui_state.json
 
 # Native experimental backend build products
 model/dense_cublas/native/build/
+
+# Native tokenization / packing caches
+cache/native_tokens/
+cache/*.sqlite*

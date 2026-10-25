@@ -50,7 +50,7 @@ def convert_resume(loaded,spec,source):
         'num_key_value_heads','head_dim','tie_word_embeddings','use_moe','num_experts','num_experts_per_tok',
         'moe_intermediate_size','hidden_act','rms_norm_eps','rope_theta','rope_scaling','dropout',
         'full_attention_interval','linear_conv_kernel_dim','linear_key_head_dim','linear_value_head_dim',
-        'linear_num_key_heads','linear_num_value_heads')
+        'linear_num_key_heads','linear_num_value_heads','prelude_layers','loop_iters','coda_layers','use_input_injection')
     for key in structural:
         if key in cfg and key in spec['config'] and cfg[key]!=spec['config'][key]:
             raise ValueError('legacy checkpoint configuration mismatch: '+key)
@@ -61,7 +61,7 @@ def convert_resume(loaded,spec,source):
         if key not in loaded:raise ValueError('legacy checkpoint is missing '+key+'; cannot reconstruct its saved state')
         weights={clean_name(k):v for k,v in loaded[key].items()}
         unknown=[k for k in weights if k not in expected and not k.endswith(('freqs_cos','freqs_sin'))]
-        if unknown:raise ValueError('unmapped legacy model parameters (old Looped structures require a separate migration): '+', '.join(unknown[:5]))
+        if unknown:raise ValueError('unmapped legacy model parameters: '+', '.join(unknown[:5]))
         order=[];seen=set()
         for name,info in expected.items():
             if name not in weights:raise ValueError('missing legacy parameter: '+name)

@@ -15,6 +15,11 @@ import time
 from experiments.smoke_dense_triton import RejectTorch
 
 
+def graph_loss(model,batch):
+    out=model(*batch,return_logits=False)
+    return out.loss+out.aux_loss
+
+
 def run(args):
     if 'torch' in sys.modules:raise RuntimeError('run the native validation in a fresh process')
     sys.meta_path.insert(0,RejectTorch())
@@ -35,6 +40,7 @@ def run(args):
     with TrainingBackend(args.device,schedule,pool_limit_mib=args.allocator_cache_mib) as backend:
         baseline=backend.memory();e=Engine(backend,fp8=bool(args.fp8),seed=123)
         model=Model(e,config,args.param_dtype,args.dtype,args.kv_cache_dtype)
+        model.fuse_projections=args.fuse_projections;model.loss_chunk_size=args.loss_chunk_size
         optimizer=Optimizer(e,model.parameters(),args.optimizer,lr=1.e-3,loss_scaling=args.dtype=='fp16')
         ids=(np.arange(34).reshape(2,17)%66+1).astype(np.int64);losses=[];memories=[];times=[]
         oracle_checked=False
@@ -57,9 +63,17 @@ def run(args):
                         key='gradient/'+name
                         if key in expected:np.testing.assert_allclose(e.numpy(gradients[p]),expected[key],atol=atol,rtol=rtol,err_msg=name)
                 backend.release_since(mark);oracle_checked=True
+        graph=None
+        if args.cuda_graph:
+            from model.dense_cublas.graph import StepGraph
+            graph=StepGraph(model,optimizer,(ids,ids),lambda batch:graph_loss(model,batch),1)
         def step():
             mark=backend.mark();started=time.perf_counter()
-            out=model(ids,ids);loss=e.item(out.loss+out.aux_loss)
+            if graph:
+                before=optimizer.updates;loss=graph.run((ids,ids),optimizer.lr,True)
+                if optimizer.updates!=before+1:raise FloatingPointError('graph skipped an update')
+                return loss,time.perf_counter()-started
+            out=model(ids,ids,return_logits=False);loss=e.item(out.loss+out.aux_loss)
             if not np.isfinite(loss):raise FloatingPointError('nonfinite loss')
             optimizer.backward(out.loss+out.aux_loss);result=optimizer.step()
             backend.release_since(mark)
@@ -94,7 +108,9 @@ if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--device',type=int,default=0);p.add_argument('--fp8',type=int,choices=[0,1],default=0)
     p.add_argument('--dtype',choices=['fp32','bf16','fp16'],default='fp32');p.add_argument('--param_dtype',choices=['fp32','bf16','fp16'],default='fp32')
-    p.add_argument('--architecture',choices=['standard','moe','linear','looped'],default='standard')
+    p.add_argument('--architecture',choices=['standard','moe','linear','looped','looped_legacy'],default='standard')
+    p.add_argument('--fuse_projections',action='store_true');p.add_argument('--loss_chunk_size',type=int,default=0)
+    p.add_argument('--cuda_graph',action='store_true')
     p.add_argument('--optimizer',choices=['adamw','adafactor','muon'],default='adamw')
     p.add_argument('--checkpoint',type=int,choices=[0,1,2],default=0);p.add_argument('--dropout',type=float,default=0.)
     p.add_argument('--kv_cache_dtype',choices=['fp32','bf16','fp16','fp8_e4m3','fp8_e5m2'],default='fp32')

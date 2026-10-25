@@ -12,9 +12,9 @@ Triton，不在训练进程导入 PyTorch / TorchAO，也不调用 `torch.compil
 
 | 功能 | 实现位置与行为 |
 |---|---|
-| Dense / MoE | `model.py`：embedding、层堆叠、共享/独立 LM head、masked shifted CE；MoE top-k 只执行选中 token 的专家计算，并保留 router auxiliary gradient |
+| Dense / MoE | `model.py`：embedding、层堆叠、共享/独立 LM head、masked shifted CE；MoE 在 GPU 上稳定 compact dispatch、按专家 grouped GEMM，只计算选中 token；保留 router auxiliary gradient 和 per-expert FP8 scale |
 | Linear | `recurrent.py`：因果 depthwise conv、Gated DeltaNet、FP32 recurrent state、显式反向；每 16 token 重计算局部状态，支持流式 cache |
-| Looped | encoder/body/output 分区、共享 body、选择性门、confidence head、阈值/上限、随机监督深度、单调性/深度/增益奖励、自蒸馏和 teacher stop-grad |
+| Looped | 新 LoopUS 的 encoder/body/output 分区、共享 body、选择性门、confidence head、阈值/上限、随机监督深度、单调性/深度/增益奖励、自蒸馏和 teacher stop-grad；另提供与旧文件同名参数的 `looped_legacy` |
 | 激活与位置 | SiLU / exact-erf GELU / ReLU、RMSNorm、RoPE / YaRN 全部导出参数、attention/residual/embedding dropout |
 | Attention | head_dim≤256 的训练使用 fused causal GQA，支持 attention dropout、padding mask 和确定性前反向/重算；更大 head 及 decode 使用通用路径 |
 | 重计算 | 0 关闭、1 attention/FFN、2 整层；RNG seed/counter 与 FP8 scale 在重算时重建 |
@@ -28,24 +28,24 @@ Triton，不在训练进程导入 PyTorch / TorchAO，也不调用 `torch.compil
 | RL | 原生采样、reference/value models、GAE、clipping/KL、组归一化、多轮工具观测零 policy mask；本地 InternLM2 reward safetensors 推理 |
 | 保存恢复 | 原子 `.npz`，模型/LoRA、optimizer、待累积梯度、reference/teacher/critic、采样顺序、RNG、loss scale；原生精确续训要求配置与数据批次设置保持一致；旧 .pth 可迁移已保存的完整训练状态，缺失状态见下文 |
 | WebUI | 原有 presets、模型 JSON 导入/导出、架构图、参数估计保留；新后端启动、日志/指标、刷新恢复、权重发现与续训已接通 |
-| 调度 | workspace / heuristic plan cache、可选候选算法计时、独立 dW stream、event 依赖；原单 block 固定 buffer / CUDA Graph 实验保留 |
+| 调度 | workspace / heuristic plan cache、可选候选算法计时、跨层 dW stream/event 依赖；固定形状监督训练的完整 forward/backward/AdamW CUDA Graph |
 
 `config.py` 的 `implementation_ready` 与 `training_ready` 是不同字段。前者表示代码
 已实现；后者保留为实卡与收敛验收门槛，因此当前 `plan_cublas --require_ready` 仍返回 2。
 实际 runner 不因缺少远程 GPU 验收而禁止用户运行。
 
-### Looped 的兼容边界
+### 两种 Looped 结构
 
-原 `model_instinct_loop.py` 是旧的 `prelude + loop_iters + coda` 模型，没有读取 WebUI
-中的多数 LoopUS 控件。新后端实现这些控件，**不能将旧 Looped checkpoint 当作同一
-结构直接载入**。可以加载相同层命名的 Dense/MoE 基座；新 gate / confidence 参数初始化，
-然后训练并保存原生 checkpoint。
+`model_architecture="looped"` 保留此前的 LoopUS 控件：按 token 用严格 `q > q_threshold`
+冻结状态，支持 confidence、选择性门、随机监督深度、单调性/深度成本和自蒸馏。
 
-新 Looped 按 token 用严格 `q > q_threshold` 冻结状态，确保因果训练与 decode 可对齐；
-KV cache 开启时仍填充所有循环深度的 cache。训练目标为最终 CE，加随机 K 个深度的
-CE / confidence BCE / monotonicity，再加 survival-chain 深度成本、可选深度增益及 KD。
-`n_supervision` 控制质量损失采样，body 的递归梯度仍贯通；长循环建议重计算模式 2。
-这是一套明确的新实现，未宣称与旧 Looped 文件或论文实验逐数值相同。
+`model_architecture="looped_legacy"` 对应原 `model_instinct_loop.py`：独立 `prelude`、一个
+共享 `loop_block`、独立 `coda`，配置为 `prelude_layers`、`loop_iters`、`coda_layers`、
+`use_input_injection`。每轮加可学习的位置 embedding，输入注入与原代码一样保留 prelude
+的梯度；每次循环拥有独立 KV cache 槽。MoE aux loss 同原代码仅收集共享块最后一次的值。
+参数名与原 checkpoint 一致，可加载旧 `.pth` 权重及完整 optimizer resume。仅传
+`--use_looped 1` 时选择旧结构；显式 JSON 的 `looped` 仍保留新结构，避免改变已有原生模型。
+WebUI 新增 **Legacy Looped Transformer**，两套参数分别导出和恢复。
 
 ### FP8 和显存
 
@@ -137,8 +137,10 @@ Ctrl+C 请求会在当前 batch 完成后保存；强制杀进程只能恢复最
 和中断后重启不会提前消耗训练 RNG。旧版原生 checkpoint 则保留串行增强模式，以保持其 RNG。
 
 上传端复用 CUDA Driver 分配的 pinned CPU 缓冲，最多 16 MiB；更大的上传继续走 pageable
-路径，避免锁住过多主机内存。`memory()` 报告 `host_pinned_bytes`。HtoD 仍为同步复制，
-CPU 数据准备可以提前运行；此处没有实现独立 GPU copy stream 的计算/传输重叠。
+路径，避免锁住过多主机内存。`memory()` 报告常规上传的 `host_pinned_bytes`。默认 HtoD
+为同步复制；`--copy_prefetch` 另分配两个固定 pinned host/device 批次槽，独立 copy stream
+提前上传下一批，通过 ready event 建立主计算 stream 的依赖。槽仅在消费者结束后复用。
+其 pinned 容量为 `2 slots × 2 arrays × batch × max_seq_len × 8 bytes`（DPO batch 翻倍）。
 
 ## 从旧 PyTorch checkpoint 续训
 
@@ -166,7 +168,7 @@ Newton–Schulz Tensor Core 数值仍需实卡验证。原训练未提供的 AMS
 累积中途保存会报告梯度缺失并清空累积。原 batch size、累积步数、总 epoch 数也未存储，
 `--legacy_*` 默认采用当前值；若不同必须传入原值。监督训练的最大 LR 可从保存 LR 与
 原训练总步数推算，也可用 `--learning_rate` 明确指定。转换报告随原生进度一起保存。
-旧 Looped 结构不兼容的限制仍然存在，本次没有改写其架构。
+旧 Looped 使用 `looped_legacy` 配置迁移；`looped` 是另一套结构，不能混用。
 
 ## 本次实卡检查
 
@@ -198,19 +200,67 @@ python -m experiments.compile_cublas_training --arch 89
 既有训练基础 kernel 的 51 个 specialization 此前已分别离线编译 SM89 / SM90 / SM120（合计 153）；
 这只检查 compiler / launcher ABI，不能代替 GPU 执行。
 
-实卡优化优先级：
+## 多卡训练
 
-1. 固定模型、batch×seq、精度，记录 warmup 后 tokens/s、显存及 Nsight 时间线；把 JIT、
-   数据准备、保存和 reward rollout 时间与训练 step 分开统计。
-2. 比较 `--workspace_mib`、`--candidates`、`--tune`、`--overlap_dw`、`--dw_sm_target`。
-   现通用 autograd 为保证依赖正确会及时 join dW；进一步跨层重叠应由时间线指导。
-3. 将 MoE 路由索引的 host 同步换成 GPU prefix-sum / compact dispatch，增加 grouped GEMM。
-4. 为 decode / head_dim>256 的通用 attention、depthwise conv、recurrent chunk、optimizer reductions
-   加融合内核；当前通用 attention 会物化 S²，长序列应优先 fused 路径。
-5. 缓存常量、减少临时 broadcast/copy，给动态训练建立固定 bucket 的 buffer/liveness 计划；
-   再扩展整步 CUDA Graph。现有 CUDA Graph 仅覆盖 `smoke_dense_cublas` 的固定 block 实验。
-6. 检查 FP8 相对 BF16 的精度/收敛，最后测 MFU。`--peak_tflops` 只给 Dense 近似
-   `6 * parameters * tokens/s / peak`；MoE/Looped/RL 必须按实际激活参数、循环深度和阶段重新计数。
+```bash
+python trainer/launch_cublas.py --nproc_per_node 2 --devices 0,1 --train_type pretrain --config_path trainer/config_pretrain.json --from_weight none --batch_size 4 --num_workers 4
+```
+
+每进程一个 CUDA device，无需 torchrun。Linux 自动使用可用的 NCCL（可用
+`INSTINCT_NCCL_LIBRARY` 指定库）；`--distributed_backend nccl` 强制使用。
+无 NCCL 时 `auto` 使用跨平台 TCP/NumPy 梯度归约，Windows 可显式选择 `tcp`，性能较低。
+NCCL 直接对 GPU FP32 梯度桶 AllReduce；TCP 回退会传输梯度到主机。
+手动多节点启动可设置 `RANK/WORLD_SIZE/LOCAL_RANK/MASTER_ADDR/MASTER_PORT`，所有 rank
+必须采用同一配置和数据。内置 launcher 负责本机进程失败联动退出。
+
+采样全局打乱后分片，尾部重复少量样本以保持各 rank 等步数。空监督批次、PPO 提前停止、
+梯度缺失专家和 overflow 在各 rank 一致处理；梯度在累计完成后、裁剪前归约。rank 0
+保存可发布权重；其余 rank 保存 `.rankN.npz` 续训文件。恢复需要同一步的完整文件集。
+改变 GPU 数时，从全局已消费位置重新分片；如有未更新梯度，先合并旧 rank 的部分梯度，
+再让新 rank 继续累计。数据分组和随机序列改变，因此不承诺跨 GPU 数逐 bit 相同。
+
+## 可选训练优化
+
+| 开关/实现 | 行为与边界 |
+|---|---|
+| GPU MoE（默认） | GPU counts/prefix/compact route + ragged grouped GEMM；E4M3 forward、E5M2 dY、每专家 current amax，显式 dX/dW；不导出路由到 CPU |
+| `--overlap_dw` | dY 就绪后分离 dX/dW，叶参数的梯度在反向末尾消费；共享参数合并保留 event 依赖。重计算边界可能减少跨层重叠 |
+| `--fuse_projections` | 合并 Q/K/V 与 gate/up GEMM，SiLU FFN 用 fused SwiGLU；LoRA 投影保留原分支以保持适配器运算。FP8 合并后共享投影 scale，属于显式选择的数值配方变化 |
+| `--loss_chunk_size 256` | 监督 CE 的 LM projection 分块，与 fused CE/VJP 联合执行；反向重算 logits，eager 不保留完整 token×vocab 张量。DPO/KD 需要完整 logits；FP8 chunk scale 也会改变 |
+| `--token_cache cache/tokens.sqlite` | tokenizer 指纹+文本哈希缓存，SQLite WAL 多 worker 复用；不冻结 SFT 的随机增强 |
+| `--packing --packing_cache cache/native_tokens` | 仅 pretrain：持久化 memory-map 的 BOS/document/EOS 连续流，窗口重叠一个 token 保留边界预测；允许跨文档上下文，语料不再逐行截断 |
+| `--length_bucket 256 --sequence_buckets 128,256,512,768` | 打乱窗口内按长度估计排序，再按实际有效 token 数裁切批次到 bucket；保留所有样本和 label mask |
+| `--copy_prefetch` | 双 pinned 槽、独立 CUDA HtoD stream；监督 token 批次可用，RL rollout 仍由其生成过程管理 |
+| `--async_checkpoint` | 主线程取得一致且独立的 CPU 快照，单后台 writer 原子写盘；最多一份待写快照，退出/下一次保存传播 IO 错误。GPU 下载仍同步 |
+| `--cuda_graph` | 单 GPU、原生 AdamW、dropout=0、固定深度、pretrain/SFT/LoRA CE：完整前向、反向、累积、norm、clip、overflow/loss-scale 和参数更新在图内；LR/计数器是设备输入 |
+
+CUDA Graph 首次准备不更新训练状态；后续重放不重建 Python autograd 图、不分配图内 buffer。
+首个 batch 形状固定保留，尾批或其他 bucket 走 eager；图引用的 arena 与 event 不进入回收池。
+图内保存所有固定临时地址，因此可能比 eager 重计算/分块 CE 使用更多显存。
+图模式不与 `--copy_prefetch` 同时使用，也不支持动态 Looped、RL、dropout 或迁移的自定义
+optimizer 参数组。旧单 block Graph 实验仍保留。融合精度选项、packing/buckets 写入
+resume 配置，恢复时校验；优化开关均由用户显式启用。
+
+上述代码与 CPU/离线检查已完成；没有实卡时间线，不能把实现当作 MFU 或收敛提升证明。
+实际下一步是验收这些实现，而不是再把它们列作未实现功能：
+
+```bash
+python -m experiments.validate_cublas_training --architecture looped_legacy --fp8 0 --dtype fp32 --reference
+python -m experiments.validate_cublas_training --architecture moe --fp8 1 --dtype bf16
+python -m experiments.validate_cublas_training --fuse_projections --loss_chunk_size 8 --overlap_dw --reference
+python -m experiments.validate_cublas_training --cuda_graph --fuse_projections --loss_chunk_size 8 --fp8 0 --dtype fp32
+python -m experiments.compile_native_remaining --arch 89
+python -m experiments.compile_native_remaining --arch 120
+```
+
+新 grouped / graph kernel 的 59 个特化在 SM89、SM120 均离线编译，最大 shared memory
+6,144 bytes，检查 direct-launch ABI 且不导入 Torch。CPU 测试覆盖旧 Looped logits/梯度/
+cache/旧 optimizer 迁移，device-only 路由 oracle，融合 loss 全梯度，完整命令重放的
+累计/更新/overflow/保存恢复，两进程梯度归约、空专家、异步快照和双槽生命周期。
+
+实卡仍须测试 NCCL、copy/dW stream、CUDA Graph capture/replay、Windows 构建和 FP8 长期
+收敛，并用 Nsight 检查实际重叠。decode/head_dim>256 的通用 attention 及其他通用数学
+路径保持功能回退；它们可能物化更多中间结果，进一步的专用 kernel 调优取决于实卡热点。
 
 API/格式依据：
 [NVIDIA cuBLASLt](https://docs.nvidia.com/cuda/archive/12.8.2/cublas/index.html#cublasltmatmul)、
@@ -218,3 +268,5 @@ API/格式依据：
 [InternLM2 reward 官方实现](https://huggingface.co/internlm/internlm2-1_8b-reward/blob/main/modeling_internlm2.py)。
 
 旧 Muon 配方迁移参考 [PyTorch v2.10 Muon 源码](https://github.com/pytorch/pytorch/blob/v2.10.0/torch/optim/_muon.py)。
+
+分布式接口依据：[NCCL 官方头文件](https://github.com/NVIDIA/nccl/blob/master/src/nccl.h.in)、[NCCL AllReduce](https://github.com/NVIDIA/nccl/blob/master/docs/userguide/source/api/colls.rst)。

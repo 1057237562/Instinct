@@ -1,5 +1,7 @@
 """JSONL indexing, Rust tokenization and Jinja chat templates without Torch."""
 import json
+import hashlib
+import sqlite3
 from pathlib import Path
 import numpy as np
 from tokenizers import Tokenizer as RustTokenizer
@@ -15,8 +17,10 @@ SYSTEM_PROMPTS=[
 
 
 class Tokenizer:
-    def __init__(self,path='./model'):
+    def __init__(self,path='./model',cache_path=None):
         self.path=str(Path(path).resolve())
+        self.cache_path=cache_path;self._cache=None
+        self.cache_namespace=hashlib.sha256((Path(self.path)/'tokenizer.json').read_bytes()+(Path(self.path)/'tokenizer_config.json').read_bytes()).hexdigest()
         path=Path(self.path);self.raw=RustTokenizer.from_file(str(path/'tokenizer.json'))
         self.config=json.loads((path/'tokenizer_config.json').read_text(encoding='utf-8'))
         def token(key):
@@ -31,9 +35,21 @@ class Tokenizer:
 
     def __reduce__(self):
         # Recreate the Jinja environment in spawned workers (lambdas are not picklable).
-        return type(self), (self.path,)
+        return type(self), (self.path,self.cache_path)
 
-    def encode(self,text):return self.raw.encode(text,add_special_tokens=False).ids
+    def encode(self,text):
+        if not self.cache_path:return self.raw.encode(text,add_special_tokens=False).ids
+        if self._cache is None:
+            Path(self.cache_path).parent.mkdir(parents=True,exist_ok=True)
+            self._cache=sqlite3.connect(self.cache_path,timeout=60)
+            self._cache.execute('PRAGMA journal_mode=WAL')
+            self._cache.execute('CREATE TABLE IF NOT EXISTS tokens (key TEXT PRIMARY KEY, value BLOB NOT NULL)')
+        key=hashlib.sha256((self.cache_namespace+text).encode()).hexdigest()
+        row=self._cache.execute('SELECT value FROM tokens WHERE key=?',(key,)).fetchone()
+        if row:return np.frombuffer(row[0],np.int64).tolist()
+        ids=self.raw.encode(text,add_special_tokens=False).ids
+        self._cache.execute('INSERT OR IGNORE INTO tokens VALUES (?,?)',(key,np.asarray(ids,np.int64).tobytes()));self._cache.commit()
+        return ids
     def decode(self,ids,skip_special_tokens=False):return self.raw.decode([int(x) for x in ids],skip_special_tokens=skip_special_tokens)
 
     def chat(self,messages,tools=None,generation=False,thinking=False):
@@ -97,3 +113,72 @@ class JsonlDataset:
         if self.mode in ('ppo','grpo','agent'):return rows
         if self.mode=='dpo':rows=[x[0] for x in rows]+[x[1] for x in rows]
         return tuple(np.stack(x) for x in zip(*rows))
+
+
+class PackedPretrain:
+    """EOS-delimited contiguous token stream, stored as a reusable memory map.
+
+    Adjacent training windows overlap by one token so every next-token target
+    is trained once. This intentionally allows context across document EOS.
+    """
+    def __init__(self,dataset,cache_dir):
+        import os
+        import tempfile
+        self.path,self.tokenizer,self.mode,self.max_length=dataset.path,dataset.tokenizer,'pretrain',dataset.max_length
+        self.rng=dataset.rng
+        digest=hashlib.sha256()
+        with self.path.open('rb') as f:
+            for block in iter(lambda:f.read(1<<20),b''):digest.update(block)
+        digest.update((self.tokenizer.cache_namespace+':packed-v1').encode())
+        root=Path(cache_dir);root.mkdir(parents=True,exist_ok=True)
+        self.token_path=root/(digest.hexdigest()+'.tokens')
+        if not self.token_path.exists():
+            fd,temp=tempfile.mkstemp(dir=root,suffix='.tmp')
+            try:
+                with os.fdopen(fd,'wb') as f:
+                    for index in range(len(dataset)):
+                        ids=[self.tokenizer.bos]+self.tokenizer.encode(str(dataset.row(index)['text']))+[self.tokenizer.eos]
+                        f.write(np.asarray(ids,np.int64).tobytes())
+                    f.flush();os.fsync(f.fileno())
+                os.replace(temp,self.token_path)
+            finally:
+                if os.path.exists(temp):os.unlink(temp)
+        self._tokens=None
+    def __getstate__(self):return self.__dict__|{'_tokens':None}
+    @property
+    def tokens(self):
+        if self._tokens is None:self._tokens=np.memmap(self.token_path,dtype=np.int64,mode='r')
+        return self._tokens
+    def __len__(self):return max(1,int(np.ceil((len(self.tokens)-1)/(self.max_length-1))))
+    def batch(self,indices):
+        rows=[]
+        for index in indices:
+            begin=int(index)*(self.max_length-1)
+            tokens=self.tokens[begin:begin+self.max_length]
+            ids=np.full(self.max_length,self.tokenizer.pad,np.int64);ids[:len(tokens)]=tokens
+            labels=ids.copy();labels[len(tokens):]=-100
+            rows.append((ids,labels))
+        return tuple(np.stack(values) for values in zip(*rows))
+
+
+def bucket_order(dataset,order,window=256):
+    """Stable length ordering inside shuffled windows; does not drop samples."""
+    result=[]
+    for start in range(0,len(order),window):
+        block=order[start:start+window]
+        # Character count is a cheap estimate; true token lengths choose the batch bucket.
+        def length(i):
+            if isinstance(dataset,PackedPretrain):return dataset.max_length
+            return len(json.dumps(dataset.row(int(i)),ensure_ascii=False))
+        result.extend(sorted(block,key=length))
+    return result
+
+
+def trim_batch(batch,pad,buckets):
+    if not buckets or not isinstance(batch,tuple):return batch
+    ids,labels=batch
+    used=np.nonzero((ids!=pad)|(labels!=-100))[1]
+    length=max(2,int(used.max())+1 if used.size else 2)
+    target=next((size for size in buckets if size>=length),ids.shape[1])
+    target=min(target,ids.shape[1])
+    return np.ascontiguousarray(ids[:,:target]),np.ascontiguousarray(labels[:,:target])

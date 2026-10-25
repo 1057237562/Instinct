@@ -21,8 +21,10 @@ import numpy as np
 from model.dense_cublas.autograd import Engine
 from model.dense_cublas.model import Model
 from model.dense_cublas.optim import Optimizer,cosine_lr
-from model.dense_cublas.data import Tokenizer,JsonlDataset
+from model.dense_cublas.data import Tokenizer,JsonlDataset,PackedPretrain,bucket_order,trim_batch
+from model.dense_cublas.prefetch import DevicePrefetch
 from model.dense_cublas.loader import BatchLoader
+from model.dense_cublas.distributed import ProcessGroup,shard_order
 from model.dense_cublas import checkpoint,objectives
 from model.dense_cublas.rollout import trajectory,reward,collate
 from model.dense_cublas.config import WebUIRequest,TRAIN_TYPES
@@ -43,9 +45,20 @@ def parser():
     p.add_argument('--epochs',type=int,default=1);p.add_argument('--batch_size',type=int,default=32)
     p.add_argument('--accumulation_steps',type=int,default=8);p.add_argument('--max_seq_len',type=int,default=768)
     p.add_argument('--num_workers',type=int,default=8);p.add_argument('--prefetch_factor',type=int,default=2)
+    p.add_argument('--token_cache',help='SQLite tokenization cache path')
+    p.add_argument('--packing',action='store_true',help='EOS-delimited pretraining token packing')
+    p.add_argument('--packing_cache',default='./cache/native_tokens')
+    p.add_argument('--length_bucket',type=int,default=0,help='Sort lengths within shuffled windows of this size')
+    p.add_argument('--sequence_buckets',default='',help='Comma separated sequence lengths')
+    p.add_argument('--copy_prefetch',action='store_true')
+    p.add_argument('--async_checkpoint',action='store_true')
+    p.add_argument('--cuda_graph',action='store_true')
+    p.add_argument('--fuse_projections',action='store_true')
+    p.add_argument('--loss_chunk_size',type=int,default=0)
+    p.add_argument('--distributed_backend',choices=['auto','nccl','tcp'],default='auto')
     p.add_argument('--pin_memory',type=int,choices=[0,1],default=1)
     p.add_argument('--grad_clip',type=float,default=1.);p.add_argument('--seed',type=int,default=42)
-    p.add_argument('--device',default='0');p.add_argument('--data_path');p.add_argument('--dataset_size',choices=['mini','normal'],default='mini')
+    p.add_argument('--device',default=os.environ.get('LOCAL_RANK','0'));p.add_argument('--data_path');p.add_argument('--dataset_size',choices=['mini','normal'],default='mini')
     p.add_argument('--from_weight',default='auto');p.add_argument('--from_student_weight',default=None);p.add_argument('--from_teacher_weight',default=None)
     p.add_argument('--from_resume',type=int,default=0);p.add_argument('--resume_path')
     p.add_argument('--legacy_batch_size',type=int);p.add_argument('--legacy_accumulation_steps',type=int)
@@ -74,7 +87,8 @@ def read_config(args):
     raw=json.loads(Path(args.config_path).read_text(encoding='utf-8')) if args.config_path else {}
     for key in ('hidden_size','num_hidden_layers','use_moe','use_grad_checkpoint'):
         if getattr(args,key) is not None:raw[key]=getattr(args,key)
-    if args.use_looped:raw['model_architecture']='looped'
+    if args.use_looped and raw.get('model_architecture') not in ('looped','looped_legacy'):raw['model_architecture']='looped_legacy'
+    if any(k in raw for k in ('prelude_layers','loop_iters','coda_layers')) and raw.get('model_architecture','looped')=='looped':raw['model_architecture']='looped_legacy'
     if args.early_exit==0:raw['early_exit_layers']=[]
     request=WebUIRequest.from_dicts(raw,dict(train_type=args.train_type,batch_size=args.batch_size,max_seq_len=args.max_seq_len,
         optimizer=args.optimizer,param_dtype=args.param_dtype,activation_dtype=args.dtype,kv_cache_dtype=args.kv_cache_dtype,num_workers=args.num_workers,prefetch_factor=args.prefetch_factor,pin_memory=bool(args.pin_memory)))
@@ -83,6 +97,10 @@ def read_config(args):
     for key in ('legacy_batch_size','legacy_accumulation_steps','legacy_epochs'):
         if getattr(args,key) is not None and getattr(args,key)<1:raise ValueError(key+' must be positive')
     if args.num_workers < 0 or args.prefetch_factor < 1:raise ValueError('invalid data worker/prefetch settings')
+    if args.packing and args.train_type!='pretrain':raise ValueError('packing is defined for pretraining only')
+    if args.length_bucket<0:raise ValueError('length_bucket must be nonnegative')
+    if args.copy_prefetch and args.train_type in ('ppo','grpo','agent'):raise ValueError('copy_prefetch expects supervised token batches')
+    if args.cuda_graph and (args.train_type not in ('pretrain','full_sft','lora') or args.copy_prefetch):raise ValueError('CUDA Graph supports supervised CE; use its fixed input uploads without copy_prefetch')
     if args.max_seq_len<2:raise ValueError('max_seq_len must allow at least one prediction target')
     if args.train_type in ('grpo','agent') and args.num_generations<2:raise ValueError('group RL requires num_generations >= 2')
     if args.temperature<=0 or not 0<=args.alpha<=1:raise ValueError('temperature must be positive and alpha in [0,1]')
@@ -148,17 +166,17 @@ def critic_values(model,ids,mask):
 
 
 def supervised_step(args,model,batch,reference=None,teacher=None):
-    e=model.e;ids,labels=batch;out=model(ids,labels)
+    e=model.e;ids,labels=batch;out=model(ids,labels,return_logits=args.train_type in ('dpo','distillation'))
     if args.train_type=='dpo':
-        policy=objectives.sequence_logps(e,out.logits[:,:-1],e.array(labels[:,1:]))
+        policy=objectives.sequence_logps(e,out.logits[:,:-1],labels[:,1:] if hasattr(labels,'data') and not isinstance(labels,np.ndarray) else e.array(labels[:,1:]))
         with e.no_grad():ref=reference(ids)
-        base=objectives.sequence_logps(e,ref.logits[:,:-1],e.array(labels[:,1:]))
+        base=objectives.sequence_logps(e,ref.logits[:,:-1],labels[:,1:] if hasattr(labels,'data') and not isinstance(labels,np.ndarray) else e.array(labels[:,1:]))
         return objectives.dpo(e,policy,base,args.beta)+out.aux_loss
     if args.train_type=='distillation':
         with e.no_grad():teach=teacher(ids)
         vocab=out.logits.shape[-1]
         if teach.logits.shape[-1]<vocab:raise ValueError('teacher vocabulary must cover student token IDs')
-        kd=objectives.distillation(e,out.logits[:,:-1],teach.logits[:,:-1,:vocab],e.array(labels[:,1:]),args.temperature)
+        kd=objectives.distillation(e,out.logits[:,:-1],teach.logits[:,:-1,:vocab],labels[:,1:] if hasattr(labels,'data') and not isinstance(labels,np.ndarray) else e.array(labels[:,1:]),args.temperature)
         return args.alpha*(out.loss+out.aux_loss)+(1.-args.alpha)*kd
     return out.loss+out.aux_loss
 
@@ -200,6 +218,7 @@ def rl_step(args,model,reference,critic,optimizer,critic_optimizer,rows,tokenize
                 critic_gradients={p:(e.wrap(g)*(critic_optimizer.scale/optimizer.scale)).data for p,g in gradients.items() if p in critic_optimizer.gradients}
                 critic_optimizer.accumulate(critic_gradients)
                 stop=e.item(kl)>args.early_stop_kl
+                if optimizer.distributed:stop=optimizer.distributed.any(stop)
                 if optimizer.accumulated>=args.accumulation_steps or begin+args.mini_batch_size>=len(ids) or stop:
                     optimizer.step(lr);critic_optimizer.step(args.critic_learning_rate)
                 e.backend.release_since(mark)
@@ -218,20 +237,29 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
         from model.dense_cublas.backend import ScheduleConfig
         backend_context=TrainingBackend(int(args.device.removeprefix('cuda:')),ScheduleConfig(workspace_mib=args.workspace_mib,candidates=args.candidates,tune=args.tune,overlap_dw=args.overlap_dw,dw_sm_target=args.dw_sm_target),pool_limit_mib=args.allocator_cache_mib, pin_memory=bool(args.pin_memory))
     else:backend_context=nullcontext(backend)
-    rng=np.random.default_rng(args.seed);tokenizer=tokenizer or Tokenizer(args.tokenizer_path)
+    rng=np.random.default_rng(args.seed);tokenizer=tokenizer or Tokenizer(args.tokenizer_path,args.token_cache)
     suffix='_mini' if args.dataset_size=='mini' else ''
     default_data={'pretrain':f'pretrain_t2t{suffix}','full_sft':f'sft_t2t{suffix}','distillation':f'sft_t2t{suffix}',
         'lora':'lora_medical','dpo':'dpo','ppo':'rlaif','grpo':'rlaif','agent':'agent_rl'}
     data=JsonlDataset(args.data_path or './dataset/'+default_data[args.train_type]+'.jsonl',tokenizer,args.train_type,args.max_seq_len,rng)
-    with backend_context as backend, BatchLoader(data,args.num_workers,args.prefetch_factor,args.seed) as loader:
+    if args.packing:data=PackedPretrain(data,args.packing_cache)
+    buckets=sorted(set(int(x) for x in args.sequence_buckets.split(',') if x))
+    if any(x<2 or x>args.max_seq_len for x in buckets):raise ValueError('sequence_buckets must be between 2 and max_seq_len')
+    with backend_context as backend, ProcessGroup(backend,args.distributed_backend) as group, BatchLoader(data,args.num_workers,args.prefetch_factor,args.seed) as loader, checkpoint.AsyncCheckpointer(args.async_checkpoint) as saver:
         fp8=args.fp8=='1' or (args.fp8=='auto' and getattr(backend,'arch',0)>=89)
-        e=Engine(backend,fp8=fp8,seed=args.seed)
+        e=Engine(backend,fp8=fp8,seed=args.seed+group.rank)
         model=Model(e,config,args.param_dtype,dtype,args.kv_cache_dtype,args.seed)
+        model.fuse_projections=args.fuse_projections;model.loss_chunk_size=args.loss_chunk_size
+        if args.loss_chunk_size<0:raise ValueError('loss_chunk_size must be nonnegative')
         if args.train_type=='lora':model.add_lora(args.lora_rank)
         name=args.lora_name or args.save_weight or args.train_type
         stem=f"{name}_{config['hidden_size']}{'_moe' if config.get('use_moe') else ''}"
         weights=Path(args.save_dir)/(stem+'.npz')
         resume,resume_source=resolve_resume(args,stem)
+        base_resume=resume
+        if group.rank:
+            resume=resume.with_name(resume.stem+f'.rank{group.rank}'+resume.suffix)
+            if args.from_resume and resume.exists():resume_source=resume
         if not args.from_resume:
             base=resolve_weight(args.from_student_weight or args.from_weight,args,config)
             if base:checkpoint.load(base,model)
@@ -250,9 +278,11 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
             critic._parameter('value_head.weight',(1,config['hidden_size']));critic._parameter('value_head.bias',(1,),zeros=True)
         optimizer=Optimizer(e,model.parameters(),args.optimizer,lr,args.weight_decay,args.grad_clip,loss_scaling=dtype=='fp16')
         if critic:critic_optimizer=Optimizer(e,critic.parameters(),args.optimizer,args.critic_learning_rate,args.weight_decay,args.grad_clip,loss_scaling=dtype=='fp16')
+        optimizer.distributed=group
+        if critic_optimizer:critic_optimizer.distributed=group
         extra_models={k:v for k,v in {'reference':reference,'teacher':teacher,'critic':critic}.items() if v is not None}
         extra_optimizers={'critic':critic_optimizer} if critic_optimizer else {}
-        progress={'epoch':0,'cursor':0,'order':None,'steps':0,'dataset_size':len(data),'dataset_path':str(data.path.resolve()),'batch_size':args.batch_size,'accumulation_steps':args.accumulation_steps,'train_type':args.train_type,'data_seed':args.seed,'loader_version':1}
+        progress={'epoch':0,'cursor':0,'order':None,'steps':0,'dataset_size':len(data),'dataset_path':str(data.path.resolve()),'batch_size':args.batch_size,'accumulation_steps':args.accumulation_steps,'train_type':args.train_type,'data_seed':args.seed,'loader_version':1,'sampler_version':2,'world_size':group.world,'data_options':dict(packing=args.packing,length_bucket=args.length_bucket,sequence_buckets=buckets),'compute_options':dict(fuse_projections=args.fuse_projections,loss_chunk_size=args.loss_chunk_size)}
         if args.from_resume:
             if resume_source.suffix=='.pth':
                 from model.dense_cublas.legacy_checkpoint import import_resume
@@ -260,6 +290,21 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
             progress=checkpoint.load(resume,model,optimizer,rng,extra_models,extra_optimizers)
             imported=checkpoint.metadata(resume).get('legacy_import')
             if imported:progress['legacy_import']=imported
+            if progress.get('data_options',dict(packing=False,length_bucket=0,sequence_buckets=[]))!=dict(packing=args.packing,length_bucket=args.length_bucket,sequence_buckets=buckets):raise ValueError('data packing/buckets changed since resume')
+            compute_options=dict(fuse_projections=args.fuse_projections,loss_chunk_size=args.loss_chunk_size)
+            if imported:progress['compute_options']=compute_options
+            if progress.get('compute_options',dict(fuse_projections=False,loss_chunk_size=0))!=compute_options:raise ValueError('native precision-affecting execution options changed since resume')
+            old_world=progress.get('world_size',1)
+            if old_world!=group.world:
+                if optimizer.accumulated or (critic_optimizer and critic_optimizer.accumulated):
+                    from model.dense_cublas.distributed import restore_pending
+                    restore_pending(base_resume,{'model':optimizer,**extra_optimizers},old_world,progress['steps'])
+                if progress.get('order') is not None:
+                    progress['order']=progress['order'][min(progress['cursor']*old_world,len(progress['order'])):]
+                progress['cursor']=0;progress['world_size']=group.world;progress['sampler_version']=2
+                e.counter+=group.rank*1000003
+                rng=np.random.default_rng(np.random.SeedSequence((args.seed,group.rank,progress['steps'])))
+                data.rng=rng
             progress.setdefault('loader_version',0);progress.setdefault('data_seed',args.seed)
             if progress['loader_version']==0:
                 loader.serial_rng=True
@@ -267,14 +312,17 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
             expected={'dataset_size':len(data),'dataset_path':str(data.path.resolve()),'batch_size':args.batch_size,'accumulation_steps':args.accumulation_steps,'train_type':args.train_type,'data_seed':args.seed}
             for key,value in expected.items():
                 if progress.get(key)!=value:raise ValueError(key+' changed since native resume checkpoint')
+        if group.world>1:
+            steps=group.sum(np.eye(group.world,dtype=np.float32)[group.rank]*progress['steps'])
+            if not np.all(steps==steps[0]):raise ValueError('rank checkpoints are from different steps; restore a complete checkpoint set')
         if args.train_type in ('ppo','grpo','agent') and reward_model is None:
             from model.dense_cublas.reward import InternLMReward
             reward_model=InternLMReward(backend,args.reward_model_path,dtype='fp16' if dtype=='fp16' else 'bf16')
         logger=None
-        if args.use_wandb:
+        if args.use_wandb and group.rank==0:
             import swanlab
             logger=swanlab.init(project=args.wandb_project,config=vars(args))
-        total_batches=math.ceil(len(data)/args.batch_size);total_steps=args.epochs*total_batches
+        total_batches=math.ceil(math.ceil(len(data)/group.world)/args.batch_size);total_steps=args.epochs*total_batches
         print(f'Backend=cuBLASLt/Triton | mode={args.train_type} | FP8={fp8} | parameters={sum(p.size for p in model.parameters(False)):,}',flush=True)
         started=time.perf_counter();last_loss=None;stop_requested=False
         previous_sigint=None
@@ -286,31 +334,45 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
                 print('Stop requested; finishing this batch before saving native resume state.',flush=True)
             signal.signal(signal.SIGINT,request_stop)
         def save_all():
-            checkpoint.save(weights,model)
-            if args.train_type=='lora':checkpoint.save(weights.with_name(weights.stem+'_adapter.npz'),model,adapters_only=True)
-            checkpoint.save(resume,model,optimizer,progress,rng,extra_models,extra_optimizers)
+            if group.rank==0:saver.save(weights,model)
+            if group.rank==0 and args.train_type=='lora':saver.save(weights.with_name(weights.stem+'_adapter.npz'),model,adapters_only=True)
+            saver.save(resume,model,optimizer,progress,rng,extra_models,extra_optimizers)
+        prefetch=DevicePrefetch(e,args.batch_size*(2 if args.train_type=='dpo' else 1),args.max_seq_len,args.copy_prefetch)
+        step_graph=None
         try:
             for epoch in range(progress['epoch'],args.epochs):
-                order=progress['order'] if progress['order'] is not None else rng.permutation(len(data)).tolist()
-                progress.update(epoch=epoch,order=order)
+                sampler_rng=rng if progress.get('sampler_version',1)==1 else np.random.default_rng(np.random.SeedSequence((args.seed,epoch)))
+                global_order=progress['order'] if progress['order'] is not None else sampler_rng.permutation(len(data)).tolist()
+                if progress['order'] is None and args.length_bucket:global_order=bucket_order(data,global_order,args.length_bucket)
+                progress.update(epoch=epoch,order=global_order)
+                order=shard_order(global_order,group.world,group.rank)
                 cursor=progress['cursor']
-                for begin,batch in loader.batches(order,args.batch_size,epoch,cursor):
+                batches=((begin,trim_batch(batch,tokenizer.pad,buckets)) for begin,batch in loader.batches(order,args.batch_size,epoch,cursor))
+                for begin,batch,device_batch in prefetch.batches(batches):
                     mark=backend.mark();step_start=time.perf_counter()
                     schedule=progress.get('legacy_schedule')
                     current_lr=cosine_lr(progress['steps']+1,schedule['total'],schedule['maximum']) if schedule else cosine_lr(progress['steps'],total_steps,lr)
                     if optimizer.scheduler:current_lr=optimizer.scheduler['_last_lr'][0]
+                    graph_used=False
                     if args.train_type in ('ppo','grpo','agent'):
                         last_loss,mean_reward,tokens=rl_step(args,model,reference,critic,optimizer,critic_optimizer,batch,tokenizer,rng,reward_model,current_lr)
                     else:
-                        if not np.any(batch[1][:,1:]!=-100):
+                        if not group.any(np.any(batch[1][:,1:]!=-100)):
                             print('Skipping batch with no supervised tokens.',flush=True)
                             progress['cursor']=min(begin+args.batch_size,len(order));backend.release_since(mark);continue
-                        loss=supervised_step(args,model,batch,reference,teacher);last_loss=e.item(loss);optimizer.backward(loss);tokens=batch[0].size
-                    if optimizer.accumulated>=args.accumulation_steps or begin+args.batch_size>=len(order):optimizer.step(current_lr)
+                        if args.cuda_graph and step_graph is None:
+                            from model.dense_cublas.graph import StepGraph
+                            step_graph=StepGraph(model,optimizer,batch,lambda values:supervised_step(args,model,values),args.accumulation_steps)
+                        graph_used=step_graph is not None and tuple(x.shape for x in batch)==step_graph.shape
+                        if graph_used:last_loss=step_graph.run(batch,current_lr,begin+args.batch_size>=len(order))
+                        else:
+                            loss=supervised_step(args,model,device_batch,reference,teacher);last_loss=e.item(loss);optimizer.backward(loss)
+                        tokens=batch[0].size
+                    if not graph_used and (optimizer.accumulated>=args.accumulation_steps or begin+args.batch_size>=len(order)):optimizer.step(current_lr)
                     progress['steps']+=1;progress['cursor']=min(begin+args.batch_size,len(order))
                     backend.synchronize();elapsed=time.perf_counter()-step_start;rate=tokens/max(elapsed,1e-9)
                     backend.release_since(mark)
-                    if progress['steps']%args.log_interval==0 or progress['cursor']==len(order):
+                    if group.rank==0 and (progress['steps']%args.log_interval==0 or progress['cursor']==len(order)):
                         eta=(time.perf_counter()-started)/max(progress['steps'],1)*(total_steps-progress['steps'])/60.
                         print(f'Epoch:[{epoch+1}/{args.epochs}]({math.ceil(progress["cursor"]/args.batch_size)}/{total_batches}), loss: {last_loss:.6f}, learning_rate: {current_lr:.8f}, epoch_time: {eta:.3f}min, tokens/s: {rate:.1f}',flush=True)
                         metrics={'loss':last_loss,'learning_rate':current_lr,'tokens_per_second':rate,'step':progress['steps']}
@@ -319,11 +381,14 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
                         if logger:logger.log(metrics)
                     if progress['steps']%args.save_interval==0:
                         save_all()
-                    if stop_requested or (args.max_steps and progress['steps']>=args.max_steps):
+                    stop_file=os.environ.get('INSTINCT_STOP_FILE')
+                    if group.any(stop_requested or bool(stop_file and Path(stop_file).exists())) or (args.max_steps and progress['steps']>=args.max_steps):
                         save_all();return {'weights':str(weights),'resume':str(resume),'loss':last_loss,'steps':progress['steps']}
                 progress.update(epoch=epoch+1,cursor=0,order=None)
                 save_all()
         finally:
+            prefetch.close()
+            saver.flush()
             if previous_sigint is not None:signal.signal(signal.SIGINT,previous_sigint)
             if logger:logger.finish()
         if 'torch' in sys.modules and type(backend).__module__.startswith('model.'):

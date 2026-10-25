@@ -109,14 +109,14 @@ class CublasDenseOps(DenseOps):
         dw_scales = (sdy, scales[0]) if scales is not None else None
         prior = self._role
         try:
+            ready = None
+            if self.backend.weight_stream != self.backend.main_stream and need_dw:
+                ready = self.backend.create_event()
+                self.backend.record_event(ready)  # dY is ready before dX, so both GEMMs can overlap.
             self._role = 'dX'
             dx = self.mm(qdy, qw, scales=dx_scales, out_dtype=dy.dtype) if need_dx else None
             if not need_dw:
                 return None if dx is None else dx.view(*shape), None
-            ready = None
-            if self.backend.weight_stream != self.backend.main_stream:
-                ready = self.backend.create_event()
-                self.backend.record_event(ready)
             self._role = 'dW'
             with self.backend.on_stream(self.backend.weight_stream):
                 if self.backend.weight_stream != self.backend.main_stream:

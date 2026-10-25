@@ -27,6 +27,7 @@ class Optimizer:
         self.good_steps,self.updates,self.accumulated=0,0,0
         self.growth_factor,self.backoff_factor,self.growth_interval=2.,.5,2000
         self.param_options,self.scheduler={},None
+        self.distributed=None
         self.present=set();self.state={};self.gradients={}
         for p in self.parameters:
             self.gradients[p]=engine.full(p.shape,0.)
@@ -58,6 +59,7 @@ class Optimizer:
 
     def step(self,lr=None):
         if not self.accumulated:return {'updated':False,'grad_norm':0.}
+        if self.distributed:self.distributed.gradients(self)
         e=self.e;requested_lr=lr;lr=self.lr if lr is None else lr
         mark=e.backend.mark()
         with e.no_grad():

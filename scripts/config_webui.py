@@ -293,6 +293,10 @@ def calc_params(config: dict) -> dict:
     moe_int_size = config.get("moe_intermediate_size", int_size)
     arch = config.get("model_architecture", "standard")
 
+    if arch=='looped_legacy':
+        n_layers=config.get('prelude_layers',1)+int(config.get('loop_iters',8)>0)+config.get('coda_layers',1)
+    legacy_position=config.get('loop_iters',8)*h if arch=='looped_legacy' else 0
+
     # ---- Embedding ----
     embedding = vocab * h
 
@@ -415,14 +419,14 @@ def calc_params(config: dict) -> dict:
         + num_full * full_layer_total
         + num_linear * linear_layer_total
         + final_norm + lm_head
-        + looped_gate + looped_q_head
+        + looped_gate + looped_q_head + legacy_position
     )
     total_active = (
         embedding
         + num_full * full_active_layer_total
         + num_linear * linear_active_layer_total
         + final_norm + lm_head
-        + looped_gate + looped_q_head
+        + looped_gate + looped_q_head + legacy_position
     )
 
     if arch == "linear":
@@ -604,6 +608,10 @@ def build_config_dict() -> dict:
         d["linear_num_key_heads"] = st.session_state.get("linear_num_key_heads", q_heads)
         d["linear_num_value_heads"] = st.session_state.get("linear_num_value_heads", q_heads)
 
+    if d['model_architecture']=='looped_legacy':
+        for key,default in dict(prelude_layers=1,loop_iters=8,coda_layers=1,use_input_injection=True).items():
+            d[key]=st.session_state.get(key,default)
+
     # Looped (LoopUS) arch params
     if d["model_architecture"] == "looped":
         d["loop_max_steps"] = st.session_state.get("loop_max_steps", 32)
@@ -769,6 +777,9 @@ def gen_config_json(cfg: dict) -> str:
                    "loop_encoder_layers", "loop_body_layers", "loop_output_layers"]:
             out[k] = cfg.get(k)
 
+    if cfg.get('model_architecture')=='looped_legacy':
+        for key in ('prelude_layers','loop_iters','coda_layers','use_input_injection'):out[key]=cfg[key]
+
     if cfg.get("early_exit_layers"):
         out["early_exit_layers"] = cfg["early_exit_layers"]
     if cfg.get("early_exit_loss_weight"):
@@ -852,6 +863,10 @@ def load_config_to_session(config_dict: dict):
         )
         st.session_state.linear_num_key_heads = config_dict.get("linear_num_key_heads", st.session_state.num_attention_heads)
         st.session_state.linear_num_value_heads = config_dict.get("linear_num_value_heads", st.session_state.num_attention_heads)
+
+    if arch=='looped_legacy':
+        for key,default in dict(prelude_layers=1,loop_iters=8,coda_layers=1,use_input_injection=True).items():
+            st.session_state[key]=config_dict.get(key,default)
 
     # Looped arch
     if arch == "looped":
@@ -1086,7 +1101,7 @@ if "_pending_config_load" in st.session_state:
 # ═══════════════════════════════════════════════════════════════
 def _training_type_from_command(command):
     """Recover the panel's valid train type, including the native runner."""
-    if re.search(r"train_cublas\.py(?:\s|$)", command):
+    if re.search(r"(?:train_cublas|launch_cublas)\.py(?:\s|$)", command):
         match = re.search(r"--train_type\s+(\w+)", command)
         return "cublas:" + (match.group(1) if match else "pretrain")
     match = re.search(r"train_(\w+)\.py(?:\s|$)", command)
@@ -1346,9 +1361,9 @@ with st.sidebar:
 
     # ── Model Architecture ──
     with st.expander("Model Architecture", expanded=True):
-        arch_options = ["Standard Transformer", "MoE Transformer", "GatedDeltaNet (Linear)", "Looped Transformer"]
+        arch_options = ["Standard Transformer", "MoE Transformer", "GatedDeltaNet (Linear)", "Looped Transformer", "Legacy Looped Transformer"]
         current_arch = st.session_state.get("model_architecture", "standard")
-        arch_index = {"standard": 0, "moe": 1, "linear": 2, "looped": 3}.get(current_arch, 0)
+        arch_index = {"standard": 0, "moe": 1, "linear": 2, "looped": 3, "looped_legacy": 4}.get(current_arch, 0)
         chosen_arch = st.radio(
             "Architecture type",
             arch_options,
@@ -1362,6 +1377,7 @@ with st.sidebar:
             "MoE Transformer": "moe",
             "GatedDeltaNet (Linear)": "linear",
             "Looped Transformer": "looped",
+            "Legacy Looped Transformer": "looped_legacy",
         }
         mapped = arch_map[chosen_arch]
         if mapped != st.session_state.get("model_architecture", "standard"):
@@ -1520,6 +1536,12 @@ with st.sidebar:
                 value=st.session_state.get("linear_num_value_heads", _q),
                 step=1, key="linear_num_value_heads",
             )
+
+    if st.session_state.get('model_architecture')=='looped_legacy':
+        with st.expander('Legacy Looped Config',expanded=True):
+            for key,default in dict(prelude_layers=1,loop_iters=8,coda_layers=1).items():
+                st.number_input(key,min_value=0,max_value=128,value=st.session_state.get(key,default),key=key)
+            st.checkbox('Input injection',value=st.session_state.get('use_input_injection',True),key='use_input_injection')
 
     # ── Looped (LoopUS) Config ──
     if st.session_state.get("model_architecture") == "looped":
@@ -1806,6 +1828,17 @@ with st.sidebar:
             st.number_input("Data workers", min_value=0, max_value=32, value=8, key="native_num_workers")
             st.number_input("Prefetch batches per worker", min_value=1, max_value=8, value=2, key="native_prefetch_factor")
             st.checkbox("Pinned upload memory", value=True, key="native_pin_memory")
+            st.number_input('GPU processes',min_value=1,max_value=64,value=1,key='native_gpus')
+            st.checkbox('Fuse QKV and gate/up projections',key='native_fuse_projections')
+            st.number_input('Linear CE chunk tokens (0 disables)',min_value=0,value=0,key='native_loss_chunk_size')
+            st.text_input('Token cache SQLite path',value='',key='native_token_cache')
+            st.checkbox('Pretraining token packing',key='native_packing')
+            st.number_input('Length sorting window (0 disables)',min_value=0,value=0,key='native_length_bucket')
+            st.text_input('Sequence buckets, comma separated',value='',key='native_sequence_buckets')
+            st.checkbox('Copy stream prefetch',key='native_copy_prefetch')
+            st.checkbox('Asynchronous checkpoint writes',key='native_async_checkpoint')
+            st.checkbox('Cross-layer dW stream',key='native_overlap_dw')
+            st.checkbox('Full supervised step CUDA Graph',key='native_cuda_graph',help='Fixed shapes, dropout=0, single GPU, native AdamW; disable copy stream prefetch.')
             st.caption("原生路径尚待实卡验收；首次启动会编译 Triton kernels。")
         train_type = st.selectbox(
             "Training type",
@@ -1987,6 +2020,15 @@ if st.session_state.get("train_triggered", False):
                            "--num_workers", str(st.session_state.get("native_num_workers", 8)),
                            "--prefetch_factor", str(st.session_state.get("native_prefetch_factor", 2)),
                            "--pin_memory", "1" if st.session_state.get("native_pin_memory", True) else "0"]
+                    if st.session_state.get('native_gpus',1)>1:
+                        cmd[2]=os.path.join(trainer_dir,'launch_cublas.py')
+                        cmd.extend(['--nproc_per_node',str(st.session_state.native_gpus)])
+                    for key in ('fuse_projections','packing','copy_prefetch','async_checkpoint','overlap_dw','cuda_graph'):
+                        if st.session_state.get('native_'+key,False):cmd.append('--'+key)
+                    for key in ('loss_chunk_size','length_bucket'):
+                        cmd.extend(['--'+key,str(st.session_state.get('native_'+key,0))])
+                    for key in ('token_cache','sequence_buckets'):
+                        if st.session_state.get('native_'+key):cmd.extend(['--'+key,st.session_state['native_'+key]])
                 elif cfg.get("model_architecture") == "linear":
                     # linear 架构必须经 run_linear.py 的 sys.modules 劫持启动，直接跑 trainer 会静默回退到标准 Transformer
                     runner = os.path.join(os.path.dirname(trainer_dir), "run_linear.py")
@@ -2021,7 +2063,7 @@ if st.session_state.get("train_triggered", False):
                     cmd.extend(["--lora_name", save_prefix])
                 else:
                     cmd.extend(["--save_weight", save_prefix])
-                if cfg.get("model_architecture") == "looped":
+                if cfg.get("model_architecture") in ("looped", "looped_legacy"):
                     cmd.extend(["--use_looped", "1"])
                 if cfg.get("early_exit_layers") and st.session_state.get("early_exit_enabled", False):
                     cmd.extend(["--early_exit", "1"])

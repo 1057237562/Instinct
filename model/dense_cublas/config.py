@@ -11,7 +11,7 @@ import math
 
 TRAIN_TYPES = ('pretrain', 'full_sft', 'lora', 'dpo', 'ppo', 'grpo', 'agent', 'distillation')
 OPTIMIZERS = ('adamw', 'adafactor', 'muon')
-ARCHITECTURES = ('standard', 'moe', 'linear', 'looped')
+ARCHITECTURES = ('standard', 'moe', 'linear', 'looped', 'looped_legacy')
 EXCLUDED = frozenset(('use_compile', 'compile_mode'))
 
 # Every exported model field must have an owner. Tests check this against the
@@ -32,7 +32,7 @@ MODEL_FIELDS = {
     'looped': ('loop_max_steps', 'q_threshold', 'n_supervision', 'depth_reward',
                'exit_in_training', 'beta', 'distill_weight', 'distill_temperature',
                'teacher_stop_grad', 'depth_gain_reward', 'loop_encoder_layers',
-               'loop_body_layers', 'loop_output_layers'),
+               'loop_body_layers', 'loop_output_layers', 'prelude_layers', 'loop_iters', 'coda_layers', 'use_input_injection'),
     'early_exit': ('early_exit_layers', 'early_exit_loss_weight'),
 }
 TRAINING_FIELDS = {
@@ -74,11 +74,11 @@ FEATURES = {
     'recompute': Feature('implemented_gpu_unverified', ('model', 'dropout'),
         'Modes 0/1/2: none/selective attention+FFN/full layer; fewer live activations, correct replay RNG and FP8 scales.'),
     'moe': Feature('implemented_gpu_unverified', ('model', 'activations'),
-        'Top-k routing, gather/scatter, expert GEMMs, optional top-k renormalization and router auxiliary loss/gradients; Dense/MoE combinations supported.'),
+        'Device-only stable compact top-k routing, ragged grouped GEMMs with per-expert FP8, optional top-k renormalization and router auxiliary loss/gradients; Dense/MoE combinations supported.'),
     'linear': Feature('implemented_gpu_unverified', ('model',),
         'GatedDeltaNet convolution + state recurrence forward/backward, configurable heads/dimensions and full-attention intervals; streaming state parity.'),
     'looped': Feature('implemented_gpu_unverified', ('model',),
-        'Encoder/body/output partitions, repeated shared-weight gradient accumulation, q threshold/cap, supervision, depth/monotonicity rewards, self-distillation and teacher gradients.'),
+        'Legacy prelude/shared-loop/coda checkpoint equivalence plus LoopUS encoder/body/output partitions, repeated shared-weight gradient accumulation, q threshold/cap, supervision, depth/monotonicity rewards, self-distillation and teacher gradients.'),
     'early_exit': Feature('implemented_gpu_unverified', ('model',),
         'Intermediate shared-head CE at configured layers and weighted losses; accumulate shared head and backbone gradients.'),
     'kv_cache': Feature('implemented_gpu_unverified', ('model', 'precision'),
@@ -173,6 +173,8 @@ class WebUIRequest:
         if model['head_dim'] % 2:
             raise ValueError('RoPE requires an even head_dim')
         _choice(model, 'model_architecture', ARCHITECTURES)
+        for key in ('prelude_layers','loop_iters','coda_layers'):
+            if key in model and (type(model[key]) is not int or model[key]<0):raise ValueError(key+' must be a nonnegative integer')
         _choice(model, 'hidden_act', ('silu', 'gelu', 'relu'))
         _choice(model, 'use_grad_checkpoint', (0, 1, 2))
         if not isinstance(model['dropout'], (int, float)) or not 0 <= model['dropout'] < 1:
@@ -229,7 +231,7 @@ class WebUIRequest:
             ('dropout', self.model['dropout'] > 0),
             ('moe', self.model['use_moe'] or self.model['model_architecture'] == 'moe'),
             ('linear', self.model['model_architecture'] == 'linear'),
-            ('looped', self.model['model_architecture'] == 'looped'),
+            ('looped', self.model['model_architecture'] in ('looped','looped_legacy')),
             ('early_exit', bool(self.model.get('early_exit_layers'))),
             ('recompute', self.model['use_grad_checkpoint'] != 0),
             ('kv_cache', self.training['kv_cache_dtype'] != 'fp32'),

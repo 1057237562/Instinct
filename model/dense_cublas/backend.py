@@ -168,8 +168,8 @@ class CublasBackend(CudaBackend):
         return out
 
     def from_numpy(self, values):
-        if self._commands is not None:
-            raise RuntimeError('upload inputs before preparing the replay plan')
+        # Constants uploaded during preparation retain fixed storage; dynamic
+        # batch inputs must be supplied as Values by the full-step graph runner.
         result = super().from_numpy(values)
         # Uploads use the synchronous Driver API, whereas compute streams are
         # NON_BLOCKING. Explicitly finish host transfers before compute reads.

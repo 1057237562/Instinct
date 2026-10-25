@@ -12,8 +12,7 @@ def _json(value):
     raise TypeError(type(value).__name__)
 
 
-def save(path,model,optimizer=None,progress=None,rng=None,extra_models=None,extra_optimizers=None,adapters_only=False):
-    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+def snapshot(model,optimizer=None,progress=None,rng=None,extra_models=None,extra_optimizers=None,adapters_only=False):
     arrays={};models={'model':model,**(extra_models or {})};optimizers={'model':optimizer,**(extra_optimizers or {})}
     metadata=dict(format='instinct-cublas-v1',config=model.config,progress=progress or {},
         engine_rng={'seed':model.e.seed,'counter':model.e.counter},rng=None if rng is None else rng.bit_generator.state,
@@ -32,6 +31,11 @@ def save(path,model,optimizer=None,progress=None,rng=None,extra_models=None,extr
             arrays[f'gradient/{group}/{p.name}']=opt.e.numpy(opt.gradients[p]).astype(np.float32)
         metadata['optimizers'][group]=info
     arrays['__metadata__']=np.asarray(json.dumps(metadata,default=_json,ensure_ascii=False))
+    return arrays
+
+
+def write(path,arrays):
+    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
     fd,tmp=tempfile.mkstemp(prefix=path.name+'.',suffix='.tmp',dir=path.parent)
     try:
         with os.fdopen(fd,'wb') as f:
@@ -39,6 +43,31 @@ def save(path,model,optimizer=None,progress=None,rng=None,extra_models=None,extr
         os.replace(tmp,path)
     finally:
         if os.path.exists(tmp):os.unlink(tmp)
+
+
+def save(path,*args,**kwargs):
+    write(path,snapshot(*args,**kwargs))
+
+
+class AsyncCheckpointer:
+    """One immutable CPU snapshot in flight; IO errors surface at next save/close."""
+    def __init__(self,enabled=True):
+        from concurrent.futures import ThreadPoolExecutor
+        self.executor=ThreadPoolExecutor(max_workers=1) if enabled else None
+        self.pending=None
+    def __enter__(self):return self
+    def flush(self):
+        if self.pending is not None:
+            pending,self.pending=self.pending,None;pending.result()
+    def save(self,path,*args,**kwargs):
+        self.flush()  # Bound host memory and preserve overwrite ordering.
+        arrays=snapshot(*args,**kwargs)
+        if self.executor:self.pending=self.executor.submit(write,path,arrays)
+        else:write(path,arrays)
+    def __exit__(self,*exc):
+        try:self.flush()
+        finally:
+            if self.executor:self.executor.shutdown(wait=True)
 
 
 def metadata(path):
