@@ -6,7 +6,9 @@ import triton.language as tl
 @triton.jit
 def cast(X, Y, SIZE: tl.constexpr, BLOCK: tl.constexpr = 256):
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    tl.store(Y + i, tl.load(X + i, i < SIZE, other=0), i < SIZE)
+    # No `other=...`: masked-out lanes are never stored (same mask), and Triton 3.4
+    # cannot implicitly convert an int32 fill to fp8 element types.
+    tl.store(Y + i, tl.load(X + i, i < SIZE), i < SIZE)
 
 
 @triton.jit
