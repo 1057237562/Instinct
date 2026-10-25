@@ -29,6 +29,42 @@
 torch reduce-overhead 相对 eager 增益只有 ~12%，因为 MoE 动态分派使大部分动态子图
 被挤出 CUDA graph（见坑 ①②）。
 
+## 为什么 cuBLASLt 后端比 PyTorch 慢
+
+先用算术定位问题量级：本配置每步 2048 token × 63.9M 激活参数 ≈ 0.79 TFLOP
+（fwd+bwd+重算 ≈ 6·N·T）。native 0.88s/step 折合有效算力 **~0.9 TFLOPS**，
+torch eager 折合 ~3.6 TFLOPS —— 两者都远低于 5060 Ti 的 bf16 算力上限。
+即**两侧瓶颈都不在 GPU 计算，而在每 op 的 CPU 调度成本**；差距来自调度成本的
+一个数量级差异（每额外 op 开销 ≈ (0.88−0.22)s ÷ ~250 内核 ≈ 2.5ms）。
+按因素分解（①②为实测，③④⑤为结构分析）：
+
+1. **Python 驱动层逐内核调度（主因）**。原生引擎每个 kernel 经
+   Python → ctypes → cuLaunchKernel 发射：参数打包、Tensor 元数据（shape/stride/
+   dtype）构造、Triton launcher 元数据查找全部走 Python 运行时。每步 MoE
+   堆叠出 24 组 expert GEMM + 32 组 attention GEMM，再加 norm/RoPE/量化/
+   elementwise，合计 ~250 次发射 × 每次 ~1-3ms 的 Python 开销 ≈ 0.5-0.7s，
+   正好补齐与 torch 的差距。torch 的等价调度都在 C++ dispatcher（eager）或
+   编译产物里摊薄，单片 savable 状态也在 C++ autograd 引擎里回放。
+2. **零算子融合。** torch eager 内部 RMSNorm/RoPE/CE 等已是融合 kernel，
+   inductor 再把相邻 norm+cast+softmax 融合并配 CUDA graph 消发射；原生是
+   逐 op 手写 kernel，每个逻辑变换（含 fp8 的 amax→scale→quantize→dequant
+   四件套）都是独立发射，op 数量比 torch 同一路径多 2-3 倍。
+3. **fp8 比 bf16 更慢的原因**：这些尺寸的 GEMM（如 2048×2432×768）本就吃不满
+   tensor core，fp8 省下的算力远小于付出的量化会计成本——每投影每步都有
+   weight scale 更新 + activation amax + cast 内核，纯粹是负优化（实测 −11%）。
+   fp8 只有在大 GEMM 且量化 fuse 进 kernel 时才可能反转。
+4. **反向引擎差异**：原生 VJP 引擎按 value 拓扑在 Python 里逐节点驱动；
+   torch autograd 在 C++ 多线程引擎执行。小模型下反向的 CPU 侧调度占比
+   与前向同量级，进一步放大差距。
+5. **无 graph 兜底的静默代价**：CUDA graph 本可以把逐次发射成本一次性摊销
+   （torch reduce-overhead 因此 +12%，且同配置下原生 graph 从 0.88s 崩到
+   9.1s —— 重捕风暴反向证明发射开销确实是主要瓶颈），但动态 MoE dispatch
+   让两条栈都吃不满 graph（见坑 ③）。
+
+对应的提升方向（原生侧）：把每步调度从 Python 下沉到 C++/预编译调用计划
+（固定形状 call plan），融合 norm+RoPE+quantize 链，MoE 换固定形状 dispatch
+以解锁 graph；这些均未实施，当前原生栈定位在"零 torch 依赖"而非性能。
+
 ## 显存（同配置峰值，等效口径对比）
 
 | 方案 | 分配峰值 (allocated 语义) | 保留池 (reserved/arena) | 8GB 卡可用性 |
