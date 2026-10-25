@@ -24,6 +24,7 @@ import signal
 import warnings
 from typing import List, Optional
 import torch
+from model.compile_policy import training_compile_kwargs
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
@@ -651,7 +652,7 @@ if __name__ == "__main__":
 
     if args.use_compile == 1:
         model = torch.compile(
-            model, mode=args.compile_mode,
+            model, **training_compile_kwargs(model, mode=args.compile_mode),
             dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
         )
         Logger(f"torch.compile enabled; cache={os.environ['TORCHINDUCTOR_CACHE_DIR']}")

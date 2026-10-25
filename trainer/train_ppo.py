@@ -19,6 +19,7 @@ import re
 import warnings
 from typing import List
 import torch
+from model.compile_policy import training_compile_kwargs
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
@@ -468,12 +469,12 @@ if __name__ == "__main__":
     # 7. 编译和分布式包装
     if args.use_compile == 1:
         actor_model = torch.compile(
-            actor_model, mode=args.compile_mode,
+            actor_model, **training_compile_kwargs(actor_model, mode=args.compile_mode),
             dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
         )
         if getattr(args, 'fp8_training', 'off') != 'off':
             critic_model = torch.compile(
-                critic_model, mode=args.compile_mode,
+                critic_model, **training_compile_kwargs(critic_model, mode=args.compile_mode),
                 dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
             )
         Logger(f"torch.compile enabled; cache={os.environ['TORCHINDUCTOR_CACHE_DIR']}")

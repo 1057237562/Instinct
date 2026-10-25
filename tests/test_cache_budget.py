@@ -192,7 +192,24 @@ def test_managed_worker_does_not_require_hf_datasets_cache(tmp_path, monkeypatch
         discarded_long_sample_count=0,
         samples=SimpleNamespace(cache_files=[{"filename": str(packed)}]),
     )
-    monkeypatch.setattr(lm_dataset, "PretrainDataset", lambda **kwargs: fake)
+    def fake_dataset(**kwargs):
+        assert os.environ['TOKENIZERS_PARALLELISM'] == 'true'
+        assert os.environ['RAYON_NUM_THREADS'] == '4'
+        return fake
+
+    # Simulate the fresh spawn import's module-level tokenizer initialization.
+    import builtins
+    real_import = builtins.__import__
+    def worker_import(name, *args, **kwargs):
+        result = real_import(name, *args, **kwargs)
+        if name == 'scripts.data_loader.lm_dataset':
+            os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+        return result
+    monkeypatch.setattr(builtins, '__import__', worker_import)
+    monkeypatch.setenv('INSTINCT_TOKENIZER_THREADS', '4')
+    monkeypatch.setenv('TOKENIZERS_PARALLELISM', 'false')
+    monkeypatch.delenv('RAYON_NUM_THREADS', raising=False)
+    monkeypatch.setattr(lm_dataset, "PretrainDataset", fake_dataset)
     monkeypatch.delenv("HF_DATASETS_CACHE", raising=False)
     monkeypatch.setenv("INSTINCT_DATA_CACHE_WORKER", "0")
     monkeypatch.setenv("INSTINCT_DATA_CACHE_MAX_GB", "0")

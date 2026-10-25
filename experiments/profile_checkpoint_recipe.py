@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 from experiments.profile_checkpoint_policy import reserve_training_state
 from model.model_instinct import InstinctConfig, InstinctForCausalLM
+from model.compile_policy import training_compile_kwargs
 from trainer.trainer_cli import step_with_scaler
 from trainer.trainer_utils import cast_training_parameters, apply_torchao_fp8_training, pause_save_checkpoint
 
@@ -76,7 +77,8 @@ def main():
     scaler = torch.amp.GradScaler('cuda', enabled=False)
     apply_torchao_fp8_training(raw_model, SimpleNamespace(fp8_training='tensorwise', fp8_filter='auto',
         dtype='bfloat16', device='cuda', use_compile=1))
-    model = torch.compile(raw_model, mode='max-autotune-no-cudagraphs', dynamic=False)
+    compile_options = training_compile_kwargs(raw_model, mode='max-autotune-no-cudagraphs')
+    model = torch.compile(raw_model, **compile_options, dynamic=False)
     shapes = [(args.batch, args.seq)]
     if args.alternate_shape:
         shapes.append(tuple(args.alternate_shape))
@@ -107,7 +109,10 @@ def main():
     report = dict(status='running', args=vars(args), config=config.to_dict(),
         gpu=torch.cuda.get_device_name(), torch=torch.__version__, cuda=torch.version.cuda,
         scope='synthetic accumulated updates, including clipping and Muon/Adam; excludes loader/saves',
+        environment={key: value for key, value in os.environ.items()
+                     if key.startswith(('INSTINCT_', 'TORCHINDUCTOR_', 'PYTORCH_ALLOC_CONF', 'PYTORCH_CUDA_ALLOC_CONF'))},
         compile_dynamic=False,
+        compile_options=compile_options,
         windows=windows, pause_file=str(pause_path), checkpoint_prefix=prefix)
 
     def write():

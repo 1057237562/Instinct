@@ -17,7 +17,7 @@ from scripts.data_loader.cache_budget import (
     enforce_cache_budget,
     release_cache_use,
 )
-from scripts.data_loader.sequence_bucket import bucket_token_budget
+from scripts.data_loader.sequence_bucket import bucket_token_budget, packing_preprocess_workers
 from trainer.packing_transition import build_dataset_with_cache_barrier
 from trainer.trainer_utils import Logger
 
@@ -46,6 +46,29 @@ def should_stream_pretrain(args) -> bool:
     # creating it; a compressed parquet file expands far beyond its own size.
     from scripts.data_loader.source_format import estimated_arrow_bytes
     return estimated_arrow_bytes(source) > budget_gb * GIB
+
+
+def configure_streaming_workers(args, *, enabled, platform_name=None):
+    """Use one Python builder with native tokenizer threads on Windows.
+
+    A spawn cache builder isolates preprocessing from GPU dispatch, but nested
+    Datasets map workers would each import PyTorch and multiply host memory.
+    Inline mode keeps this bound on all platforms, as before.
+    """
+    platform_name = os.name if platform_name is None else platform_name
+    if not enabled or (args.cache_build_mode != 'inline' and platform_name != 'nt'):
+        return
+    requested = args.packing_num_proc
+    tokenizer_threads = packing_preprocess_workers(requested, platform_name=platform_name)
+    os.environ['INSTINCT_TOKENIZER_THREADS'] = str(tokenizer_threads)
+    args.packing_num_proc = 1
+    requested_loader = args.bucket_loader_workers
+    args.bucket_loader_workers = args.num_workers = 0
+    Logger(
+        f'[Dataset Streaming] bounded {args.cache_build_mode} mode: '
+        f'packing_num_proc={requested}->1, tokenizer_threads={tokenizer_threads}, '
+        f'bucket_loader_workers={requested_loader}->0, num_workers=0'
+    )
 
 
 def validate_streaming_budget(args) -> int:

@@ -22,6 +22,31 @@ class PackedFlexMask(NamedTuple):
     block_mask: Any
 
 
+def _flex_kernel_options(q, k):
+    """TMA backward for the measured long V2 bucket; keep compact GQA storage.
+
+    TMA slowed forward while accelerating long-context backward. Configure
+    the two passes independently instead of changing the proven forward tile.
+    """
+    options = {'BACKEND': 'TRITON'}
+    setting = os.environ.get('INSTINCT_V2_FLEX_TMA', 'auto').strip().lower()
+    if setting not in ('auto', '0', '1'):
+        raise ValueError('INSTINCT_V2_FLEX_TMA must be auto, 0 or 1')
+    if (setting == '0' or not torch.is_grad_enabled() or not q.is_cuda
+            or q.dtype != torch.bfloat16 or q.shape[2:] != (16, 96)
+            or k.shape[2:] != (4, 96) or q.shape[:2] != k.shape[:2]
+            or q.shape[1] % 128 != 0):
+        return options
+    if setting == 'auto' and q.shape[:2] != (3, 4096):
+        return options
+    from model.cuda_fastpath import blackwell_training_kernels
+    if blackwell_training_kernels(q.device):
+        options.update(bwd_USE_TMA=True, bwd_BLOCK_M1=32, bwd_BLOCK_N1=32,
+                       bwd_BLOCK_M2=32, bwd_BLOCK_N2=32,
+                       bwd_num_warps=4, bwd_num_stages=3)
+    return options
+
+
 def document_mask(sequence_ids):
     """Match the existing same-ID + causal mask, including padding ID -1."""
     length = sequence_ids.size(1)
@@ -146,7 +171,7 @@ def packed_flex_attention(q, k, v, mask: PackedFlexMask):
         return flex_attention(
             q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
             block_mask=mask.block_mask, enable_gqa=True,
-            kernel_options={'BACKEND': 'TRITON'},
+            kernel_options=_flex_kernel_options(q, k),
         ).transpose(1, 2)
     return _packed_flex_attention_region(q, k, v, mask)
 
@@ -159,7 +184,7 @@ def _packed_flex_attention_region(q, k, v, mask: PackedFlexMask):
     output = attention(
         q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
         block_mask=mask.block_mask, enable_gqa=True,
-        kernel_options={'BACKEND': 'TRITON'},
+        kernel_options=_flex_kernel_options(q, k),
     )
     return output.transpose(1, 2)
 
@@ -185,7 +210,7 @@ def causal_flex_attention(q, k, v):
     mask = _causal_flex_mask(q.shape[1], str(q.device))
     return attention(q.transpose(1,2), k.transpose(1,2), v.transpose(1,2),
                      block_mask=mask, enable_gqa=True,
-                     kernel_options={'BACKEND': 'TRITON'}).transpose(1,2)
+                     kernel_options=_flex_kernel_options(q, k)).transpose(1,2)
 
 
 def _training_autotune(q):

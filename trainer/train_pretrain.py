@@ -18,6 +18,7 @@ import datasets  # noqa: F401  # Windows pyarrow/torch DLL conflict workaround (
 import time
 import warnings
 import torch
+from model.compile_policy import training_compile_kwargs
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
@@ -44,9 +45,9 @@ from trainer.streaming_pretrain import (
     should_stream_pretrain,
     validate_streaming_budget,
     streaming_token_progress,
+    configure_streaming_workers,
 )
 from scripts.data_loader.streaming_chunks import build_chunk_plan
-from scripts.data_loader.sequence_bucket import packing_preprocess_workers
 from scripts.data_loader.source_format import canonical_source_key
 
 warnings.filterwarnings('ignore')
@@ -297,26 +298,7 @@ if __name__ == "__main__":
     local_rank = setup_dist_and_seed(args)
 
     streaming_enabled = should_stream_pretrain(args)
-    if streaming_enabled and args.cache_build_mode == 'inline':
-        # Zero Python child processes in the complete data path. PyArrow may
-        # still use native threads, which do not re-import Python/DLL modules.
-        requested_packing_workers = args.packing_num_proc
-        requested_loader_workers = args.bucket_loader_workers
-        # Keep Arrow/Datasets in one Python process on Windows, but let the
-        # FastTokenizer's Rust/Rayon batch encoder use the requested CPU
-        # parallelism without importing another copy of PyTorch per worker.
-        tokenizer_threads = packing_preprocess_workers(requested_packing_workers)
-        os.environ['INSTINCT_TOKENIZER_THREADS'] = str(tokenizer_threads)
-        args.packing_num_proc = 1
-        args.bucket_loader_workers = 0
-        args.num_workers = 0
-        Logger(
-            '[Dataset Streaming] spawn-free inline mode: '
-            f'packing_num_proc={requested_packing_workers}->1, '
-            f'tokenizer_threads={tokenizer_threads}, '
-            f'bucket_loader_workers={requested_loader_workers}->0, '
-            'num_workers=0'
-        )
+    configure_streaming_workers(args, enabled=streaming_enabled)
 
     # 2. 配置目录、模型参数、检查ckp
     os.makedirs(args.save_dir, exist_ok=True)
@@ -464,7 +446,7 @@ if __name__ == "__main__":
     # 7. 编译和分布式包装
     if args.use_compile == 1:
         model = torch.compile(
-            model, mode=args.compile_mode,
+            model, **training_compile_kwargs(model, mode=args.compile_mode),
             dynamic=getattr(lm_config, 'residual_type', 'standard') == 'attnres',
         )
         Logger(f"torch.compile enabled; cache={os.environ['TORCHINDUCTOR_CACHE_DIR']}")

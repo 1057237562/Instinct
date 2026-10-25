@@ -234,6 +234,8 @@ def apply_torchao_fp8_training(model: torch.nn.Module, args, *, label: str = "mo
             'Converted layer count is not executed FP8 GEMM coverage; verify the runtime trace.'
         )
     setattr(args, "fp8_training_active", active_recipe)
+    model._instinct_fp8_recipe = active_recipe
+    model._instinct_fp8_filter = filter_mode
     return model
 
 

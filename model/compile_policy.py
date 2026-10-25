@@ -1,4 +1,4 @@
-"""Compilation budgets for repeated training buckets, without kernel changes.
+"""Compilation budgets and measured training kernel selection.
 
 Import/call after the entry point's datasets-before-torch initialization.
 Limits govern lazy specializations, not optimizer steps or total GPU kernels.
@@ -7,6 +7,46 @@ Limits govern lazy specializations, not optimizer steps or total GPU kernels.
 import os
 
 import torch
+
+
+def training_compile_kwargs(model, *, mode='default'):
+    """Keep V2 tensorwise FP8 GEMMs on cuBLAS with the validated local stack.
+
+    Inductor's default autotuner can select slower Triton FP8 GEMMs for V2's
+    1536/5504-wide projections. This is a per-compiled-model option: it does
+    not mutate global Inductor settings, precision, attention, or Muon kernels.
+    Explicit PyTorch backend settings take precedence over automatic selection.
+    """
+    setting = os.environ.get('INSTINCT_V2_GEMM_BACKEND', 'auto').strip().lower()
+    if setting not in ('auto', 'aten', 'default'):
+        raise ValueError('INSTINCT_V2_GEMM_BACKEND must be auto, aten or default')
+    if setting == 'default' or (setting == 'auto' and
+            'TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS' in os.environ):
+        return {'mode': mode}
+    if setting == 'auto':
+        config = getattr(model, 'config', None)
+        dimensions = dict(hidden_size=1536, intermediate_size=5504, num_hidden_layers=32,
+                          num_attention_heads=16, num_key_value_heads=4, head_dim=96)
+        if (mode not in ('max-autotune', 'max-autotune-no-cudagraphs')
+                or getattr(model, '_instinct_fp8_recipe', None) != 'tensorwise'
+                or getattr(model, '_instinct_fp8_filter', None) != 'auto'
+                or getattr(config, 'param_dtype', None) != 'bf16'
+                or getattr(config, 'model_architecture', 'standard') != 'standard'
+                or getattr(config, 'use_moe', False)
+                or getattr(config, 'residual_type', 'standard') != 'standard'
+                or any(getattr(config, key, None) != value for key, value in dimensions.items())):
+            return {'mode': mode}
+        from model.cuda_fastpath import blackwell_training_kernels
+        if not blackwell_training_kernels(next(model.parameters()).device):
+            return {'mode': mode}
+    # torch.compile does not allow both mode and options. Expand the mode's
+    # options so graph capture and every other mode-specific setting survive.
+    from torch._inductor import list_mode_options
+    options = dict(list_mode_options(mode))
+    options['max_autotune_gemm_backends'] = 'ATEN'
+    print('[Compile GEMMs] V2 tensorwise FP8: ATEN/cuBLAS; '
+          'INSTINCT_V2_GEMM_BACKEND=default restores compiler selection.', flush=True)
+    return {'options': options}
 
 
 def _positive_budget(name, default):

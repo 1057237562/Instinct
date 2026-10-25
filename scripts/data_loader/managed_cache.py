@@ -80,6 +80,11 @@ def _worker(kind, kwargs, work, budget_root):
     os.environ['INSTINCT_DATA_CACHE_WORKER'] = '1'
     os.environ['INSTINCT_DATA_CACHE_BUDGET_ROOT'] = str(budget_root)
     os.environ['HF_DATASETS_CACHE'] = str(Path(work) / 'intermediate')
+    import datasets
+    datasets.config.HF_DATASETS_CACHE = Path(os.environ['HF_DATASETS_CACHE'])
+    # lm_dataset initializes TOKENIZERS_PARALLELISM to false. Import it before
+    # enabling Rayon, including in a fresh spawn worker where it is not cached.
+    from scripts.data_loader.lm_dataset import PretrainDataset, SFTDataset
     tokenizer_threads = max(1, int(os.environ.get('INSTINCT_TOKENIZER_THREADS', '1')))
     if tokenizer_threads > 1:
         # FastTokenizer releases the GIL and uses Rayon for a list/batch call.
@@ -91,8 +96,6 @@ def _worker(kind, kwargs, work, budget_root):
             "(single Python process)",
             flush=True,
         )
-    import datasets
-    datasets.config.HF_DATASETS_CACHE = Path(os.environ['HF_DATASETS_CACHE'])
     byte_range = kwargs.pop('byte_range', None)
     kwargs.pop('source_fingerprint', None)
     if byte_range is not None:
@@ -121,7 +124,6 @@ def _worker(kind, kwargs, work, budget_root):
         kwargs['data_path'] = str(chunk_source)
     build_started = time.perf_counter()
     print("[Streaming Build] stage=json-tokenize-pack starting", flush=True)
-    from scripts.data_loader.lm_dataset import PretrainDataset, SFTDataset
     data = (PretrainDataset if kind == 'pretrain' else SFTDataset)(**kwargs)
     print(
         f"[Streaming Build] stage=json-tokenize-pack complete "

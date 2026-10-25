@@ -21,6 +21,27 @@ class NeverCalledTokenizer:
         raise AssertionError("token_count rows must not be tokenized during planning")
 
 
+@pytest.mark.parametrize('platform,mode,enabled,bounded', [
+    ('nt', 'inline', True, True), ('nt', 'spawn', True, True),
+    ('posix', 'inline', True, True), ('posix', 'spawn', True, False),
+    ('nt', 'spawn', False, False),
+])
+def test_streaming_worker_bound_uses_native_threads(monkeypatch, platform, mode, enabled, bounded):
+    import os
+    from trainer.streaming_pretrain import configure_streaming_workers
+    monkeypatch.delenv('INSTINCT_TOKENIZER_THREADS', raising=False)
+    args = SimpleNamespace(cache_build_mode=mode, packing_num_proc=4,
+                           bucket_loader_workers=2, num_workers=8)
+    configure_streaming_workers(args, enabled=enabled, platform_name=platform)
+    if bounded:
+        assert args.packing_num_proc == 1
+        assert args.bucket_loader_workers == args.num_workers == 0
+        assert int(os.environ['INSTINCT_TOKENIZER_THREADS']) == min(4, os.cpu_count() or 1)
+    else:
+        assert (args.packing_num_proc, args.bucket_loader_workers, args.num_workers) == (4, 2, 8)
+        assert 'INSTINCT_TOKENIZER_THREADS' not in os.environ
+
+
 def test_streaming_eta_uses_tokens_since_resume_and_current_epoch():
     from trainer.training_eta import RecentThroughputETA
     estimator = RecentThroughputETA()
