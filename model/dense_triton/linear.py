@@ -37,6 +37,19 @@ def quantize(X, SCALE, Q, SIZE: tl.constexpr, FP8_MAX: tl.constexpr,
 
 
 @triton.jit
+def quantize_dual(X,SCALE,Q,QT,ROWS:tl.constexpr,COLS:tl.constexpr,
+                  FP8_MAX:tl.constexpr,TILE:tl.constexpr=32):
+    row=tl.program_id(0)*TILE+tl.arange(0,TILE)
+    col=tl.program_id(1)*TILE+tl.arange(0,TILE)
+    valid=(row[:,None]<ROWS)&(col[None,:]<COLS)
+    x=tl.load(X+row[:,None]*COLS+col[None,:],valid,0).to(tl.float32)
+    scaled=x*tl.load(SCALE)
+    y=tl.minimum(tl.maximum(scaled,-FP8_MAX),FP8_MAX).to(Q.dtype.element_ty,fp_downcast_rounding='rtne')
+    tl.store(Q+row[:,None]*COLS+col[None,:],y,valid)
+    tl.store(QT+col[None,:]*ROWS+row[:,None],y,valid)
+
+
+@triton.jit
 def matmul(A, B, C, SA, SB, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,
            AM: tl.constexpr, AK: tl.constexpr, BK: tl.constexpr, BN: tl.constexpr,
            SCALED: tl.constexpr, BM: tl.constexpr = 32,

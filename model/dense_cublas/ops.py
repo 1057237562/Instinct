@@ -10,6 +10,17 @@ from model.dense_triton import elementwise as ew
 
 
 class CublasDenseOps(DenseOps):
+    def attention(self,q,k,v,mask=None,dropout=0.,seed=0,counter=0,cached=None,packed=False,scale=None):
+        native=getattr(self.backend,'native_attention',None)
+        if native is not None and scale is None:
+            return native.attention(q,k,v,mask,dropout,seed,counter,cached,packed,super().attention)
+        return super().attention(q,k,v,mask,dropout,seed,counter,cached,packed,scale)
+
+    def attention_backward(self,saved,dy):
+        native=getattr(self.backend,'native_attention',None)
+        if native is not None:return native.backward(saved,dy,super().attention_backward)
+        return super().attention_backward(saved,dy)
+
     def __init__(self, backend, fp8=True):
         super().__init__(backend, fp8)
         self._reuse = None
@@ -47,7 +58,9 @@ class CublasDenseOps(DenseOps):
     def quantize(self, x, dtype='fp8e4nv'):
         # Q/K/V share one normalized activation cast; gate/up share another.
         return self._cached(('quant', self._key(x), dtype),
-                            lambda: super(CublasDenseOps, self).quantize(x, dtype))
+                            lambda: super(CublasDenseOps, self).quantize(x, dtype,
+                                dual_layout=bool(getattr(self.backend,'fused_quant_pack',False)
+                                    and dtype=='fp8e5' and len(x.shape)==2 and all(d%16==0 for d in x.shape))))
 
     def norm_rotary(self,x,weight,cos,sin,eps=1.e-6,start=0):
         if len(x.shape)!=4 or x.shape[-1]%2 or weight.shape!=(x.shape[-1],):
@@ -58,16 +71,26 @@ class CublasDenseOps(DenseOps):
             raise ValueError('invalid normalization or RoPE tables')
         out=self.empty(x.shape,x.dtype);r=self.empty((b*s*h,),'fp32')
         options=dict(N=d,SEQ=s,HEADS=h,START=start,BLOCK=triton.next_power_of_2(d))
-        self.backend.launch(fused.norm_rotary_forward,(b*s*h,),(x,weight,cos,sin,out,r),EPS=eps,**options)
+        rows=getattr(self.backend,'norm_rope_rows',1) if d<=128 else 1
+        if rows>1:
+            self.backend.launch(fused.norm_rotary_forward_rows,(triton.cdiv(b*s*h,rows),),
+                (x,weight,cos,sin,out,r),M=b*s*h,EPS=eps,ROWS=rows,**options)
+        else:self.backend.launch(fused.norm_rotary_forward,(b*s*h,),(x,weight,cos,sin,out,r),EPS=eps,**options)
         return out,(x,weight,cos,sin,r,options)
 
     def norm_rotary_backward(self,saved,g):
-        x,w,cos,sin,r,options=saved;rows=x.numel//x.shape[-1];groups=min(rows,128)
+        x,w,cos,sin,r,options=saved;rows=x.numel//x.shape[-1]
+        tile=getattr(self.backend,'norm_rope_rows',1) if x.shape[-1]<=128 else 1
+        groups=min(triton.cdiv(rows,tile),getattr(self.backend,'norm_groups',None) or 128)
         dx=self.empty(x.shape,x.dtype);dw=self.empty(w.shape,w.dtype)
         partial=self.empty((groups,x.shape[-1]),'fp32')
-        self.backend.launch(fused.norm_rotary_backward,(groups,),(x,w,r,cos,sin,g,dx,partial),M=rows,GROUPS=groups,**options)
-        self.backend.launch(ew._rms_reduce_dw,(triton.cdiv(x.shape[-1],64),),(partial,dw),
-                            N=x.shape[-1],GROUPS=groups,BLOCK_G=triton.next_power_of_2(groups),BLOCK_N=64)
+        if tile>1:
+            self.backend.launch(fused.norm_rotary_backward_rows,(groups,),(x,w,r,cos,sin,g,dx,partial),
+                M=rows,GROUPS=groups,ROWS=tile,**options)
+        else:self.backend.launch(fused.norm_rotary_backward,(groups,),(x,w,r,cos,sin,g,dx,partial),M=rows,GROUPS=groups,**options)
+        block_n=8 if groups>256 else 64
+        self.backend.launch(ew._rms_reduce_dw,(triton.cdiv(x.shape[-1],block_n),),(partial,dw),
+                            N=x.shape[-1],GROUPS=groups,BLOCK_G=triton.next_power_of_2(groups),BLOCK_N=block_n)
         return dx,dw
 
     def linears(self,x,weights):
@@ -115,11 +138,20 @@ class CublasDenseOps(DenseOps):
     def _pack(self, x, rows, cols, pr, pc, strides, needed):
         if not needed:
             return x
+        transposed=getattr(x,'transpose_data',None)
+        if (transposed is not None and strides==(1,x.shape[1])
+                and (rows,cols)==(pr,pc)==transposed.shape):return transposed
         def create():
             out = self.empty((pr, pc), x.dtype)
-            self.backend.launch(kernels.pack_matrix, (triton.cdiv(pr * pc, 256),), (x, out),
-                                ROWS=rows, COLS=cols, PAD_ROWS=pr, PAD_COLS=pc,
-                                STRIDE_ROW=strides[0], STRIDE_COL=strides[1])
+            tile = getattr(self.backend, 'pack_tile', None)
+            options = dict(ROWS=rows, COLS=cols, PAD_ROWS=pr, PAD_COLS=pc,
+                           STRIDE_ROW=strides[0], STRIDE_COL=strides[1])
+            if tile and strides[0] == 1:
+                self.backend.launch(kernels.pack_matrix_tiled,
+                    (triton.cdiv(pr, tile), triton.cdiv(pc, tile)), (x, out), TILE=tile, **options)
+            else:
+                self.backend.launch(kernels.pack_matrix, (triton.cdiv(pr * pc, 256),),
+                                    (x, out), **options)
             return out
         return self._cached(('pack', self._key(x), rows, cols, pr, pc, strides), create)
 
@@ -172,6 +204,10 @@ class CublasDenseOps(DenseOps):
             raise ValueError('Linear gradient shape/dtype does not match its forward')
         dy = dy.view(dy.numel // dy.shape[-1], dy.shape[-1])
         qdy, sdy = self.quantize(dy, 'fp8e5') if scales is not None else (dy, None)
+        return self.linear_backward_quantized(saved,qdy,sdy,need_dx,need_dw)
+
+    def linear_backward_quantized(self,saved,qdy,sdy,need_dx=True,need_dw=True):
+        shape,input_dtype,weight_dtype,qx,qw,scales=saved
         dx_scales = (sdy, scales[1]) if scales is not None else None
         dw_scales = (sdy, scales[0]) if scales is not None else None
         prior = self._role
@@ -181,7 +217,7 @@ class CublasDenseOps(DenseOps):
                 ready = self.backend.create_event()
                 self.backend.record_event(ready)  # dY is ready before dX, so both GEMMs can overlap.
             self._role = 'dX'
-            dx = self.mm(qdy, qw, scales=dx_scales, out_dtype=dy.dtype) if need_dx else None
+            dx = self.mm(qdy, qw, scales=dx_scales, out_dtype=input_dtype) if need_dx else None
             if not need_dw:
                 return None if dx is None else dx.view(*shape), None
             self._role = 'dW'

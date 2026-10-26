@@ -24,7 +24,7 @@ MODEL_FIELDS = {
     'dropout': ('dropout',),
     'rope': ('max_position_embeddings', 'rope_theta', 'inference_rope_scaling', 'rope_scaling'),
     'attention': ('flash_attn',),
-    'recompute': ('use_grad_checkpoint','selective_cache_mib'),
+    'recompute': ('use_grad_checkpoint','selective_cache_mib','selective_cache_by_seq'),
     'moe': ('use_moe', 'num_experts', 'num_experts_per_tok', 'moe_intermediate_size',
             'norm_topk_prob', 'router_aux_loss_coef'),
     'linear': ('full_attention_interval', 'linear_conv_kernel_dim', 'linear_key_head_dim',
@@ -179,6 +179,18 @@ class WebUIRequest:
         _choice(model, 'use_grad_checkpoint', (0, 1, 2, 3, 4))
         if 'selective_cache_mib' in model and (type(model['selective_cache_mib']) is not int or model['selective_cache_mib']<0):
             raise ValueError('selective_cache_mib must be a nonnegative integer')
+        if 'selective_cache_by_seq' in model:
+            budgets=model['selective_cache_by_seq']
+            if not isinstance(budgets,dict):raise ValueError('selective_cache_by_seq must be an object')
+            normalized={}
+            for length,value in budgets.items():
+                try:sequence=int(length)
+                except (TypeError,ValueError):raise ValueError('cache bucket lengths must be positive integers') from None
+                if (sequence<1 or str(sequence)!=str(length) or str(sequence) in normalized
+                        or type(value) not in (int,float) or not math.isfinite(value) or value<0):
+                    raise ValueError('invalid per-sequence cache budget')
+                normalized[str(sequence)]=value
+            model['selective_cache_by_seq']=normalized
         if model['use_grad_checkpoint'] in (3, 4) and (model['model_architecture'] != 'standard' or model.get('use_moe')):
             raise ValueError('native ckpt3/4 require standard Dense')
         if not isinstance(model['dropout'], (int, float)) or not 0 <= model['dropout'] < 1:

@@ -4,6 +4,60 @@
 `codex/cublas-throughput`。模型仍为 32 层、H=1536、FFN=5504、Q/KV=16/4、
 head_dim=96、vocab=6400、共享 embedding/head，共 1,010,277,888 参数。
 
+## 2026-10-26 代码更新与验证
+
+后续验证已完成两个 native bridge 构建、融合/优化器数值回归和 160 微步生产数据训练。
+已建缓存的训练窗口为 11,398 targets/s，尚未达到 14,000 或 18,000 targets/s。
+完整条件、修复、确定性边界、保存证明和包含启动/保存的计时见
+[本轮验证报告](reports/2026-10-26-native-validation.md)。
+
+- `--fused_ops` 接通原生 Dense 融合策略，共享 V2 配方已启用。包括分块 FP8 转置、
+  梯度合并、层内 RMSNorm 直接写计算 dtype，以及 SwiGLU 前反向同时生成后续量化的 amax。
+  amax 使用实际写回 dtype 舍入后的值；重算和 VJP 回收保留尚待使用的统计缓冲。
+  对满足对齐条件的 E5M2 梯度，量化同时写出正常与转置布局，后续 dW 复用转置结果。
+- 预训练 loss 在日志、末批和保存退出边界读取；预取双缓冲通过 consumed/ready 事件连接
+  计算流和拷贝流。预训练不再要求每个微步的前向后 loss 下载和全局同步。
+  日志吞吐改用整个报告间隔的有效 targets 与墙钟时间，覆盖间隔内加载、更新和保存开销。
+- `--selective_cache_by_seq 3072:768,4096:1024` 可分别设置两个输入桶的候选输出缓存预算。
+  未指定的长度使用 `--selective_cache_mib`。示例数值只是配置语法，不是新的推荐最优点；
+  共享配方仍保持 768 MiB，不能把增加预算本身当成已验证的加速。
+- `--attention_backend hybrid --attention_cudnn_min_seq 4096` 接通分桶 attention：
+  短桶使用 Triton 128×64 / 8-warps 前向，达到阈值的 packed BF16 输入使用原生 cuDNN。
+  `cudnn` 模式对所有适用桶选择 cuDNN，`triton` 保留既有路径并作为默认。
+  cuDNN 图只保留有上限的计划缓存；workspace 随当前操作释放，保存的 LSE 压回原 token 规模。
+  文档元数据绑定到当前 mask，使 checkpoint 重放使用对应 forward 的文档边界。
+  此路径不经过 Torch，也不导入 cuDNN Python frontend；需要可选的 C++ SDPA bridge。
+  已验证候选采用 3072:1024 / 4096:1280 MiB；尚不代表全局最优配置。
+  SM120 的 cuDNN packed 反向不支持确定性执行，验收按 BF16 容差进行，不能称为逐位重复。
+- `--muon_gemm_backend cublas` 新增 cuBLASLt strided-batched NS 矩阵乘法路径，
+  支持原来的 alpha/beta 更新表达式，共用现有 Lt workspace 和候选算法选择。
+  momentum、mantissa、NS 次数和分块预算保持原语义。默认仍为 `triton`，新路径需要重新构建
+  `model/dense_cublas/native` 的 bridge。两种后端的 16 个 CUDA 更新用例、
+  9 组生产矩阵形状以及实际训练的 20 次优化器更新已通过对应验证。
+- 新控制项通过同一原生 CLI 与 Config WebUI 传递。融合和 Muon GEMM 后端写入 resume 的
+  execution options；恢复时拒绝未经声明的执行选项变化，旧 checkpoint 按原始选项解释。
+
+可选 SDPA bridge 源码位于 `model/dense_cublas/native/attention.cpp`。CMake 的
+`INSTINCT_BUILD_CUDNN=ON` 开关接收 `CUDNN_ROOT` 和 `CUDNN_FRONTEND_ROOT`，也可以直接指定
+`CUDNN_INCLUDE_DIR` / `CUDNN_LIBRARY`。运行时 `CUDNN_PATH` 选择 SDK/runtime，
+`INSTINCT_CUDNN_BRIDGE` 可指定已构建库。现有候选使用 cuDNN 9.27.0.42 与 Frontend 1.31.0；
+SDK、下载缓存和编译产物不入库。本轮两个 Release bridge 均已构建成功。
+
+生产 Parquet 现在可直接交给原生预训练入口。`dataset_compiler` 的 `plan-pretrain` /
+`pack-pretrain` 命令用 Rust/Rayon 并行分词打包；Python 只做进程调度和 mmap 批次解码。
+每个 Parquet row group 是有界缓存单元，后台准备下一块，保留文档边界、有效目标数和
+下一未读 group/batch 游标。先在 `dataset_compiler/` 内构建 release CLI。
+新数据路径不依赖 Torch/TorchAO，也不要求 HuggingFace Arrow 中间数据集。
+
+```powershell
+python -m scripts.native_v2_recipe --data-path D:/AI/Instinct/dataset/pretrain_coder_l2l3_24b.parquet
+```
+
+上述命令仅打印原生命令；添加 `--run` 才启动。使用
+`--sequence_buckets 3072,4096 --num_workers 4 --copy_prefetch` 可选择生产的两个桶、
+Rust 预处理线程和设备双缓冲。原生 `batch_size × max_seq_len` 是这些桶的 token budget，
+因此配方的 `3 × 4096` 对应 `4 × 3072` 和 `3 × 4096`。
+
 ## 已接通的运行路径
 
 - 原生数值档位 `use_grad_checkpoint=4`：整层建立重算边界，按实际 B×S、

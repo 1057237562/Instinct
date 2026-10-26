@@ -15,6 +15,19 @@ def pack_matrix(X, OUT, ROWS: tl.constexpr, COLS: tl.constexpr,
 
 
 @triton.jit
+def pack_matrix_tiled(X, OUT, ROWS: tl.constexpr, COLS: tl.constexpr,
+                      PAD_ROWS: tl.constexpr, PAD_COLS: tl.constexpr,
+                      STRIDE_ROW: tl.constexpr, STRIDE_COL: tl.constexpr,
+                      TILE: tl.constexpr = 64):
+    row = tl.program_id(0) * TILE + tl.arange(0, TILE)
+    col = tl.program_id(1) * TILE + tl.arange(0, TILE)
+    value = tl.load(X + row[:, None] * STRIDE_ROW + col[None, :] * STRIDE_COL,
+                    (row[:, None] < ROWS) & (col[None, :] < COLS), other=0.)
+    tl.store(OUT + row[:, None] * PAD_COLS + col[None, :], value,
+             (row[:, None] < PAD_ROWS) & (col[None, :] < PAD_COLS))
+
+
+@triton.jit
 def unpack_matrix(X, OUT, ROWS: tl.constexpr, COLS: tl.constexpr,
                   PAD_COLS: tl.constexpr, BLOCK: tl.constexpr = 256):
     index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)

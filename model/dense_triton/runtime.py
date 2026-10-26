@@ -46,7 +46,9 @@ class Tensor:
     def view(self, *shape):
         if math.prod(shape) != self.numel:
             raise ValueError('view must preserve the element count')
-        return Tensor(tuple(shape), self.dtype, self.storage, self.owner)
+        result=Tensor(tuple(shape), self.dtype, self.storage, self.owner)
+        if hasattr(self,'amax_partial'):result.amax_partial=self.amax_partial
+        return result
 
 
 @lru_cache(maxsize=None)
@@ -62,18 +64,22 @@ def constants_for(fn, values):
     return result
 
 
-def compile_kernel(fn, dtypes, constants, arch=89):
+def compile_kernel(fn, dtypes, constants, arch=89, compiler_options=None, alignments=None):
     if not triton.__version__.startswith('3.4.'):
         raise RuntimeError('This experimental direct launcher requires Triton 3.4.x')
     constants = constants_for(fn, constants)
     names = [name for name in fn.arg_names if name not in constants]
     if len(names) != len(dtypes):
         raise ValueError(f'{fn.__name__}: runtime argument count does not match signature')
+    attrs = {} if alignments is None else {
+        (fn.arg_names.index(name),): [['tt.divisibility', alignment]]
+        for name, alignment in zip(names, alignments) if alignment > 1}
     source = ASTSource(fn, signature={n: t.removeprefix('scalar:') if t.startswith('scalar:') else '*' + t for n, t in zip(names, dtypes)},
-                       constexprs=constants)
+                       constexprs=constants, attrs=attrs)
     # Explicit target avoids GPUDriver.__init__, which otherwise imports torch.
     return triton.compile(source, target=GPUTarget('cuda', arch, 32),
-                           options={'num_warps': 4, 'num_stages': 2, 'enable_fp_fusion': False})
+                           options={'num_warps': 4, 'num_stages': 2, 'enable_fp_fusion': False,
+                                    **(compiler_options or {})})
 
 
 class CudaBackend:
@@ -83,6 +89,9 @@ class CudaBackend:
         self._allocations = []
         self._modules = []
         self._cache = {}
+        self._argument_buffers = {}
+        self.kernel_options = {}
+        self.aligned_pointers = False
         self._context = None
         self.pin_memory = False
         self._host_pointer, self._host_capacity = None, 0
@@ -211,9 +220,23 @@ class CudaBackend:
             if not isinstance(arg, Scalar):
                 self._check_tensor(arg,check_context=False)
         constants = constants_for(fn, constants)
-        key = (fn.__name__, tuple(a.dtype for a in args), tuple(sorted(constants.items())))
+        compiler_options = self.kernel_options.get(fn.fn.__module__ + '.' + fn.__name__, {})
+        # Native tensors may be manually constructed as offset views. Specialize
+        # on the actual address, rather than assuming every pointer is aligned.
+        align=self.aligned_pointers
+        if align and getattr(self,'aligned_pointwise_only',False):
+            # Sum/mean reduction layouts can change BF16 rounding downstream.
+            # Restrict vectorized specialization to elementwise/max/layout ops.
+            align=fn.__name__ in {'cast','add','binary','binary_scalar','gradient_sum','scaled_copy',
+                'fill','pack_matrix','pack_matrix_tiled','unpack_matrix','inverse_scale',
+                'amax_partial','scale_from_amax','quantize','quantize_dual',
+                'rounded_swiglu','rounded_swiglu_amax','statistics','quantized_values'}
+        alignments = tuple(1 if isinstance(arg,Scalar) else min(16,arg.storage & -arg.storage)
+                           for arg in args) if align else None
+        key = (fn.__name__, tuple(a.dtype for a in args), tuple(sorted(constants.items())),
+               tuple(sorted(compiler_options.items())), alignments)
         if key not in self._cache:
-            kernel = compile_kernel(fn, [a.dtype for a in args], constants, self.arch)
+            kernel = compile_kernel(fn, [a.dtype for a in args], constants, self.arch, compiler_options, alignments)
             meta = kernel.metadata
             if (meta.global_scratch_size or meta.num_ctas != 1 or meta.launch_cooperative_grid
                     or meta.tensordesc_meta or meta.launch_pdl):
@@ -228,10 +251,17 @@ class CudaBackend:
             self._cache[key] = (function, meta)
         function, meta = self._cache[key]
         # Triton 3.4 adds a global-scratch pointer even when its size is zero.
-        scalar_types = {'fp32': ct.c_float, 'i32': ct.c_int32, 'i64': ct.c_int64}
-        values = [scalar_types[arg.kind](arg.value) if isinstance(arg, Scalar)
-                  else ct.c_uint64(arg.storage) for arg in args] + [ct.c_uint64(0)]
-        params = (ct.c_void_p * len(values))(*[ct.addressof(v) for v in values])
+        # cuLaunchKernel copies its parameter values before returning. This
+        # backend is single-threaded, so reuse host ABI slots across launches.
+        signature=tuple(a.dtype if isinstance(a,Scalar) else 'pointer' for a in args)
+        buffers=self._argument_buffers.get(signature)
+        if buffers is None:
+            types={'scalar:fp32':ct.c_float,'scalar:i32':ct.c_int32,'scalar:i64':ct.c_int64,'pointer':ct.c_uint64}
+            values=[types[k]() for k in signature]+[ct.c_uint64(0)]
+            params=(ct.c_void_p*len(values))(*[ct.addressof(v) for v in values])
+            buffers=self._argument_buffers[signature]=(values,params)
+        values,params=buffers
+        for target,arg in zip(values,args):target.value=arg.value if isinstance(arg,Scalar) else arg.storage
         grid = tuple(grid) + (1,) * (3 - len(grid))
         self._launch(function, *grid, meta.num_warps * 32, 1, 1, meta.shared, self.stream, params, None)
 
@@ -273,5 +303,6 @@ class CudaBackend:
             self._allocations.clear()
             self._modules.clear()
             self._cache.clear()
+            self._argument_buffers.clear()
         if error is not None and exc is None:
             raise error

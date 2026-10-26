@@ -45,6 +45,7 @@ def parser():
     p.add_argument('--muon_momentum_dtype',choices=['fp32','bf16'],default='fp32')
     p.add_argument('--muon_batch_size',type=int,default=16)
     p.add_argument('--muon_workspace_mb',type=float,default=512)
+    p.add_argument('--muon_gemm_backend',choices=['triton','cublas'],default='triton')
     p.add_argument('--optimizer',choices=['adamw','adafactor','muon'],default='adamw')
     p.add_argument('--learning_rate',type=float,default=None);p.add_argument('--weight_decay',type=float,default=.01)
     p.add_argument('--epochs',type=int,default=1);p.add_argument('--batch_size',type=int,default=32)
@@ -60,6 +61,9 @@ def parser():
     p.add_argument('--async_checkpoint',action='store_true')
     p.add_argument('--cuda_graph',action='store_true')
     p.add_argument('--fuse_projections',action='store_true')
+    p.add_argument('--fused_ops',action='store_true',help='Native Dense norm/cast and SwiGLU/amax fusion with compact gradients')
+    p.add_argument('--attention_backend',choices=['triton','cudnn','hybrid'],default='triton')
+    p.add_argument('--attention_cudnn_min_seq',type=int,default=4096)
     p.add_argument('--loss_chunk_size',type=int,default=0)
     p.add_argument('--distributed_backend',choices=['auto','nccl','tcp'],default='auto')
     p.add_argument('--pin_memory',type=int,choices=[0,1],default=1)
@@ -77,6 +81,7 @@ def parser():
     p.add_argument('--allocator_cache_mib',type=int,default=256)
     p.add_argument('--allocator_backend',choices=['driver','async'],default='driver')
     p.add_argument('--selective_cache_mib',type=int)
+    p.add_argument('--selective_cache_by_seq',default='',help='Optional per-bucket saved-output MiB, e.g. 3072:768,4096:1024')
     p.add_argument('--workspace_mib',type=int,default=32);p.add_argument('--candidates',type=int,default=8)
     p.add_argument('--tune',action='store_true');p.add_argument('--overlap_dw',action='store_true');p.add_argument('--dw_sm_target',type=int,default=0)
     p.add_argument('--beta',type=float,default=.1);p.add_argument('--alpha',type=float,default=.5);p.add_argument('--temperature',type=float,default=1.)
@@ -101,6 +106,9 @@ def read_config(args):
     if args.selective_cache_mib is not None:
         if args.selective_cache_mib<0:raise ValueError('selective cache budget must be nonnegative')
         raw['selective_cache_mib']=args.selective_cache_mib
+    if args.selective_cache_by_seq:
+        from model.dense_cublas.selective import parse_cache_budgets
+        raw['selective_cache_by_seq']=parse_cache_budgets(args.selective_cache_by_seq)
     request=WebUIRequest.from_dicts(raw,dict(train_type=args.train_type,batch_size=args.batch_size,max_seq_len=args.max_seq_len,
         optimizer=args.optimizer,param_dtype=args.param_dtype,activation_dtype=args.dtype,kv_cache_dtype=args.kv_cache_dtype,num_workers=args.num_workers,prefetch_factor=args.prefetch_factor,pin_memory=bool(args.pin_memory)))
     for key in ('epochs','batch_size','max_seq_len','accumulation_steps','log_interval','save_interval','max_gen_len','max_total_len','max_turns','num_generations','ppo_update_iters','mini_batch_size'):
@@ -249,7 +257,7 @@ def rl_step(args,model,reference,critic,optimizer,critic_optimizer,rows,tokenize
     finally:model.training=prior
 
 
-def train(args,backend=None,tokenizer=None,reward_model=None):
+def train(args,backend=None,tokenizer=None,reward_model=None,observer=None):
     config=read_config(args)
     dtype={'bfloat16':'bf16','float16':'fp16','fp32':'fp32'}[args.dtype]
     lr=args.learning_rate if args.learning_rate is not None else (5e-4 if args.train_type=='pretrain' else 1e-6 if args.train_type in ('ppo','grpo','agent') else 5e-5)
@@ -262,11 +270,45 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
     suffix='_mini' if args.dataset_size=='mini' else ''
     default_data={'pretrain':f'pretrain_t2t{suffix}','full_sft':f'sft_t2t{suffix}','distillation':f'sft_t2t{suffix}',
         'lora':'lora_medical','dpo':'dpo','ppo':'rlaif','grpo':'rlaif','agent':'agent_rl'}
-    data=JsonlDataset(args.data_path or './dataset/'+default_data[args.train_type]+'.jsonl',tokenizer,args.train_type,args.max_seq_len,rng)
-    if args.packing:data=PackedPretrain(data,args.packing_cache,isolate_documents=args.packed_attention)
     buckets=sorted(set(int(x) for x in args.sequence_buckets.split(',') if x))
     if any(x<2 or x>args.max_seq_len for x in buckets):raise ValueError('sequence_buckets must be between 2 and max_seq_len')
-    with backend_context as backend, ProcessGroup(backend,args.distributed_backend) as group, BatchLoader(data,args.num_workers,args.prefetch_factor,args.seed) as loader, checkpoint.AsyncCheckpointer(args.async_checkpoint) as saver:
+    path=args.data_path or './dataset/'+default_data[args.train_type]+'.jsonl'
+    streaming=Path(path).suffix.lower() in ('.parquet','.pq')
+    if streaming:
+        if args.train_type!='pretrain' or not args.packing or not args.packed_attention:
+            raise ValueError('native Parquet currently requires packed, document-isolated pretraining')
+        from model.dense_cublas.parquet_data import ParquetPretrain
+        data=ParquetPretrain(path,tokenizer,args.packing_cache,lengths=buckets or [args.max_seq_len],
+            token_budget=args.batch_size*args.max_seq_len,threads=max(1,args.num_workers),seed=args.seed)
+        loader_context=data
+    else:
+        data=JsonlDataset(path,tokenizer,args.train_type,args.max_seq_len,rng)
+        if args.packing:data=PackedPretrain(data,args.packing_cache,isolate_documents=args.packed_attention)
+        loader_context=BatchLoader(data,args.num_workers,args.prefetch_factor,args.seed)
+    with backend_context as backend, ProcessGroup(backend,args.distributed_backend) as group, loader_context as loader, checkpoint.AsyncCheckpointer(args.async_checkpoint) as saver:
+        if streaming and group.world!=1:raise ValueError('bounded native Parquet currently supports one GPU')
+        if args.fused_ops:
+            if config.get('use_moe') or config.get('model_architecture','standard')!='standard':
+                raise ValueError('fused_ops currently requires the standard Dense backbone')
+            from model.dense_cublas.policy import enable_fused_ops
+            enable_fused_ops(backend)
+        backend.muon_gemm_backend=args.muon_gemm_backend
+        if args.muon_gemm_backend=='cublas':
+            if not args.muon_mantissa or args.optimizer!='muon':
+                raise ValueError('Muon cuBLASLt GEMM requires split-weight Muon')
+            native=getattr(backend,'native',None)
+            if native is None or native._plan_batched is None or native._run_batched is None:
+                raise RuntimeError('rebuild the native bridge before selecting Muon cuBLASLt GEMM')
+        if args.attention_cudnn_min_seq<1:raise ValueError('attention threshold must be positive')
+        if args.attention_backend!='triton':
+            if not args.packed_attention or dtype!='bf16' or args.cuda_graph:
+                raise ValueError('native cuDNN attention currently requires BF16 packed attention without CUDA Graph')
+            from model.dense_cublas.vendor_attention import NativeAttention
+            backend.native_attention=NativeAttention(backend)
+            backend.native_attention.minimum_seq=args.attention_cudnn_min_seq if args.attention_backend=='hybrid' else 0
+            if args.attention_backend=='hybrid':
+                backend.attention_forward_tile=128;backend.attention_forward_cols=64
+                backend.kernel_options['model.dense_triton.attention.forward']=dict(num_warps=8,num_stages=2)
         fp8=args.fp8=='1' or (args.fp8=='auto' and getattr(backend,'arch',0)>=89)
         e=Engine(backend,fp8=fp8,seed=args.seed+group.rank,fp8_filter=args.fp8_filter)
         model=Model(e,config,args.param_dtype,dtype,args.kv_cache_dtype,args.seed,muon_mantissa=args.muon_mantissa)
@@ -306,6 +348,13 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
         extra_models={k:v for k,v in {'reference':reference,'teacher':teacher,'critic':critic}.items() if v is not None}
         extra_optimizers={'critic':critic_optimizer} if critic_optimizer else {}
         progress={'epoch':0,'cursor':0,'order':None,'steps':0,'dataset_size':len(data),'dataset_path':str(data.path.resolve()),'batch_size':args.batch_size,'accumulation_steps':args.accumulation_steps,'train_type':args.train_type,'data_seed':args.seed,'loader_version':1,'sampler_version':2,'world_size':group.world,'data_options':dict(packing=args.packing,length_bucket=args.length_bucket,sequence_buckets=buckets,packed_attention=args.packed_attention),'compute_options':dict(fuse_projections=args.fuse_projections,loss_chunk_size=args.loss_chunk_size)}
+        progress['compute_options']['fused_ops']=args.fused_ops
+        progress['compute_options']['muon_gemm_backend']=args.muon_gemm_backend
+        progress['compute_options'].update(attention_backend=args.attention_backend,attention_cudnn_min_seq=args.attention_cudnn_min_seq)
+        data_options=dict(progress['data_options'])
+        if streaming:
+            data_options['parquet_fingerprint']=data.fingerprint
+            progress.update(data_options=data_options,parquet_cursor=dict(group=0,batch=0),processed_tokens=0)
         if args.from_resume:
             if resume_source.suffix=='.pth':
                 from model.dense_cublas.legacy_checkpoint import import_resume
@@ -314,10 +363,17 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
             imported=checkpoint.metadata(resume).get('legacy_import')
             if imported:progress['legacy_import']=imported
             progress.get('data_options',{}).setdefault('packed_attention',False)
-            if progress.get('data_options',dict(packing=False,length_bucket=0,sequence_buckets=[],packed_attention=False))!=dict(packing=args.packing,length_bucket=args.length_bucket,sequence_buckets=buckets,packed_attention=args.packed_attention):raise ValueError('data packing/buckets changed since resume')
-            compute_options=dict(fuse_projections=args.fuse_projections,loss_chunk_size=args.loss_chunk_size)
+            if progress.get('data_options',dict(packing=False,length_bucket=0,sequence_buckets=[],packed_attention=False))!=data_options:raise ValueError('data packing/buckets changed since resume')
+            compute_options=dict(fuse_projections=args.fuse_projections,loss_chunk_size=args.loss_chunk_size,
+                fused_ops=args.fused_ops,muon_gemm_backend=args.muon_gemm_backend,
+                attention_backend=args.attention_backend,attention_cudnn_min_seq=args.attention_cudnn_min_seq)
             if imported:progress['compute_options']=compute_options
-            if progress.get('compute_options',dict(fuse_projections=False,loss_chunk_size=0))!=compute_options:raise ValueError('native precision-affecting execution options changed since resume')
+            previous_compute=progress.get('compute_options',dict(fuse_projections=False,loss_chunk_size=0))
+            previous_compute.setdefault('fused_ops',False)
+            previous_compute.setdefault('muon_gemm_backend','triton')
+            previous_compute.setdefault('attention_backend','triton')
+            previous_compute.setdefault('attention_cudnn_min_seq',4096)
+            if previous_compute!=compute_options:raise ValueError('native precision-affecting execution options changed since resume')
             old_world=progress.get('world_size',1)
             if old_world!=group.world:
                 if optimizer.accumulated or (critic_optimizer and critic_optimizer.accumulated):
@@ -347,8 +403,13 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
             import swanlab
             logger=swanlab.init(project=args.wandb_project,config=vars(args))
         total_batches=math.ceil(math.ceil(len(data)/group.world)/args.batch_size);total_steps=args.epochs*total_batches
+        if streaming:
+            total_batches=math.ceil(data.plan['tokens']/(data.token_budget*.97))
+            total_steps=args.epochs*total_batches
+        if observer:observer.start(args,backend,model,optimizer,data,progress,rng=rng)
         print(f'Backend=cuBLASLt/Triton | mode={args.train_type} | FP8={fp8} | parameters={sum(p.size for p in model.parameters(False)):,}',flush=True)
         started=time.perf_counter();last_loss=None;stop_requested=False
+        report_started=started;report_tokens=0
         previous_sigint=None
         if threading.current_thread() is threading.main_thread():
             previous_sigint=signal.getsignal(signal.SIGINT)
@@ -365,17 +426,26 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
         step_graph=None
         try:
             for epoch in range(progress['epoch'],args.epochs):
-                sampler_rng=rng if progress.get('sampler_version',1)==1 else np.random.default_rng(np.random.SeedSequence((args.seed,epoch)))
-                global_order=progress['order'] if progress['order'] is not None else sampler_rng.permutation(len(data)).tolist()
-                if progress['order'] is None and args.length_bucket:global_order=bucket_order(data,global_order,args.length_bucket)
-                progress.update(epoch=epoch,order=global_order)
-                order=shard_order(global_order,group.world,group.rank)
-                cursor=progress['cursor']
-                batches=((begin,trim_batch(batch,tokenizer.pad,buckets)) for begin,batch in loader.batches(order,args.batch_size,epoch,cursor))
+                if streaming:
+                    progress.update(epoch=epoch,order=None)
+                    batches=loader.batches(epoch,progress.get('parquet_cursor'))
+                    order=None
+                else:
+                    sampler_rng=rng if progress.get('sampler_version',1)==1 else np.random.default_rng(np.random.SeedSequence((args.seed,epoch)))
+                    global_order=progress['order'] if progress['order'] is not None else sampler_rng.permutation(len(data)).tolist()
+                    if progress['order'] is None and args.length_bucket:global_order=bucket_order(data,global_order,args.length_bucket)
+                    progress.update(epoch=epoch,order=global_order)
+                    order=shard_order(global_order,group.world,group.rank)
+                    cursor=progress['cursor']
+                    batches=((begin,trim_batch(batch,tokenizer.pad,buckets)) for begin,batch in loader.batches(order,args.batch_size,epoch,cursor))
+                wall_start=time.perf_counter()
                 for begin,batch,device_batch in prefetch.batches(batches):
                     mark=backend.mark();step_start=time.perf_counter()
+                    last_batch=begin['group']>=len(data.plan['groups']) if streaming else begin+args.batch_size>=len(order)
+                    next_cursor=progress['cursor']+len(batch[0]) if streaming else min(begin+args.batch_size,len(order))
                     schedule=progress.get('legacy_schedule')
                     current_lr=cosine_lr(progress['steps']+1,schedule['total'],schedule['maximum']) if schedule else cosine_lr(progress['steps'],total_steps,lr)
+                    if streaming:current_lr=cosine_lr(progress['processed_tokens']+begin['valid_tokens'],data.plan['tokens']*args.epochs,lr)
                     if optimizer.scheduler:current_lr=optimizer.scheduler['_last_lr'][0]
                     graph_used=False
                     if args.train_type in ('ppo','grpo','agent'):
@@ -383,22 +453,52 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
                     else:
                         if not group.any(np.any(batch[1][:,1:]!=-100)):
                             print('Skipping batch with no supervised tokens.',flush=True)
-                            progress['cursor']=min(begin+args.batch_size,len(order));backend.release_since(mark);continue
+                            progress['cursor']=next_cursor
+                            if streaming:
+                                progress['parquet_cursor']=dict(begin)
+                                progress['processed_tokens']+=begin['valid_tokens']
+                            backend.release_since(mark);continue
                         if args.cuda_graph and step_graph is None:
                             from model.dense_cublas.graph import StepGraph
                             step_graph=StepGraph(model,optimizer,batch,lambda values:supervised_step(args,model,values),args.accumulation_steps)
                         graph_used=step_graph is not None and tuple(x.shape for x in batch)==step_graph.shape
-                        if graph_used:last_loss=step_graph.run(batch,current_lr,begin+args.batch_size>=len(order))
+                        if graph_used:last_loss=step_graph.run(batch,current_lr,last_batch)
                         else:
-                            loss=supervised_step(args,model,device_batch,reference,teacher);last_loss=e.item(loss);optimizer.backward(loss)
-                        tokens=batch[0].size
-                    if not graph_used and (optimizer.accumulated>=args.accumulation_steps or begin+args.batch_size>=len(order)):optimizer.step(current_lr)
-                    progress['steps']+=1;progress['cursor']=min(begin+args.batch_size,len(order))
-                    # Graph.run already waits for its statistics/loss download.
-                    if not graph_used:backend.synchronize()
-                    elapsed=time.perf_counter()-step_start;rate=tokens/max(elapsed,1e-9)
+                            loss=supervised_step(args,model,device_batch,reference,teacher)
+                            optimizer.backward(loss)
+                            if args.train_type!='pretrain':last_loss=e.item(loss)
+                        tokens=int(np.count_nonzero(batch[1][:,1:]!=-100)) if args.train_type=='pretrain' else batch[0].size
+                    if not graph_used and args.train_type=='pretrain':
+                        # Gradients have reached persistent optimizer buffers.
+                        # Release checkpoint activations before allocating NS
+                        # workspaces; only the scalar loss is still consumed.
+                        backend.release_since(mark,keep=(loss.data,))
+                    if not graph_used and (optimizer.accumulated>=args.accumulation_steps or last_batch):optimizer.step(current_lr)
+                    progress['steps']+=1;progress['cursor']=next_cursor
+                    if streaming:
+                        progress['parquet_cursor']=dict(begin)
+                        progress['processed_tokens']+=begin['valid_tokens']
+                    stop_file=os.environ.get('INSTINCT_STOP_FILE')
+                    pause_requested=stop_requested or bool(stop_file and Path(stop_file).exists()) or Path(args.checkpoint_dir,'.pause_request').exists()
+                    pause_requested=group.any(pause_requested)
+                    limit_reached=group.any(bool(args.max_steps and progress['steps']>=args.max_steps))
+                    stopping=(pause_requested or limit_reached) and optimizer.accumulated==0
+                    reporting=group.rank==0 and (progress['steps']%args.log_interval==0 or last_batch)
+                    # Pretraining only downloads the loss when it is consumed.
+                    # This also completes queued work before reporting/stopping.
+                    if not graph_used:
+                        if args.train_type=='pretrain':
+                            if reporting or last_batch or stopping:last_loss=e.item(loss)
+                        else:backend.synchronize()
+                    now=time.perf_counter();elapsed=now-wall_start;wall_start=now
+                    rate=tokens/max(elapsed,1e-9)
+                    report_tokens+=tokens
+                    if reporting and args.train_type=='pretrain':
+                        rate=report_tokens/max(now-report_started,1e-9)
+                        report_tokens=0;report_started=now
                     backend.release_since(mark)
-                    if group.rank==0 and (progress['steps']%args.log_interval==0 or progress['cursor']==len(order)):
+                    if observer:observer.step(backend,model,optimizer,progress,batch,tokens,elapsed)
+                    if reporting:
                         eta=(time.perf_counter()-started)/max(progress['steps'],1)*(total_steps-progress['steps'])/60.
                         print(f'Epoch:[{epoch+1}/{args.epochs}]({math.ceil(progress["cursor"]/args.batch_size)}/{total_batches}), loss: {last_loss:.6f}, learning_rate: {current_lr:.8f}, epoch_time: {eta:.3f}min, tokens/s: {rate:.1f}',flush=True)
                         metrics={'loss':last_loss,'learning_rate':current_lr,'tokens_per_second':rate,'step':progress['steps']}
@@ -412,11 +512,7 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
                         if logger:logger.log(metrics)
                     if progress['steps']%args.save_interval==0:
                         save_all()
-                    stop_file=os.environ.get('INSTINCT_STOP_FILE')
-                    pause_requested = stop_requested or bool(stop_file and Path(stop_file).exists()) or Path(args.checkpoint_dir,'.pause_request').exists()
-                    pause_requested = group.any(pause_requested)
-                    limit_reached = group.any(bool(args.max_steps and progress['steps']>=args.max_steps))
-                    if (pause_requested or limit_reached) and optimizer.accumulated==0:
+                    if stopping:
                         save_all();saver.flush()
                         assert checkpoint.metadata(resume)['progress']['steps']==progress['steps']
                         if group.rank==0:assert checkpoint.metadata(weights)['progress']['steps']==progress['steps']
@@ -426,6 +522,7 @@ def train(args,backend=None,tokenizer=None,reward_model=None):
                             print(f'Native training paused: verified full state at step {progress["steps"]}.',flush=True)
                         return {'weights':str(weights),'resume':str(resume),'loss':last_loss,'steps':progress['steps'],'paused':bool(pause_requested)}
                 progress.update(epoch=epoch+1,cursor=0,order=None)
+                if streaming:progress['parquet_cursor']=dict(group=0,batch=0)
                 save_all()
         finally:
             prefetch.close()

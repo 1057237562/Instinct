@@ -16,6 +16,7 @@ class ScheduleConfig:
     overlap_dw: bool = False
     dw_sm_target: int = 0  # Heuristic hint, not an SM reservation.
     tune_repeats: int = 5
+    fp8_fast_accum_output: bool = False
 
     def __post_init__(self):
         if self.workspace_mib < 0 or not 1 <= self.candidates <= 64 or self.dw_sm_target < 0 or self.tune_repeats < 1:
@@ -158,6 +159,23 @@ class CublasBackend(CudaBackend):
             self._commands.append(Command(label, lane, fn))
 
     def launch(self, fn, grid, args, **constants):
+        block=getattr(self,'elementwise_block',None)
+        if block and len(grid)==1:
+            module,name=fn.fn.__module__,fn.__name__
+            size_key=block_key=None
+            if module=='model.dense_cublas.tensor_kernels' and name in (
+                    'fill','masked_fill','binary','binary_scalar','scalar_extreme_backward',
+                    'unary','unary_backward','strided_copy','dropout','scaled_copy'):
+                size_key,block_key='N','BLOCK'
+            elif module=='model.dense_triton.elementwise' and name in ('cast','add','_swiglu_forward','_swiglu_backward'):
+                size_key,block_key='SIZE','BLOCK'
+            elif module=='model.dense_triton.linear' and name=='quantize':
+                size_key,block_key='SIZE','BLOCK'
+            elif module=='model.dense_cublas.fused' and name=='rounded_swiglu':
+                size_key,block_key='N','B'
+            if size_key and constants[size_key]>=65536:
+                constants[block_key]=block
+                grid=((constants[size_key]+block-1)//block,)
         stream = self.stream
         def execute():
             with self.on_stream(stream):
@@ -306,15 +324,17 @@ class CublasBackend(CudaBackend):
         is_dw = stream == self.weight_stream and stream != self.main_stream
         hint = self.config.dw_sm_target if is_dw else 0
         size = self.config.workspace_mib * 1024 * 1024
-        key = (m, n, k, a.dtype, b.dtype, out.dtype, size, hint, stream, transpose_a, transpose_b)
+        fast_accum=bool(self.config.fp8_fast_accum_output and role=='forward' and a.dtype.startswith('fp8'))
+        key = (m, n, k, a.dtype, b.dtype, out.dtype, size, hint, stream, transpose_a, transpose_b, fast_accum)
         workspace = self.workspaces[stream]
         pointers = (a.storage, b.storage, out.storage,
                     None if scale_a is None else scale_a.storage,
                     None if scale_b is None else scale_b.storage,
                     None if workspace is None else workspace.storage, size, stream)
         if key not in self._plans:
+            extra={'fast_accum':True} if fast_accum else {}
             plan, candidates = self.native.create_plan(m, n, k, a.dtype, b.dtype, out.dtype,
-                                                       size, self.config.candidates, hint, transpose_a, transpose_b)
+                                                       size, self.config.candidates, hint, transpose_a, transpose_b,**extra)
             # Drain competing work so one-off tuning isn't biased by outstanding dW.
             # All this happens during build, never inside capture/replay.
             self.synchronize()
@@ -340,6 +360,7 @@ class CublasBackend(CudaBackend):
             self._plans[key] = (plan, best['index'], {'shape_mnk': [m, n, k], 'types': [a.dtype, b.dtype, out.dtype],
                     'lane': 'dW' if is_dw else 'main', 'sm_target': hint,
                     'transpose_ab': [transpose_a, transpose_b],
+                    'fp8_fast_accum':fast_accum,
                     'selected_index': best['index'], 'candidates': candidates})
         plan, index, _ = self._plans[key]
         self._submit('cublasLt:' + role, lambda: self.native.run(plan, index, *pointers))
@@ -348,6 +369,49 @@ class CublasBackend(CudaBackend):
         return {'cublas_version': self.native.version, 'bridge_abi': self.native.abi,
                 'direct_layout': self.direct_layout, 'workspace_bytes_per_stream': self.config.workspace_mib * 1024 * 1024,
                 'streams': len(self._streams), 'plans': [record for _, _, record in self._plans.values()]}
+
+    def batched_matmul(self,a,b,c,out,m,n,k,astrides,bstrides,alpha=1.,beta=0.):
+        self._check()
+        batch=a.shape[0]
+        if a.dtype!=b.dtype or a.dtype!=out.dtype or (beta and c.dtype!=out.dtype):
+            raise ValueError('batched GEMM requires matching high precision dtypes')
+        if a.dtype not in ('bf16','fp16','fp32') or b.shape[0]!=batch or out.shape!=(batch,m,n):
+            raise ValueError('invalid batched GEMM geometry')
+        for tensor in (a,b,c,out):
+            self._check_tensor(tensor,check_context=False)
+            if tensor.storage%256:raise ValueError('batched GEMM requires aligned base allocations')
+        if beta and c.shape!=(batch,m,n):raise ValueError('batched GEMM C shape mismatch')
+        def transpose(strides,rows,cols):
+            if strides==(rows*cols,cols,1):return False
+            if strides==(rows*cols,1,rows):return True
+            raise ValueError('batched GEMM only supports contiguous matrices or their transposes')
+        ta,tb=transpose(bstrides,k,n),transpose(astrides,m,k)
+        size=self.config.workspace_mib*2**20;stream=self.stream
+        workspace=self.workspaces[stream]
+        key=('batched',m,n,k,batch,a.dtype,astrides,bstrides,size,stream,bool(beta))
+        pointers=(b.storage,a.storage,c.storage if beta else out.storage,out.storage,
+                  float(alpha),float(beta),None if workspace is None else workspace.storage,size,stream)
+        if key not in self._plans:
+            plan,candidates=self.native.create_batched_plan(n,m,k,a.dtype,size,self.config.candidates,
+                ta,tb,batch,(bstrides[0],astrides[0],m*n))
+            self.synchronize();winners=[]
+            for candidate in candidates:
+                index=candidate['index']
+                try:
+                    self.native.run_batched(plan,index,*pointers)
+                    if self.config.tune:
+                        candidate['median_ms']=statistics.median(self.time_call(
+                            lambda i=index:self.native.run_batched(plan,i,*pointers),stream,self.config.tune_repeats) for _ in range(3))
+                    else:self.synchronize()
+                    winners.append(candidate)
+                    if not self.config.tune:break
+                except LtError as exc:candidate['rejected']=str(exc)
+            if not winners:raise LtError('no usable batched cuBLASLt algorithm')
+            best=min(winners,key=lambda x:x.get('median_ms',x['index']))
+            self._plans[key]=(plan,best['index'],dict(shape_mnk=[m,n,k],batch=batch,
+                types=[a.dtype]*3,lane='Muon',selected_index=best['index'],candidates=candidates))
+        plan,index,_=self._plans[key]
+        self._submit('cublasLt:muon',lambda:self.native.run_batched(plan,index,*pointers))
 
     def __exit__(self, exc_type, exc, traceback):
         error = None

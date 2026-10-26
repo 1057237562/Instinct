@@ -169,6 +169,51 @@ class StepGraph:
         return float(loss_value.reshape(-1)[0])
 
 
+class MicrostepGraph:
+    """Capture forward/backward/accumulation; keep Muon updates on the eager path.
+
+    Preparation and capture have gradient writes disabled. Model weights and
+    optimizer counters are never updated while constructing the graph.
+    """
+    def __init__(self, model, optimizer, batch, loss_fn):
+        if optimizer.loss_scaling or model.config['dropout'] or model.config.get('use_moe'):
+            raise ValueError('microstep graphs require Dense, dropout=0 and fixed loss scale')
+        if optimizer.distributed and optimizer.distributed.world > 1:
+            raise ValueError('microstep graphs currently require one GPU')
+        self.model, self.opt, self.e, self.b = model, optimizer, model.e, model.e.backend
+        self.shape = tuple(array.shape for array in batch)
+        mark = self.b.mark()
+        self.inputs = tuple(self.e.array(np.asarray(array, np.int64)) for array in batch)
+        self.control = self.e.array(np.zeros(2, np.float32))
+        self.parameters = set()
+
+        def prepare():
+            loss = loss_fn(self.inputs)
+            def consume(parameter, gradient):
+                if parameter in optimizer.gradients:
+                    self.b.launch(accumulate, (triton.cdiv(parameter.size,256),),
+                        (gradient, optimizer.gradients[parameter].data, self.control.data), N=parameter.size)
+                    self.parameters.add(parameter)
+                return True
+            self.e.vjp(loss, self.e.full(loss.shape, optimizer.scale).data, leaf_callback=consume)
+            return loss.data
+
+        self.plan = self.b.build(prepare)
+        self.b.pin_since(mark)
+        self.plan.capture()
+
+    def run(self, batch):
+        if tuple(array.shape for array in batch) != self.shape:
+            raise ValueError('microstep graph shape changed')
+        self.b.copy_many_from_numpy(tuple(x.data for x in self.inputs)+(self.control.data,),
+            tuple(np.asarray(array,np.int64) for array in batch)+(np.asarray([0.,1.],np.float32),))
+        loss = self.plan.replay()
+        value = float(self.b.to_numpy(loss).reshape(-1)[0])
+        self.opt.present.update(self.parameters)
+        self.opt.accumulated += 1
+        return value
+
+
 @triton.jit
 def advance_steps(Steps,Stats,Used,N:tl.constexpr,B:tl.constexpr=256):
     if tl.load(Stats+3)!=0:

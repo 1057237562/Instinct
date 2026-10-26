@@ -72,12 +72,15 @@ API int instinct_lt_destroy(void* handle) {
 
 // Column-major op(A)[m,k] @ op(B)[k,n] -> C[m,n]. High-precision inputs
 // use natural leading dimensions directly; FP8 uses explicitly packed TN.
-API int instinct_lt_plan(void* handle, int64_t m, int64_t n, int64_t k,
+static int make_plan(void* handle, int64_t m, int64_t n, int64_t k,
                          int a_type, int b_type, int out_type, uint64_t workspace,
-                         int max_candidates, int sm_target, int transpose_a, int transpose_b, void** out) {
+                         int max_candidates, int sm_target, int transpose_a, int transpose_b, int fast_accum,
+                         int batch, int64_t stride_a, int64_t stride_b, int64_t stride_c, void** out) {
     GUARD_BEGIN
     if (!out || !handle || m <= 0 || n <= 0 || k <= 0 || max_candidates < 1 || max_candidates > 64)
         throw std::invalid_argument("invalid matmul plan arguments");
+    if (batch < 1 || (batch > 1 && (stride_a <= 0 || stride_b <= 0 || stride_c <= 0)))
+        throw std::invalid_argument("invalid batched matmul strides");
     *out = nullptr;
     auto plan = std::make_unique<Plan>();
     plan->handle = static_cast<cublasLtHandle_t>(handle);
@@ -97,7 +100,7 @@ API int instinct_lt_plan(void* handle, int64_t m, int64_t n, int64_t k,
     LT(cublasLtMatmulDescSetAttribute(plan->operation, CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(transa)));
     LT(cublasLtMatmulDescSetAttribute(plan->operation, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(transb)));
     if (plan->fp8) {
-        int8_t fast = 0;
+        int8_t fast = fast_accum ? 1 : 0;
         LT(cublasLtMatmulDescSetAttribute(plan->operation, CUBLASLT_MATMUL_DESC_FAST_ACCUM, &fast, sizeof(fast)));
     }
     if (sm_target > 0)
@@ -107,6 +110,13 @@ API int instinct_lt_plan(void* handle, int64_t m, int64_t n, int64_t k,
     LT(cublasLtMatrixLayoutCreate(&plan->a, dtype(a_type), ar, ac, ar));
     LT(cublasLtMatrixLayoutCreate(&plan->b, dtype(b_type), br, bc, br));
     LT(cublasLtMatrixLayoutCreate(&plan->c, dtype(out_type), m, n, m));
+    if (batch > 1) {
+        auto set_batch = [&](cublasLtMatrixLayout_t layout, int64_t stride) {
+            LT(cublasLtMatrixLayoutSetAttribute(layout,CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,&batch,sizeof(batch)));
+            LT(cublasLtMatrixLayoutSetAttribute(layout,CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,&stride,sizeof(stride)));
+        };
+        set_batch(plan->a,stride_a);set_batch(plan->b,stride_b);set_batch(plan->c,stride_c);
+    }
     LT(cublasLtMatmulPreferenceCreate(&plan->preference));
     size_t limit = static_cast<size_t>(workspace);
     LT(cublasLtMatmulPreferenceSetAttribute(plan->preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &limit, sizeof(limit)));
@@ -127,6 +137,29 @@ API int instinct_lt_plan(void* handle, int64_t m, int64_t n, int64_t k,
     if (plan->candidates.empty()) throw std::runtime_error("no cuBLASLt algorithm fits precision/layout/workspace constraints");
     *out = plan.release();
     GUARD_END
+}
+
+API int instinct_lt_plan_ex(void* handle, int64_t m, int64_t n, int64_t k,
+                         int a_type, int b_type, int out_type, uint64_t workspace,
+                         int max_candidates, int sm_target, int transpose_a, int transpose_b, int fast_accum, void** out) {
+    return make_plan(handle,m,n,k,a_type,b_type,out_type,workspace,max_candidates,sm_target,
+                     transpose_a,transpose_b,fast_accum,1,0,0,0,out);
+}
+
+API int instinct_lt_plan_batched(void* handle, int64_t m, int64_t n, int64_t k,
+                         int data_type, uint64_t workspace, int max_candidates,
+                         int transpose_a, int transpose_b, int batch,
+                         int64_t stride_a, int64_t stride_b, int64_t stride_c, void** out) {
+    return make_plan(handle,m,n,k,data_type,data_type,data_type,workspace,max_candidates,0,
+                     transpose_a,transpose_b,0,batch,stride_a,stride_b,stride_c,out);
+}
+
+// Retain ABI 2's precise-accumulation behavior for existing callers.
+API int instinct_lt_plan(void* handle, int64_t m, int64_t n, int64_t k,
+                         int a_type, int b_type, int out_type, uint64_t workspace,
+                         int max_candidates, int sm_target, int transpose_a, int transpose_b, void** out) {
+    return instinct_lt_plan_ex(handle,m,n,k,a_type,b_type,out_type,workspace,
+                               max_candidates,sm_target,transpose_a,transpose_b,0,out);
 }
 
 API int instinct_lt_plan_destroy(void* opaque) {
@@ -168,5 +201,21 @@ API int instinct_lt_run(void* opaque, int index, const void* a, const void* b, v
     LT(cublasLtMatmul(plan.handle, plan.operation, &alpha, a, plan.a, b, plan.b,
                       &beta, out, plan.c, out, plan.c, &result.algo,
                       workspace, static_cast<size_t>(workspace_bytes), static_cast<cudaStream_t>(stream)));
+    GUARD_END
+}
+
+API int instinct_lt_run_batched(void* opaque, int index, const void* a, const void* b,
+                               const void* c, void* out, float alpha, float beta,
+                               void* workspace, uint64_t workspace_bytes, void* stream) {
+    GUARD_BEGIN
+    if (!opaque || !a || !b || !c || !out) throw std::invalid_argument("null batched GEMM argument");
+    auto& plan=*static_cast<Plan*>(opaque);
+    auto& result=plan.candidates.at(index);
+    if (plan.fp8) throw std::invalid_argument("optimizer batched GEMM uses high precision operands");
+    if (result.workspaceSize>workspace_bytes || (result.workspaceSize && !workspace))
+        throw std::invalid_argument("insufficient batched GEMM workspace");
+    LT(cublasLtMatmul(plan.handle,plan.operation,&alpha,a,plan.a,b,plan.b,&beta,c,plan.c,
+                     out,plan.c,&result.algo,workspace,static_cast<size_t>(workspace_bytes),
+                     static_cast<cudaStream_t>(stream)));
     GUARD_END
 }

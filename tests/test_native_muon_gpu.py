@@ -28,9 +28,11 @@ def lerp(a,b,w):
 @pytest.mark.parametrize('momentum_dtype',['fp32','bf16'])
 @pytest.mark.parametrize('steps',[0,5])
 @pytest.mark.parametrize('allocator',['driver','async'])
-def test_split_muon_matches_batched_bf16_reference(momentum_dtype,steps,allocator):
+@pytest.mark.parametrize('gemm_backend',['triton','cublas'])
+def test_split_muon_matches_batched_bf16_reference(momentum_dtype,steps,allocator,gemm_backend):
     rng=np.random.default_rng(23)
     with TrainingBackend(config=ScheduleConfig(),allocator_backend=allocator) as backend:
+        backend.muon_gemm_backend=gemm_backend
         e=Engine(backend);params=[]
         for index,shape in enumerate(((16,32),(16,32),(32,16),(32,32))):
             params.append(e.array(rng.normal(0,.1,shape).astype(np.float32),'bf16',True,f'layer.{index}.weight'))

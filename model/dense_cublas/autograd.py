@@ -140,7 +140,8 @@ class Engine:
                 self.backend.launch(tk.scalar_extreme_backward, (triton.cdiv(a.size, 256),),
                                     (a.data, g, dx, Scalar(float(b))), N=a.size, MAXIMUM=op == 'max')
                 return (dx,)
-            return self.wrap(out) if op in ('gt', 'ge', 'eq') else self._node(out, (a,), backward)
+            grad_dtype='preserve' if op=='add' and getattr(self.backend,'compact_gradients',False) else 'fp32'
+            return self.wrap(out) if op in ('gt', 'ge', 'eq') else self._node(out, (a,), backward,grad_dtype)
         shape = tuple(np.broadcast_shapes(a.shape, b.shape))
         dtype = a.dtype if scalar or a.dtype == b.dtype else 'fp32'
         if op in ('gt', 'ge', 'eq'): dtype = 'fp32'
@@ -160,7 +161,8 @@ class Engine:
             else: return None, None
             return (None if ga is None else self.sum_to(ga, a.shape).data,
                     None if gb is None else self.sum_to(gb, b.shape).data)
-        return self.wrap(out) if op in ('gt', 'ge', 'eq') else self._node(out, (a, b), backward)
+        grad_dtype='preserve' if op=='add' and getattr(self.backend,'compact_gradients',False) else 'fp32'
+        return self.wrap(out) if op in ('gt', 'ge', 'eq') else self._node(out, (a, b), backward,grad_dtype)
 
     def squared_norm(self, values, scale=1.):
         """Optimizer-only reduction: O(N/1024) scratch, no full-size products."""
@@ -318,14 +320,36 @@ class Engine:
 
     def _linear_node(self,x,weight,out,saved):
         def backward(g):
-            result = self.ops.linear_backward(saved, self.ops.cast(g, x.dtype), x.requires_grad, weight.requires_grad)
-            dx,dw=result
-            if dw is not None and self.backend.weight_stream!=self.backend.main_stream:
-                event=self.backend.create_event()
-                with self.backend.on_stream(self.backend.weight_stream):self.backend.record_event(event)
-                dw=PendingGradient(dw,event)
-            return dx,dw
+            return self._linear_vjp(x,weight,saved,g)
         return self._node(out, (x, weight), backward, x.dtype)
+
+    def _linear_vjp(self,x,weight,saved,g):
+        dx,dw=self.ops.linear_backward(saved,self.ops.cast(g,x.dtype),x.requires_grad,weight.requires_grad)
+        if dw is not None and self.backend.weight_stream!=self.backend.main_stream:
+            event=self.backend.create_event()
+            with self.backend.on_stream(self.backend.weight_stream):self.backend.record_event(event)
+            dw=PendingGradient(dw,event)
+        return dx,dw
+
+    def linear_residual_replay(self,x,weight,residual,output):
+        """Rebuild only the VJP of a terminal residual + Linear operation.
+
+        output is the original checkpoint result, not a newly evaluated Linear.
+        Neither Linear's VJP nor addition's VJP reads the terminal output value.
+        """
+        if output.shape!=residual.shape or output.shape!=(*x.shape[:-1],weight.shape[0]):
+            raise ValueError('terminal replay output/residual shape mismatch')
+        previous=self.ops.fp8
+        if self.fp8_filter=='auto':
+            n,k=weight.shape
+            self.ops.fp8=previous and n%16==0 and k%16==0 and not (k<=4096 and n<=1024) and 'lm_head' not in (weight.name or '') and 'embed_tokens' not in (weight.name or '')
+        try:saved=self.ops.linear_saved(x.data,weight.data)
+        finally:self.ops.fp8=previous
+        def backward(g):
+            dx,dw=self._linear_vjp(x,weight,saved,g)
+            return g,dx,dw
+        dtype='preserve' if getattr(self.backend,'compact_gradients',False) else 'fp32'
+        return self._node(output,(residual,x,weight),backward,dtype)
 
     def linear_ce(self, x, weight, labels, chunk_size=256):
         """Chunked projection + fused CE; recompute logits in VJP, never retain T×V."""
@@ -363,26 +387,53 @@ class Engine:
             return dx.data.view(*shape),dw.data
         return self._node(loss.data,(x,weight),backward)
 
-    def swiglu(self,gate,up,round_gate=False):
+    def swiglu(self,gate,up,round_gate=False,up_grad_dtype=None):
         if round_gate:
-            from .fused import rounded_swiglu
+            from .fused import rounded_swiglu,rounded_swiglu_amax
             if gate.shape!=up.shape or gate.dtype!=up.dtype:raise ValueError('SwiGLU inputs differ')
             out=self.backend.empty(gate.shape,gate.dtype)
-            self.backend.launch(rounded_swiglu,(triton.cdiv(gate.size,256),),
-                (gate.data,up.data,out,out,out,out),N=gate.size,BACKWARD=False)
+            fused=getattr(self.backend,'fused_swiglu_amax',False) and self.ops.fp8
+            if fused:
+                partial=self.backend.empty((triton.cdiv(gate.size,1024),),'fp32')
+                self.backend.launch(rounded_swiglu_amax,(partial.numel,),
+                    (gate.data,up.data,out,out,out,out,partial,partial),N=gate.size,BACKWARD=False)
+                out.amax_partial=partial
+            else:self.backend.launch(rounded_swiglu,(triton.cdiv(gate.size,256),),
+                    (gate.data,up.data,out,out,out,out),N=gate.size,BACKWARD=False)
             def backward(g):
                 dg=self.backend.empty(gate.shape,gate.dtype)
-                du=self.backend.empty(up.shape,'fp32')
-                self.backend.launch(rounded_swiglu,(triton.cdiv(gate.size,256),),
-                    (gate.data,up.data,out,g,dg,du),N=gate.size,BACKWARD=True)
+                du=self.backend.empty(up.shape,up_grad_dtype or 'fp32')
+                if fused:
+                    mg,mu=[self.backend.empty((triton.cdiv(gate.size,1024),),'fp32') for _ in range(2)]
+                    self.backend.launch(rounded_swiglu_amax,(mg.numel,),
+                        (gate.data,up.data,out,g,dg,du,mg,mu),N=gate.size,BACKWARD=True)
+                    dg.amax_partial,du.amax_partial=mg,mu
+                else:self.backend.launch(rounded_swiglu,(triton.cdiv(gate.size,256),),
+                        (gate.data,up.data,out,g,dg,du),N=gate.size,BACKWARD=True)
                 return dg,du
             return self._node(out,(gate,up),backward,'preserve')
         out,saved=self.ops.swiglu(gate.data,up.data)
         return self._node(out,(gate,up),lambda g:self.ops.swiglu_backward(saved,self.ops.cast(g,gate.dtype)),gate.dtype)
 
-    def norm(self, x, weight, eps=1e-6):
-        out, saved = self.ops.norm(x.data, weight.data, eps)
+    def norm(self, x, weight, eps=1e-6, out_dtype=None):
+        out, saved = self.ops.norm(x.data, weight.data, eps, out_dtype=out_dtype)
         return self._node(out, (x, weight), lambda g: self.ops.norm_backward(saved, self.ops.cast(g, x.dtype)),x.dtype)
+
+    def residual_norm(self,x,a,weight,eps=1e-6,out_dtype=None):
+        from .fused import residual_norm
+        if x.shape!=a.shape or weight.shape!=(x.shape[-1],):raise ValueError('residual norm shape mismatch')
+        n=x.shape[-1];rows=x.size//n;dtype=x.dtype if x.dtype==a.dtype else 'fp32'
+        z=self.backend.empty(x.shape,dtype);y=self.backend.empty(x.shape,out_dtype or dtype)
+        inv=self.backend.empty((rows,),'fp32');maximum=self.backend.empty((rows,),'fp32')
+        self.backend.launch(residual_norm,(rows,),(x.data,a.data,weight.data,z,y,inv,maximum),
+                            N=n,EPS=eps,BLOCK=triton.next_power_of_2(n))
+        y.amax_partial=maximum
+        grad_dtype='preserve' if getattr(self.backend,'compact_gradients',False) else 'fp32'
+        residual=self._node(z,(x,a),lambda g:(g,g),grad_dtype)
+        saved=(z,weight.data,inv)
+        normalized=self._node(y,(residual,weight),
+            lambda g:self.ops.norm_backward(saved,self.ops.cast(g,dtype)),dtype)
+        return residual,normalized
 
     def rotary(self, x, cos, sin, start=0):
         out = self.ops.rotary(x.data, cos.data, sin.data, start=start)
@@ -549,6 +600,21 @@ class Engine:
             def materialize(value):
                 parts=gradients.get(value,[]);result=None
                 target='fp32' if value.node is None or value in requested else value.gradient_dtype
+                compact=getattr(self.backend,'compact_gradients',False)
+                if compact and value.node is None:target='preserve'
+                if compact and 2<=len(parts)<=4:
+                    ready=[]
+                    for part in parts:
+                        if isinstance(part,PendingGradient):
+                            self.backend.wait_event(part.event);part=part.data
+                        ready.append(part)
+                    result=self.backend.empty(value.shape,'fp32')
+                    arguments=(ready+[ready[0]]*4)[:4]
+                    self.backend.launch(tk.gradient_sum,(triton.cdiv(value.size,1024),),
+                        (*arguments,result),N=value.size,COUNT=len(ready))
+                    if target!='preserve':result=self.ops.cast(result,target)
+                    gradients[value]=[result]
+                    return result
                 for part in parts:
                     if isinstance(part,PendingGradient):
                         self.backend.wait_event(part.event);part=part.data
@@ -586,12 +652,14 @@ class Engine:
                 if recycle:
                     pending=[part.data if isinstance(part,PendingGradient) else part
                              for parts in gradients.values() for part in parts]
-                    self.backend.release_since(mark,keep=(*pending,*finished.values()))
+                    keep=(*pending,*finished.values())
+                    statistics=tuple(t.amax_partial for t in keep if t is not None and hasattr(t,'amax_partial'))
+                    self.backend.release_since(mark,keep=(*keep,*statistics))
             # Parameter gradients are consumed only after all dX work has been queued.
             if inputs is not None:return tuple(finished.get(x) for x in inputs)
             return finished
 
-    def checkpoint(self, fn, x, parameters, selective=None):
+    def checkpoint(self, fn, x, parameters, selective=None, replay=None):
         """Discard forward temporaries; reproduce RNG and regenerate a local VJP."""
         if not self.recording: return fn(x)
         mark, seed, counter = self.backend.mark(), self.seed, self.counter
@@ -612,13 +680,14 @@ class Engine:
             if selective is not None: selective.replay = True
             try:
                 leaf = self.wrap(x.data, True)
-                regenerated = fn(leaf)
+                regenerated = fn(leaf) if replay is None else replay(leaf,out.data)
                 result = self.vjp(regenerated, g, (leaf, *parameters))
                 self.backend.release_since(mark, keep=result)
                 return result
             finally:
                 self.recording, self.seed, self.counter, self.replay_cache = prior
-        return self._node(out.data, parents, backward)
+        grad_dtype='preserve' if getattr(self.backend,'compact_gradients',False) else 'fp32'
+        return self._node(out.data, parents, backward,grad_dtype)
 
     def copy(self, target, source, scale=1., add=False):
         if target.shape != source.shape: raise ValueError('copy shape mismatch')

@@ -47,3 +47,6 @@ model/dense_cublas/native/build/
 # Native tokenization / packing caches
 cache/native_tokens/
 cache/*.sqlite*
+
+# Reused native corpus compiler and bounded Parquet preprocessing.
+/dataset_compiler/target/

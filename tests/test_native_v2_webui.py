@@ -54,5 +54,6 @@ def test_native_v2_actual_app_load_and_command(tmp_path,monkeypatch):
                        ('--learning_rate','0.0003'),('--weight_decay','0.1')):
         assert cmd[cmd.index(flag)+1]==value
     assert '--packed_attention' in cmd
+    assert '--fused_ops' in cmd
     saved=json.loads((tmp_path/'trainer/config_pretrain.json').read_text(encoding='utf-8'))
     assert saved['intermediate_size']==5504 and saved['num_hidden_layers']==32

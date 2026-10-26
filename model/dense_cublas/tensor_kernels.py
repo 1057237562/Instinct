@@ -4,6 +4,26 @@ import triton.language as tl
 
 
 @triton.jit
+def gradient_sum(A, B, C, D, OUT, N: tl.constexpr, COUNT: tl.constexpr,
+                 BLOCK: tl.constexpr = 1024):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = i < N
+    value = tl.load(A+i,valid,0).to(tl.float32) + tl.load(B+i,valid,0).to(tl.float32)
+    if COUNT >= 3: value = value + tl.load(C+i,valid,0).to(tl.float32)
+    if COUNT >= 4: value = value + tl.load(D+i,valid,0).to(tl.float32)
+    tl.store(OUT+i,value,valid)
+
+
+@triton.jit
+def resize_last_dim(X, OUT, ROWS: tl.constexpr, SOURCE: tl.constexpr,
+                    DEST: tl.constexpr, BLOCK: tl.constexpr = 1024):
+    i = tl.program_id(0)*BLOCK+tl.arange(0,BLOCK)
+    row,col=i//DEST,i%DEST
+    value=tl.load(X+row*SOURCE+col,(row<ROWS)&(col<SOURCE),0)
+    tl.store(OUT+i,value,i<ROWS*DEST)
+
+
+@triton.jit
 def offset(index, SHAPE: tl.constexpr, STRIDES: tl.constexpr):
     result = tl.full(index.shape, 0, tl.int64)
     remaining = index

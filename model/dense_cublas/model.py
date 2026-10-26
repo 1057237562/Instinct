@@ -185,7 +185,10 @@ class Model:
             result.append(joined[...,begin:begin+weight.shape[0]]);begin+=weight.shape[0]
         return result
 
-    def norm(self, x, name): return self.e.norm(x, self.params[name], self.config['rms_norm_eps'])
+    def norm(self, x, name):
+        target=self.activation_dtype if (self.muon_mantissa and name.endswith('layernorm.weight')
+            and getattr(self.e.backend,'fused_norm_cast',False)) else None
+        return self.e.norm(x, self.params[name], self.config['rms_norm_eps'],out_dtype=target)
     def head(self, x): return self.linear(self.norm(x, 'model.norm.weight'), 'lm_head.weight')
 
     def _pack_cache(self, x):
@@ -241,10 +244,16 @@ class Model:
         return e.dropout(self.linear(out,p+'o_proj.weight'),c['dropout'],self.training)
 
     def ffn(self, x, prefix):
+        from . import ffn
+        if ffn.eligible(self,x,prefix):return ffn.apply(self,x,prefix)
+        return self.linear(self.ffn_hidden(x,prefix),prefix+'down_proj.weight')
+
+    def ffn_hidden(self,x,prefix):
         with self.e.ops.reuse_scope():
             gate, up = self.projections(x,[prefix+'gate_proj.weight',prefix+'up_proj.weight'])
-        activated=self.e.swiglu(gate,up,round_gate=not self.fuse_projections) if self.config['hidden_act']=='silu' else self.e.unary(gate,self.config['hidden_act'])*up
-        return self.linear(activated,prefix+'down_proj.weight')
+        activated=self.e.swiglu(gate,up,round_gate=not self.fuse_projections,
+            up_grad_dtype=up.dtype if getattr(self.e.backend,'compact_gradients',False) else None) if self.config['hidden_act']=='silu' else self.e.unary(gate,self.config['hidden_act'])*up
+        return activated
 
     def feed_forward(self, x, i):
         e,c,p = self.e,self.config,self.layer_prefixes[i]+'mlp.'
@@ -269,16 +278,32 @@ class Model:
             # Dense has no router auxiliary output. Do not pack an extra zero
             # into every checkpoint's activation, then copy/slice it back out.
             def dense_mlp(z): return self.ffn(self.norm(z,p+'post_attention_layernorm.weight'),p+'mlp.')
+            def attention_residual(z):
+                a=attention(z)
+                if getattr(e.backend,'fused_residual_norm',False):
+                    target=self.activation_dtype if self.muon_mantissa and getattr(e.backend,'fused_norm_cast',False) else None
+                    return e.residual_norm(z,a,self.params[p+'post_attention_layernorm.weight'],c['rms_norm_eps'],out_dtype=target)
+                z=z+a
+                return z,self.norm(z,p+'post_attention_layernorm.weight')
             def dense_whole(z):
-                z=z+attention(z)
-                return z+dense_mlp(z)
+                z,normalized=attention_residual(z)
+                return z+self.ffn(normalized,p+'mlp.')
+            def dense_replay(z,output):
+                z,normalized=attention_residual(z)
+                from . import ffn
+                if ffn.eligible(self,normalized,p+'mlp.'):
+                    return ffn.apply(self,normalized,p+'mlp.',residual=z,output=output)
+                hidden=self.ffn_hidden(normalized,p+'mlp.')
+                return e.linear_residual_replay(hidden,self.params[p+'mlp.down_proj.weight'],z,output)
             if checkpoint in (3, 4):
                 if self.fuse_projections or self.adapters:
                     raise ValueError('native ckpt3/4 require separate Dense projections without LoRA')
                 from .selective import ReplayCache, recipe_plan
-                selected = (recipe_plan(c, x.shape, self.activation_dtype, i) if checkpoint == 4
+                selected = (recipe_plan(c, x.shape, self.activation_dtype, i,
+                    attention_min_seq=getattr(e.backend,'selective_attention_min_seq',4096)) if checkpoint == 4
                             else ReplayCache({v.name for v in ps if len(v.shape) == 2}, c['dropout'] == 0.))
-                return e.checkpoint(dense_whole, x, ps, selected), self._zero_aux
+                replay=dense_replay if getattr(e.backend,'terminal_replay',False) else None
+                return e.checkpoint(dense_whole, x, ps, selected,replay=replay), self._zero_aux
             if checkpoint==2:return e.checkpoint(dense_whole,x,ps),self._zero_aux
             x=x+(e.checkpoint(attention,x,ps) if checkpoint==1 else attention(x))
             return x+(e.checkpoint(dense_mlp,x,ps) if checkpoint==1 else dense_mlp(x)),self._zero_aux
@@ -297,6 +322,14 @@ class Model:
 
     def __call__(self, ids, labels=None, attention_mask=None, cache=None, use_cache=False, return_logits=True, sequence_ids=None):
         e,c = self.e,self.config
+        native=getattr(e.backend,'native_attention',None)
+        native_context=None
+        if native is not None:
+            host_ids=getattr(sequence_ids,'host_array',None) if isinstance(sequence_ids,Value) else sequence_ids
+            # Masked/opaque device-only metadata keeps the existing kernel path.
+            native.prepare(ids.shape,host_ids if attention_mask is None else None,
+                           c['num_attention_heads'],c['num_key_value_heads'],c['head_dim'])
+            native_context=native.context
         if not isinstance(ids, Value): ids = e.array(np.asarray(ids,np.int64))
         if labels is not None and not isinstance(labels,Value): labels=e.array(np.asarray(labels,np.int64))
         if attention_mask is not None and not isinstance(attention_mask,Value): attention_mask=e.array(np.asarray(attention_mask,np.int64))
@@ -312,6 +345,7 @@ class Model:
             if sequence_ids.shape != ids.shape: raise ValueError('sequence_ids shape differs from input IDs')
             from .packing import metadata
             attention_mask, positions, labels = metadata(e, sequence_ids, labels, attention_mask)
+            if native is not None:attention_mask.data.native_attention_context=native_context
             packed = tuple(e.embedding(t, positions).reshape(-1, c['head_dim']) for t in (self.cos, self.sin))
         embedded=e.embedding(self.params['model.embed_tokens.weight'],ids)
         x=e.dropout(embedded if self.muon_mantissa else embedded.cast(self.activation_dtype),c['dropout'],self.training)

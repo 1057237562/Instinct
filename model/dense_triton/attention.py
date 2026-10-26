@@ -12,6 +12,95 @@ import triton.language as tl
 
 
 @triton.jit
+def _forward_band(q, K, V, MASK, m, n, d, qdoc, acc, maximum, denominator,
+                  start, end, doc_start, batch, kh,
+                  SEQ: tl.constexpr, HQ: tl.constexpr, HKV: tl.constexpr,
+                  DIM: tl.constexpr, SCALE: tl.constexpr, BN: tl.constexpr,
+                  MODE: tl.constexpr, PACKED: tl.constexpr, HAS_MASK: tl.constexpr):
+    for offset in range(start, end, BN):
+        nn = offset + n
+        ko = ((batch * SEQ + nn[None, :]) * HKV + kh) * DIM + d[:, None]
+        k = tl.load(K + ko, (nn[None, :] < SEQ) & (d[:, None] < DIM), other=0)
+        v = tl.load(V + tl.trans(ko), (nn[:, None] < SEQ) & (d[None, :] < DIM), other=0)
+        score = tl.dot(q, k, input_precision='ieee') * (SCALE * 1.4426950408889634)
+        if MODE != 0:
+            allowed = (m[:, None] >= nn[None, :]) & (nn[None, :] < SEQ)
+            if MODE == 3:
+                allowed = allowed & (nn[None, :] >= doc_start)
+            if MODE == 2 and HAS_MASK:
+                key_doc = tl.load(MASK + batch * SEQ + nn, nn < SEQ, other=-1)
+                if PACKED:
+                    allowed = allowed & (qdoc[:, None] == key_doc[None, :]) & (qdoc[:, None] >= 0)
+                else:
+                    allowed = allowed & (key_doc[None, :] != 0)
+            score = tl.where(allowed, score, -float('inf'))
+        next_maximum = tl.maximum(maximum, tl.max(score, 1))
+        if MODE == 2:
+            safe = tl.where(next_maximum == -float('inf'), 0., next_maximum)
+        else:
+            safe = next_maximum
+        alpha = tl.exp2(maximum - safe)
+        probability = tl.exp2(score - safe[:, None])
+        acc *= alpha[:, None]
+        acc = tl.dot(probability.to(q.dtype), v, acc, input_precision='ieee')
+        denominator = denominator * alpha + tl.sum(probability, 1)
+        maximum = next_maximum
+    return acc, maximum, denominator
+
+
+@triton.jit
+def forward_fast(Q, K, V, MASK, O, LSE, seed, offset, SEQ: tl.constexpr, HQ: tl.constexpr,
+                 HKV: tl.constexpr, DIM: tl.constexpr, SCALE: tl.constexpr,
+                 HAS_MASK: tl.constexpr, DROPOUT: tl.constexpr = 0., BM: tl.constexpr = 128,
+                 BN: tl.constexpr = 64, BD: tl.constexpr = 128, PACKED: tl.constexpr = False,
+                 PACKED_SKIP: tl.constexpr = True):
+    """Separate fully allowed tiles from the causal/document boundary tiles."""
+    tl.static_assert(DROPOUT == 0.)
+    tl.static_assert(BM % BN == 0)
+    qh = tl.program_id(1) % HQ
+    batch = tl.program_id(1) // HQ
+    kh = qh // (HQ // HKV)
+    first = tl.program_id(0) * BM
+    m = first + tl.arange(0, BM)
+    n, d = tl.arange(0, BN), tl.arange(0, BD)
+    qo = ((batch * SEQ + m[:, None]) * HQ + qh) * DIM + d[None, :]
+    q = tl.load(Q + qo, (m[:, None] < SEQ) & (d[None, :] < DIM), other=0)
+    acc = tl.full((BM, BD), 0., tl.float32)
+    maximum = tl.full((BM,), -float('inf'), tl.float32)
+    denominator = tl.full((BM,), 0., tl.float32)
+    qdoc = tl.full((BM,), 0, tl.int64)
+    uniform = True
+    start_doc = 0
+    if HAS_MASK:
+        if PACKED:
+            qdoc = tl.load(MASK + batch * SEQ + m, m < SEQ, -1)
+            start_doc = tl.min(qdoc, 0)
+            uniform = (start_doc >= 0) & (start_doc == tl.max(qdoc, 0))
+        else:
+            uniform = False
+    if uniform:
+        begin = (start_doc // BN * BN).to(tl.int32)
+        aligned = ((start_doc + BN - 1) // BN * BN).to(tl.int32)
+        if begin != aligned:
+            acc, maximum, denominator = _forward_band(q,K,V,MASK,m,n,d,qdoc,acc,maximum,denominator,
+                begin,aligned,start_doc,batch,kh,SEQ,HQ,HKV,DIM,SCALE,BN,3,PACKED,HAS_MASK)
+        acc, maximum, denominator = _forward_band(q,K,V,MASK,m,n,d,qdoc,acc,maximum,denominator,
+            aligned,first,start_doc,batch,kh,SEQ,HQ,HKV,DIM,SCALE,BN,0,PACKED,HAS_MASK)
+        acc, maximum, denominator = _forward_band(q,K,V,MASK,m,n,d,qdoc,acc,maximum,denominator,
+            first,tl.minimum(first+BM,SEQ),start_doc,batch,kh,SEQ,HQ,HKV,DIM,SCALE,BN,1,PACKED,HAS_MASK)
+    else:
+        begin = 0
+        if PACKED and PACKED_SKIP:
+            begin = (tl.min(tl.where((m<SEQ)&(qdoc>=0),qdoc,SEQ),0)//BN*BN).to(tl.int32)
+        acc, maximum, denominator = _forward_band(q,K,V,MASK,m,n,d,qdoc,acc,maximum,denominator,
+            begin,tl.minimum(first+BM,SEQ),start_doc,batch,kh,SEQ,HQ,HKV,DIM,SCALE,BN,2,PACKED,HAS_MASK)
+    out = acc / tl.where(denominator > 0., denominator, 1.)[:, None]
+    lse = tl.where(denominator > 0., (maximum + tl.log2(denominator)) * 0.6931471805599453, float('inf'))
+    tl.store(O + qo, out, (m[:, None] < SEQ) & (d[None, :] < DIM))
+    tl.store(LSE + (batch * HQ + qh) * SEQ + m, lse, m < SEQ)
+
+
+@triton.jit
 def forward(Q, K, V, MASK, O, LSE, seed, offset, SEQ: tl.constexpr, HQ: tl.constexpr,
             HKV: tl.constexpr, DIM: tl.constexpr, SCALE: tl.constexpr,
             HAS_MASK: tl.constexpr, DROPOUT: tl.constexpr = 0., BM: tl.constexpr = 32,
@@ -139,9 +228,14 @@ def backward_kv(Q, K, V, MASK, O, LSE, DO, DK, DV, seed, offset, SEQ: tl.constex
                 SCALE: tl.constexpr, HAS_MASK: tl.constexpr, DROPOUT: tl.constexpr = 0.,
                 BM: tl.constexpr = 32, BN: tl.constexpr = 32, BD: tl.constexpr = 128,
                 PRECOMPUTED_DELTA: tl.constexpr = False, PACKED: tl.constexpr = False,
-                PACKED_SKIP: tl.constexpr = True):
-    kh = tl.program_id(1) % HKV
-    batch = tl.program_id(1) // HKV
+                PACKED_SKIP: tl.constexpr = True, SPLIT_GROUP: tl.constexpr = False):
+    if SPLIT_GROUP:
+        head=tl.program_id(1)%HQ
+        kh=head//(HQ//HKV)
+        batch=tl.program_id(1)//HQ
+    else:
+        kh = tl.program_id(1) % HKV
+        batch = tl.program_id(1) // HKV
     n = tl.program_id(0) * BN + tl.arange(0, BN)
     m = tl.arange(0, BM)
     d = tl.arange(0, BD)
@@ -161,8 +255,9 @@ def backward_kv(Q, K, V, MASK, O, LSE, DO, DK, DV, seed, offset, SEQ: tl.constex
         positions=tl.arange(0,triton.next_power_of_2(SEQ))
         documents=tl.load(MASK+batch*SEQ+positions,positions<SEQ,-1)
         end=tl.max(tl.where((positions<SEQ)&(documents==last_doc)&(last_doc>=0),positions+1,0),0).to(tl.int32)
-    for group in range(HQ // HKV):
-        qh = kh * (HQ // HKV) + group
+    for group in range(1 if SPLIT_GROUP else HQ // HKV):
+        if SPLIT_GROUP:qh=head
+        else:qh = kh * (HQ // HKV) + group
         # BM == BN in the public launcher: earlier query tiles are all masked.
         for start in range(tl.program_id(0) * BN, end, BM):
             mm = start + m
@@ -193,5 +288,19 @@ def backward_kv(Q, K, V, MASK, O, LSE, DO, DK, DV, seed, offset, SEQ: tl.constex
             ds = (p * (dp - delta[:, None]) * SCALE).to(q.dtype)
             dk = tl.dot(tl.trans(ds), q, dk, input_precision="ieee")
             dv = tl.dot(tl.trans(pd.to(q.dtype)), do, dv, input_precision="ieee")
+    if SPLIT_GROUP:
+        ko=((batch*SEQ+n[:,None])*HQ+head)*DIM+d[None,:]
     tl.store(DK + ko, dk, kmask)
     tl.store(DV + ko, dv, kmask)
+
+
+@triton.jit
+def reduce_kv_groups(K, V, OUTK, OUTV, N:tl.constexpr,DIM:tl.constexpr,
+                     HQ:tl.constexpr,HKV:tl.constexpr,BLOCK:tl.constexpr=512):
+    i=tl.program_id(0)*BLOCK+tl.arange(0,BLOCK)
+    d=i%DIM;head=(i//DIM)%HKV;token=i//(DIM*HKV)
+    total_k=tl.full((BLOCK,),0,tl.float32);total_v=tl.full((BLOCK,),0,tl.float32)
+    for group in tl.static_range(HQ//HKV):
+        source=(token*HQ+head*(HQ//HKV)+group)*DIM+d
+        total_k+=tl.load(K+source,i<N,0);total_v+=tl.load(V+source,i<N,0)
+    tl.store(OUTK+i,total_k,i<N);tl.store(OUTV+i,total_v,i<N)

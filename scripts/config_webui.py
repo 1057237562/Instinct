@@ -557,6 +557,8 @@ def fmt_table(breakdown: dict) -> list:
 
 def build_config_dict() -> dict:
     """Assemble a InstinctConfig-compatible dict from st.session_state."""
+    from model.dense_cublas.selective import parse_cache_budgets
+    native_budgets=parse_cache_budgets(st.session_state.get('native_selective_cache_by_seq','')) if st.session_state.get('runtime_backend','pytorch')=='cublas' else {}
     d = {
         "hidden_size": st.session_state.get("hidden_size", 768),
         "num_hidden_layers": st.session_state.get("num_hidden_layers", 8),
@@ -572,6 +574,7 @@ def build_config_dict() -> dict:
         "use_moe": st.session_state.get("use_moe", False),
         "use_grad_checkpoint": st.session_state.get("use_grad_checkpoint", 0),
         "selective_cache_mib": st.session_state.get("native_selective_cache_mib",1792),
+        "selective_cache_by_seq": native_budgets,
         "checkpoint_profile": (
             st.session_state.get("checkpoint_profile", "legacy")
             if st.session_state.get("runtime_backend", "pytorch") == "pytorch"
@@ -760,10 +763,13 @@ def gen_config_json(cfg: dict) -> str:
         "use_moe",
         "use_grad_checkpoint",
         "selective_cache_mib",
+        "selective_cache_by_seq",
     ]
     for k in keys:
         if k == "rope_theta":
             out[k] = int(cfg[k])
+        elif k == 'selective_cache_by_seq':
+            out[k] = cfg.get(k) or {}
         else:
             out[k] = cfg.get(k)
 
@@ -843,6 +849,7 @@ def load_config_to_session(config_dict: dict):
     st.session_state.use_moe = config_dict.get("use_moe", False)
     st.session_state.use_grad_checkpoint = config_dict.get("use_grad_checkpoint", 0)
     st.session_state.native_selective_cache_mib = config_dict.get("selective_cache_mib",1792)
+    st.session_state.native_selective_cache_by_seq = ','.join(f'{length}:{budget:g}' for length,budget in config_dict.get('selective_cache_by_seq',{}).items())
     st.session_state.intermediate_size = config_dict.get("intermediate_size", compute_intermediate_size(st.session_state.hidden_size))
     st.session_state.intermediate_override = st.session_state.intermediate_size != compute_intermediate_size(st.session_state.hidden_size)
     st.session_state.checkpoint_profile = config_dict.get("checkpoint_profile", "legacy") or "legacy"
@@ -1851,13 +1858,18 @@ with st.sidebar:
             st.text_input('Token cache SQLite path',value='',key='native_token_cache')
             st.checkbox('Pretraining token packing',key='native_packing')
             st.checkbox('Packed document isolation + reset RoPE',key='native_packed_attention')
+            st.checkbox('Dense fused operators',key='native_fused_ops')
+            st.selectbox('Attention backend',['triton','cudnn','hybrid'],key='native_attention_backend')
+            st.number_input('Hybrid cuDNN minimum sequence length',min_value=1,value=4096,key='native_attention_cudnn_min_seq')
             st.selectbox('FP8 projection filter',['eligible','auto'],key='native_fp8_filter')
             st.selectbox('CUDA allocator',['driver','async'],key='native_allocator_backend')
             st.number_input('ckpt4 saved-output budget MiB',min_value=0,value=1792,key='native_selective_cache_mib')
+            st.text_input('ckpt4 budget per sequence length',value='',key='native_selective_cache_by_seq',help='For example: 3072:768,4096:1024 (MiB). Empty uses the shared budget.')
             st.checkbox('Muon BF16 high bits + uint16 mantissa',key='native_muon_mantissa')
             st.selectbox('Muon momentum storage',['fp32','bf16'],key='native_muon_momentum_dtype')
             st.number_input('Muon matrices per chunk',min_value=1,value=16,key='native_muon_batch_size')
             st.number_input('Muon temporary workspace MiB',min_value=1,value=512,key='native_muon_workspace_mb')
+            st.selectbox('Muon GEMM backend',['triton','cublas'],key='native_muon_gemm_backend')
             st.number_input('Learning rate',min_value=0.0,value=0.0005,format='%.6f',key='learning_rate')
             st.number_input('Weight decay',min_value=0.0,value=0.01,format='%.4f',key='weight_decay')
             st.number_input('Allocator cache MiB',min_value=0,value=256,key='native_allocator_cache_mib')
@@ -2078,14 +2090,16 @@ if st.session_state.get("train_triggered", False):
                     if st.session_state.get('native_gpus',1)>1:
                         cmd[2]=os.path.join(trainer_dir,'launch_cublas.py')
                         cmd.extend(['--nproc_per_node',str(st.session_state.native_gpus)])
-                    for key in ('fuse_projections','packing','packed_attention','copy_prefetch','async_checkpoint','overlap_dw','cuda_graph'):
+                    for key in ('fuse_projections','fused_ops','packing','packed_attention','copy_prefetch','async_checkpoint','overlap_dw','cuda_graph'):
                         if st.session_state.get('native_'+key,False):cmd.append('--'+key)
                     for key in ('loss_chunk_size','length_bucket'):
                         cmd.extend(['--'+key,str(st.session_state.get('native_'+key,0))])
-                    for key in ('token_cache','sequence_buckets'):
+                    for key in ('token_cache','sequence_buckets','selective_cache_by_seq'):
                         if st.session_state.get('native_'+key):cmd.extend(['--'+key,st.session_state['native_'+key]])
-                    for key,default in (('fp8_filter','eligible'),('muon_momentum_dtype','fp32'),('muon_batch_size',16),('muon_workspace_mb',512),('allocator_backend','driver'),('selective_cache_mib',1792),('allocator_cache_mib',256)):
+                    for key,default in (('fp8_filter','eligible'),('muon_momentum_dtype','fp32'),('muon_batch_size',16),('muon_workspace_mb',512),('muon_gemm_backend','triton'),('allocator_backend','driver'),('selective_cache_mib',1792),('allocator_cache_mib',256)):
                         cmd.extend(['--'+key,str(st.session_state.get('native_'+key,default))])
+                    cmd.extend(['--attention_backend',st.session_state.get('native_attention_backend','triton'),
+                                '--attention_cudnn_min_seq',str(st.session_state.get('native_attention_cudnn_min_seq',4096))])
                     cmd.extend(['--learning_rate',str(st.session_state.get('learning_rate',0.0005)),
                                 '--weight_decay',str(st.session_state.get('weight_decay',0.01))])
                     cmd.extend(['--muon_mantissa','1' if st.session_state.get('native_muon_mantissa',False) else '0'])

@@ -123,6 +123,9 @@ class MuonPlan:
     def gemm(self,a,b,c,m,n,k,astrides,bstrides,alpha=1.,beta=0.,symmetric=False):
         backend=self.opt.e.backend;batch=a.shape[0]
         out=backend.empty((batch,m,n),'bf16')
+        if getattr(backend,'muon_gemm_backend','triton')=='cublas':
+            backend.batched_matmul(a,b,c,out,m,n,k,astrides,bstrides,alpha,beta)
+            return out
         tiles=triton.cdiv(m,64)
         grid=(tiles*(tiles+1)//2,1,batch) if symmetric else (tiles,triton.cdiv(n,64),batch)
         backend.launch(ns_gemm,grid,(a,b,c,out),

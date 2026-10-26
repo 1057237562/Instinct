@@ -16,7 +16,7 @@ class DevicePrefetch:
         capacity=batch_size*sequence_length
         try:
             for _ in range(2):
-                slot={'device':[],'host':[],'ready':b.create_event()}
+                slot={'device':[],'host':[],'ready':b.create_event(),'consumed':b.create_event()}
                 self.slots.append(slot)
                 for _ in range(fields):
                     ptr=p();self.alloc(ct.byref(ptr),capacity*8,0);slot['host'].append(ptr)
@@ -30,6 +30,7 @@ class DevicePrefetch:
         if slot.get('used'):self.b._event_sync(slot['ready'])
         values=[]
         with self.b.on_stream(self.stream):
+            if slot.get('computed'):self.b.wait_event(slot['consumed'])
             for array,host,device in zip(batch,slot['host'],slot['device']):
                 array=np.ascontiguousarray(array,dtype=np.int64)
                 if array.size>device.numel:raise ValueError('prefetch batch exceeds slot capacity')
@@ -37,6 +38,8 @@ class DevicePrefetch:
                 self.upload(device.storage,host,array.nbytes,self.stream)
                 from model.dense_triton.runtime import Tensor
                 values.append(self.e.wrap(Tensor(array.shape,'i64',device.storage,self.b)))
+                if getattr(self.b,'native_attention',None) is not None:
+                    values[-1].host_array=array
             self.b.record_event(slot['ready'])
         slot['used']=True
         return tuple(values)
@@ -57,8 +60,10 @@ class DevicePrefetch:
             begin,batch,device,index=current
             self.b.wait_event(self.slots[index]['ready'])
             yield begin,batch,device
-            # Ensure all readers are done before this slot can be reused.
-            self.b.synchronize()
+            # Fence only reuse of this slot. The copy stream waits for its
+            # readers while the CPU can queue the following microstep.
+            self.b.record_event(self.slots[index]['consumed'])
+            self.slots[index]['computed']=True
             current=following
             following=stage(index) if current is not None else None
     def close(self):

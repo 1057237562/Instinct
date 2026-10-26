@@ -35,25 +35,35 @@ class DenseOps:
         self.backend.launch(ew.add, (triton.cdiv(a.numel, 256),), (a, b, out), SIZE=a.numel)
         return out
 
-    def quantize(self, x, dtype='fp8e4nv'):
+    def quantize(self, x, dtype='fp8e4nv', dual_layout=False):
         if dtype not in ('fp8e4nv', 'fp8e5') or x.dtype not in ('fp32', 'bf16', 'fp16'):
             raise ValueError('expected high-precision input and E4M3/E5M2 output')
         count = triton.cdiv(x.numel, 1024)
         if count <= 0:
             raise ValueError('tensorwise amax requires a nonempty tensor')
         maximum = 448.0 if dtype == 'fp8e4nv' else 57344.0
-        partial = self.empty((count,), 'fp32')
+        partial=getattr(x,'amax_partial',None)
+        known=partial is not None
+        if known:count=partial.numel
+        else:partial = self.empty((count,), 'fp32')
         scale = self.empty((1,), 'fp32')
         out = self.empty(x.shape, dtype)
-        self.backend.launch(lin.amax_partial, (count,), (x, partial), SIZE=x.numel, BLOCK=1024)
+        if not known:self.backend.launch(lin.amax_partial, (count,), (x, partial), SIZE=x.numel, BLOCK=1024)
         while count > 1024:
             reduced = self.empty((triton.cdiv(count,1024),), 'fp32')
             self.backend.launch(lin.amax_partial, (reduced.numel,), (partial,reduced), SIZE=count,BLOCK=1024)
             partial,count = reduced,reduced.numel
         self.backend.launch(lin.scale_from_amax, (1,), (partial, scale), COUNT=count,
                             FP8_MAX=maximum, BLOCK=triton.next_power_of_2(count))
-        self.backend.launch(lin.quantize, (triton.cdiv(x.numel,1024),), (x, scale, out),
-                            SIZE=x.numel, FP8_MAX=maximum, BLOCK=1024)
+        if dual_layout:
+            if len(x.shape)!=2:raise ValueError('dual-layout quantization requires a matrix')
+            rows,cols=x.shape
+            transposed=self.empty((cols,rows),dtype)
+            self.backend.launch(lin.quantize_dual,(triton.cdiv(rows,32),triton.cdiv(cols,32)),
+                                (x,scale,out,transposed),ROWS=rows,COLS=cols,FP8_MAX=maximum)
+            out.transpose_data=transposed
+        else:self.backend.launch(lin.quantize, (triton.cdiv(x.numel,1024),), (x, scale, out),
+                                 SIZE=x.numel, FP8_MAX=maximum, BLOCK=1024)
         return out, scale
 
     def mm(self, a, b, transpose_a=False, transpose_b=False,
@@ -108,13 +118,13 @@ class DenseOps:
             dw = self.mm(dy, qx, transpose_a=True, out_dtype=weight_dtype)
         return dx.view(*shape), dw
 
-    def norm(self, x, weight, eps=1e-6):
+    def norm(self, x, weight, eps=1e-6, out_dtype=None):
         n, rows = x.shape[-1], x.numel // x.shape[-1]
         if not 0 < n <= 8192 or weight.shape != (n,):
             raise ValueError('RMSNorm requires width <= 8192 and a matching weight')
         if eps <= 0:
             raise ValueError('RMSNorm epsilon must be positive')
-        y, r = self.empty(x.shape, x.dtype), self.empty((rows,), 'fp32')
+        y, r = self.empty(x.shape, out_dtype or x.dtype), self.empty((rows,), 'fp32')
         self.backend.launch(ew._rms_forward, (rows,), (x, weight, y, r),
                             N=n, EPS=eps, BLOCK=triton.next_power_of_2(n))
         return y, (x, weight, r)
@@ -124,13 +134,14 @@ class DenseOps:
         if dy.shape != x.shape or dy.dtype != x.dtype:
             raise ValueError('RMSNorm gradient must match its input shape and dtype')
         n, rows = x.shape[-1], x.numel // x.shape[-1]
-        groups = min(rows, 128)
+        groups = min(rows, getattr(self.backend,'norm_groups',None) or 128)
         dx, dw = self.empty(x.shape, x.dtype), self.empty(w.shape, w.dtype)
         partial = self.empty((groups, n), 'fp32')
         self.backend.launch(ew._rms_backward, (groups,), (x, w, r, dy, dx, partial),
                             M=rows, N=n, GROUPS=groups, BLOCK=triton.next_power_of_2(n))
-        self.backend.launch(ew._rms_reduce_dw, (triton.cdiv(n, 64),), (partial, dw),
-                            N=n, GROUPS=groups, BLOCK_G=triton.next_power_of_2(groups), BLOCK_N=64)
+        block_n=8 if groups>256 else 64
+        self.backend.launch(ew._rms_reduce_dw, (triton.cdiv(n, block_n),), (partial, dw),
+                            N=n, GROUPS=groups, BLOCK_G=triton.next_power_of_2(groups), BLOCK_N=block_n)
         return dx, dw
 
     def rotary(self, x, cos, sin, backward=False, start=0):
@@ -161,7 +172,25 @@ class DenseOps:
                             (gate, up, dy, dg, du), SIZE=gate.numel, BLOCK=256)
         return dg, du
 
-    def attention(self, q, k, v, mask=None, dropout=0., seed=0, counter=0, cached=None, packed=False):
+    def _attention_width(self, tensor, width):
+        from model.dense_cublas.tensor_kernels import resize_last_dim
+        shape=(*tensor.shape[:-1],width)
+        out=self.empty(shape,tensor.dtype)
+        self.backend.launch(resize_last_dim,(triton.cdiv(out.numel,1024),),(tensor,out),
+                            ROWS=tensor.numel//tensor.shape[-1],SOURCE=tensor.shape[-1],DEST=width)
+        return out
+
+    def attention(self, q, k, v, mask=None, dropout=0., seed=0, counter=0, cached=None, packed=False, scale=None):
+        if getattr(self.backend,'pad_attention',False) and q.shape[-1]==96:
+            original=(q.shape,k.shape,v.shape)
+            padded=tuple(self._attention_width(x,128) for x in (q,k,v))
+            saved_output=(self._attention_width(cached[0],128),cached[1]) if cached is not None else None
+            out,saved=self.attention(*padded,mask,dropout,seed,counter,cached=saved_output,
+                                     packed=packed,scale=96**-.5)
+            compact=cached[0] if cached is not None else self._attention_width(out,96)
+            # SAC retains saved[4]/saved[5]. Keep its original 96-wide budget;
+            # the padded output is only a temporary for this local VJP.
+            return compact,(*saved[:4],compact,*saved[5:],original,out)
         if len(q.shape) != 4 or len(k.shape) != 4 or k.shape != v.shape:
             raise ValueError('GQA requires [batch, seq, heads, dim] inputs')
         b, s, hq, d = q.shape
@@ -176,17 +205,25 @@ class DenseOps:
         tile = 16 if d > 128 else 32
         tile = getattr(self.backend,'attention_tile',None) or tile
         if tile not in (16,32,64):raise ValueError('attention tile must be 16, 32 or 64')
-        options = dict(BM=tile, BN=tile, DROPOUT=float(dropout), SEQ=s, HQ=hq, HKV=k.shape[2], DIM=d, SCALE=d ** -0.5,
+        options = dict(BM=tile, BN=tile, DROPOUT=float(dropout), SEQ=s, HQ=hq, HKV=k.shape[2], DIM=d, SCALE=d ** -0.5 if scale is None else scale,
                        HAS_MASK=mask is not None, BD=max(16, triton.next_power_of_2(d)), PACKED=packed,
                        PACKED_SKIP=getattr(self.backend,'packed_skip',True))
         if packed and mask is None: raise ValueError('packed attention requires segment IDs')
         out, lse = cached if cached is not None else (self.empty(q.shape, q.dtype), self.empty((b, hq, s), 'fp32'))
         mask = mask if mask is not None else q
         if cached is None:
-            self.backend.launch(attn.forward, (triton.cdiv(s, tile), b * hq), (q, k, v, mask, out, lse, Scalar(seed, 'i32'), Scalar(counter, 'i64')), **options)
+            forward_tile = getattr(self.backend, 'attention_forward_tile', None) or tile
+            forward_cols = getattr(self.backend, 'attention_forward_cols', None) or forward_tile
+            forward_options = options | dict(BM=forward_tile, BN=forward_cols)
+            kernel = attn.forward_fast if getattr(self.backend,'fast_attention',False) and not dropout else attn.forward
+            self.backend.launch(kernel, (triton.cdiv(s, forward_tile), b * hq), (q, k, v, mask, out, lse, Scalar(seed, 'i32'), Scalar(counter, 'i64')), **forward_options)
         return out, (q, k, v, mask, out, lse, options, seed, counter)
 
     def attention_backward(self, saved, dy):
+        if len(saved)==11:
+            inner=(*saved[:4],saved[10],*saved[5:9])
+            gradients=self.attention_backward(inner,self._attention_width(dy,128))
+            return tuple(self._attention_width(g,shape[-1]) for g,shape in zip(gradients,saved[9]))
         q, k, v, mask, out, lse, options, seed, counter = saved
         if dy.shape != q.shape or dy.dtype != q.dtype:
             raise ValueError('attention gradient must match its output shape and dtype')
@@ -200,9 +237,13 @@ class DenseOps:
         self.backend.launch(attn.backward_q, (triton.cdiv(s, options['BM']), b * hq),
                             (q, k, v, mask, delta, lse, dy, dq, Scalar(seed, 'i32'), Scalar(counter, 'i64')),
                             PRECOMPUTED_DELTA=True, **options)
-        self.backend.launch(attn.backward_kv, (triton.cdiv(s, options['BN']), b * k.shape[2]),
-                            (q, k, v, mask, delta, lse, dy, dk, dv, Scalar(seed, 'i32'), Scalar(counter, 'i64')),
-                            PRECOMPUTED_DELTA=True, **options)
+        split=getattr(self.backend,'split_kv_gradients',False) and hq!=k.shape[2]
+        outk,outv=(self.empty(q.shape,'fp32'),self.empty(q.shape,'fp32')) if split else (dk,dv)
+        self.backend.launch(attn.backward_kv, (triton.cdiv(s, options['BN']), b * (hq if split else k.shape[2])),
+                            (q, k, v, mask, delta, lse, dy, outk, outv, Scalar(seed, 'i32'), Scalar(counter, 'i64')),
+                            PRECOMPUTED_DELTA=True, SPLIT_GROUP=split, **options)
+        if split:self.backend.launch(attn.reduce_kv_groups,(triton.cdiv(dk.numel,512),),(outk,outv,dk,dv),
+                                     N=dk.numel,DIM=q.shape[-1],HQ=hq,HKV=k.shape[2])
         return dq, dk, dv
 
 

@@ -9,10 +9,24 @@ import ctypes as ct
 import triton
 
 
+class AllocationRegistry:
+    """Ordered allocation ownership with O(1) removal of released addresses."""
+    def __init__(self):self.entries={}
+    def append(self,item):
+        pointer,size=item
+        if pointer.value in self.entries:raise RuntimeError('duplicate owned CUDA allocation')
+        self.entries[pointer.value]=item
+    def discard(self,pointer):self.entries.pop(pointer)
+    def __iter__(self):return iter(self.entries.values())
+    def __len__(self):return len(self.entries)
+    def clear(self):self.entries.clear()
+
+
 class TrainingBackend(CublasBackend):
     recycle_vjp = True
-    def __init__(self, *args, pool_limit_mib=256, pin_memory=True, allocator_backend='driver', **kwargs):
+    def __init__(self, *args, pool_limit_mib=256, pin_memory=True, allocator_backend='driver', async_release_mib=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self._allocations=AllocationRegistry()
         self.pin_memory = pin_memory
         if allocator_backend not in ('driver','async'):raise ValueError('unknown native allocator backend')
         self.allocator_backend=allocator_backend
@@ -27,6 +41,9 @@ class TrainingBackend(CublasBackend):
         self._uploading_constant=False
         self._live_bytes=self._peak_live_bytes=0
         self.allocator_stats=dict(requests=0,pool_hits=0,releases=0,empty_releases=0,release_syncs=0)
+        self.async_release_mib = async_release_mib
+        if async_release_mib is not None and async_release_mib < 0:
+            raise ValueError('async_release_mib must be nonnegative')
 
     def __enter__(self):
         super().__enter__()
@@ -42,6 +59,12 @@ class TrainingBackend(CublasBackend):
             self._bind('cuDeviceGetDefaultMemPool',[ct.POINTER(ct.c_void_p),ct.c_int])(ct.byref(pool),self._dev)
             self._async_pool=pool
             self._pool_attribute=self._bind('cuMemPoolGetAttribute',[ct.c_void_p,ct.c_int,ct.c_void_p])
+            if self.async_release_mib is not None:
+                self._set_pool_attribute=self._bind('cuMemPoolSetAttribute',[ct.c_void_p,ct.c_int,ct.c_void_p])
+                self._prior_release_threshold=ct.c_uint64()
+                self._pool_attribute(pool,4,ct.byref(self._prior_release_threshold))
+                threshold=ct.c_uint64(int(self.async_release_mib*1024*1024))
+                self._set_pool_attribute(pool,4,ct.byref(threshold))
             def malloc(out,size):
                 # Synchronous host uploads are outside the compute stream.
                 # Keep those allocations synchronous; all device temporaries
@@ -61,6 +84,11 @@ class TrainingBackend(CublasBackend):
         return self
 
     def __exit__(self,exc_type,exc,traceback):
+        native=getattr(self,'native_attention',None)
+        if native is not None:
+            self.synchronize();native.close();self.native_attention=None
+        if hasattr(self,'_prior_release_threshold'):
+            self._set_pool_attribute(self._async_pool,4,ct.byref(self._prior_release_threshold))
         if hasattr(self,'_sync_free'):
             # cuMemFree is valid for async allocations after synchronization.
             # Restore it before CublasBackend destroys the compute streams.
@@ -150,8 +178,18 @@ class TrainingBackend(CublasBackend):
         # overlap still fences all consumers before any buffer/event is reused.
         if self._commands is not None and not single_stream:return
         retained = {t.storage for t in keep if t is not None}|self._pinned
-        allocations=[(pointer,size) for pointer,(serial,size) in self._live.items() if serial>mark and pointer not in retained]
-        events=[event for event,serial in self._live_events.items() if serial>mark and event not in self._pinned_events]
+        # Insertion order is allocation serial order, including addresses reused
+        # from the pool. A local VJP must not scan all model/optimizer buffers.
+        allocations=[]
+        for pointer,(serial,size) in reversed(self._live.items()):
+            if serial<=mark:break
+            if pointer not in retained:allocations.append((pointer,size))
+        allocations.reverse()
+        events=[]
+        for event,serial in reversed(self._live_events.items()):
+            if serial<=mark:break
+            if event not in self._pinned_events:events.append(event)
+        events.reverse()
         if not allocations and not events:
             self.allocator_stats['empty_releases']+=1
             return
@@ -171,16 +209,13 @@ class TrainingBackend(CublasBackend):
         if self._commands is not None:return
         # Dynamic MoE token counts and decode lengths must not grow the cache
         # without a bound. Release unused buffers, never active tensors.
-        freed = set()
         for size in sorted(self._pool, reverse=True):
             pool = self._pool[size]
             while pool and self._pool_bytes > self.pool_limit:
                 pointer = pool.pop()
                 self._free(pointer)
-                freed.add(pointer)
+                self._allocations.discard(pointer)
                 self._pool_bytes -= size
-        if freed:
-            self._allocations[:] = [(p, n) for p, n in self._allocations if p.value not in freed]
 
     def memory(self):
         result=super().memory() | {'live_bytes': self._live_bytes,
@@ -189,6 +224,8 @@ class TrainingBackend(CublasBackend):
                                   'cached_limit_bytes': self.pool_limit,
                                   'allocator_stats':dict(self.allocator_stats)}
         if self._async_pool is not None:
+            threshold=ct.c_uint64();self._pool_attribute(self._async_pool,4,ct.byref(threshold))
+            result['async_release_threshold_bytes']=threshold.value
             for name,attribute in (('async_reserved_bytes',5),('async_peak_reserved_bytes',6),
                                    ('async_used_bytes',7),('async_peak_used_bytes',8)):
                 value=ct.c_uint64();self._pool_attribute(self._async_pool,attribute,ct.byref(value))
