@@ -1859,6 +1859,7 @@ with st.sidebar:
             st.checkbox('Pretraining token packing',key='native_packing')
             st.checkbox('Packed document isolation + reset RoPE',key='native_packed_attention')
             st.checkbox('Dense fused operators',key='native_fused_ops')
+            st.checkbox('cuBLAS algorithm tuning',key='native_tune')
             st.selectbox('Attention backend',['triton','cudnn','hybrid'],key='native_attention_backend')
             st.number_input('Hybrid cuDNN minimum sequence length',min_value=1,value=4096,key='native_attention_cudnn_min_seq')
             st.selectbox('FP8 projection filter',['eligible','auto'],key='native_fp8_filter')
@@ -1873,6 +1874,9 @@ with st.sidebar:
             st.number_input('Learning rate',min_value=0.0,value=0.0005,format='%.6f',key='learning_rate')
             st.number_input('Weight decay',min_value=0.0,value=0.01,format='%.4f',key='weight_decay')
             st.number_input('Allocator cache MiB',min_value=0,value=256,key='native_allocator_cache_mib')
+            st.number_input('Async pool retention MiB',min_value=0,value=0,key='native_allocator_release_mib',
+                            disabled=st.session_state.get('native_allocator_backend')!='async',
+                            help='Retention threshold at synchronization, not a VRAM limit. 0 returns unused pool memory to the driver.')
             st.number_input('Length sorting window (0 disables)',min_value=0,value=0,key='native_length_bucket')
             st.text_input('Sequence buckets, comma separated',value='',key='native_sequence_buckets')
             st.checkbox('Copy stream prefetch',key='native_copy_prefetch')
@@ -2090,13 +2094,13 @@ if st.session_state.get("train_triggered", False):
                     if st.session_state.get('native_gpus',1)>1:
                         cmd[2]=os.path.join(trainer_dir,'launch_cublas.py')
                         cmd.extend(['--nproc_per_node',str(st.session_state.native_gpus)])
-                    for key in ('fuse_projections','fused_ops','packing','packed_attention','copy_prefetch','async_checkpoint','overlap_dw','cuda_graph'):
+                    for key in ('fuse_projections','fused_ops','packing','packed_attention','copy_prefetch','async_checkpoint','overlap_dw','cuda_graph','tune'):
                         if st.session_state.get('native_'+key,False):cmd.append('--'+key)
                     for key in ('loss_chunk_size','length_bucket'):
                         cmd.extend(['--'+key,str(st.session_state.get('native_'+key,0))])
                     for key in ('token_cache','sequence_buckets','selective_cache_by_seq'):
                         if st.session_state.get('native_'+key):cmd.extend(['--'+key,st.session_state['native_'+key]])
-                    for key,default in (('fp8_filter','eligible'),('muon_momentum_dtype','fp32'),('muon_batch_size',16),('muon_workspace_mb',512),('muon_gemm_backend','triton'),('allocator_backend','driver'),('selective_cache_mib',1792),('allocator_cache_mib',256)):
+                    for key,default in (('fp8_filter','eligible'),('muon_momentum_dtype','fp32'),('muon_batch_size',16),('muon_workspace_mb',512),('muon_gemm_backend','triton'),('allocator_backend','driver'),('selective_cache_mib',1792),('allocator_cache_mib',256),('allocator_release_mib',0)):
                         cmd.extend(['--'+key,str(st.session_state.get('native_'+key,default))])
                     cmd.extend(['--attention_backend',st.session_state.get('native_attention_backend','triton'),
                                 '--attention_cudnn_min_seq',str(st.session_state.get('native_attention_cudnn_min_seq',4096))])

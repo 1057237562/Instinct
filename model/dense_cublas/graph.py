@@ -154,6 +154,10 @@ class StepGraph:
     def run(self,batch,lr,force=False):
         if tuple(x.shape for x in batch)!=self.shape:raise ValueError('CUDA Graph batch shape changed')
         opt=self.opt
+        # Captured AdamW can update weights without calling Optimizer.step.
+        # Eager fallbacks must not reuse scales from before that replay.
+        for parameter in opt.parameters:
+            if hasattr(parameter.data,'quant_scale_valid'):parameter.data.quant_scale_valid=False
         self.b.copy_many_from_numpy(
             tuple(t.data for t in self.inputs)+(self.control.data,self.counts.data,self.stats.data,self.steps.data),
             tuple(np.asarray(array,np.int64) for array in batch)+(

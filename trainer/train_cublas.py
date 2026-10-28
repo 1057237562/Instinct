@@ -80,6 +80,8 @@ def parser():
     p.add_argument('--peak_tflops',type=float,default=0.)
     p.add_argument('--allocator_cache_mib',type=int,default=256)
     p.add_argument('--allocator_backend',choices=['driver','async'],default='driver')
+    p.add_argument('--allocator_release_mib',type=int,default=None,
+                   help='Async CUDA pool retention threshold in MiB, not a memory cap; omitted preserves the driver setting')
     p.add_argument('--selective_cache_mib',type=int)
     p.add_argument('--selective_cache_by_seq',default='',help='Optional per-bucket saved-output MiB, e.g. 3072:768,4096:1024')
     p.add_argument('--workspace_mib',type=int,default=32);p.add_argument('--candidates',type=int,default=8)
@@ -264,7 +266,7 @@ def train(args,backend=None,tokenizer=None,reward_model=None,observer=None):
     if backend is None:
         from model.dense_cublas.memory import TrainingBackend
         from model.dense_cublas.backend import ScheduleConfig
-        backend_context=TrainingBackend(int(args.device.removeprefix('cuda:')),ScheduleConfig(workspace_mib=args.workspace_mib,candidates=args.candidates,tune=args.tune,overlap_dw=args.overlap_dw,dw_sm_target=args.dw_sm_target),pool_limit_mib=args.allocator_cache_mib, pin_memory=bool(args.pin_memory), allocator_backend=args.allocator_backend)
+        backend_context=TrainingBackend(int(args.device.removeprefix('cuda:')),ScheduleConfig(workspace_mib=args.workspace_mib,candidates=args.candidates,tune=args.tune,overlap_dw=args.overlap_dw,dw_sm_target=args.dw_sm_target),pool_limit_mib=args.allocator_cache_mib, pin_memory=bool(args.pin_memory), allocator_backend=args.allocator_backend,async_release_mib=args.allocator_release_mib)
     else:backend_context=nullcontext(backend)
     rng=np.random.default_rng(args.seed);tokenizer=tokenizer or Tokenizer(args.tokenizer_path,args.token_cache)
     suffix='_mini' if args.dataset_size=='mini' else ''

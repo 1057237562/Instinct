@@ -34,10 +34,15 @@ def statistics(G,U,DY,MY,MG,MU,N:tl.constexpr,BACKWARD:tl.constexpr,B:tl.constex
 
 @triton.jit
 def quantized_values(G,U,DY,SY,SG,SU,Y,QG,QGT,QU,QUT,
-                     ROWS:tl.constexpr,COLS:tl.constexpr,BACKWARD:tl.constexpr,TILE:tl.constexpr=32):
-    row=tl.program_id(0)*TILE+tl.arange(0,TILE)
-    col=tl.program_id(1)*TILE+tl.arange(0,TILE)
-    pos=row[:,None]*COLS+col[None,:];valid=(row[:,None]<ROWS)&(col[None,:]<COLS)
+                     ROWS:tl.constexpr,COLS:tl.constexpr,BACKWARD:tl.constexpr,TILE:tl.constexpr=32,
+                     FLAT_FORWARD:tl.constexpr=False, COL_TILE:tl.constexpr=0, COL_MAJOR_GRID:tl.constexpr=False):
+    if FLAT_FORWARD and not BACKWARD:
+        pos=tl.program_id(0)*1024+tl.arange(0,1024);valid=pos<ROWS*COLS
+    else:
+        width:tl.constexpr=COL_TILE if COL_TILE else TILE
+        row=tl.program_id(1 if COL_MAJOR_GRID else 0)*TILE+tl.arange(0,TILE)
+        col=tl.program_id(0 if COL_MAJOR_GRID else 1)*width+tl.arange(0,width)
+        pos=row[:,None]*COLS+col[None,:];valid=(row[:,None]<ROWS)&(col[None,:]<COLS)
     y,dg,du=values(G,U,DY,pos,valid,BACKWARD)
     yq=tl.minimum(tl.maximum(y*tl.load(SY),-448.),448.).to(Y.dtype.element_ty,fp_downcast_rounding='rtne')
     if BACKWARD:
@@ -50,6 +55,9 @@ def quantized_values(G,U,DY,SY,SG,SU,Y,QG,QGT,QU,QUT,
 
 
 def _scale(ops,partial,maximum):
+    if getattr(ops.backend,'fused_scale_inverse',False):
+        from .quantization import make_scale
+        return make_scale(ops,partial,maximum)
     while partial.numel>1024:
         reduced=ops.empty((triton.cdiv(partial.numel,1024),),'fp32')
         ops.backend.launch(lin.amax_partial,(reduced.numel,),(partial,reduced),SIZE=partial.numel,BLOCK=1024)
@@ -62,9 +70,10 @@ def _scale(ops,partial,maximum):
 
 def quantize_swiglu(ops,gate,up,dy=None):
     rows,cols=gate.shape;backward=dy is not None
-    partials=[ops.empty((triton.cdiv(gate.numel,1024),),'fp32') for _ in range(3 if backward else 1)]
+    block=getattr(ops.backend,'ffn_statistics_block',1024)
+    partials=[ops.empty((triton.cdiv(gate.numel,block),),'fp32') for _ in range(3 if backward else 1)]
     py,pg,pu=(partials+[partials[0]]*3)[:3]
-    ops.backend.launch(statistics,(py.numel,),(gate,up,dy or gate,py,pg,pu),N=gate.numel,BACKWARD=backward)
+    ops.backend.launch(statistics,(py.numel,),(gate,up,dy or gate,py,pg,pu),N=gate.numel,BACKWARD=backward,B=block)
     sy=_scale(ops,py,448.)
     y=ops.empty((cols,rows) if backward else (rows,cols),'fp8e4nv')
     if backward:
@@ -73,8 +82,16 @@ def quantize_swiglu(ops,gate,up,dy=None):
         qgt,qut=[ops.empty((cols,rows),'fp8e5') for _ in range(2)]
         qg.transpose_data,qu.transpose_data=qgt,qut
     else:sg=su=sy;qg=qgt=qu=qut=y
-    ops.backend.launch(quantized_values,(triton.cdiv(rows,32),triton.cdiv(cols,32)),
-        (gate,up,dy or gate,sy,sg,su,y,qg,qgt,qu,qut),ROWS=rows,COLS=cols,BACKWARD=backward)
+    tile=getattr(ops.backend,'ffn_quant_tile',32)
+    flat=getattr(ops.backend,'ffn_flat_forward',False)
+    width=getattr(ops.backend,'ffn_quant_col_tile',tile)
+    col_major=getattr(ops.backend,'ffn_col_major_grid',False)
+    grid=(triton.cdiv(rows,tile),triton.cdiv(cols,width))
+    if col_major:grid=grid[::-1]
+    if flat and not backward:grid=(triton.cdiv(rows*cols,1024),)
+    ops.backend.launch(quantized_values,grid,
+        (gate,up,dy or gate,sy,sg,su,y,qg,qgt,qu,qut),ROWS=rows,COLS=cols,BACKWARD=backward,
+        TILE=tile,FLAT_FORWARD=flat,COL_TILE=width,COL_MAJOR_GRID=col_major)
     return (y,sy,qg,sg,qu,su) if backward else (y,sy)
 
 
@@ -109,7 +126,7 @@ def apply(model,x,prefix,*,residual=None,output=None):
         output=ops.mm(qa,qw,transpose_b=True,scales=(sa,sw),out_dtype=x.dtype).view(*x.shape)
     def backward(g):
         with ops.reuse_scope():
-            dy=ops.cast(g,x.dtype).view(rows,x.shape[-1]);qd,sd=ops.quantize(dy,'fp8e5')
+            dy=ops.cast_for_quantize(g,x.dtype).view(rows,x.shape[-1]);qd,sd=ops.quantize(dy,'fp8e5')
             qw,sw=ops.quantize(wd.data)
             prior=ops._role
             try:
@@ -120,8 +137,12 @@ def apply(model,x,prefix,*,residual=None,output=None):
                 dd=ops.mm(qd,ya,transpose_a=True,transpose_b=True,scales=(sd,sy),out_dtype=wd.dtype)
                 dxg,dg=ops.linear_backward_quantized(gs,qg,sg)
                 dxu,du=ops.linear_backward_quantized(us,qu,su)
-                dx=ops.empty(x.shape,'fp32')
-                e.backend.launch(tk.gradient_sum,(triton.cdiv(x.size,1024),),(dxg,dxu,dxg,dxg,dx),N=x.size,COUNT=2)
+                if getattr(e.backend,'fused_norm_backward',False):
+                    from .autograd import GradientSum
+                    dx=GradientSum((dxg,dxu))
+                else:
+                    dx=ops.empty(x.shape,'fp32')
+                    e.backend.launch(tk.gradient_sum,(triton.cdiv(x.size,1024),),(dxg,dxu,dxg,dxg,dx),N=x.size,COUNT=2)
             finally:ops._role=prior
         result=(dx,dg,du,dd)
         return result if residual is None else (*result,g)

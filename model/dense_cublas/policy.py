@@ -1,4 +1,4 @@
-"""Validated native Dense fusions; independent of experimental attention schedules."""
+"""Validated native Dense fusions and bounded packed-attention scheduling."""
 
 
 def enable_fused_ops(backend):
@@ -12,3 +12,16 @@ def enable_fused_ops(backend):
     backend.selective_attention_min_seq=1
     backend.norm_groups=1024
     backend.elementwise_block=1024
+    # Explicit probe overrides survive policy application. Normal trainers use
+    # the production-validated settings without importing experiment modules.
+    defaults=dict(fused_residual_norm=True,fused_norm_backward=True,fused_scale_inverse=True,
+                  fused_residual_backward=True,fused_cast_amax=True,cache_weight_scales=True,
+                  norm_rope_rows=8,ffn_flat_forward=True,ffn_quant_tile=64,
+                  async_attention_metadata=True,attention_plan_quantum=1024,
+                  attention_plan_limit=64,attention_docs_per_plan=8,attention_local_maxima=True,
+                  attention_group_penalty=4096)
+    for name,value in defaults.items():
+        if not hasattr(backend,name):setattr(backend,name,value)
+    if not hasattr(backend,'aligned_pointwise_only'):
+        backend.aligned_pointwise_only=True
+        backend.aligned_pointers=True

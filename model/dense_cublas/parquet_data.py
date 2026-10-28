@@ -100,6 +100,7 @@ class ParquetPretrain:
         self.root = Path(cache_dir).resolve() / 'parquet-v1'
         self.root.mkdir(parents=True, exist_ok=True)
         self.budget = int(cache_max_gb * 2**30)
+        compiler=compiler or os.environ.get('INSTINCT_DATASET_COMPILER')
         self.compiler = Path(compiler) if compiler else ROOT / 'dataset_compiler/target/release' / (
             'dataset_compiler.exe' if os.name == 'nt' else 'dataset_compiler')
         if not self.compiler.is_file():

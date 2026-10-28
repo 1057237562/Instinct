@@ -63,6 +63,11 @@ class PendingGradient:
     def __init__(self, data, event):self.data,self.event=data,event
 
 
+class GradientSum:
+    """Ordered FP32 additions that a compatible consumer can perform in registers."""
+    def __init__(self,parts):self.parts=tuple(parts)
+
+
 class Engine:
     def __init__(self, backend, fp8=False, seed=42, fp8_filter='eligible'):
         self.backend, self.ops = backend, CublasDenseOps(backend, fp8)
@@ -321,7 +326,9 @@ class Engine:
     def _linear_node(self,x,weight,out,saved):
         def backward(g):
             return self._linear_vjp(x,weight,saved,g)
-        return self._node(out, (x, weight), backward, x.dtype)
+        value=self._node(out, (x, weight), backward, x.dtype)
+        value.quantized_gradient=saved[-1] is not None
+        return value
 
     def _linear_vjp(self,x,weight,saved,g):
         dx,dw=self.ops.linear_backward(saved,self.ops.cast(g,x.dtype),x.requires_grad,weight.requires_grad)
@@ -417,7 +424,16 @@ class Engine:
 
     def norm(self, x, weight, eps=1e-6, out_dtype=None):
         out, saved = self.ops.norm(x.data, weight.data, eps, out_dtype=out_dtype)
-        return self._node(out, (x, weight), lambda g: self.ops.norm_backward(saved, self.ops.cast(g, x.dtype)),x.dtype)
+        return self._norm_node(out,x,weight,saved)
+
+    def _norm_node(self,out,x,weight,saved):
+        def backward(g):
+            if isinstance(g,GradientSum):return self.ops.norm_backward_sum(saved,g.parts)
+            return self.ops.norm_backward(saved,self.ops.cast(g,saved[0].dtype))
+        value=self._node(out,(x,weight),backward,saved[0].dtype)
+        value.accept_gradient_sum=bool(getattr(self.backend,'fused_norm_backward',False))
+        value.residual_norm_saved=saved
+        return value
 
     def residual_norm(self,x,a,weight,eps=1e-6,out_dtype=None):
         from .fused import residual_norm
@@ -431,8 +447,7 @@ class Engine:
         grad_dtype='preserve' if getattr(self.backend,'compact_gradients',False) else 'fp32'
         residual=self._node(z,(x,a),lambda g:(g,g),grad_dtype)
         saved=(z,weight.data,inv)
-        normalized=self._node(y,(residual,weight),
-            lambda g:self.ops.norm_backward(saved,self.ops.cast(g,dtype)),dtype)
+        normalized=self._norm_node(y,residual,weight,saved)
         return residual,normalized
 
     def rotary(self, x, cos, sin, start=0):
@@ -595,12 +610,20 @@ class Engine:
                     for parent in value.node[0]:
                         if parent.requires_grad and parent.node is None:
                             users[parent]=users.get(parent,0)+1
+        residual_users={}
+        if getattr(self.backend,'fused_residual_backward',False):
+            for value in ordered:
+                if value.node:
+                    for parent in value.node[0]:
+                        if parent.requires_grad:residual_users[parent]=residual_users.get(parent,0)+1
         with self.no_grad():
             gradients = {output: [gradient if gradient is not None else self.full(output.shape, 1.).data]}
             def materialize(value):
-                parts=gradients.get(value,[]);result=None
+                parts=[part for item in gradients.get(value,[]) for part in
+                       (item.parts if isinstance(item,GradientSum) else (item,))];result=None
                 target='fp32' if value.node is None or value in requested else value.gradient_dtype
                 compact=getattr(self.backend,'compact_gradients',False)
+                cast=self.ops.cast_for_quantize if getattr(value,'quantized_gradient',False) else self.ops.cast
                 if compact and value.node is None:target='preserve'
                 if compact and 2<=len(parts)<=4:
                     ready=[]
@@ -608,11 +631,13 @@ class Engine:
                         if isinstance(part,PendingGradient):
                             self.backend.wait_event(part.event);part=part.data
                         ready.append(part)
+                    if value not in requested and getattr(value,'accept_gradient_sum',False):
+                        return GradientSum(ready)
                     result=self.backend.empty(value.shape,'fp32')
                     arguments=(ready+[ready[0]]*4)[:4]
                     self.backend.launch(tk.gradient_sum,(triton.cdiv(value.size,1024),),
                         (*arguments,result),N=value.size,COUNT=len(ready))
-                    if target!='preserve':result=self.ops.cast(result,target)
+                    if target!='preserve':result=cast(result,target)
                     gradients[value]=[result]
                     return result
                 for part in parts:
@@ -622,9 +647,9 @@ class Engine:
                     # go directly to a kernel's declared input precision, without
                     # a BF16 -> FP32 -> BF16 round trip. Metadata views preserve it.
                     dtype='fp32' if len(parts)>1 else (part.dtype if target=='preserve' else target)
-                    part=self.ops.cast(part,dtype)
+                    part=cast(part,dtype) if len(parts)==1 else self.ops.cast(part,dtype)
                     result=part if result is None else (self.wrap(result)+self.wrap(part)).data
-                if result is not None and target!='preserve':result=self.ops.cast(result,target)
+                if result is not None and target!='preserve':result=cast(result,target)
                 gradients[value]=[] if result is None else [result]
                 return result
             for value in reversed(ordered):
@@ -636,9 +661,23 @@ class Engine:
                     if not consumed and inputs is None:finished[value]=g
                 else:
                     parents, backward = value.node
-                    local = backward(g)
+                    saved=getattr(value,'residual_norm_saved',None)
+                    residual=parents[0] if saved is not None else None
+                    prior=gradients.get(residual,[])
+                    parts=g.parts if isinstance(g,GradientSum) else (g,)
+                    # Consume the residual only at its last incoming edge. The
+                    # fused result is the complete input gradient, including
+                    # requested checkpoint leaves; it preserves FP32 add order.
+                    fuse=(saved is not None and saved[0].dtype=='fp32'
+                          and residual_users.get(residual)==1 and len(prior)==1
+                          and not isinstance(prior[0],(PendingGradient,GradientSum)) and 1<=len(parts)<=4)
+                    if fuse:
+                        local=self.ops.norm_backward_sum(saved,parts,residual=prior[0])
+                        gradients.pop(residual)
+                    else:local = backward(g)
                     if len(local) != len(parents): raise RuntimeError('VJP returned wrong gradient count')
                     for parent, grad in zip(parents, local):
+                        if parent in residual_users:residual_users[parent]-=1
                         if parent.requires_grad and grad is not None:
                             gradients.setdefault(parent,[]).append(grad)
                     if early_consume:
@@ -651,7 +690,8 @@ class Engine:
                 gradients.pop(value,None)
                 if recycle:
                     pending=[part.data if isinstance(part,PendingGradient) else part
-                             for parts in gradients.values() for part in parts]
+                             for parts in gradients.values() for item in parts
+                             for part in (item.parts if isinstance(item,GradientSum) else (item,))]
                     keep=(*pending,*finished.values())
                     statistics=tuple(t.amax_partial for t in keep if t is not None and hasattr(t,'amax_partial'))
                     self.backend.release_since(mark,keep=(*keep,*statistics))
@@ -691,5 +731,6 @@ class Engine:
 
     def copy(self, target, source, scale=1., add=False):
         if target.shape != source.shape: raise ValueError('copy shape mismatch')
+        if hasattr(target.data,'quant_scale_valid'):target.data.quant_scale_valid=False
         self.backend.launch(tk.scaled_copy, (triton.cdiv(target.size, 256),),
             (source.data, target.data, Scalar(scale)), N=target.size, ADD=add)

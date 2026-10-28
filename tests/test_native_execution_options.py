@@ -7,6 +7,59 @@ from model.dense_cublas.selective import parse_cache_budgets, recipe_plan
 from model.dense_cublas.model import configuration
 
 
+def test_async_pool_retention_cli_preserves_default_and_rejects_negative_budget():
+    from trainer.train_cublas import parser
+    from model.dense_cublas.memory import TrainingBackend
+    assert parser().parse_args([]).allocator_release_mib is None
+    args=parser().parse_args(['--allocator_backend','async','--allocator_release_mib','13312'])
+    backend=TrainingBackend(allocator_backend=args.allocator_backend,async_release_mib=args.allocator_release_mib)
+    assert backend.async_release_mib==13312
+    with pytest.raises(ValueError,match='nonnegative'):TrainingBackend(async_release_mib=-1)
+
+
+def test_production_fusion_policy_preserves_explicit_probe_overrides():
+    from types import SimpleNamespace
+    from model.dense_cublas.policy import enable_fused_ops
+    backend=SimpleNamespace(aligned_pointers=False)
+    enable_fused_ops(backend)
+    assert backend.fused_norm_backward and backend.fused_residual_norm
+    assert backend.fused_scale_inverse and backend.attention_local_maxima
+    assert backend.fused_residual_backward and backend.fused_cast_amax and backend.cache_weight_scales
+    assert backend.attention_group_penalty==4096
+    assert backend.ffn_flat_forward and backend.ffn_quant_tile==64
+    assert backend.norm_rope_rows==8 and backend.attention_docs_per_plan==8
+    assert backend.attention_plan_quantum==1024 and backend.attention_plan_limit==64
+    assert backend.aligned_pointers and backend.aligned_pointwise_only
+    override=SimpleNamespace(fused_norm_backward=False,ffn_quant_tile=32,
+                             fused_residual_backward=False,fused_cast_amax=False,cache_weight_scales=False,
+                             attention_group_penalty=0,
+                             fused_scale_inverse=False,attention_local_maxima=False,
+                             aligned_pointers=False,aligned_pointwise_only=False)
+    enable_fused_ops(override)
+    assert not override.fused_norm_backward and override.ffn_quant_tile==32
+    assert not override.fused_scale_inverse and not override.attention_local_maxima
+    assert not override.fused_residual_backward and not override.fused_cast_amax and not override.cache_weight_scales
+    assert override.attention_group_penalty==0
+    assert not override.aligned_pointers and not override.aligned_pointwise_only
+
+
+def test_attention_local_maxima_preserve_ragged_offsets_and_total_address_space():
+    from types import SimpleNamespace
+    from model.dense_cublas.vendor_attention import NativeAttention
+    from model.dense_triton.runtime import Tensor
+    native=NativeAttention.__new__(NativeAttention)
+    native.b=SimpleNamespace(attention_docs_per_plan=2,attention_plan_quantum=1024,attention_local_maxima=True)
+    metadata=[Tensor((6,),dtype,1000+i*100,native.b) for i,dtype in enumerate(('i64','i64','i64','i32'))]
+    context=(5,4096,16,4,96,12288,metadata,(3900,25,600,900,15))
+    chunks=list(native.chunks(context))
+    assert [(x[0],x[1]) for x in chunks]==[(2,4096),(2,1024),(1,1024)]
+    assert all(x[5]==12288 for x in chunks)
+    assert chunks[1][6][0].storage==1016 and chunks[1][6][3].storage==1308
+    assert chunks[2][6][0].shape==(2,) and chunks[2][6][3].shape==(1,)
+    native.b.attention_local_maxima=False
+    assert all(x[1]==4096 for x in native.chunks(context))
+
+
 def test_per_bucket_budget_changes_only_the_selected_length():
     cfg=configuration(dict(hidden_size=1536,num_hidden_layers=32,intermediate_size=5504,
         num_attention_heads=16,num_key_value_heads=4,head_dim=96,selective_cache_mib=768,

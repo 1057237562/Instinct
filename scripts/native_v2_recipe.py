@@ -23,8 +23,9 @@ def ui_values():
     common={'optimizer','param_dtype','use_grad_checkpoint','batch_size','max_seq_len',
             'accumulation_steps','learning_rate','weight_decay','train_type','from_weight'}
     native={'fp8','fp8_filter','muon_mantissa','muon_momentum_dtype','muon_batch_size','muon_workspace_mb',
-            'selective_cache_mib','selective_cache_by_seq','allocator_backend','allocator_cache_mib',
-            'packing','packed_attention','fused_ops','muon_gemm_backend','attention_backend','attention_cudnn_min_seq'}
+            'selective_cache_mib','selective_cache_by_seq','allocator_backend','allocator_cache_mib','allocator_release_mib',
+            'packing','packed_attention','fused_ops','muon_gemm_backend','attention_backend','attention_cudnn_min_seq',
+            'sequence_buckets','copy_prefetch','num_workers','tune'}
     result={k:v for k,v in cfg.items() if k in common}
     result.update({'native_'+k:v for k,v in cfg.items() if k in native})
     result.update(runtime_backend='cublas',activation_dtype=cfg['dtype'],use_compile=False,

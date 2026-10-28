@@ -28,16 +28,36 @@ class Sdpa:
         self.lib.sdpa_create.argtypes=[ct.c_int64]*5+[ct.c_int,ct.c_int64,ct.c_void_p,ct.POINTER(ct.c_void_p),ct.POINTER(ct.c_uint64)]
         self.lib.sdpa_run.argtypes=[ct.c_void_p,ct.POINTER(ct.c_void_p),ct.c_void_p]
         self.lib.sdpa_destroy.argtypes=[ct.c_void_p]
+        self.tuning_abi=hasattr(self.lib,'sdpa_create_ex')
+        if self.tuning_abi:
+            self.lib.sdpa_create_ex.argtypes=self.lib.sdpa_create.argtypes+[ct.c_int,ct.c_uint64]
+            self.lib.sdpa_candidate_count.argtypes=[ct.c_void_p]
+            self.lib.sdpa_candidate.argtypes=[ct.c_void_p,ct.c_int,ct.POINTER(ct.c_uint64),ct.POINTER(ct.c_char_p)]
+            self.lib.sdpa_select.argtypes=[ct.c_void_p,ct.c_int]
         self.plans=[]
 
     def check(self,status):
         if status:raise RuntimeError(self.lib.sdpa_error().decode())
 
-    def plan(self,b,s,h,hk,d,backward,stream,total=0):
+    def plan(self,b,s,h,hk,d,backward,stream,total=0,*,tune=False,workspace_limit=512*2**20):
         p=ct.c_void_p();workspace=ct.c_uint64()
-        self.check(self.lib.sdpa_create(b,s,h,hk,d,backward,total,stream,ct.byref(p),ct.byref(workspace)))
+        args=(b,s,h,hk,d,backward,total,stream,ct.byref(p),ct.byref(workspace))
+        if tune:
+            if not self.tuning_abi:raise RuntimeError('rebuild native_sdpa for measured plan selection')
+            self.check(self.lib.sdpa_create_ex(*args,1,workspace_limit))
+        else:self.check(self.lib.sdpa_create(*args))
         self.plans.append(p)
         return p,workspace.value
+
+    def candidates(self,plan):
+        result=[]
+        for index in range(self.lib.sdpa_candidate_count(plan)):
+            size=ct.c_uint64();name=ct.c_char_p()
+            self.check(self.lib.sdpa_candidate(plan,index,ct.byref(size),ct.byref(name)))
+            result.append(dict(index=index,workspace_bytes=size.value,name=name.value.decode()))
+        return result
+
+    def select(self,plan,index):self.check(self.lib.sdpa_select(plan,index))
 
     def run(self,plan,buffers,workspace):
         pointers=(ct.c_void_p*len(buffers))(*(x.storage if x is not None else 0 for x in buffers))

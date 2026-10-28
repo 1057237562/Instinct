@@ -16,7 +16,7 @@ from model.dense_cublas.autograd import Engine
 from model.dense_cublas.memory import TrainingBackend
 from model.dense_cublas.model import Model
 from model.dense_cublas.optim import Optimizer
-from model.dense_triton.runtime import Tensor, Scalar
+from model.dense_triton.runtime import Tensor, Scalar, ITEMSIZE
 from tests.test_dense_cublas import ScheduleOracle
 from tests.test_dense_triton import ReferenceBackend, DTYPES
 from tests.test_cublas_training import HostBackend
@@ -45,7 +45,11 @@ class ReusingBackend(TrainingBackend):
 
     def cpu(self, tensor):
         if isinstance(tensor, Scalar): return tensor
-        storage = self.buffers[tensor.storage].view(DTYPES[tensor.dtype]).view(tensor.shape)
+        size=tensor.numel*ITEMSIZE[tensor.dtype]
+        if tensor.storage in self.buffers:base=tensor.storage
+        else:base=next(p for p,buf in self.buffers.items() if p<=tensor.storage and tensor.storage+size<=p+buf.numel())
+        offset=tensor.storage-base
+        storage = self.buffers[base][offset:offset+size].view(DTYPES[tensor.dtype]).view(tensor.shape)
         return Tensor(tensor.shape, tensor.dtype, storage, self)
 
     def launch(self, fn, grid, args, **constants):
@@ -73,6 +77,49 @@ class ReusingBackend(TrainingBackend):
             self.cpu(tensor).storage.copy_(torch.from_numpy(np.asarray(array).copy()))
 
     def to_numpy_many(self, tensors): return tuple(self.to_numpy(t) for t in tensors)
+
+
+@pytest.mark.parametrize('maximum',[448.,57344.])
+@pytest.mark.parametrize('amax',[0.,1e-13,.12345,1.,3.1415926,10000.])
+def test_scale_pair_matches_rounded_reciprocal_and_survives_pool_reuse(maximum,amax):
+    from model.dense_cublas.quantization import make_scale
+    b=ReusingBackend();e=Engine(b)
+    partial=e.array(np.asarray([amax],np.float32)).data
+    mark=b.mark();scale=make_scale(e.ops,partial,maximum);inverse=e.ops._inverse(scale)
+    assert scale.shape==inverse.shape==(1,)
+    expected=np.float32(np.float64(maximum)/max(np.float64(np.float32(amax)),1e-12))
+    np.testing.assert_array_equal(b.to_numpy(scale),[expected])
+    np.testing.assert_array_equal(b.to_numpy(inverse),[np.float32(1.)/expected])
+    b.release_since(mark,keep=(scale,))
+    other=b.empty((8,),'fp32')
+    assert other.storage!=scale.storage
+    assert scale.storage%16==0 and inverse.storage%16==0
+    np.testing.assert_array_equal(b.to_numpy(inverse),[np.float32(1.)/expected])
+
+
+@pytest.mark.parametrize('branches,deferred',[(2,False),(3,False),(4,False),(1,True)])
+@pytest.mark.parametrize('dtype',['fp32','bf16'])
+def test_fused_norm_gradient_sum_preserves_recycled_storage(branches,deferred,dtype):
+    from model.dense_cublas.autograd import GradientSum
+    results=[]
+    for enabled in (False,True):
+        b=ReusingBackend();b.compact_gradients=True;b.fused_norm_backward=enabled
+        e=Engine(b);rng=np.random.default_rng(931)
+        x=e.array(rng.normal(size=(2,7,32)).astype(np.float32),dtype,True)
+        weight=e.array(rng.normal(size=(32,)).astype(np.float32),dtype,True)
+        y=e.norm(x,weight,out_dtype=dtype)
+        loss=e.full((1,),0.)
+        for index in range(branches):
+            if deferred:
+                data=e.binary(y,2.,'mul').data
+                z=e._node(data,(y,),lambda g:(GradientSum((g,g)),))
+            else:z=y*(index+.25)
+            loss=loss+(z*z).sum()
+        grads=e.vjp(loss)
+        results.append((e.item(loss),e.numpy(grads[x]),e.numpy(grads[weight])))
+        assert b.allocator_stats['pool_hits']>0
+    for actual,expected in zip(results[1],results[0]):
+        np.testing.assert_array_equal(actual,expected)
 
 
 @pytest.mark.parametrize('checkpoint', [0, 1, 2])

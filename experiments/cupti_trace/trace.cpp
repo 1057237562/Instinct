@@ -15,7 +15,7 @@
 #define API extern "C" __attribute__((visibility("default")))
 #endif
 namespace {
-struct Row {std::string kind,name;uint64_t start,end;uint32_t correlation,stream;uint32_t regs=0,local=0,shared=0;};
+struct Row {std::string kind,name;uint64_t start,end;uint32_t correlation,stream;uint32_t regs=0,local=0,shared=0;uint64_t bytes=0;};
 struct Stats {uint64_t count=0,ns=0;};
 std::mutex mutex;
 std::vector<Row> rows;
@@ -36,16 +36,19 @@ void CUPTIAPI complete(CUcontext context,uint32_t stream,uint8_t* buffer,size_t,
                             k->registersPerThread,k->localMemoryPerThread,static_cast<uint32_t>(k->staticSharedMemory+k->dynamicSharedMemory)});
         }else if(record->kind==CUPTI_ACTIVITY_KIND_MEMCPY){
             auto* m=reinterpret_cast<CUpti_ActivityMemcpy6*>(record);
-            rows.push_back({"memcpy",std::to_string(m->copyKind),m->start,m->end,m->correlationId,m->streamId});
+            rows.push_back({"memcpy",std::to_string(m->copyKind),m->start,m->end,m->correlationId,m->streamId,0,0,0,m->bytes});
         }else if(record->kind==CUPTI_ACTIVITY_KIND_MEMSET){
             auto* m=reinterpret_cast<CUpti_ActivityMemset4*>(record);
-            rows.push_back({"memset","memset",m->start,m->end,m->correlationId,m->streamId});
+            rows.push_back({"memset","memset",m->start,m->end,m->correlationId,m->streamId,0,0,0,m->bytes});
         }else if(record->kind==CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION){
             auto* c=reinterpret_cast<CUpti_ActivityExternalCorrelation*>(record);
             if(c->externalKind==CUPTI_EXTERNAL_CORRELATION_KIND_CUSTOM0)correlation[c->correlationId]=c->externalId;
         }else if(record->kind==CUPTI_ACTIVITY_KIND_DRIVER || record->kind==CUPTI_ACTIVITY_KIND_RUNTIME){
             auto* a=reinterpret_cast<CUpti_ActivityAPI*>(record);
             auto& s=apis[a->cbid|(record->kind==CUPTI_ACTIVITY_KIND_RUNTIME?0x80000000u:0u)];s.count++;s.ns+=a->end-a->start;
+            const char* name=nullptr;
+            cuptiGetCallbackName(record->kind==CUPTI_ACTIVITY_KIND_RUNTIME?CUPTI_CB_DOMAIN_RUNTIME_API:CUPTI_CB_DOMAIN_DRIVER_API,a->cbid,&name);
+            rows.push_back({record->kind==CUPTI_ACTIVITY_KIND_RUNTIME?"runtime_api":"driver_api",name?name:"",a->start,a->end,a->correlationId,0});
         }
     }
     size_t lost=0;cuptiActivityGetNumDroppedRecords(context,stream,&lost);dropped+=lost;
@@ -70,7 +73,8 @@ API int trace_stop(const char* path){try{
         auto found=correlation.find(r.correlation);uint64_t label=found==correlation.end()?0:found->second;
         out<<"{\"kind\":"<<std::quoted(r.kind)<<",\"name\":"<<std::quoted(r.name)
            <<",\"start\":"<<r.start<<",\"end\":"<<r.end<<",\"label\":"<<label<<",\"stream\":"<<r.stream
-           <<",\"registers\":"<<r.regs<<",\"local_bytes\":"<<r.local<<",\"shared_bytes\":"<<r.shared<<"}\n";
+           <<",\"registers\":"<<r.regs<<",\"local_bytes\":"<<r.local<<",\"shared_bytes\":"<<r.shared
+           <<",\"correlation\":"<<r.correlation<<",\"bytes\":"<<r.bytes<<"}\n";
     }
     for(const auto& entry:apis){const char* name=nullptr;
         cuptiGetCallbackName((entry.first&0x80000000u)?CUPTI_CB_DOMAIN_RUNTIME_API:CUPTI_CB_DOMAIN_DRIVER_API,entry.first&0x7fffffffu,&name);

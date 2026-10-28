@@ -15,7 +15,13 @@ def main():
     p.add_argument('--async-metadata',action='store_true')
     p.add_argument('--docs-per-plan',type=int,default=0)
     p.add_argument('--documents',type=int,default=3)
-    a=p.parse_args();sys.meta_path.insert(0,RejectTorch())
+    p.add_argument('--local-maxima',action='store_true')
+    p.add_argument('--group-penalty',type=int,default=0)
+    p.add_argument('--skewed-documents',action='store_true',help='One long document followed by short documents, to exercise local plan maxima')
+    p.add_argument('--relative-l2-limit',type=float,default=1e-3,help='Explicit accepted whole-gradient tolerance; recorded with the result')
+    a=p.parse_args()
+    if not np.isfinite(a.relative_l2_limit) or a.relative_l2_limit<=0:p.error('relative L2 limit must be positive and finite')
+    sys.meta_path.insert(0,RejectTorch())
     from model.dense_cublas.memory import TrainingBackend
     from model.dense_cublas.autograd import Engine
     from model.dense_cublas.model import Model
@@ -23,18 +29,29 @@ def main():
     from model.dense_cublas.vendor_attention import NativeAttention
     cfg=dict(hidden_size=192,num_hidden_layers=2,intermediate_size=512,num_attention_heads=4,
         num_key_value_heads=1,head_dim=96,vocab_size=256,max_position_embeddings=4096)
-    result=dict(status='running',cases=[]);a.output.parent.mkdir(parents=True,exist_ok=True)
+    result=dict(status='running',cases=[],relative_l2_limit=a.relative_l2_limit);a.output.parent.mkdir(parents=True,exist_ok=True)
     def write():a.output.write_text(json.dumps(result,indent=2))
     def run(mode,seq,fp8,interleaved=False):
         with TrainingBackend(allocator_backend='async') as b:
             enable_fused_ops(b);b.native_attention=NativeAttention(b)
+            # Keep the control independent of the currently shipped defaults.
+            b.attention_local_maxima=False
+            b.attention_group_penalty=0
+            b.fused_scale_inverse=False
             if mode==4:
                 b.attention_plan_quantum=a.candidate_quantum
                 b.async_attention_metadata=a.async_metadata
                 b.attention_docs_per_plan=a.docs_per_plan
+                b.attention_local_maxima=a.local_maxima
+                b.attention_group_penalty=a.group_penalty
             e=Engine(b,fp8=fp8);m=Model(e,cfg|dict(use_grad_checkpoint=mode),param_dtype='bf16',muon_mantissa=True)
             ids=np.arange(seq,dtype=np.int64)[None]%253+3
             segments=np.minimum(np.arange(seq)*a.documents//seq,a.documents-1)[None];segments[:,-7:]=-1
+            if a.skewed_documents:
+                split=seq//2
+                segments[:,:split]=0
+                segments[:,split:]=1+np.arange(seq-split)*max(1,a.documents-1)//(seq-split)
+                segments[:,-7:]=-1
             out=m(ids,ids,sequence_ids=segments)
             loss=e.item(out.loss);logits=e.numpy(out.logits)
             if interleaved:
@@ -62,7 +79,7 @@ def main():
                 if not a.diagnose_repeat:np.testing.assert_allclose(actual[1][name],expected,rtol=1/128,atol=2e-5,err_msg=name)
                 worst=max(worst,float(np.max(np.abs(actual[1][name]-expected))))
                 relative=max(relative,float(np.linalg.norm(actual[1][name]-expected)/max(np.linalg.norm(expected),1e-20)))
-            if not a.diagnose_repeat:assert relative<1e-3,(seq,fp8,relative)
+            if not a.diagnose_repeat:assert relative<a.relative_l2_limit,(seq,fp8,relative)
             row=dict(seq=seq,fp8=fp8,interleaved=interleaved,loss=actual[0],max_gradient_difference=worst,
                 relative_l2=relative,repeat_control_l2=control_l2,repeat_control_max_abs=control_abs,original_bound=original_bound)
             result['cases'].append(row);print(json.dumps(row),flush=True);write()
@@ -80,7 +97,7 @@ def main():
         actual=e.numpy(m(future,sequence_ids=segments).logits)
         np.testing.assert_array_equal(actual[:,:10],reference[:,:10])
     result.update(status='diagnostic' if a.diagnose_repeat else 'complete',document_and_causal_isolation=True,
-        backward_deterministic=False,relative_l2_limit=1e-3,torch_imported='torch' in sys.modules);write()
+        backward_deterministic=False,relative_l2_limit=a.relative_l2_limit,torch_imported='torch' in sys.modules);write()
 
 
 if __name__=='__main__':main()

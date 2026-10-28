@@ -4,6 +4,35 @@ import triton.language as tl
 
 
 @triton.jit
+def rms_backward_sum(X,W,R,G0,G1,G2,G3,DX,PARTIAL_DW,RESIDUAL,M:tl.constexpr,N:tl.constexpr,
+                     GROUPS:tl.constexpr,COUNT:tl.constexpr,BLOCK:tl.constexpr,ADD_RESIDUAL:tl.constexpr=False):
+    group=tl.program_id(0);col=tl.arange(0,BLOCK);valid=col<N
+    w=tl.load(W+col,valid,0).to(tl.float32);dw=tl.full((BLOCK,),0.,tl.float32)
+    for row in range(group,M,GROUPS):
+        offset=row*N+col
+        dy=tl.load(G0+offset,valid,0).to(tl.float32)
+        if COUNT>=2:dy=dy+tl.load(G1+offset,valid,0).to(tl.float32)
+        if COUNT>=3:dy=dy+tl.load(G2+offset,valid,0).to(tl.float32)
+        if COUNT>=4:dy=dy+tl.load(G3+offset,valid,0).to(tl.float32)
+        dy=dy.to(X.dtype.element_ty).to(tl.float32)
+        x=tl.load(X+offset,valid,0).to(tl.float32);inv=tl.load(R+row)
+        xhat=x*inv;dxhat=dy*w;dot=tl.sum(dxhat*xhat,0)/N
+        dx=(inv*(dxhat-xhat*dot)).to(X.dtype.element_ty).to(tl.float32)
+        if ADD_RESIDUAL:dx=tl.load(RESIDUAL+offset,valid,0).to(tl.float32)+dx
+        tl.store(DX+offset,dx,valid)
+        dw+=dy*xhat
+    tl.store(PARTIAL_DW+group*N+col,dw,valid)
+
+
+@triton.jit
+def cast_amax(X,Y,PARTIAL,N:tl.constexpr,BLOCK:tl.constexpr=1024):
+    i=tl.program_id(0)*BLOCK+tl.arange(0,BLOCK);valid=i<N
+    y=tl.load(X+i,valid,0).to(Y.dtype.element_ty)
+    tl.store(Y+i,y,valid)
+    tl.store(PARTIAL+tl.program_id(0),tl.max(tl.where(valid,tl.abs(y.to(tl.float32)),0.),0))
+
+
+@triton.jit
 def residual_norm(X,A,W,Z,Y,R,MAXIMUM,N:tl.constexpr,EPS:tl.constexpr,BLOCK:tl.constexpr):
     row=tl.program_id(0);d=tl.arange(0,BLOCK);mask=d<N
     x=tl.load(X+row*N+d,mask,0).to(tl.float32)

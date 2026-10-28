@@ -10,6 +10,29 @@ from model.dense_triton import elementwise as ew
 
 
 class CublasDenseOps(DenseOps):
+    def norm_backward_sum(self,saved,parts,residual=None):
+        x,w,r=saved
+        if not 1<=len(parts)<=4 or any(p.shape!=x.shape for p in parts):
+            raise ValueError('RMSNorm gradient parts must match the input')
+        n=x.shape[-1];rows=x.numel//n;groups=min(rows,getattr(self.backend,'norm_groups',None) or 128)
+        dx,dw=self.empty(x.shape,x.dtype),self.empty(w.shape,w.dtype)
+        partial=self.empty((groups,n),'fp32');args=(list(parts)+[parts[0]]*4)[:4]
+        if residual is not None and (x.dtype!='fp32' or residual.shape!=x.shape):
+            raise ValueError('fused residual backward requires matching FP32 norm input')
+        self.backend.launch(fused.rms_backward_sum,(groups,),(x,w,r,*args,dx,partial,residual or x),
+            M=rows,N=n,GROUPS=groups,COUNT=len(parts),BLOCK=triton.next_power_of_2(n),ADD_RESIDUAL=residual is not None)
+        block_n=8 if groups>256 else 64
+        self.backend.launch(ew._rms_reduce_dw,(triton.cdiv(n,block_n),),(partial,dw),
+            N=n,GROUPS=groups,BLOCK_G=triton.next_power_of_2(groups),BLOCK_N=block_n)
+        return dx,dw
+
+    def cast_for_quantize(self,x,dtype):
+        if x.dtype==dtype or not getattr(self.backend,'fused_cast_amax',False):return self.cast(x,dtype)
+        out=self.empty(x.shape,dtype);partial=self.empty((triton.cdiv(x.numel,1024),),'fp32')
+        self.backend.launch(fused.cast_amax,(partial.numel,),(x,out,partial),N=x.numel)
+        out.amax_partial=partial
+        return out
+
     def attention(self,q,k,v,mask=None,dropout=0.,seed=0,counter=0,cached=None,packed=False,scale=None):
         native=getattr(self.backend,'native_attention',None)
         if native is not None and scale is None:
@@ -57,10 +80,14 @@ class CublasDenseOps(DenseOps):
 
     def quantize(self, x, dtype='fp8e4nv'):
         # Q/K/V share one normalized activation cast; gate/up share another.
-        return self._cached(('quant', self._key(x), dtype),
-                            lambda: super(CublasDenseOps, self).quantize(x, dtype,
-                                dual_layout=bool(getattr(self.backend,'fused_quant_pack',False)
-                                    and dtype=='fp8e5' and len(x.shape)==2 and all(d%16==0 for d in x.shape))))
+        def create():
+            dual=bool(getattr(self.backend,'fused_quant_pack',False)
+                      and dtype=='fp8e5' and len(x.shape)==2 and all(d%16==0 for d in x.shape))
+            if getattr(self.backend,'fused_scale_inverse',False):
+                from .quantization import quantize
+                return quantize(self,x,dtype,dual)
+            return super(CublasDenseOps,self).quantize(x,dtype,dual_layout=dual)
+        return self._cached(('quant',self._key(x),dtype),create)
 
     def norm_rotary(self,x,weight,cos,sin,eps=1.e-6,start=0):
         if len(x.shape)!=4 or x.shape[-1]%2 or weight.shape!=(x.shape[-1],):
@@ -129,6 +156,8 @@ class CublasDenseOps(DenseOps):
     def _inverse(self, scale):
         if scale.dtype != 'fp32' or scale.numel != 1:
             raise ValueError('quantization scale must be a device FP32 scalar')
+        paired=getattr(scale,'_native_inverse',None)
+        if paired is not None:return paired
         def create():
             out = self.empty((1,), 'fp32')
             self.backend.launch(kernels.inverse_scale, (1,), (scale, out))

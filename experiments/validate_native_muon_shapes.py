@@ -10,6 +10,8 @@ from experiments.smoke_dense_triton import RejectTorch
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--output',required=True,type=Path)
+    p.add_argument('--shapes',default='2:1536:5504,8:1536:1536,16:384:1536',help='batch:rows:columns tuples')
+    p.add_argument('--resident-v2',action='store_true')
     a=p.parse_args();sys.meta_path.insert(0,RejectTorch())
     from model.dense_cublas.memory import TrainingBackend
     from model.dense_cublas.backend import ScheduleConfig
@@ -18,7 +20,17 @@ def main():
     report=dict(status='running',cases=[]);a.output.parent.mkdir(parents=True,exist_ok=True)
     with TrainingBackend(allocator_backend='async',config=ScheduleConfig(tune=True)) as b:
         ops=CublasDenseOps(b);rng=np.random.default_rng(19)
-        for batch,m,k in ((2,1536,5504),(8,1536,1536),(16,384,1536)):
+        if a.resident_v2:
+            from model.dense_cublas.autograd import Engine
+            from model.dense_cublas.model import Model
+            from model.dense_cublas.optim import Optimizer
+            cfg=json.loads((Path(__file__).resolve().parents[1]/'trainer/config_instinct_v2.json').read_text())
+            e=Engine(b,fp8=True,fp8_filter='auto')
+            model=Model(e,cfg,param_dtype='bf16',muon_mantissa=True)
+            optimizer=Optimizer(e,model.parameters(),'muon',muon_mantissa=True,muon_momentum_dtype='bf16')
+            report['resident_bytes']=b._live_bytes
+        shapes=[tuple(map(int,item.split(':'))) for item in a.shapes.split(',')]
+        for batch,m,k in shapes:
             mark=b.mark()
             x=ops.cast(b.from_numpy((rng.standard_normal((batch,m,k),dtype=np.float32)/np.sqrt(k)).astype(np.float32)),'bf16')
             inputs={}

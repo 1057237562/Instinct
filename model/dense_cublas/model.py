@@ -130,7 +130,11 @@ class Model:
         from .muon import hidden_matrix
         dtype = 'fp32' if self.muon_mantissa and not hidden_matrix(name,shape) else self.param_dtype
         self.params[name] = self.e.array(np.asarray(array, np.float32), dtype, True, name)
-        self.e.backend.release_since(mark, keep=(self.params[name].data,))
+        retained=(self.params[name].data,)
+        if getattr(self.e.backend,'cache_weight_scales',False) and len(shape)==2 and dtype=='bf16':
+            from .quantization import reserve_weight_scale
+            retained+= (reserve_weight_scale(self.e.ops,self.params[name].data),)
+        self.e.backend.release_since(mark, keep=retained)
         return self.params[name]
 
     def _ffn_parameters(self, prefix, width):

@@ -11,6 +11,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output',required=True,type=Path)
     p.add_argument('--fused-ffn',action='store_true')
+    p.add_argument('--ffn-quant-tile',type=int,choices=[16,32,64],default=32)
+    p.add_argument('--ffn-flat-forward',action='store_true')
     p.add_argument('--schedule',action='store_true')
     p.add_argument('--cudnn',action='store_true')
     p.add_argument('--aligned',action='store_true')
@@ -20,6 +22,11 @@ def main():
     p.add_argument('--plan-quantum',type=int,default=128)
     p.add_argument('--docs-per-plan',type=int,default=0)
     p.add_argument('--norm-rope-rows',type=int,default=1)
+    p.add_argument('--norm-backward',action='store_true')
+    p.add_argument('--scale-inverse',action='store_true')
+    p.add_argument('--residual-backward',action='store_true')
+    p.add_argument('--cast-amax',action='store_true')
+    p.add_argument('--cache-weight-scales',action='store_true')
     a=p.parse_args();a.output.parent.mkdir(parents=True,exist_ok=True)
     sys.meta_path.insert(0,RejectTorch())
     from model.dense_cublas.memory import TrainingBackend
@@ -36,6 +43,8 @@ def main():
                         with TrainingBackend(allocator_backend='async') as b:
                             enable_fused_ops(b);b.terminal_replay=enabled
                             b.fused_ffn=a.fused_ffn and enabled
+                            b.ffn_quant_tile=a.ffn_quant_tile if enabled else 32
+                            b.ffn_flat_forward=a.ffn_flat_forward and enabled
                             b.norm_groups=1024 if a.schedule and enabled else 128
                             b.elementwise_block=1024 if a.schedule and enabled else 256
                             b.aligned_pointers=(a.aligned or a.aligned_pointwise) and enabled
@@ -45,6 +54,11 @@ def main():
                             b.attention_plan_quantum=a.plan_quantum if enabled else 128
                             b.attention_docs_per_plan=a.docs_per_plan if enabled else 0
                             b.norm_rope_rows=a.norm_rope_rows if enabled else 1
+                            b.fused_norm_backward=a.norm_backward and enabled
+                            b.fused_scale_inverse=a.scale_inverse and enabled
+                            b.fused_residual_backward=a.residual_backward and enabled
+                            b.fused_cast_amax=a.cast_amax and enabled
+                            b.cache_weight_scales=a.cache_weight_scales and enabled
                             if a.cudnn:
                                 from model.dense_cublas.vendor_attention import NativeAttention
                                 b.native_attention=NativeAttention(b)

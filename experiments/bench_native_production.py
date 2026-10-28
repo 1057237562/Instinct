@@ -4,6 +4,7 @@ No Torch/TorchAO imports. The window includes Rust preprocessing overlap,
 mmap batch decoding, H2D, accumulated Muon updates, logs and periodic saves.
 """
 import argparse
+from contextlib import nullcontext
 from collections import Counter
 import json
 import os
@@ -40,6 +41,7 @@ def main():
     parser.add_argument('--native-sdpa-min-seq', type=int, default=0)
     parser.add_argument('--attention-backend',choices=['triton','cudnn','hybrid'])
     parser.add_argument('--muon-gemm-backend',choices=['triton','cublas'])
+    parser.add_argument('--muon-workspace-mib',type=int,default=512)
     parser.add_argument('--selective-cache-by-seq',default='')
     parser.add_argument('--tune', action='store_true')
     parser.add_argument('--save-interval', type=int, default=1000)
@@ -47,6 +49,7 @@ def main():
     parser.add_argument('--async-release-mib', type=int)
     parser.add_argument('--allocator-cache-mib',type=int,default=256)
     parser.add_argument('--profile-stages',action='store_true')
+    parser.add_argument('--sample-device-memory',action='store_true',help='20 ms NVML device-wide memory samples; no CUDA barriers')
     parser.add_argument('--aligned-pointers',action='store_true')
     parser.add_argument('--aligned-pointwise',action='store_true')
     parser.add_argument('--async-attention-metadata',action='store_true')
@@ -54,6 +57,16 @@ def main():
     parser.add_argument('--attention-plan-limit',type=int,default=32)
     parser.add_argument('--attention-docs-per-plan',type=int,default=0)
     parser.add_argument('--fused-residual-norm',action='store_true')
+    parser.add_argument('--fused-norm-backward',action='store_true')
+    parser.add_argument('--fused-scale-inverse',action='store_true')
+    parser.add_argument('--fused-residual-backward',action='store_true')
+    parser.add_argument('--fused-cast-amax',action='store_true')
+    parser.add_argument('--cache-weight-scales',action='store_true')
+    parser.add_argument('--attention-group-penalty',type=int,default=0)
+    parser.add_argument('--attention-local-maxima',action='store_true')
+    parser.add_argument('--ffn-quant-tile',type=int,choices=[16,32,64],default=32)
+    parser.add_argument('--ffn-flat-forward',action='store_true')
+    parser.add_argument('--norm-rope-rows',type=int,choices=[1,2,4,8,16],default=1)
     opts = parser.parse_args()
     if min(opts.start_group, opts.tail_batches) < 0 or min(opts.updates, opts.warmup_updates) < 1:
         parser.error('invalid sample or update counts')
@@ -80,11 +93,12 @@ def main():
         '--save_interval', str(opts.save_interval), '--log_interval', '100',
         '--save_dir', 'D:/AI/Instinct/out/native_cublas', '--checkpoint_dir', 'D:/AI/Instinct/checkpoints/native_cublas',
         '--max_steps', str(microsteps), '--save_weight', prefix, '--selective_cache_mib', str(opts.cache_mib),
-        '--allocator_cache_mib',str(opts.allocator_cache_mib)])
+        '--allocator_cache_mib',str(opts.allocator_cache_mib),'--muon_workspace_mb',str(opts.muon_workspace_mib)])
     args = trainer_parser().parse_args(cmd[3:])
     if opts.native_sdpa_min_seq and opts.attention_backend:
         parser.error('use either legacy SDPA threshold or the public attention backend option')
     extra=[]
+    if opts.async_release_mib is not None:extra.extend(['--allocator_release_mib',str(opts.async_release_mib)])
     for key,value in (('attention_backend',opts.attention_backend),('muon_gemm_backend',opts.muon_gemm_backend),
                       ('selective_cache_by_seq',opts.selective_cache_by_seq)):
         if value is not None and value!='':extra.extend(['--'+key,str(value)])
@@ -117,6 +131,11 @@ def main():
                           parameters=sum(p.size for p in model.parameters(False)),
                           sampling=dict(start_group=opts.start_group,tail_batches=opts.tail_batches,
                                         omitted_prefix_trained=False))
+            report['effective_backend_options']={key:getattr(backend,key,None) for key in (
+                'terminal_replay','fused_ffn','ffn_quant_tile','ffn_flat_forward','fused_residual_norm','fused_norm_backward','fused_scale_inverse','fused_residual_backward','fused_cast_amax','cache_weight_scales','attention_group_penalty','norm_groups','norm_rope_rows',
+                'elementwise_block','aligned_pointers','aligned_pointwise_only','async_attention_metadata',
+                'selective_attention_min_seq','attention_plan_quantum','attention_plan_limit','attention_docs_per_plan','attention_local_maxima')}
+            report['native_compiler']=str(data.compiler)
             if opts.start_group or opts.tail_batches:
                 manifest=data.build(opts.start_group)
                 chunk=PackedChunk(data.cache_path(opts.start_group),manifest,data.tokenizer.pad)
@@ -142,6 +161,7 @@ def main():
                 report['warmup_seconds']=now-launch
                 self.window_start=now;self.pending=[]
                 backend._peak_live_bytes=backend._live_bytes
+                if memory_sampler:memory_sampler.phase='measurement'
                 return
             useful=sum(b['useful_tokens'] for b in self.pending)
             row=dict(step=progress['steps'],seconds=now-self.window_start,useful_tokens=useful,
@@ -158,8 +178,12 @@ def main():
             report['windows'].append(row)
             print('[Native production] '+json.dumps(row),flush=True)
             write(target,report)
+            if memory_sampler and self.micro>=microsteps:memory_sampler.phase='save_and_verify'
 
     observer=Observer()
+    from experiments.native_device_memory import DeviceMemorySampler
+    memory_context=DeviceMemorySampler() if opts.sample_device_memory else nullcontext()
+    memory_sampler=None
     with TrainingBackend(config=ScheduleConfig(tune=opts.tune),pool_limit_mib=args.allocator_cache_mib,
                          allocator_backend=args.allocator_backend,async_release_mib=opts.async_release_mib) as backend:
         backend.pack_tile=opts.pack_tile
@@ -170,6 +194,16 @@ def main():
         backend.attention_plan_limit=opts.attention_plan_limit
         backend.attention_docs_per_plan=opts.attention_docs_per_plan
         backend.fused_residual_norm=opts.fused_residual_norm
+        backend.fused_norm_backward=opts.fused_norm_backward
+        backend.fused_scale_inverse=opts.fused_scale_inverse
+        backend.fused_residual_backward=opts.fused_residual_backward
+        backend.fused_cast_amax=opts.fused_cast_amax
+        backend.cache_weight_scales=opts.cache_weight_scales
+        backend.attention_group_penalty=opts.attention_group_penalty
+        backend.attention_local_maxima=opts.attention_local_maxima
+        backend.ffn_quant_tile=opts.ffn_quant_tile
+        backend.ffn_flat_forward=opts.ffn_flat_forward
+        backend.norm_rope_rows=opts.norm_rope_rows
         backend.attention_tile=32
         backend.attention_forward_tile=opts.attention_forward_tile
         backend.attention_forward_cols=opts.attention_forward_cols
@@ -180,7 +214,9 @@ def main():
             backend.native_attention=NativeAttention(backend)
             backend.native_attention.minimum_seq=opts.native_sdpa_min_seq
         try:
-            result=train(args,backend=backend,observer=observer)
+            with memory_context as memory_sampler:
+                result=train(args,backend=backend,observer=observer)
+            if memory_sampler:report['device_memory_samples']=memory_sampler.report()
             report['save_and_loader_close_seconds']=time.perf_counter()-launch
             if getattr(backend,'native_attention',None) is not None:
                 report['native_sdpa_calls']=dict(forward=backend.native_attention.forward_calls,backward=backend.native_attention.backward_calls)
@@ -207,6 +243,7 @@ def main():
             write(target,report)
         except BaseException as error:
             report.update(status='failed',error=repr(error))
+            if memory_sampler:report['device_memory_samples']=memory_sampler.report()
             if hasattr(observer,'model'):
                 # Preserve current state even on unexpected diagnostic failure.
                 # A partial failing backward/update is forensic, not an accepted resume.

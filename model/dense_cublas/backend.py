@@ -225,7 +225,9 @@ class CublasBackend(CudaBackend):
             prepared.append((tensor,values))
         if not prepared:return
         self.synchronize()
-        for tensor,values in prepared:self._htod(tensor.storage,values.ctypes.data,values.nbytes)
+        for tensor,values in prepared:
+            if hasattr(tensor,'quant_scale_valid'):tensor.quant_scale_valid=False
+            self._htod(tensor.storage,values.ctypes.data,values.nbytes)
         self.synchronize()
 
     def to_numpy_many(self,tensors):

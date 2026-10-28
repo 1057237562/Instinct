@@ -102,6 +102,8 @@ class Optimizer:
                 self.zero_grad();e.backend.release_since(mark)
                 return {'updated':False,'grad_norm':norm,'loss_scale':self.scale}
             scale=divisor*min(1.,self.grad_clip/(norm+1.e-6)) if self.grad_clip>0 else divisor
+            for parameter in self.present:
+                if hasattr(parameter.data,'quant_scale_valid'):parameter.data.quant_scale_valid=False
             if self.muon_plan:
                 if self.param_options or self.scheduler:
                     raise ValueError('split-weight Muon does not accept legacy per-parameter optimizer recipes')

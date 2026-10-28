@@ -36,6 +36,7 @@ def main():
     p.add_argument('--fp8-fast-accum-output',action='store_true')
     p.add_argument('--cache-mib',type=int,default=1792)
     p.add_argument('--profile-driver',action='store_true')
+    p.add_argument('--profile-memory',action='store_true',help='Synchronize at new phase allocation peaks; diagnostic windows are excluded from throughput')
     p.add_argument('--profile-kernels',action='store_true',help='CUDA-event breakdown after warmup (profiling overhead is included)')
     p.add_argument('--profile-cupti',action='store_true',help='Actual CUPTI kernel timestamps, without importing Torch')
     p.add_argument('--cupti-last-steps',type=int,default=2)
@@ -71,7 +72,16 @@ def main():
     p.add_argument('--fused-quant-pack',action='store_true')
     p.add_argument('--terminal-replay',action='store_true')
     p.add_argument('--fused-ffn',action='store_true')
+    p.add_argument('--ffn-quant-tile',type=int,choices=[16,32,64],default=32)
+    p.add_argument('--ffn-flat-forward',action='store_true')
     p.add_argument('--fused-residual-norm',action='store_true')
+    p.add_argument('--fused-norm-backward',action='store_true')
+    p.add_argument('--fused-scale-inverse',action='store_true')
+    p.add_argument('--fused-residual-backward',action='store_true')
+    p.add_argument('--fused-cast-amax',action='store_true')
+    p.add_argument('--cache-weight-scales',action='store_true')
+    p.add_argument('--attention-group-penalty',type=int,default=0)
+    p.add_argument('--attention-local-maxima',action='store_true')
     p.add_argument('--selective-attention-min-seq',type=int,default=4096)
     p.add_argument('--no-packed-skip',action='store_true')
     p.add_argument('--arena-limit-gib',type=float,default=14.37)
@@ -81,6 +91,8 @@ def main():
     if args.micro_graph and len(args.shapes)!=1:p.error('micro-graph screening currently requires one shape')
     if args.production_samples and args.updates:p.error('use bench_native_production for actual updates on production data')
     if args.profile_cupti and (args.profile_kernels or args.updates):p.error('CUPTI probe uses fixed weights and no event profiler')
+    if args.profile_memory and (args.updates or args.micro_graph or args.profile_cupti or args.profile_kernels):
+        p.error('memory diagnostics require a separate fixed-weight eager probe')
     sys.meta_path.insert(0,RejectTorch())
     from model.dense_cublas.memory import TrainingBackend
     from model.dense_cublas.backend import ScheduleConfig
@@ -95,8 +107,20 @@ def main():
             self.driver_profile={}
             self.kernel_events=[];self.profile_active=False
             self.cupti=None;self.gemm_label=None
+            self.memory_active=False;self.memory_phase='setup';self.memory_peaks={};self.memory_samples=[]
             super().__init__(*a,**kw)
         def _submit(self,label,fn,stream=None):
+            if self.memory_active:
+                peak=self.memory_peaks.get(self.memory_phase)
+                if peak and peak['live_bytes']>peak.get('sampled_live_bytes',0):
+                    # Deliberate diagnostic barrier: resolve stream-ordered
+                    # allocations before reading physical free memory. Never
+                    # mix these windows into a throughput result.
+                    snapshot=self.memory()
+                    self.memory_samples.append(dict(phase=self.memory_phase,operation=label,
+                        allocation=peak['allocation'],memory=snapshot,
+                        device_used_bytes=snapshot['device_total_bytes']-snapshot['device_free_bytes']))
+                    peak['sampled_live_bytes']=peak['live_bytes']
             profiler=self.cupti
             if profiler is None or not profiler.active:return super()._submit(label,fn,stream)
             selected=self.gemm_label if label.startswith('cublasLt:') and self.gemm_label else label
@@ -115,6 +139,11 @@ def main():
             self.record_event(end)
             self.kernel_events.append((label,start,end,host_ms))
             return result
+        def control(self,label,call):
+            if self.cupti is None or not self.cupti.active:return call()
+            self.cupti.push('control:'+label)
+            try:return call()
+            finally:self.cupti.pop()
         def launch(self,fn,grid,values,**constants):
             call=super().launch
             return self.timed('kernel/'+getattr(fn,'__name__',str(fn)),lambda:call(fn,grid,values,**constants))
@@ -151,6 +180,11 @@ def main():
                 raise MemoryError(f'native arena guard: {(arena+additional)/2**30:.3f} GiB > {args.arena_limit_gib}')
             result=super().empty(shape,dtype,zero)
             self.peak_arena=max(self.peak_arena,self._live_bytes+self._pool_bytes)
+            if self.memory_active:
+                peak=self.memory_peaks.setdefault(self.memory_phase,dict(live_bytes=0))
+                if self._live_bytes>peak['live_bytes']:
+                    peak.update(live_bytes=self._live_bytes,arena_bytes=self._live_bytes+self._pool_bytes,
+                                allocation=dict(shape=list(shape),dtype=dtype,bytes=needed))
             return result
     target=Path(args.output);target.parent.mkdir(parents=True,exist_ok=True)
     root=Path(__file__).resolve().parents[1]
@@ -184,7 +218,16 @@ def main():
         b.fused_quant_pack=args.fused_quant_pack
         b.terminal_replay=args.terminal_replay
         b.fused_ffn=args.fused_ffn
+        b.ffn_quant_tile=args.ffn_quant_tile
+        b.ffn_flat_forward=args.ffn_flat_forward
         b.fused_residual_norm=args.fused_residual_norm
+        b.fused_norm_backward=args.fused_norm_backward
+        b.fused_scale_inverse=args.fused_scale_inverse
+        b.fused_residual_backward=args.fused_residual_backward
+        b.fused_cast_amax=args.fused_cast_amax
+        b.cache_weight_scales=args.cache_weight_scales
+        b.attention_group_penalty=args.attention_group_penalty
+        b.attention_local_maxima=args.attention_local_maxima
         b.selective_attention_min_seq=args.selective_attention_min_seq
         if args.norm_rope_warps:
             b.kernel_options['model.dense_cublas.fused.norm_rotary_forward']=dict(num_warps=args.norm_rope_warps)
@@ -278,6 +321,8 @@ def main():
             print(json.dumps({'saved_resume':str(resume),'verified_current_state':True}),flush=True)
         try:
             for window in range(args.warmup+args.steps):
+                b.memory_active=args.profile_memory and window>=args.warmup
+                b.memory_peaks={};b.memory_samples=[]
                 b.profile_active=args.profile_kernels and window>=args.warmup
                 collecting=args.profile_cupti and window>=args.warmup+max(0,args.steps-args.cupti_last_steps)
                 if collecting:b.synchronize();b.cupti.start()
@@ -290,16 +335,18 @@ def main():
                         last_loss=graph.run(host_batches[0])
                         if not args.updates:opt.zero_grad()
                     else:
+                        b.memory_phase='forward'
                         if b.cupti:b.cupti.phase='forward'
                         loss=model(ids,labels,sequence_ids=segments,return_logits=False).loss
                     if args.updates and not graph:opt.backward(loss)
                     elif not graph:
+                        b.memory_phase='backward_including_replay'
                         if b.cupti:b.cupti.phase='backward'
                         def consume(param,grad):
                             e.copy(opt.gradients[param],e.wrap(grad))
                             return True
                         e.vjp(loss,leaf_callback=consume)
-                    if not graph:last_loss=e.item(loss)
+                    if not graph:last_loss=b.control('read_loss',lambda:e.item(loss))
                     micro+=1;valid+=count
                     b.release_since(mark)
                     if args.updates:
@@ -311,17 +358,22 @@ def main():
                     if not result['updated']:raise FloatingPointError('optimizer skipped a nonfinite update')
                     updates+=1
                 b.synchronize();end=time.perf_counter()
+                b.memory_active=False
                 if collecting:
                     trace=target.with_suffix(f'.window{window}.cupti.jsonl')
                     report.setdefault('cupti_traces',[]).append(dict(window=window,bucket=(micro-1)%len(batches),path=b.cupti.stop(trace)))
                 row=dict(window=window,warmup=window<args.warmup,total_ms=(end-start)*1000,
                          cupti_profiled=collecting,
+                         memory_profiled=args.profile_memory and window>=args.warmup,
                          forward_backward_ms=(backward_end-start)*1000,optimizer_ms=(end-backward_end)*1000,
                          valid_tokens=valid,loss=last_loss,peak_live_gib=b._peak_live_bytes/2**30,
                          peak_arena_gib=b.peak_arena/2**30,memory=b.memory())
+                if row['memory_profiled']:
+                    row.update(memory_phase_peaks=b.memory_peaks,memory_samples=b.memory_samples,
+                        memory_scope='Synchronized samples at new logical phase peaks; sampled device usage is a lower bound on the physical peak. CUDA pool high-water counters include warmup.')
                 report['windows'].append(row);write();print(json.dumps(row),flush=True)
                 if stop or pause.exists():break
-            measured=[r for r in report['windows'] if not r['warmup'] and not r['cupti_profiled']]
+            measured=[r for r in report['windows'] if not r['warmup'] and not r['cupti_profiled'] and not r['memory_profiled']]
             report['summary']=dict(median_ms=statistics.median(r['total_ms'] for r in measured),
                 useful_tokens_per_second=sum(r['valid_tokens'] for r in measured)*1000/sum(r['total_ms'] for r in measured),
                 peak_live_gib=max(r['peak_live_gib'] for r in measured),peak_arena_gib=max(r['peak_arena_gib'] for r in measured)) if measured else {}
@@ -334,6 +386,7 @@ def main():
             report.update(microsteps=micro,updates=updates,algorithms=b.tuning_report(),torch_imported='torch' in sys.modules)
             if args.native_sdpa:
                 report['native_sdpa_calls']={'forward':b.native_attention.forward_calls,'backward':b.native_attention.backward_calls}
+                report['attention_runtime']=dict(b.native_attention.metrics)
             report['driver_profile']=b.driver_profile
             if args.profile_kernels:report['kernel_profile']=b.kernel_report()
             write()

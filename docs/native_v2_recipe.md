@@ -4,6 +4,20 @@
 `codex/cublas-throughput`。模型仍为 32 层、H=1536、FFN=5504、Q/KV=16/4、
 head_dim=96、vocab=6400、共享 embedding/head，共 1,010,277,888 参数。
 
+## 2026-10-28 当前已验证预设
+
+当前共享原生预设采用cuDNN packed attention、cuBLAS Muon、FP8 scale/倒数融合、
+attention自适应连续分组与组内长度上界、残差梯度融合、cast＋amax、权重scale缓存、
+双1280 MiB checkpoint缓存、256 MiB复用池和512 MiB Muon workspace。
+`--allocator_release_mib 13312` 控制CUDA异步池在同步时保留内存的阈值；它不是显存硬上限。
+该参数也可在Config WebUI原生设置的Async pool retention MiB中调整，裸CLI省略时保留驱动设置。
+16 GiB RTX 5070 Ti生产数据256微步窗口达到15,211有效目标/s；独立128微步为15,081，
+扩大窗口的相同前128微步也为15,081。含loader和Muon更新，不含启动、预热及最终保存；
+完整保存核验通过。权重scale在更新/加载后失效，只增加7168字节常驻标量。
+分组保持1024长度粒度、最多8文档、4096 token等效调度成本和64 plan上限。
+条件、显存和用户接受的attention 0.0011相对L2门槛见
+[2026-10-28验证报告](reports/2026-10-28-native-14k-progress.md)。下面2026-10-26小节保留历史配置。
+
 ## 2026-10-26 代码更新与验证
 
 后续验证已完成两个 native bridge 构建、融合/优化器数值回归和 160 微步生产数据训练。
@@ -69,7 +83,7 @@ Rust 预处理线程和设备双缓冲。原生 `batch_size × max_seq_len` 是�
   4 层 gate/up；3×4096 保留全部 attention O/LSE 和顶部 2 层 gate/up。
   `--selective_cache_mib` 可调整预算。768 MiB 时分别保留全部 K/V、
   顶部 20 层 O/LSE，均不额外保留 gate/up。预算不包含层边界、优化器、量化临时量或驱动池。
-  本机完整累计更新的共享配方采用 768 MiB；1792 MiB 作为可显式选择的原始策略保留。
+  当前共享配方使用两桶各1280 MiB并在两桶缓存attention O/LSE；1792 MiB作为可显式选择的原始策略保留。
   ckpt3 也已提供；ckpt3/4 仅支持标准 Dense、独立投影，不与 LoRA/融合投影组合。
 - `--muon_mantissa 1 --muon_momentum_dtype bf16`：
   隐藏矩阵为 BF16 高位 + 原始 uint16 低位；EMA/Nesterov 在 FP32 计算，

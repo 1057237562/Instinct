@@ -27,7 +27,7 @@ def test_compact_block_labels_and_document_boundaries(tmp_path):
 
 
 def test_rust_parquet_preserves_documents_and_exact_resume(tmp_path):
-    binary=ROOT/'dataset_compiler/target/release/dataset_compiler.exe'
+    binary=Path(os.environ.get('INSTINCT_DATASET_COMPILER',ROOT/'dataset_compiler/target/release/dataset_compiler.exe'))
     if not binary.is_file():pytest.skip('build the native dataset_compiler first')
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -68,7 +68,7 @@ def test_rust_parquet_preserves_documents_and_exact_resume(tmp_path):
 
 @pytest.mark.skipif(os.environ.get('TRITON_INTERPRET')!='1',reason='CPU interpreter integration')
 def test_native_trainer_parquet_pause_resume_matches_continuous(tmp_path):
-    binary=ROOT/'dataset_compiler/target/release/dataset_compiler.exe'
+    binary=Path(os.environ.get('INSTINCT_DATASET_COMPILER',ROOT/'dataset_compiler/target/release/dataset_compiler.exe'))
     if not binary.is_file():pytest.skip('build native dataset_compiler first')
     import pyarrow as pa
     import pyarrow.parquet as pq

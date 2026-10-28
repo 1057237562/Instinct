@@ -16,7 +16,8 @@ def category(name, label, native):
         if op in ('backward_q', 'backward_kv', 'backward_delta',
                   'reduce_kv_groups', 'attention_backward', 'stats_copy'):
             return 'attention_backward_stats'
-        if op in ('norm_rotary_forward', 'norm_rotary_backward'):
+        if op in ('norm_rotary_forward', 'norm_rotary_backward',
+                  'norm_rotary_forward_rows', 'norm_rotary_backward_rows'):
             return 'qk_norm_rope'
     else:
         lower = name.lower()
@@ -57,20 +58,43 @@ def summarize(activities):
                                key=lambda x: x['ms'], reverse=True))
 
 
+def compute_window(activities):
+    """Use identical first/last-kernel bounds; keep original full-span metrics."""
+    kernels=[event for event in activities if event['kind']=='kernel']
+    if not kernels:return None
+    start=min(event['start_ms'] for event in kernels)
+    end=max(event['end_ms'] for event in kernels)
+    bounded=[event|dict(start_ms=max(start,event['start_ms']),end_ms=min(end,event['end_ms']))
+             for event in activities if event['end_ms']>start and event['start_ms']<end]
+    summary=summarize(bounded)
+    return dict(scope='First kernel start to last kernel end; includes intervening copies/memsets',
+                span_ms=end-start,activity_ms=summary['activity_ms'],busy_union_ms=summary['busy_union_ms'],
+                uncovered_span_ms=summary['uncovered_span_ms'],
+                leading_span_ms=start-min(event['start_ms'] for event in activities),
+                trailing_span_ms=max(event['end_ms'] for event in activities)-end)
+
+
 def native_trace(path):
     labels = json.loads(path.with_suffix('.labels.json').read_text(encoding='utf-8'))
     labels = {value: key for key, value in labels['labels'].items()}
     records = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
-    events = []
+    events = [];transfers={}
     for row in records:
         if row['kind'] not in ('kernel', 'memcpy', 'memset'):
             continue
         label = labels.get(row['label'], '<unlabeled>')
-        events.append(dict(start_ms=row['start']/1e6, end_ms=row['end']/1e6,
+        if row['kind']!='kernel':
+            key=(row['kind'],label,row['name'])
+            entry=transfers.setdefault(key,dict(kind=row['kind'],operation=label,copy_kind=row['name'],calls=0,ms=0.,bytes=0))
+            entry['calls']+=1;entry['ms']+=(row['end']-row['start'])/1e6
+            entry['bytes']=entry['bytes']+row['bytes'] if entry['bytes'] is not None and 'bytes' in row else None
+        events.append(dict(kind=row['kind'],start_ms=row['start']/1e6, end_ms=row['end']/1e6,
                            name=label if row['kind']=='kernel' else row['kind'],
                            category=category(row.get('name', ''), label, True)
                            if row['kind']=='kernel' else row['kind']))
     report = summarize(events)
+    report['compute_window']=compute_window(events)
+    report['transfer_operations']=sorted(transfers.values(),key=lambda x:-x['ms'])
     report['trace_summary'] = [r for r in records if r['kind']=='summary']
     report['source'] = str(path)
     return report
@@ -83,10 +107,12 @@ def torch_trace(path):
         kind = row.get('cat')
         if kind not in ('kernel', 'gpu_memcpy', 'gpu_memset'):
             continue
-        events.append(dict(start_ms=row['ts']/1000, end_ms=(row['ts']+row['dur'])/1000,
+        events.append(dict(kind='kernel' if kind=='kernel' else kind.removeprefix('gpu_'),
+                           start_ms=row['ts']/1000, end_ms=(row['ts']+row['dur'])/1000,
                            name=row['name'], category=category(row['name'], '', False)
                            if kind=='kernel' else kind.removeprefix('gpu_')))
     report = summarize(events)
+    report['compute_window']=compute_window(events)
     report['source'] = str(path)
     return report
 
@@ -104,7 +130,8 @@ def main():
                   caveats=['Weights use different RNG implementations.',
                            'Native caches 1024/1280 MiB; Torch caches 1792 MiB.',
                            'Torch Flex templates can fuse Q/K norm and RoPE; these are separate native kernels.',
-                           'Uncovered device span includes dependencies/runtime/launch gaps; it is not CPU self time.'],
+                           'Uncovered device span includes dependencies/runtime/launch gaps; it is not CPU self time.',
+                           'Native probe reads loss; Torch probe does not. compute_window aligns first/last kernel bounds while full-span metrics retain readback/control overhead.'],
                   shapes=torch['shapes'], useful_targets=torch['useful_targets'],
                   native=[], torch=[])
     for bucket in range(2):

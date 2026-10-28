@@ -1,11 +1,38 @@
 """Optional native packed SDPA with bounded plans and compact saved LSE."""
 from collections import OrderedDict
+from functools import lru_cache
 import ctypes as ct
 import time
+import statistics
 import numpy as np
 import triton
 import triton.language as tl
 from .vendor_bridge import Sdpa
+
+
+@lru_cache(maxsize=512)
+def document_groups(lengths,size,quantum,maximum,penalty):
+    """Contiguous partition minimizing padded tokens plus per-plan launch cost.
+
+    The penalty is expressed in padded-token equivalents, not a measured time.
+    Original document order and absolute ragged offsets are never changed.
+    """
+    if size<1 or penalty<0:raise ValueError('invalid attention grouping policy')
+    n=len(lengths)
+    if not penalty:
+        return tuple((start,min(size,n-start)) for start in range(0,n,size))
+    cost=[0]+[float('inf')]*n;previous=[0]*(n+1);groups=[0]*(n+1)
+    for end in range(1,n+1):
+        longest=0
+        for start in range(end-1,max(-1,end-size-1),-1):
+            longest=max(longest,lengths[start]);padded=min(maximum,((longest+quantum-1)//quantum)*quantum)
+            candidate=cost[start]+(end-start)*padded+penalty
+            if (candidate,groups[start]+1)<(cost[end],groups[end]):
+                cost[end]=candidate;previous[end]=start;groups[end]=groups[start]+1
+    result=[];end=n
+    while end:
+        start=previous[end];result.append((start,end-start));end=start
+    return tuple(reversed(result))
 
 
 @triton.jit
@@ -29,7 +56,9 @@ class NativeAttention:
         self.b=backend;self.lib=Sdpa();self.plans=OrderedDict();self.context=None
         self.forward_calls=self.backward_calls=0
         self.upload_slots=[];self.upload_index=0
-        self.metrics=dict(plan_builds=0,plan_evictions=0,plan_build_seconds=0.,prepare_seconds=0.,max_workspace_bytes=0,workspace_fallbacks=0)
+        self.tuned={}
+        self.metrics=dict(plan_builds=0,plan_evictions=0,plan_build_seconds=0.,prepare_seconds=0.,max_workspace_bytes=0,workspace_fallbacks=0,
+                          descriptor_padded_tokens=0,global_descriptor_padded_tokens=0,plan_tuning=[])
 
     def upload_metadata(self,arrays):
         if not getattr(self.b,'async_attention_metadata',False) or self.b._commands is not None:
@@ -77,7 +106,8 @@ class NativeAttention:
         if quantum<128 or quantum%128:raise ValueError('attention plan quantum must be a positive multiple of 128')
         maximum=min(triton.cdiv(seq,128)*128,triton.cdiv(max(lengths),quantum)*quantum)
         if len(lengths)*maximum*heads*4>64*2**20:return
-        geometry=(len(lengths),maximum,heads,kv_heads,dim,batch*seq,[])
+        local_lengths=(tuple(lengths),) if getattr(self.b,'attention_local_maxima',False) else ()
+        geometry=(len(lengths),maximum,heads,kv_heads,dim,batch*seq,[])+local_lengths
         limit=getattr(self.b,'attention_workspace_limit_mib',1792)*2**20
         workspaces=[self.plan(chunk,backward)[1] for chunk in self.chunks(geometry) for backward in (False,True)]
         if max(workspaces)>limit:
@@ -87,21 +117,32 @@ class NativeAttention:
         offsets=np.asarray(starts+[batch*seq],np.int64)
         metadata=self.upload_metadata([offsets*width for width in (heads*dim,kv_heads*dim,heads)]
             +[np.asarray(lengths,np.int32)])
-        self.context=(len(lengths),maximum,heads,kv_heads,dim,batch*seq,metadata)
+        self.context=(len(lengths),maximum,heads,kv_heads,dim,batch*seq,metadata)+local_lengths
+        self.metrics['descriptor_padded_tokens']+=sum(chunk[0]*chunk[1] for chunk in self.chunks(geometry))
+        self.metrics['global_descriptor_padded_tokens']+=len(lengths)*maximum
         self.metrics['prepare_seconds']+=time.perf_counter()-begin
 
     def chunks(self,context):
         from model.dense_triton.runtime import Tensor,ITEMSIZE
-        docs,maximum,h,hk,d,total,metadata=context
+        docs,maximum,h,hk,d,total,metadata=context[:7]
+        lengths=context[7] if len(context)>7 else ()
         size=getattr(self.b,'attention_docs_per_plan',0) or docs
-        for start in range(0,docs,size):
-            count=min(size,docs-start)
+        if size<1:raise ValueError('attention documents per plan must be nonnegative')
+        penalty=getattr(self.b,'attention_group_penalty',0)
+        partition=document_groups(lengths,size,getattr(self.b,'attention_plan_quantum',128),maximum,penalty) if lengths else tuple((s,min(size,docs-s)) for s in range(0,docs,size))
+        for start,count in partition:
+            chunk_maximum=maximum
+            if lengths and getattr(self.b,'attention_local_maxima',False):
+                quantum=getattr(self.b,'attention_plan_quantum',128)
+                chunk_maximum=min(maximum,triton.cdiv(max(lengths[start:start+count]),quantum)*quantum)
             views=[Tensor((count+(index<3),),x.dtype,x.storage+start*ITEMSIZE[x.dtype],self.b)
                    for index,x in enumerate(metadata)]
-            yield count,maximum,h,hk,d,total,views
+            # Preserve physical document order, offsets and total-token address
+            # range. Only each contiguous group's padded length is reduced.
+            yield count,chunk_maximum,h,hk,d,total,views
 
     def plan(self,context,backward):
-        docs,maximum,h,hk,d,total,_=context
+        docs,maximum,h,hk,d,total,_=context[:7]
         key=(docs,maximum,h,hk,d,total,backward)
         if key not in self.plans:
             # Descriptors own runtime resources, but never retain GPU workspaces.
@@ -109,14 +150,33 @@ class NativeAttention:
                 self.b.synchronize()
                 _,(old,_) = self.plans.popitem(last=False)
                 self.lib.lib.sdpa_destroy(old);self.lib.plans.remove(old)
+                self.tuned.pop(old.value,None)
                 self.metrics['plan_evictions']+=1
             begin=time.perf_counter()
-            self.plans[key]=self.lib.plan(docs,maximum,h,hk,d,backward,self.b.main_stream,total)
+            self.plans[key]=self.lib.plan(docs,maximum,h,hk,d,backward,self.b.main_stream,total,
+                tune=getattr(self.b,'attention_tune',False),
+                workspace_limit=getattr(self.b,'attention_tune_workspace_mib',512)*2**20)
             self.metrics['plan_builds']+=1
             self.metrics['plan_build_seconds']+=time.perf_counter()-begin
             self.metrics['max_workspace_bytes']=max(self.metrics['max_workspace_bytes'],self.plans[key][1])
         self.plans.move_to_end(key)
         return self.plans[key]
+
+    def run(self,plan,buffers,workspace,context,backward):
+        if getattr(self.b,'attention_tune',False) and plan.value not in self.tuned:
+            begin=time.perf_counter();candidates=self.lib.candidates(plan)
+            # Only outputs/workspace are overwritten. Inputs and compact saved
+            # LSE remain immutable; repeat executions are safe before capture.
+            for candidate in candidates:
+                self.lib.select(plan,candidate['index'])
+                for _ in range(2):self.lib.run(plan,buffers,workspace)
+                candidate['median_ms']=statistics.median(self.b.time_call(
+                    lambda:self.lib.run(plan,buffers,workspace),self.b.main_stream,repeats=3) for _ in range(3))
+            best=min(candidates,key=lambda x:x['median_ms'])
+            self.lib.select(plan,best['index']);self.tuned[plan.value]=best['index']
+            self.metrics['plan_tuning'].append(dict(geometry=list(context[:6]),backward=backward,
+                selected=best['index'],candidates=candidates,seconds=time.perf_counter()-begin))
+        self.lib.run(plan,buffers,workspace)
 
     def attention(self,q,k,v,mask,dropout,seed,counter,cached,packed,fallback):
         # Bind metadata to the mask carried by this particular forward/replay,
@@ -124,7 +184,7 @@ class NativeAttention:
         context=getattr(mask,'native_attention_context',self.context)
         if not packed or context is None or q.dtype!='bf16' or dropout:
             return fallback(q,k,v,mask,dropout,seed,counter,cached,packed)
-        docs,maximum,h,hk,d,total,metadata=context
+        docs,maximum,h,hk,d,total,metadata=context[:7]
         out,lse=cached if cached is not None else (self.b.empty(q.shape,q.dtype,zero=True),self.b.empty((total,h),'fp32',zero=True))
         if cached is None:
             self.forward_calls+=1
@@ -135,7 +195,7 @@ class NativeAttention:
                 stats=self.b.empty((docs,h,maximum),'fp32')
                 work=self.b.empty((max(1,(n+3)//4),),'fp32')
                 buffers=[q,k,v,out,stats,None,None,None,None,*metadata]
-                self.b._submit('cudnn:attention_forward',lambda plan=plan,buffers=buffers,work=work:self.lib.run(plan,buffers,work))
+                self.b._submit('cudnn:attention_forward',lambda plan=plan,buffers=buffers,work=work,chunk=chunk:self.run(plan,buffers,work,chunk,False))
                 self.b.launch(stats_copy,(docs,h,triton.cdiv(maximum,256)),(stats,lse,metadata[2],metadata[3]),SEQ=maximum,HEADS=h,EXPAND=False)
                 self.b.release_since(mark)
         return out,(q,k,v,mask,out,lse,('native_sdpa',context),seed,counter)
@@ -144,7 +204,7 @@ class NativeAttention:
         if not isinstance(saved[6],tuple) or saved[6][0]!='native_sdpa':return fallback(saved,dy)
         q,k,v,_,out,lse,(_,context),_,_=saved
         self.backward_calls+=1
-        docs,maximum,h,hk,d,total,metadata=context
+        docs,maximum,h,hk,d,total,metadata=context[:7]
         dq,dk,dv=[self.b.empty(x.shape,x.dtype,zero=True) for x in (q,k,v)]
         for chunk in self.chunks(context):
             docs,maximum,h,hk,d,total,metadata=chunk
@@ -154,7 +214,7 @@ class NativeAttention:
             self.b.launch(stats_copy,(docs,h,triton.cdiv(maximum,256)),(stats,lse,metadata[2],metadata[3]),SEQ=maximum,HEADS=h,EXPAND=True)
             work=self.b.empty((max(1,(n+3)//4),),'fp32')
             buffers=[q,k,v,out,stats,dy,dq,dk,dv,*metadata]
-            self.b._submit('cudnn:attention_backward',lambda plan=plan,buffers=buffers,work=work:self.lib.run(plan,buffers,work))
+            self.b._submit('cudnn:attention_backward',lambda plan=plan,buffers=buffers,work=work,chunk=chunk:self.run(plan,buffers,work,chunk,True))
             self.b.release_since(mark)
         return dq,dk,dv
 
