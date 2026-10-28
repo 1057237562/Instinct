@@ -44,6 +44,8 @@ def main():
     parser.add_argument('--muon-workspace-mib',type=int,default=512)
     parser.add_argument('--selective-cache-by-seq',default='')
     parser.add_argument('--tune', action='store_true')
+    parser.add_argument('--workspace-mib',type=int,default=32)
+    parser.add_argument('--candidates',type=int,default=8)
     parser.add_argument('--save-interval', type=int, default=1000)
     parser.add_argument('--cache-mib', type=int, default=768)
     parser.add_argument('--async-release-mib', type=int)
@@ -67,6 +69,7 @@ def main():
     parser.add_argument('--ffn-quant-tile',type=int,choices=[16,32,64],default=32)
     parser.add_argument('--ffn-flat-forward',action='store_true')
     parser.add_argument('--norm-rope-rows',type=int,choices=[1,2,4,8,16],default=1)
+    parser.add_argument('--candidate-config')
     opts = parser.parse_args()
     if min(opts.start_group, opts.tail_batches) < 0 or min(opts.updates, opts.warmup_updates) < 1:
         parser.error('invalid sample or update counts')
@@ -93,7 +96,8 @@ def main():
         '--save_interval', str(opts.save_interval), '--log_interval', '100',
         '--save_dir', 'D:/AI/Instinct/out/native_cublas', '--checkpoint_dir', 'D:/AI/Instinct/checkpoints/native_cublas',
         '--max_steps', str(microsteps), '--save_weight', prefix, '--selective_cache_mib', str(opts.cache_mib),
-        '--allocator_cache_mib',str(opts.allocator_cache_mib),'--muon_workspace_mb',str(opts.muon_workspace_mib)])
+        '--allocator_cache_mib',str(opts.allocator_cache_mib),'--muon_workspace_mb',str(opts.muon_workspace_mib),
+        '--workspace_mib',str(opts.workspace_mib),'--candidates',str(opts.candidates)])
     args = trainer_parser().parse_args(cmd[3:])
     if opts.native_sdpa_min_seq and opts.attention_backend:
         parser.error('use either legacy SDPA threshold or the public attention backend option')
@@ -184,7 +188,7 @@ def main():
     from experiments.native_device_memory import DeviceMemorySampler
     memory_context=DeviceMemorySampler() if opts.sample_device_memory else nullcontext()
     memory_sampler=None
-    with TrainingBackend(config=ScheduleConfig(tune=opts.tune),pool_limit_mib=args.allocator_cache_mib,
+    with TrainingBackend(config=ScheduleConfig(tune=opts.tune,workspace_mib=opts.workspace_mib,candidates=opts.candidates),pool_limit_mib=args.allocator_cache_mib,
                          allocator_backend=args.allocator_backend,async_release_mib=opts.async_release_mib) as backend:
         backend.pack_tile=opts.pack_tile
         backend.aligned_pointers=opts.aligned_pointers or opts.aligned_pointwise
@@ -214,6 +218,8 @@ def main():
             backend.native_attention=NativeAttention(backend)
             backend.native_attention.minimum_seq=opts.native_sdpa_min_seq
         try:
+            from experiments.native_candidate import apply
+            report['candidate_config']=apply(backend,opts.candidate_config)
             with memory_context as memory_sampler:
                 result=train(args,backend=backend,observer=observer)
             if memory_sampler:report['device_memory_samples']=memory_sampler.report()

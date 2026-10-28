@@ -1,6 +1,8 @@
 # Native V2：2026-10-28 算子优化、15k 验证与显存调优
 
-最新组合已完成256测量微步的 **15,210.9661 有效预测目标/秒** 验证；128微步独立运行为15,080.6001 TPS，扩大运行的相同前128微步为15,081.4158 TPS。两轮均完成当前完整状态保存及逐数组核验。新增残差梯度融合、cast＋amax、权重scale复用和自适应连续文档分组；固定样本kernel数由5402降至4314。详细结果见末尾“15k执行结果”。下文保留前几轮历史记录。
+2026-10-29的新一轮实现了有界启发式选型、Muon转置分块和O/LSE＋K/V混合缓存。16k目标尚未验收，fast accumulation未启用；本轮结果见末尾“16k目标与有界选型”。下文保留前几轮历史记录。
+
+2026-10-28组合已完成256测量微步的 **15,210.9661 有效预测目标/秒** 验证；128微步独立运行为15,080.6001 TPS，扩大运行的相同前128微步为15,081.4158 TPS。两轮均完成当前完整状态保存及逐数组核验。新增残差梯度融合、cast＋amax、权重scale复用和自适应连续文档分组；固定样本kernel数由5402降至4314。详细结果见“15k执行结果”。
 
 上一轮组合的同窗口生产验证达到 **14,603.2725 有效预测目标/秒**，对照为14,308.0266，提高 **2.0635%**、平均每微步减少 **16.759 ms**。160微步正常完成，当前weights、完整optimizer/scaler/RNG/data cursor状态逐数组核验通过。峰值native live **12.73708 GiB**基本不变；NVML设备采样峰值 **15.29552 GiB**，比本轮匹配对照增加约 **1.63%**。18,000 TPS尚未达到。
 
@@ -288,3 +290,69 @@ Norm组包含独立的Norm权重梯度归约；最后一组的清零是Triton fi
 | 数据加载独立耗时 | 本轮未单独计时 | 无同窗口数据 | 不从剩余时间反推loader耗时 |
 
 生产测量包含212个短桶和44个长桶，文档长度组成与固定样本不同，不能用两个固定样本的均值还原生产窗口。生产已启用自适应分组，完整运行48个plan、0次淘汰和0次fallback。Torch优化器参考来自[历史完整更新汇总](D:/AI/Instinct/experiments/results/v2_14k/final_comparison.json)及[合成更新原始记录](D:/AI/Instinct/experiments/results/v2_14k/optimized_updates.json)；其口径不含loader和保存，测量方式也不同。
+
+## 16k目标与有界选型（2026-10-29）
+
+最终保持原有精确累计，生产256测量微步为 **15,596.7330 TPS**；同样本窗口旧版为15,210.9661，提升 **2.5361%**，节省 **19.4049 ms/微步**。**尚未达到16,000 TPS**：按本窗口有效目标数，仍需减少 **19.2848 ms/微步**。43 ms是验收目标预算，不是已经实现或可以直接相加的收益。
+
+### 最终生产结果与保存
+
+配方仍是32层V2、BF16隐藏参数/momentum、uint16 mantissa、FP8 auto、累积8、512 MiB Muon workspace。数据为同一生产Parquet，从group0末64批跨到group1；4更新预热后测32更新。使用已建Rust packed缓存，含loader、H2D、前后向和更新，不含启动/预热/最终保存；本轮未重建冷缓存。
+
+| 项目 | 上一轮256微步 | 本轮256微步 |
+|---|---:|---:|
+| 有效预测目标 | 3,055,038 | 3,055,038 |
+| 测量墙钟 | 200.844442 s | 195.876791 s |
+| 有效TPS | 15,210.9661 | **15,596.7330** |
+| 相同前128微步TPS | 15,081.4158 | **15,475.9458** |
+| Muon/伴随更新阶段 | 448.5574 ms/更新 | **415.4570 ms/更新** |
+| 更新阶段摊销 | 56.0697 ms/微步 | **51.9321 ms/微步** |
+| native live峰值 | 12.736976 GiB | **13.281898 GiB（+4.2783%）** |
+| NVML设备采样峰值 | 15.421196 GiB | **15.243004 GiB（−1.1555%）** |
+| 设备采样峰值时free | 0.499702 GiB | **0.677895 GiB** |
+
+native live与NVML device-used口径不同，后者是20 ms采样下界，不能把二者相减作为可分配余量。60个plan、0次淘汰、0次workspace fallback；启动预热30种描述符几何耗时3.0254秒。没有用单个全短桶窗口的16,256.6 TPS冒充混合桶验收。完整脚本含启动、预热、保存和逐数组核验共310.756秒，不等于表中的测量窗口。
+
+共完成288微步、36次真实更新，正常退出；最终loss=5.3650336266。weights和完整resume逐数组核验通过，`verified_current_state=true`，`torch_imported=false`：
+
+- `D:/AI/Instinct/out/native_cublas/native_production_20261029_012616_33952_1536.npz`
+- `D:/AI/Instinct/checkpoints/native_cublas/native_production_20261029_012616_33952_1536_resume.npz`
+
+[最终生产原始记录](../../experiments/results/cublas/target16k_20261029/production_precise_extended.json) · [同窗口比较](../../experiments/results/cublas/target16k_20261029/production_comparison.json)。此表核验性能和保存，**不表示下文完整模型梯度重复性问题已经解决**。
+
+### 选择算法与采用项
+
+1. CPU先筛资源和形状。cuBLAS保留前两个启发式推荐，再考虑workspace和waves不同的候选，最多4项；waves是占用率代理，不冒充延迟预测。cuDNN对A/B/fallback启发式去重，限制workspace，仅保留最多4个受支持plan。FFN按元素存活数量、转置存储宽度和数据流选择短名单。文档分组的CPU动态规划保持连续文档顺序，兼顾padding与调用成本。
+2. 粗测每项2次，只将基线与领先项交替复测3轮，每轮3次。未超过1%的改善保留基线；仅一个支持项时跳过比较。选择结果随shape/precision/workspace的现有plan缓存复用；**没有新增跨进程持久选型缓存**。
+3. cuDNN长度粒度512、每组最多4文档、等效调度成本4096、plan上限64。消费训练数据前预热合法的有界描述符目录，使用零合成输入，不改参数/优化器/数据cursor。实测只有30个单候选plan和30个双候选plan。邻近tile配置尝试没有新增可用plan，因此不宣称得到新attention核心内核。CUDA/cuDNN官方支持[按plan执行与实测选择](https://docs.nvidia.com/cudnn/latest/developer/overview/)。
+4. Muon长矩阵的prepare/apply改为32×32分块转置，保持舍入点及mantissa拆位不变；只对SM120已测的1536×1536×1536和384×384×1536对称运算使用BK128三角内核，其余继续cuBLAS。五步NS链的三种生产几何对cuBLAS逐位一致。
+5. 通用FP8双布局量化tile 32→64。ckpt4保持O/LSE优先，用剩余预算先缓存K/V，再缓存gate/up。两桶预算1792 MiB，实际32层O/LSE 1176 MiB＋32层K/V 576 MiB＝1752 MiB；未超过预算。BF16 K/V投影的实测时间/缓存字节优于大FFN Tensor Core投影，不能只按理论FLOP/byte排优先级。
+
+### 同输入固定权重剖面
+
+同旧版的两份生产输入、真实常驻优化器/梯度、6次warmup、4个无profiler测量样本及2个CUPTI样本。缓存策略是优化变量：旧1280、新1792 MiB。旧数据是历史测量，不能当成同时运行的严格配对，也不能代替生产窗口。
+
+| 项目（ms/微步） | 旧短桶 | 新短桶 | 旧长桶 | 新长桶 |
+|---|---:|---:|---:|---:|
+| 无profiler墙钟中位数 | 748.92 | **726.19** | 821.59 | **813.43** |
+| GEMM | 329.44 | **323.66** | 328.29 | **322.84** |
+| Attention＋Q/K Norm/RoPE | 215.38 | **200.79** | 291.20 | 292.09 |
+| 其他kernel | 183.31 | **181.61** | 182.71 | **181.46** |
+| memset | 5.62 | **4.31** | 2.82 | **2.75** |
+| 同首尾kernel边界的GPU空档 | 9.51 | 10.11 | 9.90 | 9.84 |
+| kernel数 | 4314 | **4570** | 4314 | **4250** |
+
+短桶分组增加了attention调用数，但前向从77.75降到62.13 ms，少做padding的收益超过额外调用；kernel更少不是独立验收目标。K/V缓存减少64次重算GEMM。通用quantize_dual约节省1.24/1.36 ms；FFN statistics＋quantized_values仍约71.7 ms，**本轮没有兑现FFN 15 ms预算**。Norm对齐/行分组没有稳定收益，未启用；Muon摊销节省4.14 ms，未达到8 ms预算。无法把这两个固定样本按桶数量加权后冒充整段生产的分项计时。
+
+[固定样本分项报告](../../experiments/results/cublas/target16k_20261029/fixed_final_comparison.json)
+
+### 未采用项与数值边界
+
+- FFN单纯tile/warp、矩形转置tile、暂存BF16中间值均未胜出。基线前向/反向约0.747/1.591 ms每层；暂存变为0.787/2.155 ms，增加的读写抵消了少算一遍。完整输出逐元素一致，但不能因减少计算次数就采用更慢的版本。
+- 更大的Muon batch/workspace基本按矩阵数线性扩展；128 MiB cuBLAS workspace及本机cuBLAS13.4.0 DLL没有显示可采纳收益，最终保留32 MiB cuBLAS workspace和原13.2.1库。
+- fast accumulation两层生产形状曾通过，但32层检查未满足原门槛，最终**不启用**。通用模式最坏相对L2为0.297/0.194，限定形状的短桶为0.265。进一步关闭调优并重复原精确基线，仍出现0.160/0.133；在同一对照设置下，限定fast候选为0.155/0.132，loss一致。因此较大梯度差异不能全部归因fast accumulation，完整32层FP8/cuDNN基线的重复性仍未解释。没有提高容差，也没有宣称完整模型梯度验收通过。
+- 用户之前接受的attention相对L2 0.0011仍仅用于既有attention对照。本轮小模型attention分组/选型最大约0.000786，混合缓存16个loss/VJP用例通过，最坏约2.38e-7；这些局部/小模型证据不覆盖上述32层问题。
+
+[FFN短名单](../../experiments/results/cublas/target16k_20261029/ffn_shortlist.json) · [Muon转置逐位校验](../../experiments/results/cublas/target16k_20261029/muon_io.json) · [五步NS链](../../experiments/results/cublas/target16k_20261029/muon_chain.json) · [混合缓存VJP](../../experiments/results/cublas/target16k_20261029/auxkv_parity.json) · [完整模型重复对照](../../experiments/results/cublas/target16k_20261029/full_v2_precision_control.json)
+
+CPU聚焦检查108 passed、4个CUDA用例按标记跳过；最终预设/选型/实际WebUI命令25 passed，另有上述独立CUDA验证。旧原生分支不存在主工作区的config模板三组测试及relay schema生成器，因此使用本分支native UI/CLI契约测试，不借用主工作区测试冒充验证。没有停止或丢弃任何未保存训练进度；所有生产候选均完成各自保存核验，未采纳候选的状态也保留在ignored输出目录。

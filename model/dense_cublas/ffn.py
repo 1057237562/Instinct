@@ -33,9 +33,22 @@ def statistics(G,U,DY,MY,MG,MU,N:tl.constexpr,BACKWARD:tl.constexpr,B:tl.constex
 
 
 @triton.jit
+def cached_statistics(G,U,DY,MY,MG,MU,Y,DG,DU,N:tl.constexpr,BACKWARD:tl.constexpr,B:tl.constexpr=1024):
+    i=tl.program_id(0)*B+tl.arange(0,B);mask=i<N
+    y,dg,du=values(G,U,DY,i,mask,BACKWARD)
+    tl.store(Y+i,y,mask)
+    tl.store(MY+tl.program_id(0),tl.max(tl.where(mask,tl.abs(y),0.),0))
+    if BACKWARD:
+        tl.store(DG+i,dg,mask);tl.store(DU+i,du,mask)
+        tl.store(MG+tl.program_id(0),tl.max(tl.where(mask,tl.abs(dg),0.),0))
+        tl.store(MU+tl.program_id(0),tl.max(tl.where(mask,tl.abs(du),0.),0))
+
+
+@triton.jit
 def quantized_values(G,U,DY,SY,SG,SU,Y,QG,QGT,QU,QUT,
                      ROWS:tl.constexpr,COLS:tl.constexpr,BACKWARD:tl.constexpr,TILE:tl.constexpr=32,
-                     FLAT_FORWARD:tl.constexpr=False, COL_TILE:tl.constexpr=0, COL_MAJOR_GRID:tl.constexpr=False):
+                     FLAT_FORWARD:tl.constexpr=False, COL_TILE:tl.constexpr=0, COL_MAJOR_GRID:tl.constexpr=False,
+                     PRECOMPUTED:tl.constexpr=False):
     if FLAT_FORWARD and not BACKWARD:
         pos=tl.program_id(0)*1024+tl.arange(0,1024);valid=pos<ROWS*COLS
     else:
@@ -43,7 +56,11 @@ def quantized_values(G,U,DY,SY,SG,SU,Y,QG,QGT,QU,QUT,
         row=tl.program_id(1 if COL_MAJOR_GRID else 0)*TILE+tl.arange(0,TILE)
         col=tl.program_id(0 if COL_MAJOR_GRID else 1)*width+tl.arange(0,width)
         pos=row[:,None]*COLS+col[None,:];valid=(row[:,None]<ROWS)&(col[None,:]<COLS)
-    y,dg,du=values(G,U,DY,pos,valid,BACKWARD)
+    if PRECOMPUTED:
+        y=tl.load(G+pos,valid,0).to(tl.float32);dg=y;du=y
+        if BACKWARD:
+            dg=tl.load(U+pos,valid,0).to(tl.float32);du=tl.load(DY+pos,valid,0).to(tl.float32)
+    else:y,dg,du=values(G,U,DY,pos,valid,BACKWARD)
     yq=tl.minimum(tl.maximum(y*tl.load(SY),-448.),448.).to(Y.dtype.element_ty,fp_downcast_rounding='rtne')
     if BACKWARD:
         tl.store(Y+col[None,:]*ROWS+row[:,None],yq,valid)
@@ -73,7 +90,14 @@ def quantize_swiglu(ops,gate,up,dy=None):
     block=getattr(ops.backend,'ffn_statistics_block',1024)
     partials=[ops.empty((triton.cdiv(gate.numel,block),),'fp32') for _ in range(3 if backward else 1)]
     py,pg,pu=(partials+[partials[0]]*3)[:3]
-    ops.backend.launch(statistics,(py.numel,),(gate,up,dy or gate,py,pg,pu),N=gate.numel,BACKWARD=backward,B=block)
+    cached=getattr(ops.backend,'ffn_materialize_backward' if backward else 'ffn_materialize_forward',False)
+    operands=(gate,up,dy or gate)
+    if cached:
+        intermediates=[ops.empty(gate.shape,gate.dtype) for _ in range(3 if backward else 1)]
+        cy,cg,cu=(intermediates+[intermediates[0]]*3)[:3]
+        ops.backend.launch(cached_statistics,(py.numel,),(*operands,py,pg,pu,cy,cg,cu),N=gate.numel,BACKWARD=backward,B=block)
+        operands=(cy,cg,cu)
+    else:ops.backend.launch(statistics,(py.numel,),(*operands,py,pg,pu),N=gate.numel,BACKWARD=backward,B=block)
     sy=_scale(ops,py,448.)
     y=ops.empty((cols,rows) if backward else (rows,cols),'fp8e4nv')
     if backward:
@@ -90,8 +114,8 @@ def quantize_swiglu(ops,gate,up,dy=None):
     if col_major:grid=grid[::-1]
     if flat and not backward:grid=(triton.cdiv(rows*cols,1024),)
     ops.backend.launch(quantized_values,grid,
-        (gate,up,dy or gate,sy,sg,su,y,qg,qgt,qu,qut),ROWS=rows,COLS=cols,BACKWARD=backward,
-        TILE=tile,FLAT_FORWARD=flat,COL_TILE=width,COL_MAJOR_GRID=col_major)
+        (*operands,sy,sg,su,y,qg,qgt,qu,qut),ROWS=rows,COLS=cols,BACKWARD=backward,
+        TILE=tile,FLAT_FORWARD=flat,COL_TILE=width,COL_MAJOR_GRID=col_major,PRECOMPUTED=cached)
     return (y,sy,qg,sg,qu,su) if backward else (y,sy)
 
 

@@ -44,7 +44,7 @@ class Sdpa:
         args=(b,s,h,hk,d,backward,total,stream,ct.byref(p),ct.byref(workspace))
         if tune:
             if not self.tuning_abi:raise RuntimeError('rebuild native_sdpa for measured plan selection')
-            self.check(self.lib.sdpa_create_ex(*args,1,workspace_limit))
+            self.check(self.lib.sdpa_create_ex(*args,int(tune),workspace_limit))
         else:self.check(self.lib.sdpa_create(*args))
         self.plans.append(p)
         return p,workspace.value

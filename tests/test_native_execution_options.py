@@ -27,8 +27,10 @@ def test_production_fusion_policy_preserves_explicit_probe_overrides():
     assert backend.fused_residual_backward and backend.fused_cast_amax and backend.cache_weight_scales
     assert backend.attention_group_penalty==4096
     assert backend.ffn_flat_forward and backend.ffn_quant_tile==64
-    assert backend.norm_rope_rows==8 and backend.attention_docs_per_plan==8
-    assert backend.attention_plan_quantum==1024 and backend.attention_plan_limit==64
+    assert backend.norm_rope_rows==8 and backend.attention_docs_per_plan==4
+    assert backend.attention_plan_quantum==512 and backend.attention_plan_limit==64
+    assert backend.muon_tiled_io and backend.muon_symmetric and backend.quant_tile==64
+    assert backend.selective_aux_kv and not backend.attention_tune and not backend.attention_prewarm
     assert backend.aligned_pointers and backend.aligned_pointwise_only
     override=SimpleNamespace(fused_norm_backward=False,ffn_quant_tile=32,
                              fused_residual_backward=False,fused_cast_amax=False,cache_weight_scales=False,

@@ -34,6 +34,24 @@ def prepare(Table, U, scale, ROWS:tl.constexpr, COLS:tl.constexpr, MOM:tl.conste
 
 
 @triton.jit
+def prepare_tiled(Table,U,scale,ROWS:tl.constexpr,COLS:tl.constexpr,MOM:tl.constexpr,
+                  MOM_DTYPE:tl.constexpr,TILE:tl.constexpr=32):
+    matrix=tl.program_id(2)
+    r=tl.program_id(0)*TILE+tl.arange(0,TILE)
+    c=tl.program_id(1)*TILE+tl.arange(0,TILE)
+    i=r[:,None]*COLS+c[None,:];valid=(r[:,None]<ROWS)&(c[None,:]<COLS)
+    row=Table+matrix*4
+    grad=tl.load(row+1).to(tl.pointer_type(tl.bfloat16))
+    momentum=parameter_pointer(tl.load(row+2),MOM_DTYPE)
+    g=(tl.load(grad+i,valid,0).to(tl.float32)*scale).to(tl.bfloat16).to(tl.float32)
+    old=tl.load(momentum+i,valid,0).to(tl.float32)
+    updated=lerp(old,g,tl.full((),1.-MOM,tl.float32))
+    tl.store(momentum+i,updated,valid)
+    value=lerp(g,updated,tl.full((),MOM,tl.float32))
+    tl.store(U+matrix*ROWS*COLS+c[None,:]*ROWS+r[:,None],value,valid)
+
+
+@triton.jit
 def norm_partials(U, P, N:tl.constexpr, COUNT:tl.constexpr, B:tl.constexpr=1024):
     matrix=tl.program_id(1);block=tl.program_id(0);i=block*B+tl.arange(0,B)
     u=tl.load(U+matrix*N+i,i<N,0).to(tl.float32)
@@ -72,6 +90,24 @@ def apply(Table,U,decay,alpha,ROWS:tl.constexpr,COLS:tl.constexpr,B:tl.constexpr
     tl.store(low+i,(bits&0xffff).to(tl.uint16),valid)
 
 
+@triton.jit
+def apply_tiled(Table,U,decay,alpha,ROWS:tl.constexpr,COLS:tl.constexpr,TILE:tl.constexpr=32):
+    matrix=tl.program_id(2)
+    r=tl.program_id(0)*TILE+tl.arange(0,TILE)
+    c=tl.program_id(1)*TILE+tl.arange(0,TILE)
+    i=r[:,None]*COLS+c[None,:];valid=(r[:,None]<ROWS)&(c[None,:]<COLS)
+    row=Table+matrix*4
+    high=tl.load(row).to(tl.pointer_type(tl.bfloat16))
+    low=tl.load(row+3).to(tl.pointer_type(tl.uint16))
+    hi=tl.load(high+i,valid,0).to(tl.uint16,bitcast=True).to(tl.uint32)
+    lo=tl.load(low+i,valid,0).to(tl.uint32)
+    weight=((hi<<16)|lo).to(tl.float32,bitcast=True)
+    update=tl.load(U+matrix*ROWS*COLS+c[None,:]*ROWS+r[:,None],valid,0).to(tl.float32)
+    precise=tl.fma(update,alpha,weight*decay);bits=precise.to(tl.uint32,bitcast=True)
+    tl.store(high+i,(bits>>16).to(tl.uint16).to(tl.bfloat16,bitcast=True),valid)
+    tl.store(low+i,(bits&0xffff).to(tl.uint16),valid)
+
+
 class MuonPlan:
     def __init__(self, optimizer):
         self.opt=optimizer
@@ -100,7 +136,10 @@ class MuonPlan:
                 table=self.tables[key];mark=b.mark()
                 batch=len(chunk);r,c=shape;m,k=min(r,c),max(r,c);n=r*c
                 u=b.empty((batch,m,k),'bf16')
-                b.launch(prepare,(triton.cdiv(n,1024),batch),(table,u,Scalar(scale)),
+                tiled=getattr(b,'muon_tiled_io',False) and r>c and n>=2**20
+                tile=32
+                grid=(triton.cdiv(r,tile),triton.cdiv(c,tile),batch) if tiled else (triton.cdiv(n,1024),batch)
+                b.launch(prepare_tiled if tiled else prepare,grid,(table,u,Scalar(scale)),
                          ROWS=r,COLS=c,MOM=opt.momentum,MOM_DTYPE=opt.muon_momentum_dtype)
                 count=triton.cdiv(n,1024);partial=b.empty((batch,count),'fp32');norm=b.empty((batch,),'bf16')
                 b.launch(norm_partials,(count,batch),(u,partial),N=n,COUNT=count)
@@ -116,14 +155,16 @@ class MuonPlan:
                     x=next_x
                     b.release_since(mark,keep=(x,))
                 alpha=-lr*.2*math.sqrt(max(shape))
-                b.launch(apply,(count,batch),(table,x,Scalar(1.-lr*opt.weight_decay),Scalar(alpha)),ROWS=r,COLS=c)
+                b.launch(apply_tiled if tiled else apply,grid,(table,x,Scalar(1.-lr*opt.weight_decay),Scalar(alpha)),ROWS=r,COLS=c)
                 b.release_since(mark)
                 for p in chunk:opt.state[p]['step']+=1
 
     def gemm(self,a,b,c,m,n,k,astrides,bstrides,alpha=1.,beta=0.,symmetric=False):
         backend=self.opt.e.backend;batch=a.shape[0]
         out=backend.empty((batch,m,n),'bf16')
-        if getattr(backend,'muon_gemm_backend','triton')=='cublas':
+        measured_symmetric=(getattr(backend,'muon_symmetric',False) and getattr(backend,'arch',None)==120 and symmetric
+                            and (m,n,k) in ((1536,1536,1536),(384,384,1536)))
+        if getattr(backend,'muon_gemm_backend','triton')=='cublas' and not measured_symmetric:
             backend.batched_matmul(a,b,c,out,m,n,k,astrides,bstrides,alpha,beta)
             return out
         tiles=triton.cdiv(m,64)
@@ -131,7 +172,7 @@ class MuonPlan:
         backend.launch(ns_gemm,grid,(a,b,c,out),
                        M=m,N=n,K=k,A0=astrides[0],A1=astrides[1],A2=astrides[2],
                        B0=bstrides[0],B1=bstrides[1],B2=bstrides[2],
-                       C0=m*n,C1=n,C2=1,ALPHA=alpha,BETA=beta,BM=64,BN=64,BK=32,
+                       C0=m*n,C1=n,C2=1,ALPHA=alpha,BETA=beta,BM=64,BN=64,BK=128 if measured_symmetric else 32,
                        SYMMETRIC=symmetric,TRANSPOSE_OUTPUT=False)
         return out
 

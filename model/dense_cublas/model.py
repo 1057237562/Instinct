@@ -304,6 +304,7 @@ class Model:
                     raise ValueError('native ckpt3/4 require separate Dense projections without LoRA')
                 from .selective import ReplayCache, recipe_plan
                 selected = (recipe_plan(c, x.shape, self.activation_dtype, i,
+                    auxiliary_kv=getattr(e.backend,'selective_aux_kv',False),
                     attention_min_seq=getattr(e.backend,'selective_attention_min_seq',4096)) if checkpoint == 4
                             else ReplayCache({v.name for v in ps if len(v.shape) == 2}, c['dropout'] == 0.))
                 replay=dense_replay if getattr(e.backend,'terminal_replay',False) else None

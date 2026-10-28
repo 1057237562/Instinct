@@ -441,8 +441,13 @@ class Engine:
         n=x.shape[-1];rows=x.size//n;dtype=x.dtype if x.dtype==a.dtype else 'fp32'
         z=self.backend.empty(x.shape,dtype);y=self.backend.empty(x.shape,out_dtype or dtype)
         inv=self.backend.empty((rows,),'fp32');maximum=self.backend.empty((rows,),'fp32')
-        self.backend.launch(residual_norm,(rows,),(x.data,a.data,weight.data,z,y,inv,maximum),
-                            N=n,EPS=eps,BLOCK=triton.next_power_of_2(n))
+        tile=getattr(self.backend,'norm_forward_rows',1)
+        if tile>1:
+            from .fused import norm_forward_amax
+            self.backend.launch(norm_forward_amax,(triton.cdiv(rows,tile),),(x.data,a.data,weight.data,z,y,inv,maximum),
+                M=rows,N=n,EPS=eps,BLOCK=triton.next_power_of_2(n),ROWS=tile,ADD_RESIDUAL=True)
+        else:self.backend.launch(residual_norm,(rows,),(x.data,a.data,weight.data,z,y,inv,maximum),
+                                 N=n,EPS=eps,BLOCK=triton.next_power_of_2(n))
         y.amax_partial=maximum
         grad_dtype='preserve' if getattr(self.backend,'compact_gradients',False) else 'fp32'
         residual=self._node(z,(x,a),lambda g:(g,g),grad_dtype)

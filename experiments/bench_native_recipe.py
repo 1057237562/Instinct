@@ -33,6 +33,8 @@ def main():
     p.add_argument('--async-release-mib',type=int)
     p.add_argument('--muon-workspace-mib',type=int,default=512)
     p.add_argument('--tune',action='store_true')
+    p.add_argument('--workspace-mib',type=int,default=32)
+    p.add_argument('--candidates',type=int,default=8)
     p.add_argument('--fp8-fast-accum-output',action='store_true')
     p.add_argument('--cache-mib',type=int,default=1792)
     p.add_argument('--profile-driver',action='store_true')
@@ -86,6 +88,7 @@ def main():
     p.add_argument('--no-packed-skip',action='store_true')
     p.add_argument('--arena-limit-gib',type=float,default=14.37)
     p.add_argument('--output',required=True)
+    p.add_argument('--candidate-config')
     args=p.parse_args()
     if min(args.layers,args.steps,args.accumulation)<1 or args.warmup<0:p.error('invalid counts')
     if args.micro_graph and len(args.shapes)!=1:p.error('micro-graph screening currently requires one shape')
@@ -206,7 +209,7 @@ def main():
     report['pause_file']=str(pause)
     micro=updates=0
     write()
-    with BudgetBackend(config=ScheduleConfig(tune=args.tune,fp8_fast_accum_output=args.fp8_fast_accum_output),pool_limit_mib=args.pool_mib,allocator_backend=args.allocator_backend,async_release_mib=args.async_release_mib) as b:
+    with BudgetBackend(config=ScheduleConfig(tune=args.tune,workspace_mib=args.workspace_mib,candidates=args.candidates,fp8_fast_accum_output=args.fp8_fast_accum_output),pool_limit_mib=args.pool_mib,allocator_backend=args.allocator_backend,async_release_mib=args.async_release_mib) as b:
         b.attention_tile=args.attention_tile
         b.pack_tile=args.pack_tile
         b.elementwise_block=args.elementwise_block
@@ -251,6 +254,8 @@ def main():
             **({'num_stages':args.attention_stages} if args.attention_stages else {})}
         b.kernel_options['model.dense_triton.attention.forward_fast']=b.kernel_options['model.dense_triton.attention.forward']
         b.packed_skip=not args.no_packed_skip
+        from experiments.native_candidate import apply
+        report['candidate_config']=apply(b,args.candidate_config)
         e=Engine(b,fp8=bool(args.fp8),fp8_filter='auto',seed=307)
         model=Model(e,cfg,param_dtype='bf16',muon_mantissa=True,seed=307)
         opt=Optimizer(e,model.parameters(),'muon',lr=3e-4,weight_decay=.1,

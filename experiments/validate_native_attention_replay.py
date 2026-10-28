@@ -17,6 +17,7 @@ def main():
     p.add_argument('--documents',type=int,default=3)
     p.add_argument('--local-maxima',action='store_true')
     p.add_argument('--group-penalty',type=int,default=0)
+    p.add_argument('--tune',action='store_true')
     p.add_argument('--skewed-documents',action='store_true',help='One long document followed by short documents, to exercise local plan maxima')
     p.add_argument('--relative-l2-limit',type=float,default=1e-3,help='Explicit accepted whole-gradient tolerance; recorded with the result')
     a=p.parse_args()
@@ -44,6 +45,7 @@ def main():
                 b.attention_docs_per_plan=a.docs_per_plan
                 b.attention_local_maxima=a.local_maxima
                 b.attention_group_penalty=a.group_penalty
+                b.attention_tune=a.tune
             e=Engine(b,fp8=fp8);m=Model(e,cfg|dict(use_grad_checkpoint=mode),param_dtype='bf16',muon_mantissa=True)
             ids=np.arange(seq,dtype=np.int64)[None]%253+3
             segments=np.minimum(np.arange(seq)*a.documents//seq,a.documents-1)[None];segments[:,-7:]=-1

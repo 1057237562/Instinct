@@ -47,6 +47,22 @@ def residual_norm(X,A,W,Z,Y,R,MAXIMUM,N:tl.constexpr,EPS:tl.constexpr,BLOCK:tl.c
 
 
 @triton.jit
+def norm_forward_amax(X,A,W,Z,Y,R,MAXIMUM,M:tl.constexpr,N:tl.constexpr,EPS:tl.constexpr,
+                      BLOCK:tl.constexpr,ROWS:tl.constexpr=1,ADD_RESIDUAL:tl.constexpr=False):
+    row=tl.program_id(0)*ROWS+tl.arange(0,ROWS);d=tl.arange(0,BLOCK)
+    valid=(row[:,None]<M)&(d[None,:]<N);offset=row[:,None]*N+d[None,:]
+    z=tl.load(X+offset,valid,0).to(tl.float32)
+    if ADD_RESIDUAL:
+        a=tl.load(A+offset,valid,0).to(tl.float32)
+        z=(z+a).to(Z.dtype.element_ty).to(tl.float32);tl.store(Z+offset,z,valid)
+    w=tl.load(W+d,d<N,0).to(tl.float32)
+    inv=tl.rsqrt(tl.sum(z*z,1)/N+EPS)
+    y=(z*inv[:,None]*w[None,:]).to(Y.dtype.element_ty)
+    tl.store(Y+offset,y,valid);tl.store(R+row,inv,row<M)
+    tl.store(MAXIMUM+row,tl.max(tl.where(valid,tl.abs(y.to(tl.float32)),0.),1),row<M)
+
+
+@triton.jit
 def projection_cast(W0,W1,W2,C0,C1,C2,N0:tl.constexpr,N1:tl.constexpr,N2:tl.constexpr,B:tl.constexpr=256):
     block=tl.program_id(0);i=tl.arange(0,B)
     if block<tl.cdiv(N0,B):

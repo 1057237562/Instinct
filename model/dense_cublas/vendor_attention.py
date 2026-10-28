@@ -3,7 +3,6 @@ from collections import OrderedDict
 from functools import lru_cache
 import ctypes as ct
 import time
-import statistics
 import numpy as np
 import triton
 import triton.language as tl
@@ -153,9 +152,18 @@ class NativeAttention:
                 self.tuned.pop(old.value,None)
                 self.metrics['plan_evictions']+=1
             begin=time.perf_counter()
-            self.plans[key]=self.lib.plan(docs,maximum,h,hk,d,backward,self.b.main_stream,total,
-                tune=getattr(self.b,'attention_tune',False),
-                workspace_limit=getattr(self.b,'attention_tune_workspace_mib',512)*2**20)
+            tune=getattr(self.b,'attention_tune',False)
+            try:
+                self.plans[key]=self.lib.plan(docs,maximum,h,hk,d,backward,self.b.main_stream,total,
+                    tune=tune,workspace_limit=getattr(self.b,'attention_tune_workspace_mib',512)*2**20)
+            except RuntimeError as error:
+                if not tune:raise
+                # A tuning cap must never remove an otherwise supported model.
+                # The existing total-workspace guard still decides fallback.
+                self.plans[key]=self.lib.plan(docs,maximum,h,hk,d,backward,self.b.main_stream,total)
+                self.tuned[self.plans[key][0].value]=-1
+                self.metrics['plan_tuning'].append(dict(geometry=list(context[:6]),backward=backward,
+                    selected=None,candidates=[],fallback_reason=str(error),seconds=time.perf_counter()-begin))
             self.metrics['plan_builds']+=1
             self.metrics['plan_build_seconds']+=time.perf_counter()-begin
             self.metrics['max_workspace_bytes']=max(self.metrics['max_workspace_bytes'],self.plans[key][1])
@@ -167,16 +175,47 @@ class NativeAttention:
             begin=time.perf_counter();candidates=self.lib.candidates(plan)
             # Only outputs/workspace are overwritten. Inputs and compact saved
             # LSE remain immutable; repeat executions are safe before capture.
-            for candidate in candidates:
+            from .tuning import race
+            def measure(candidate,repeats):
                 self.lib.select(plan,candidate['index'])
-                for _ in range(2):self.lib.run(plan,buffers,workspace)
-                candidate['median_ms']=statistics.median(self.b.time_call(
-                    lambda:self.lib.run(plan,buffers,workspace),self.b.main_stream,repeats=3) for _ in range(3))
-            best=min(candidates,key=lambda x:x['median_ms'])
+                self.lib.run(plan,buffers,workspace)
+                return self.b.time_call(lambda:self.lib.run(plan,buffers,workspace),self.b.main_stream,repeats=repeats)
+            best=race(candidates,measure)
             self.lib.select(plan,best['index']);self.tuned[plan.value]=best['index']
             self.metrics['plan_tuning'].append(dict(geometry=list(context[:6]),backward=backward,
                 selected=best['index'],candidates=candidates,seconds=time.perf_counter()-begin))
         self.lib.run(plan,buffers,workspace)
+
+    def warm_catalog(self,total,maximum,h,hk,d):
+        """Prepare a bounded descriptor catalog before consuming training data.
+
+        Zero synthetic operands are used only for timing/library initialization;
+        no parameters, optimizer state or dataset cursor are touched.
+        """
+        quantum=getattr(self.b,'attention_plan_quantum',128)
+        size=getattr(self.b,'attention_docs_per_plan',0)
+        if not size or self.b._commands is not None:return
+        geometries=[(docs,seq,h,hk,d,total) for docs in range(1,size+1)
+                    for seq in range(quantum,maximum+1,quantum) if docs*seq<=total]
+        if 2*len(geometries)>getattr(self.b,'attention_plan_limit',32):return
+        begin=time.perf_counter();mark=self.b.mark()
+        try:
+            q,k,v,out,dy,dq,dk,dv=[self.b.empty((total,heads,d),'bf16',zero=True) for heads in (h,hk,hk,h,h,h,hk,hk)]
+            for docs,seq,*_ in geometries:
+                local=self.b.mark()
+                starts=np.arange(docs+1,dtype=np.int64)*seq
+                metadata=self.upload_metadata([starts*width for width in (h*d,hk*d,h)]
+                    +[np.full(docs,seq,np.int32)])
+                context=(docs,seq,h,hk,d,total,metadata)
+                stats=self.b.empty((docs,h,seq),'fp32')
+                for backward in (False,True):
+                    plan,n=self.plan(context,backward)
+                    work=self.b.empty((max(1,(n+3)//4),),'fp32')
+                    self.run(plan,[q,k,v,out,stats,dy,dq,dk,dv,*metadata],work,context,backward)
+                self.b.release_since(local)
+            self.b.synchronize()
+        finally:self.b.release_since(mark)
+        self.metrics['catalog_warmup']=dict(geometries=len(geometries),seconds=time.perf_counter()-begin)
 
     def attention(self,q,k,v,mask,dropout,seed,counter,cached,packed,fallback):
         # Bind metadata to the mask carried by this particular forward/replay,

@@ -64,8 +64,9 @@ def quantize(ops,x,dtype,dual_layout):
     out=ops.empty(x.shape,dtype)
     if dual_layout:
         rows,cols=x.shape;transposed=ops.empty((cols,rows),dtype)
-        ops.backend.launch(lin.quantize_dual,(triton.cdiv(rows,32),triton.cdiv(cols,32)),
-            (x,scale,out,transposed),ROWS=rows,COLS=cols,FP8_MAX=maximum)
+        tile=getattr(ops.backend,'quant_tile',32)
+        ops.backend.launch(lin.quantize_dual,(triton.cdiv(rows,tile),triton.cdiv(cols,tile)),
+            (x,scale,out,transposed),ROWS=rows,COLS=cols,FP8_MAX=maximum,TILE=tile)
         out.transpose_data=transposed
     else:
         ops.backend.launch(lin.quantize,(triton.cdiv(x.numel,1024),),(x,scale,out),

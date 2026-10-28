@@ -6,6 +6,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <unordered_set>
 #ifdef _WIN32
 #define API extern "C" __declspec(dllexport)
 #else
@@ -16,9 +17,45 @@ namespace {
 thread_local std::string error;
 void check(cudnnStatus_t s) { if(s!=CUDNN_STATUS_SUCCESS)throw std::runtime_error(cudnnGetErrorString(s)); }
 void check(fe::error_t s) { if(!s.is_good())throw std::runtime_error(s.get_message()); }
+struct TunableGraph:fe::graph::Graph {
+    void add_tile_neighbors(int64_t index){
+      // Reuse the finalized seed engine: on SM120, querying an unconfigured
+      // SDPA engine fails before KERNEL_CFG can be supplied by the generic API.
+      fe::detail::backend_descriptor config(CUDNN_BACKEND_ENGINECFG_DESCRIPTOR);
+      auto config_ptr=config.get_ptr();int64_t count=0;
+      check(cudnnBackendGetAttribute(plans.execution_plans.at(index)->get_raw_desc(),
+        CUDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG,CUDNN_TYPE_BACKEND_DESCRIPTOR,1,&count,&config_ptr));
+      fe::detail::backend_descriptor engine(CUDNN_BACKEND_ENGINE_DESCRIPTOR);auto engine_ptr=engine.get_ptr();
+      check(cudnnBackendGetAttribute(config_ptr,CUDNN_ATTR_ENGINECFG_ENGINE,CUDNN_TYPE_BACKEND_DESCRIPTOR,1,&count,&engine_ptr));
+      std::vector<fe::detail::backend_descriptor> info;
+      std::vector<cudnnBackendDescriptor_t> raw;
+      for(int i=0;i<CUDNN_KNOB_TYPE_COUNTS;++i){info.emplace_back(CUDNN_BACKEND_KNOB_INFO_DESCRIPTOR);raw.push_back(info.back().get_ptr());}
+      check(cudnnBackendGetAttribute(engine_ptr,CUDNN_ATTR_ENGINE_KNOB_INFO,CUDNN_TYPE_BACKEND_DESCRIPTOR,
+        raw.size(),&count,raw.data()));
+      int64_t engine_id;std::unordered_map<fe::KnobType_t,int64_t> seed;
+      check(get_engine_and_knobs_at_index(index,engine_id,seed));
+      for(int64_t i=0;i<count;++i){
+        cudnnBackendKnobType_t type;int64_t min,max,stride,unused;
+        check(cudnnBackendGetAttribute(raw[i],CUDNN_ATTR_KNOB_INFO_TYPE,CUDNN_TYPE_KNOB_TYPE,1,&unused,&type));
+        if(type!=CUDNN_KNOB_TYPE_TILE_M && type!=CUDNN_KNOB_TYPE_TILE_N)continue;
+        check(cudnnBackendGetAttribute(raw[i],CUDNN_ATTR_KNOB_INFO_MINIMUM_VALUE,CUDNN_TYPE_INT64,1,&unused,&min));
+        check(cudnnBackendGetAttribute(raw[i],CUDNN_ATTR_KNOB_INFO_MAXIMUM_VALUE,CUDNN_TYPE_INT64,1,&unused,&max));
+        check(cudnnBackendGetAttribute(raw[i],CUDNN_ATTR_KNOB_INFO_STRIDE,CUDNN_TYPE_INT64,1,&unused,&stride));
+        auto axis=fe::convert_from_backend_knob_type(type);
+        if(!seed.count(axis) || stride<=0)continue;
+        auto value=seed.at(axis)+stride;if(value>max)value=seed.at(axis)-stride;
+        if(value<min || value==seed.at(axis))continue;
+        auto knobs=seed;knobs[axis]=value;
+        std::vector<fe::detail::backend_descriptor> choices;check(fe::detail::set_knob_choices(knobs,choices));
+        auto candidate=fe::make_shared_backend_pointer(CUDNN_BACKEND_ENGINECFG_DESCRIPTOR);
+        if(!fe::detail::create_engine_config(candidate,engine,choices).is_good())continue;
+        plans.enqueue_engine_configs({candidate});check(plans.query_properties());
+      }
+    }
+};
 struct Plan {
     cudnnHandle_t handle=nullptr;
-    fe::graph::Graph graph;
+    TunableGraph graph;
     bool backward=false;
     bool ragged=false;
     std::vector<int64_t> indices;
@@ -65,17 +102,32 @@ API int sdpa_create_ex(int64_t b,int64_t s,int64_t h,int64_t hk,int64_t d,int ba
     }
     if(tune){
       g.deselect_workspace_greater_than(static_cast<int64_t>(limit));
-      check(g.build(p->handle,{fe::HeurMode_t::A,fe::HeurMode_t::B,fe::HeurMode_t::FALLBACK},fe::BuildPlanPolicy_t::ALL));
+      check(g.build(p->handle,{fe::HeurMode_t::A,fe::HeurMode_t::B,fe::HeurMode_t::FALLBACK}));
     }else check(g.build(p->handle,{fe::HeurMode_t::A}));
     *workspace=g.get_workspace_size();
     std::string initial;check(g.get_plan_name(initial));
+    if(tune>1){
+      // A local search around the heuristic seed, not a Cartesian knob sweep.
+      // Only public tile knobs change; precision/softmax attributes do not.
+      for(int64_t i=0;i<g.get_execution_plan_count();++i){
+        std::string name;check(g.get_plan_name_at_index(i,name));if(name!=initial)continue;
+        g.add_tile_neighbors(i);
+        break;
+      }
+    }
+    std::unordered_set<std::string> seen;
     for(int64_t i=0;i<g.get_execution_plan_count();++i){
       int64_t bytes=0;std::string name;
-      if(!g.get_workspace_size_plan_at_index(i,bytes).is_good() || !g.get_plan_name_at_index(i,name).is_good())continue;
+      if(!g.get_plan_name_at_index(i,name).is_good() || !seen.insert(name).second)continue;
+      // cuDNN's A/B heuristic ordering is the prior. Build at most the first
+      // four distinct supported plans, never an exhaustive ALL-plan search.
+      if(tune && name!=initial && !g.build_plan_at_index(i).is_good())continue;
+      if(!g.get_workspace_size_plan_at_index(i,bytes).is_good())continue;
       if(tune && static_cast<uint64_t>(bytes)>limit)continue;
       if(name==initial && p->selected<0)p->selected=i;
       p->indices.push_back(i);
       if(tune)*workspace=std::max(*workspace,static_cast<uint64_t>(bytes));
+      if(p->indices.size()>=static_cast<size_t>(tune?4:1))break;
     }
     *result=p.release();return 0;
   }catch(const std::exception& e){error=e.what();return -1;}

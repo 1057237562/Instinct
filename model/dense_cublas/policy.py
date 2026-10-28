@@ -14,12 +14,14 @@ def enable_fused_ops(backend):
     backend.elementwise_block=1024
     # Explicit probe overrides survive policy application. Normal trainers use
     # the production-validated settings without importing experiment modules.
+    tune=bool(getattr(getattr(backend,'config',None),'tune',False))
     defaults=dict(fused_residual_norm=True,fused_norm_backward=True,fused_scale_inverse=True,
                   fused_residual_backward=True,fused_cast_amax=True,cache_weight_scales=True,
                   norm_rope_rows=8,ffn_flat_forward=True,ffn_quant_tile=64,
-                  async_attention_metadata=True,attention_plan_quantum=1024,
-                  attention_plan_limit=64,attention_docs_per_plan=8,attention_local_maxima=True,
-                  attention_group_penalty=4096)
+                  async_attention_metadata=True,attention_plan_quantum=512,
+                  attention_plan_limit=64,attention_docs_per_plan=4,attention_local_maxima=True,
+                  attention_group_penalty=4096,attention_tune=tune,attention_prewarm=tune,
+                  muon_tiled_io=True,muon_symmetric=True,quant_tile=64,selective_aux_kv=True)
     for name,value in defaults.items():
         if not hasattr(backend,name):setattr(backend,name,value)
     if not hasattr(backend,'aligned_pointwise_only'):

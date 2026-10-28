@@ -24,7 +24,7 @@ def parse_cache_budgets(value):
     return result
 
 
-def recipe_plan(config, shape, dtype, layer, *, attention_min_seq=4096):
+def recipe_plan(config, shape, dtype, layer, *, attention_min_seq=4096, auxiliary_kv=False):
     tokens = shape[0] * shape[1]
     size = 4 if dtype == 'fp32' else 2
     h, q, kv, f = (config['hidden_size'], config['num_attention_heads'] * config['head_dim'],
@@ -38,11 +38,17 @@ def recipe_plan(config, shape, dtype, layer, *, attention_min_seq=4096):
     attention = shape[1] >= attention_min_seq and config['dropout'] == 0.
     per_token = size * q + 4 * config['num_attention_heads'] if attention else size * 2 * kv
     base_layers = min(layers, budget // max(1, tokens * per_token))
-    gate_layers = min(layers, max(0, (budget - tokens * base_layers * per_token)
+    remaining=budget-tokens*base_layers*per_token
+    # Measured V2 BF16 K/V projections save more time per resident byte than
+    # the much larger tensor-core FFN projections. Fill the remainder only;
+    # the O/LSE priority and the user's hard cache-byte budget are preserved.
+    kv_layers=min(layers,remaining//max(1,tokens*size*2*kv)) if attention and auxiliary_kv and kv!=q and f!=kv else 0
+    remaining-=tokens*size*2*kv*kv_layers
+    gate_layers = min(layers, max(0, remaining
                                 // max(1, tokens * size * 2 * f)))
     prefix = f'model.layers.{layer}.'
     names = set()
-    if not attention and layer >= layers - base_layers and kv != q and f != kv:
+    if layer >= layers-(kv_layers if attention else base_layers) and kv != q and f != kv:
         names.update(prefix + 'self_attn.' + k + '_proj.weight' for k in ('k', 'v'))
     if layer >= layers - gate_layers and f not in (h, q, kv):
         names.update(prefix + 'mlp.' + k + '_proj.weight' for k in ('gate', 'up'))

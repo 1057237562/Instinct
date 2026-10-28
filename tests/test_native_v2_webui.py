@@ -53,7 +53,7 @@ def test_native_v2_actual_app_load_and_command(tmp_path,monkeypatch):
                        ('--fp8_filter','auto'),('--allocator_backend','async'),
                        ('--attention_backend','cudnn'),('--muon_gemm_backend','cublas'),
                        ('--sequence_buckets','3072,4096'),('--num_workers','4'),
-                       ('--selective_cache_by_seq','3072:1280,4096:1280'),
+                       ('--selective_cache_by_seq','3072:1792,4096:1792'),
                        ('--allocator_release_mib','13312'),
                        ('--learning_rate','0.0003'),('--weight_decay','0.1')):
         assert cmd[cmd.index(flag)+1]==value

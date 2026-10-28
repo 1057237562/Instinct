@@ -88,6 +88,7 @@ class CublasBackend(CudaBackend):
     def __init__(self, device=0, config=ScheduleConfig(), library=None):
         super().__init__(device)
         self.config, self.library = config, library
+        self.bounded_tuning=True
         self.native = None
         self.direct_layout = True
         self.main_stream = self.weight_stream = None
@@ -326,7 +327,9 @@ class CublasBackend(CudaBackend):
         is_dw = stream == self.weight_stream and stream != self.main_stream
         hint = self.config.dw_sm_target if is_dw else 0
         size = self.config.workspace_mib * 1024 * 1024
-        fast_accum=bool(self.config.fp8_fast_accum_output and role=='forward' and a.dtype.startswith('fp8'))
+        validated_large=(getattr(self,'fp8_fast_accum_large',False) and self.arch==120 and (m,n,k) in (
+            (1536,12288,1536),(5504,12288,1536),(1536,12288,5504),(6400,12288,1536)))
+        fast_accum=bool((self.config.fp8_fast_accum_output or validated_large) and role=='forward' and a.dtype.startswith('fp8'))
         key = (m, n, k, a.dtype, b.dtype, out.dtype, size, hint, stream, transpose_a, transpose_b, fast_accum)
         workspace = self.workspaces[stream]
         pointers = (a.storage, b.storage, out.storage,
@@ -341,7 +344,18 @@ class CublasBackend(CudaBackend):
             # All this happens during build, never inside capture/replay.
             self.synchronize()
             winners = []
-            for candidate in candidates:
+            bounded=self.config.tune and getattr(self,'bounded_tuning',False)
+            if bounded:
+                from .tuning import gemm_shortlist,race
+                def measure(candidate,repeats):
+                    try:
+                        self.native.run(plan,candidate['index'],*pointers)
+                        return self.time_call(lambda:self.native.run(plan,candidate['index'],*pointers),stream,repeats)
+                    except LtError as error:
+                        candidate['rejected']=str(error);return float('inf')
+                best=race(gemm_shortlist(candidates),measure,baseline=candidates[0]['index'])
+                winners=[best]
+            for candidate in (() if bounded else candidates):
                 index = candidate['index']
                 try:
                     self.native.run(plan, index, *pointers)
@@ -369,6 +383,7 @@ class CublasBackend(CudaBackend):
 
     def tuning_report(self):
         return {'cublas_version': self.native.version, 'bridge_abi': self.native.abi,
+                'runtime_override':getattr(self.native,'runtime_path',None),
                 'direct_layout': self.direct_layout, 'workspace_bytes_per_stream': self.config.workspace_mib * 1024 * 1024,
                 'streams': len(self._streams), 'plans': [record for _, _, record in self._plans.values()]}
 
@@ -397,7 +412,18 @@ class CublasBackend(CudaBackend):
             plan,candidates=self.native.create_batched_plan(n,m,k,a.dtype,size,self.config.candidates,
                 ta,tb,batch,(bstrides[0],astrides[0],m*n))
             self.synchronize();winners=[]
-            for candidate in candidates:
+            bounded=self.config.tune and getattr(self,'bounded_tuning',False)
+            if bounded:
+                from .tuning import gemm_shortlist,race
+                def measure(candidate,repeats):
+                    try:
+                        self.native.run_batched(plan,candidate['index'],*pointers)
+                        return self.time_call(lambda:self.native.run_batched(plan,candidate['index'],*pointers),stream,repeats)
+                    except LtError as error:
+                        candidate['rejected']=str(error);return float('inf')
+                best=race(gemm_shortlist(candidates),measure,baseline=candidates[0]['index'])
+                winners=[best]
+            for candidate in (() if bounded else candidates):
                 index=candidate['index']
                 try:
                     self.native.run_batched(plan,index,*pointers)

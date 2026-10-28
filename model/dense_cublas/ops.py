@@ -10,6 +10,18 @@ from model.dense_triton import elementwise as ew
 
 
 class CublasDenseOps(DenseOps):
+    def norm(self,x,weight,eps=1e-6,out_dtype=None):
+        if not (getattr(self.backend,'fused_input_norm_amax',False) and out_dtype in ('bf16','fp16')):
+            return super().norm(x,weight,eps,out_dtype)
+        n=x.shape[-1];rows=x.numel//n
+        if not 0<n<=8192 or weight.shape!=(n,) or eps<=0:raise ValueError('invalid RMSNorm shape or epsilon')
+        y=self.empty(x.shape,out_dtype);r=self.empty((rows,),'fp32');maximum=self.empty((rows,),'fp32')
+        tile=getattr(self.backend,'norm_forward_rows',1)
+        self.backend.launch(fused.norm_forward_amax,(triton.cdiv(rows,tile),),(x,x,weight,x,y,r,maximum),
+            M=rows,N=n,EPS=eps,BLOCK=triton.next_power_of_2(n),ROWS=tile)
+        y.amax_partial=maximum
+        return y,(x,weight,r)
+
     def norm_backward_sum(self,saved,parts,residual=None):
         x,w,r=saved
         if not 1<=len(parts)<=4 or any(p.shape!=x.shape for p in parts):

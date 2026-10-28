@@ -408,6 +408,10 @@ def train(args,backend=None,tokenizer=None,reward_model=None,observer=None):
         if streaming:
             total_batches=math.ceil(data.plan['tokens']/(data.token_budget*.97))
             total_steps=args.epochs*total_batches
+        native=getattr(backend,'native_attention',None)
+        if native is not None and getattr(backend,'attention_prewarm',False) and args.packed_attention:
+            native.warm_catalog(args.batch_size*args.max_seq_len,args.max_seq_len,
+                config['num_attention_heads'],config['num_key_value_heads'],config['head_dim'])
         if observer:observer.start(args,backend,model,optimizer,data,progress,rng=rng)
         print(f'Backend=cuBLASLt/Triton | mode={args.train_type} | FP8={fp8} | parameters={sum(p.size for p in model.parameters(False)):,}',flush=True)
         started=time.perf_counter();last_loss=None;stop_requested=False

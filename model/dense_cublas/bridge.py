@@ -14,6 +14,15 @@ class LtError(RuntimeError):
 class NativeLt:
     def __init__(self, path=None):
         self._dll_dirs = []
+        self.runtime_path=os.environ.get('INSTINCT_CUBLAS_RUNTIME')
+        self._runtime=None
+        if self.runtime_path:
+            runtime=Path(self.runtime_path).resolve()
+            if not runtime.is_file():raise FileNotFoundError(runtime)
+            if os.name=='nt':
+                self._dll_dirs.append(os.add_dll_directory(str(runtime.parent)))
+                self._runtime=ct.WinDLL(str(runtime))
+            else:self._runtime=ct.CDLL(str(runtime),mode=ct.RTLD_GLOBAL)
         if os.name == 'nt' and os.environ.get('CUDA_PATH'):
             cuda_bin = Path(os.environ['CUDA_PATH']) / 'bin'
             self._dll_dirs.append(os.add_dll_directory(str(cuda_bin)))
