@@ -162,6 +162,20 @@ class MuonPlan:
     def gemm(self,a,b,c,m,n,k,astrides,bstrides,alpha=1.,beta=0.,symmetric=False):
         backend=self.opt.e.backend;batch=a.shape[0]
         out=backend.empty((batch,m,n),'bf16')
+        if (getattr(backend,'muon_blocked_polynomial',False) and getattr(backend,'arch',None)==120
+            and getattr(backend,'muon_gemm_backend','triton')=='cublas' and batch in (3,8)
+            and (m,n,k)==(1536,1536,1536) and a is b and b is c and symmetric
+            and alpha==2.0315 and beta==-4.775):
+            from .muon_gram import gram
+            if gram(backend,a,out,tile=getattr(backend,'muon_gram_tile',0) or 64,polynomial=True):return out
+        if (getattr(backend,'muon_blocked_gram',False) and getattr(backend,'arch',None)==120
+            and getattr(backend,'muon_gemm_backend','triton')=='cublas'
+            and ((batch in (2,3) and (m,n,k)==(1536,1536,5504)) or (batch==8 and (m,n,k)==(1536,1536,1536)))
+            and a is b and alpha==1. and beta==0.
+            and astrides==(m*k,k,1) and bstrides==(m*k,1,k)):
+            from .muon_gram import gram
+            tile=getattr(backend,'muon_gram_tile',0) or (512 if batch==2 else 64)
+            if gram(backend,a,out,tile=tile):return out
         measured_symmetric=(getattr(backend,'muon_symmetric',False) and getattr(backend,'arch',None)==120 and symmetric
                             and (m,n,k) in ((1536,1536,1536),(384,384,1536)))
         if getattr(backend,'muon_gemm_backend','triton')=='cublas' and not measured_symmetric:

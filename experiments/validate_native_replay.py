@@ -28,6 +28,8 @@ def main():
     p.add_argument('--cast-amax',action='store_true')
     p.add_argument('--cache-weight-scales',action='store_true')
     p.add_argument('--auxiliary-kv',action='store_true')
+    p.add_argument('--activation-layouts',action='store_true')
+    p.add_argument('--boundary-norm',action='store_true')
     a=p.parse_args();a.output.parent.mkdir(parents=True,exist_ok=True)
     sys.meta_path.insert(0,RejectTorch())
     from model.dense_cublas.memory import TrainingBackend
@@ -43,6 +45,8 @@ def main():
                     for enabled in (False,True):
                         with TrainingBackend(allocator_backend='async') as b:
                             b.selective_aux_kv=a.auxiliary_kv and enabled
+                            b.fused_activation_layouts=a.activation_layouts and enabled
+                            b.fused_boundary_norm=a.boundary_norm and enabled
                             enable_fused_ops(b);b.terminal_replay=enabled
                             b.fused_ffn=a.fused_ffn and enabled
                             b.ffn_quant_tile=a.ffn_quant_tile if enabled else 32

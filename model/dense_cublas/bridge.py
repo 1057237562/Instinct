@@ -60,6 +60,7 @@ class NativeLt:
         self._plan_batched=self._bind('plan_batched',[ptr]+[ct.c_int64]*3+[integer,u64]+[integer]*4
             +[ct.c_int64]*3+[ct.POINTER(ptr)]) if hasattr(self.lib,'instinct_lt_plan_batched') else None
         self._run_batched=self._bind('run_batched',[ptr,integer]+[ptr]*4+[ct.c_float]*2+[ptr,u64,ptr]) if hasattr(self.lib,'instinct_lt_run_batched') else None
+        self._plan_pointer_gram=self._bind('plan_pointer_gram',[ptr]+[integer]*4+[u64,integer,ct.POINTER(ptr)]) if hasattr(self.lib,'instinct_lt_plan_pointer_gram') else None
         self.handle = ptr()
         self.check(self._create(ct.byref(self.handle)))
         self.plans = []
@@ -112,6 +113,17 @@ class NativeLt:
     def run_batched(self,plan,index,a,b,c,out,alpha,beta,workspace,workspace_bytes,stream):
         if self._run_batched is None:raise RuntimeError('rebuild native bridge for batched GEMM')
         self.check(self._run_batched(plan,index,a,b,c,out,alpha,beta,workspace,workspace_bytes,stream))
+
+    def create_pointer_gram(self,tile,reduction,leading,batch,workspace,candidates=4):
+        if self._plan_pointer_gram is None:raise RuntimeError('rebuild bridge for pointer-array Gram')
+        plan=ct.c_void_p()
+        self.check(self._plan_pointer_gram(self.handle,tile,reduction,leading,batch,workspace,candidates,ct.byref(plan)))
+        self.plans.append(plan);info=[]
+        for index in range(self._count(plan)):
+            size,algo,waves=ct.c_uint64(),ct.c_int(),ct.c_float()
+            self.check(self._info(plan,index,ct.byref(size),ct.byref(algo),ct.byref(waves)))
+            info.append(dict(index=index,workspace_bytes=size.value,algo_id=algo.value,waves=waves.value))
+        return plan,info
 
     def close(self):
         first_error = None

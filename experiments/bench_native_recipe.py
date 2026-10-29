@@ -295,6 +295,10 @@ def main():
                             int(np.count_nonzero(labels[:,1:]!=-100))))
         if real_chunk is not None:real_chunk.close()
         if loaded is not None:loaded.close()
+        if args.native_sdpa and getattr(b,'attention_cost_model',False):
+            totals={values[0].shape[0]*values[0].shape[1] for values in host_batches}
+            if len(totals)==1:b.native_attention.warm_catalog(totals.pop(),max(values[0].shape[1] for values in host_batches),
+                cfg['num_attention_heads'],cfg['num_key_value_heads'],cfg['head_dim'])
         if args.export_samples:
             np.savez(args.export_samples,**{f'{key}{i}':array for i,values in enumerate(host_batches)
                 for key,array in zip(('ids','labels','segments'),values)})
@@ -350,7 +354,10 @@ def main():
                         def consume(param,grad):
                             e.copy(opt.gradients[param],e.wrap(grad))
                             return True
-                        e.vjp(loss,leaf_callback=consume)
+                        prior_consume=getattr(e,'consume_checkpoint_cache',False)
+                        e.consume_checkpoint_cache=getattr(b,'release_checkpoint_cache',False)
+                        try:e.vjp(loss,leaf_callback=consume)
+                        finally:e.consume_checkpoint_cache=prior_consume
                     if not graph:last_loss=b.control('read_loss',lambda:e.item(loss))
                     micro+=1;valid+=count
                     b.release_since(mark)

@@ -1,6 +1,6 @@
 # Native V2：2026-10-28 算子优化、15k 验证与显存调优
 
-2026-10-29的新一轮实现了有界启发式选型、Muon转置分块和O/LSE＋K/V混合缓存。16k目标尚未验收，fast accumulation未启用；本轮结果见末尾“16k目标与有界选型”。下文保留前几轮历史记录。
+2026-10-30的cuBLAS分块Muon、层边界融合及缓存生命周期优化，在完整256微步生产窗口达到16,045.519 TPS，保存核验通过。fast accumulation未启用；完整模型基线的梯度重复性限制仍未解决。最新条件与结果见末尾“16k第二轮执行”。下文保留前几轮历史记录。
 
 2026-10-28组合已完成256测量微步的 **15,210.9661 有效预测目标/秒** 验证；128微步独立运行为15,080.6001 TPS，扩大运行的相同前128微步为15,081.4158 TPS。两轮均完成当前完整状态保存及逐数组核验。新增残差梯度融合、cast＋amax、权重scale复用和自适应连续文档分组；固定样本kernel数由5402降至4314。详细结果见“15k执行结果”。
 
@@ -356,3 +356,46 @@ native live与NVML device-used口径不同，后者是20 ms采样下界，不能
 [FFN短名单](../../experiments/results/cublas/target16k_20261029/ffn_shortlist.json) · [Muon转置逐位校验](../../experiments/results/cublas/target16k_20261029/muon_io.json) · [五步NS链](../../experiments/results/cublas/target16k_20261029/muon_chain.json) · [混合缓存VJP](../../experiments/results/cublas/target16k_20261029/auxkv_parity.json) · [完整模型重复对照](../../experiments/results/cublas/target16k_20261029/full_v2_precision_control.json)
 
 CPU聚焦检查108 passed、4个CUDA用例按标记跳过；最终预设/选型/实际WebUI命令25 passed，另有上述独立CUDA验证。旧原生分支不存在主工作区的config模板三组测试及relay schema生成器，因此使用本分支native UI/CLI契约测试，不借用主工作区测试冒充验证。没有停止或丢弃任何未保存训练进度；所有生产候选均完成各自保存核验，未采纳候选的状态也保留在ignored输出目录。
+
+## 16k第二轮执行（2026-10-30）
+
+256微步完整生产窗口达到 **16,045.5191有效目标/s**。基线与候选同为3,055,038个有效预测目标、212个短桶和44个长桶；从group0末64批跨到group1，4次更新预热后测32次更新。仍使用已建Rust packed缓存、BF16隐藏参数及momentum、uint16 mantissa、FP8 auto、累积8、512 MiB Muon workspace、32 MiB Lt workspace，未启用fast accumulation。基准LR保持5e-4，配方LR仍是3e-4。
+
+| 项目 | 上一轮256微步 | 本轮256微步 |
+|---|---:|---:|
+| 有效TPS | 15,596.7330 | **16,045.5191（+2.8774%）** |
+| 窗口墙钟 | 195.876791 s | **190.398203 s** |
+| 墙钟/微步 | 765.1437 ms | **743.7430 ms** |
+| 更新阶段 | 415.4570 ms/更新 | **334.5147 ms/更新** |
+| 更新阶段摊销 | 51.9321 ms/微步 | **41.8143 ms/微步** |
+| native live峰值 | 13.281898 GiB | **14.108333 GiB（+6.2223%）** |
+| NVML设备采样峰值 | 15.243004 GiB | **15.477634 GiB（+1.5393%）** |
+| 设备采样峰值时free | 0.677895 GiB | **0.443264 GiB** |
+
+实际节省21.4007 ms/微步，其中更新阶段摊销节省10.1178 ms；没有把原25 ms预算当作实测结果。计时包含loader、H2D、前后向、日志和真实更新，排除启动、预热及最终保存。NVML为20 ms采样下界，不能把设备used当作进程allocated。
+
+[生产原始记录](../../experiments/results/cublas/target16k_round2/production_final2816.json)中`status=complete`、`verified_current_state=true`、`completed_requested_windows=true`、`torch_imported=false`。共288微步/36更新，最终loss=5.3673849106；weights及完整resume逐数组核验通过：
+
+- `D:/AI/Instinct/out/native_cublas/native_production_20261030_004657_6800_1536.npz`
+- `D:/AI/Instinct/checkpoints/native_cublas/native_production_20261030_004657_6800_1536_resume.npz`
+
+### 采用的改动
+
+- **cuBLAS对称分块Muon**：以device pointer-array将Gram的下三角块合为一次Lt调用，再镜像补齐；不依赖SM120不支持的BF16 fill-mode。FFN batch3采用64分块，batch2保持实测更快的512分块；1536方阵batch8的Gram和batch3/8的多项式也使用已验证分块。batch1保留旧路径，因为分块候选的五步链曾达到0.00964相对L2。最终五种生产形状的五步NS链与原路径逐位一致。动量、缩放、NS系数/次数及mantissa舍入不变，指针表复用且按stream隔离。
+- **层边界融合**：原始checkpoint前向把层末FP32残差加法与下一层input RMSNorm合并，所有层共享一个BF16暂存区；VJP仍重建原操作。新token预算不再新增一套持久缓冲，使用普通路径。E4M3激活仅在重算阶段同时写出dW所需的转置布局；固定形状减少96次独立pack，单次链从0.1478降至0.1414 ms，未夸大为数毫秒的独立收益。
+- **缓存生命周期**：`Optimizer.backward`完成该层反向后，释放只属于该层的selective输出；拒绝释放外部、视图或pinned参数地址。手动`Engine.vjp`保留原行为，已消费的optimizer图明确拒绝二次使用。两桶预算改为2816 MiB，实际32层O/LSE 1176 MiB＋32层K/V 576 MiB＋顶部4层gate/up 1032 MiB＝2784 MiB；复用池改为128 MiB。较大缓存通过缩短生命周期控制峰值，并非直接堆积所有缓存。
+- **前向耗时模型**：最多9个描述符锚点，CPU拟合非负四项耗时模型；连续分组动态规划只在预热目录中选择，比预测基线改善不足1%就不改组。只改变前向分组；反向保留原分组。双向改组曾超过0.0011数值门槛，因此未采用。原有cuBLAS/cuDNN短名单仍最多4项，不穷举所有候选。
+
+### 数值验证、未采用项及数据端
+
+[层边界/量化回放](../../experiments/results/cublas/target16k_round2/boundary_parity.json)的16个BF16/FP8、ckpt3/4、长度137/512、缓存0/8 MiB用例通过；loss一致，最坏相对L2约2.38e-7。[缓存释放](../../experiments/results/cublas/target16k_round2/cache_release_parity.json)的四个双微步累积用例隐藏层梯度逐位一致；embedding沿用既有原子归约容差，最坏整体相对L2约2.06e-8。[选定Muon五步链](../../experiments/results/cublas/target16k_round2/muon_selected_chain.json)五种形状逐位一致。[前向分组](../../experiments/results/cublas/target16k_round2/attention_forward_cost_parity.json)含交错forward、文档和因果隔离，最坏相对L2约0.001008，保持用户已接受的0.0011门槛。
+
+SM120 CuTe/FROST反向已完成Torch-free packed staging、执行和scatter对照，但未采用：短桶4.008→4.909 ms/层，长桶7.209→6.980 ms/层；dQ/dK相对L2约0.0032/0.0039，超过门槛。实验依赖只安装在ignored的`.cache/native-dsl`；生产路径不需要这些依赖。[原始结果](../../experiments/results/cublas/target16k_round2/frost_attention_staged.json)
+
+完整32层基线的重复性仍未解决。同一context、固定参数与相同输入重复两次，FP8全局梯度相对L2为0.0960/0.0991，量化布局候选为0.0970；loss相同。关闭FP8后仍有0.00410全局相对L2、0.00674最大参数相对L2。结果支持FP8放大既有数值扰动的可能性，但尚未证明完整根因；**吞吐验收与局部一致性检查不等于完整模型数值验收已闭环**。[FP8重复记录](../../experiments/results/cublas/target16k_round2/repeatability_layout.json) · [BF16重复记录](../../experiments/results/cublas/target16k_round2/repeatability_bf16.json)
+
+独立128微步诊断把生产时间拆为：墙钟764.27 ms/微步、前后向CUDA事件跨度712.08 ms、更新摊销51.76 ms，其余0.43 ms。loader.next主机时间0.514 ms、H2D staging主机时间0.103 ms，与GPU重叠，不能再加到CUDA跨度上。该诊断使用较早的量化布局候选，15,518.49 TPS，完整保存核验通过；用于定位数据端而非冒充最终吞吐。[端到端诊断](../../experiments/results/cublas/target16k_round2/e2e_audit.json)
+
+此前`production_layout.json`只记录到224微步，后续发现进程已不存在且无匹配checkpoint，未计作完成/验收；不从部分JSON补造最终状态。本节两次已核验运行的状态与该中断运行分开保存。
+
+最终聚焦CPU/实际WebUI检查119 passed、4个CUDA用例按标记跳过；另有上述独立GPU数值/性能验证。native bridge构建通过，保留ABI2旧入口，缺少pointer-array扩展时回退原Muon路径。共享配方已更新，实际UI启动命令检查覆盖2816 MiB桶预算与128 MiB复用池。

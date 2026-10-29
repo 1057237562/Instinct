@@ -718,19 +718,29 @@ class Engine:
         self.backend.release_since(mark, keep=(out.data, *retained))
         parents = (x, *parameters)
         def backward(g):
+            if selective is not None and getattr(selective,'consumed',False):
+                raise RuntimeError('optimizer backward already consumed this checkpoint cache')
             mark = self.backend.mark()
             prior = self.recording, self.seed, self.counter, self.replay_cache
             self.recording, self.seed, self.counter = True, seed, counter
             self.replay_cache = selective
+            previous_layouts=self.ops.save_activation_layouts
+            # Only replay operands need both orientations. Original checkpoint
+            # forwards discard their VJP inputs, so a transpose there is waste.
+            self.ops.save_activation_layouts=getattr(self.backend,'fused_activation_layouts',False)
             if selective is not None: selective.replay = True
             try:
                 leaf = self.wrap(x.data, True)
                 regenerated = fn(leaf) if replay is None else replay(leaf,out.data)
                 result = self.vjp(regenerated, g, (leaf, *parameters))
                 self.backend.release_since(mark, keep=result)
+                if selective is not None and getattr(self,'consume_checkpoint_cache',False):
+                    self.backend.release_owned(selective.tensors())
+                    selective.values.clear();selective.consumed=True
                 return result
             finally:
                 self.recording, self.seed, self.counter, self.replay_cache = prior
+                self.ops.save_activation_layouts=previous_layouts
         grad_dtype='preserve' if getattr(self.backend,'compact_gradients',False) else 'fp32'
         return self._node(out.data, parents, backward,grad_dtype)
 

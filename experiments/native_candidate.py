@@ -11,6 +11,14 @@ ALLOWED={
     'muon_fused_prepare','muon_tiled_io','muon_symmetric','quant_tile','kernel_options','aligned_norm_backward',
     'fused_input_norm_amax','norm_forward_rows',
     'fp8_fast_accum_large','bounded_tuning','attention_prewarm','selective_aux_kv',
+    'fused_activation_layouts','attention_cost_model',
+    'attention_frost_backward',
+    'muon_blocked_gram',
+    'fused_boundary_norm',
+    'release_checkpoint_cache',
+    'muon_gram_tile',
+    'muon_blocked_polynomial',
+    'ffn_backward_stage',
 }
 
 

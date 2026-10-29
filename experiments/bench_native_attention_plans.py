@@ -19,6 +19,7 @@ def lengths_of(ids):
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--output',required=True,type=Path)
     p.add_argument('--neighbors',action='store_true')
+    p.add_argument('--cost-model',action='store_true')
     a=p.parse_args();a.output.parent.mkdir(parents=True,exist_ok=True)
     sys.meta_path.insert(0,RejectTorch())
     from model.dense_cublas.data import Tokenizer
@@ -68,11 +69,14 @@ def main():
     report=dict(status='running',cpu_ranking=ranked,shortlist=shortlisted,sample_indices=indices,cases=[])
     trials=[(False,baseline)]+[(2 if a.neighbors else True,c) for c in shortlisted]
     if a.neighbors:trials=[(2,baseline),(2,score(512,4,4096))]
-    for tune,config in trials:
+    if a.cost_model:trials=[(True,score(512,4,4096)),(True,score(512,4,4096))]
+    for trial,(tune,config) in enumerate(trials):
         with TrainingBackend(allocator_backend='async') as b:
             enable_fused_ops(b);ops=CublasDenseOps(b);b.attention_tune=tune;b.attention_plan_limit=128
             for k in ('attention_plan_quantum','attention_docs_per_plan','attention_group_penalty'):setattr(b,k,config[k])
             native=NativeAttention(b);b.native_attention=native;rng=np.random.default_rng(372)
+            b.attention_cost_model=a.cost_model and trial==1
+            if a.cost_model:native.warm_catalog(12288,4096,16,4,96)
             arrays=[]
             for h in (16,4,4,16):
                 mark=b.mark();x=ops.cast(b.from_numpy(rng.standard_normal((12288,h,96),dtype=np.float32)*.2),'bf16')
@@ -92,7 +96,7 @@ def main():
                 for _ in range(2):run_live()
                 times=[b.time_call(run_live,b.main_stream,repeats=3) for _ in range(3)]
                 row=dict(tune=tune,config=config,sample_index=index,shape=list(shape),documents=len(lengths_of(ids)),
-                         median_ms=float(np.median(times)))
+                         cost_model=b.attention_cost_model,median_ms=float(np.median(times)))
                 report['cases'].append(row);print(json.dumps(row),flush=True)
                 a.output.write_text(json.dumps(report,indent=2));b.release_since(mark)
             report.setdefault('plan_tuning',[]).append(dict(config=config,tune=tune,metrics=native.metrics))

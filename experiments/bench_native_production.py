@@ -51,6 +51,7 @@ def main():
     parser.add_argument('--async-release-mib', type=int)
     parser.add_argument('--allocator-cache-mib',type=int,default=256)
     parser.add_argument('--profile-stages',action='store_true')
+    parser.add_argument('--profile-pipeline',action='store_true',help='Record loader host time and main-stream spans at existing update fences')
     parser.add_argument('--sample-device-memory',action='store_true',help='20 ms NVML device-wide memory samples; no CUDA barriers')
     parser.add_argument('--aligned-pointers',action='store_true')
     parser.add_argument('--aligned-pointwise',action='store_true')
@@ -71,6 +72,7 @@ def main():
     parser.add_argument('--norm-rope-rows',type=int,choices=[1,2,4,8,16],default=1)
     parser.add_argument('--candidate-config')
     opts = parser.parse_args()
+    if opts.profile_pipeline:opts.profile_stages=True
     if min(opts.start_group, opts.tail_batches) < 0 or min(opts.updates, opts.warmup_updates) < 1:
         parser.error('invalid sample or update counts')
     os.chdir(ROOT)
@@ -121,6 +123,11 @@ def main():
             self.rng=rng
             self.window_start=None;self.pending=[];self.micro=0
             self.last_optimizer_events=None
+            self.pipeline=None
+            if opts.profile_pipeline:
+                import trainer.train_cublas as trainer
+                from experiments.native_pipeline_timing import PipelineTiming
+                self.pipeline=PipelineTiming(trainer,backend,optimizer,data)
             if opts.profile_stages:
                 original_step=optimizer.step
                 def measured_step(*values,**keywords):
@@ -138,7 +145,9 @@ def main():
             report['effective_backend_options']={key:getattr(backend,key,None) for key in (
                 'terminal_replay','fused_ffn','ffn_quant_tile','ffn_flat_forward','fused_residual_norm','fused_norm_backward','fused_scale_inverse','fused_residual_backward','fused_cast_amax','cache_weight_scales','attention_group_penalty','norm_groups','norm_rope_rows',
                 'elementwise_block','aligned_pointers','aligned_pointwise_only','async_attention_metadata',
-                'selective_attention_min_seq','attention_plan_quantum','attention_plan_limit','attention_docs_per_plan','attention_local_maxima')}
+                'selective_attention_min_seq','attention_plan_quantum','attention_plan_limit','attention_docs_per_plan','attention_local_maxima',
+                'fused_activation_layouts','fused_boundary_norm','release_checkpoint_cache','attention_cost_model',
+                'muon_blocked_gram','muon_blocked_polynomial','muon_gram_tile')}
             report['native_compiler']=str(data.compiler)
             if opts.start_group or opts.tail_batches:
                 manifest=data.build(opts.start_group)
@@ -159,10 +168,12 @@ def main():
             if optimizer.accumulated: return
             backend.synchronize()
             now=time.perf_counter()
+            pipeline=self.pipeline.drain() if self.pipeline else None
             if self.micro < opts.warmup_updates*args.accumulation_steps:
                 self.pending=[];return
             if self.window_start is None:
                 report['warmup_seconds']=now-launch
+                if pipeline:report['last_warmup_pipeline']=pipeline
                 self.window_start=now;self.pending=[]
                 backend._peak_live_bytes=backend._live_bytes
                 if memory_sampler:memory_sampler.phase='measurement'
@@ -180,6 +191,10 @@ def main():
                 backend._elapsed(ct.byref(elapsed),*self.last_optimizer_events)
                 row['optimizer_ms']=elapsed.value
             report['windows'].append(row)
+            if pipeline:
+                row['pipeline']=pipeline
+                row['main_stream_uncovered_ms']=row['seconds']*1000-pipeline['forward_backward_stream_ms']-row.get('optimizer_ms',0.)
+            if memory_sampler:report['device_memory_samples']=memory_sampler.report()
             print('[Native production] '+json.dumps(row),flush=True)
             write(target,report)
             if memory_sampler and self.micro>=microsteps:memory_sampler.phase='save_and_verify'
@@ -267,6 +282,8 @@ def main():
                     while True:time.sleep(30)
             write(target,report)
             raise
+        finally:
+            if getattr(observer,'pipeline',None):observer.pipeline.close()
 
 
 if __name__=='__main__':main()

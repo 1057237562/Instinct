@@ -66,7 +66,11 @@ class Optimizer:
                 self.e.copy(self.gradients[parameter],self.e.wrap(gradient),add=True)
                 self.present.add(parameter)
             return True
-        self.e.vjp(loss,self.e.full(loss.shape,self.scale).data,leaf_callback=consume)
+        previous=getattr(self.e,'consume_checkpoint_cache',False)
+        self.e.consume_checkpoint_cache=(getattr(self.e.backend,'release_checkpoint_cache',False)
+            and hasattr(self.e.backend,'release_owned'))
+        try:self.e.vjp(loss,self.e.full(loss.shape,self.scale).data,leaf_callback=consume)
+        finally:self.e.consume_checkpoint_cache=previous
         self.accumulated+=1
 
     def accumulate(self,gradients):

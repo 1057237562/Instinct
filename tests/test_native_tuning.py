@@ -83,3 +83,71 @@ def test_single_attention_candidate_is_cached_and_runs_once_per_invocation():
         select=lambda *args:calls.append('select'),run=lambda *args:calls.append('run'))
     for _ in range(2):native.run(ct.c_void_p(1234),[],None,(1,512,16,4,96,12288),False)
     assert calls==['select','run','run'] and len(native.metrics['plan_tuning'])==1
+
+
+def test_checkpoint_layout_scope_restores_on_replay_failure():
+    import os
+    if os.environ.get('TRITON_INTERPRET')!='1':pytest.skip('CPU interpreter only')
+    import numpy as np
+    from tests.test_native_optimization import ReusingBackend
+    from model.dense_cublas.autograd import Engine
+    b=ReusingBackend();b.fused_activation_layouts=True;e=Engine(b)
+    x=e.array(np.ones((2,4),np.float32),requires_grad=True)
+    observed=[]
+    def fn(x):
+        observed.append(e.ops.save_activation_layouts)
+        if e.recording:raise RuntimeError('replay failed')
+        return x*2
+    y=e.checkpoint(fn,x,[])
+    with pytest.raises(RuntimeError,match='replay failed'):e.vjp(y.sum())
+    assert observed==[False,True] and not e.ops.save_activation_layouts
+
+
+def test_measured_attention_cost_recovers_positive_model_and_partition():
+    from model.dense_cublas.attention_cost import fit,predict,partition,anchors
+    import numpy as np
+    expected=(.04,.02,.03,.06)
+    samples=[dict(docs=n,sequence=s,milliseconds=predict(expected,n,s))
+             for n,s in ((1,512),(1,1536),(1,3072),(1,4096),(4,512),(4,1536),(4,3072),(3,4096),(2,2048))]
+    coefficients=fit(samples)
+    np.testing.assert_allclose(coefficients,expected,atol=1e-10)
+    lengths=(4096,128,128,128,2000,1900)
+    baseline=((0,4),(4,2))
+    groups=partition(lengths,4,512,4096,12288,coefficients,baseline)
+    assert groups[0]==(0,1)
+    assert [i for s,n in groups for i in range(s,s+n)]==list(range(len(lengths)))
+    assert all(n*((max(lengths[s:s+n])+511)//512)*512<=12288 for s,n in groups)
+    assert len(anchors([(n,s) for n in range(1,5) for s in range(512,4097,512)]))==9
+
+
+def test_measured_attention_cost_rejects_bad_measurements_and_keeps_ties():
+    from model.dense_cublas.attention_cost import fit,partition
+    assert fit([]) is None
+    assert fit([dict(docs=1,sequence=512,milliseconds=float('nan'))]*4) is None
+    baseline=((0,2),)
+    assert partition((512,512),4,512,4096,12288,(1.,0.,0.,0.),baseline)==baseline
+
+
+def test_race_rewarms_same_shortlist_after_clock_drift():
+    candidates=[dict(index=0),dict(index=1)];warmups=[];confirmation=0
+    def measure(candidate,repeats):
+        nonlocal confirmation
+        if repeats>3:warmups.append(repeats)
+        value=1. if candidate['index']==0 else .8
+        if repeats==3:
+            confirmation+=1
+            if confirmation<=2:value*=1.5
+        return value
+    assert race(candidates,measure,warmup_ms=100,drift_limit=.05,retries=1)['index']==1
+    assert warmups==[100,100] and len(candidates[0]['unstable_attempts'])==1
+    assert confirmation==12
+
+
+def test_race_bounds_unstable_retries_and_reports_baseline_fallback():
+    candidates=[dict(index=0),dict(index=1)];count=0
+    def measure(candidate,repeats):
+        nonlocal count
+        if repeats==3:count+=1
+        return (1. if candidate['index']==0 else .8)*(1.5 if count%3==1 else 1.)
+    result=race(candidates,measure,drift_limit=.05,retries=1)
+    assert result['index']==0 and 'selection_warning' in result and count<=12

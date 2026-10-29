@@ -21,7 +21,10 @@ def enable_fused_ops(backend):
                   async_attention_metadata=True,attention_plan_quantum=512,
                   attention_plan_limit=64,attention_docs_per_plan=4,attention_local_maxima=True,
                   attention_group_penalty=4096,attention_tune=tune,attention_prewarm=tune,
-                  muon_tiled_io=True,muon_symmetric=True,quant_tile=64,selective_aux_kv=True)
+                  muon_tiled_io=True,muon_symmetric=True,quant_tile=64,selective_aux_kv=True,
+                  fused_activation_layouts=True,fused_boundary_norm=True,release_checkpoint_cache=True,
+                  attention_cost_model='forward' if tune else False,
+                  muon_blocked_gram=True,muon_blocked_polynomial=True,muon_gram_tile=0)
     for name,value in defaults.items():
         if not hasattr(backend,name):setattr(backend,name,value)
     if not hasattr(backend,'aligned_pointwise_only'):

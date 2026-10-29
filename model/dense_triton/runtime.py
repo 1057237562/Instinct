@@ -230,7 +230,7 @@ class CudaBackend:
             align=fn.__name__ in {'cast','add','binary','binary_scalar','gradient_sum','scaled_copy',
                 'fill','pack_matrix','pack_matrix_tiled','unpack_matrix','inverse_scale',
                 'amax_partial','scale_from_amax','quantize','quantize_dual',
-                'rounded_swiglu','rounded_swiglu_amax','statistics','cached_statistics','quantized_values'}
+                'rounded_swiglu','rounded_swiglu_amax','statistics','cached_statistics','quantized_values','quantized_backward_staged'}
             if getattr(self,'aligned_norm_backward',False) and fn.__name__ in ('rms_backward_sum','residual_norm','_rms_forward','_rms_reduce_dw'):
                 align=True
         alignments = tuple(1 if isinstance(arg,Scalar) else min(16,arg.storage & -arg.storage)

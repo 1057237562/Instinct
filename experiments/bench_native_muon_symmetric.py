@@ -11,6 +11,10 @@ from experiments.smoke_dense_triton import RejectTorch
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--output',required=True,type=Path)
     p.add_argument('--chain-only',action='store_true')
+    p.add_argument('--blocked-gram',action='store_true')
+    p.add_argument('--gram-tile',type=int,default=512)
+    p.add_argument('--blocked-polynomial',action='store_true')
+    p.add_argument('--ffn-batch',type=int,default=2)
     a=p.parse_args();a.output.parent.mkdir(parents=True,exist_ok=True)
     sys.meta_path.insert(0,RejectTorch())
     from model.dense_cublas.memory import TrainingBackend
@@ -20,7 +24,7 @@ def main():
     report=dict(status='running',cases=[])
     with TrainingBackend(allocator_backend='async',config=ScheduleConfig(tune=True)) as b:
         ops=CublasDenseOps(b);rng=np.random.default_rng(729)
-        shapes=[(2,1536,5504),(8,1536,1536),(16,384,1536)]
+        shapes=[(a.ffn_batch,1536,5504),(8,1536,1536),(16,384,1536)]
         if a.chain_only:shapes.extend([(3,1536,5504),(1,1536,5504)])
         for batch,m,k in shapes:
             mark=b.mark()
@@ -37,9 +41,14 @@ def main():
                 baseline();ref=b.to_numpy(expected)
                 # Square 64 tiles bound accumulator registers; choose only the
                 # two K tiles that halve/quarter the old BK32 loop trip count.
-                for bk in (0,64,128):
+                choices=(0,128,-1) if (a.blocked_gram or a.blocked_polynomial) and m==1536 else (0,64,128)
+                for bk in choices:
                     def run():
                         if not bk:return baseline()
+                        if bk==-1:
+                            from model.dense_cublas.muon_gram import gram as blocked
+                            assert blocked(b,left,actual,tile=a.gram_tile,polynomial=role=='polynomial')
+                            return
                         tiles=triton.cdiv(m,64)
                         b.launch(ns_gemm,(tiles*(tiles+1)//2,1,batch),(left,right,c,actual),
                             M=m,N=m,K=kk,A0=astrides[0],A1=astrides[1],A2=astrides[2],
@@ -62,6 +71,9 @@ def main():
                 reference=None
                 for enabled in (False,True):
                     local=b.mark();b.muon_symmetric=enabled;y=start
+                    b.muon_blocked_gram=enabled and a.blocked_gram
+                    b.muon_gram_tile=a.gram_tile
+                    b.muon_blocked_polynomial=enabled and a.blocked_polynomial
                     for _ in range(5):
                         gram=plan.gemm(y,y,y,m,m,k,(m*k,k,1),(m*k,1,k),symmetric=(m,k)!=(1536,5504))
                         poly=plan.gemm(gram,gram,gram,m,m,m,(m*m,m,1),(m*m,m,1),alpha=2.0315,beta=-4.775,symmetric=True)

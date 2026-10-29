@@ -190,6 +190,10 @@ class Model:
         return result
 
     def norm(self, x, name):
+        hint=getattr(self,'_input_norm_hint',None)
+        if not self.e.recording and hint is not None and hint[:2]==(name,x.data.storage):
+            self._input_norm_hint=None
+            return self.e.wrap(hint[2].view(*x.shape))
         target=self.activation_dtype if (self.muon_mantissa and name.endswith('layernorm.weight')
             and getattr(self.e.backend,'fused_norm_cast',False)) else None
         return self.e.norm(x, self.params[name], self.config['rms_norm_eps'],out_dtype=target)
@@ -291,7 +295,19 @@ class Model:
                 return z,self.norm(z,p+'post_attention_layernorm.weight')
             def dense_whole(z):
                 z,normalized=attention_residual(z)
-                return z+self.ffn(normalized,p+'mlp.')
+                branch=self.ffn(normalized,p+'mlp.')
+                if not e.recording and getattr(self,'_boundary_active',False) and i+1<c['num_hidden_layers']:
+                    from .fused import residual_norm
+                    import triton
+                    name=self.layer_prefixes[i+1]+'input_layernorm.weight'
+                    y,inv,maximum=self._boundary_scratch
+                    out=e.backend.empty(z.shape,'fp32');n=z.shape[-1];rows=z.size//n
+                    e.backend.launch(residual_norm,(rows,),(z.data,branch.data,self.params[name].data,out,y,inv,maximum),
+                        N=n,EPS=c['rms_norm_eps'],BLOCK=triton.next_power_of_2(n))
+                    y.amax_partial=maximum
+                    self._input_norm_hint=(name,out.storage,y)
+                    return e.wrap(out)
+                return z+branch
             def dense_replay(z,output):
                 z,normalized=attention_residual(z)
                 from . import ffn
@@ -327,6 +343,20 @@ class Model:
 
     def __call__(self, ids, labels=None, attention_mask=None, cache=None, use_cache=False, return_logits=True, sequence_ids=None):
         e,c = self.e,self.config
+        self._input_norm_hint=None;self._boundary_active=False
+        if (getattr(e.backend,'fused_boundary_norm',False) and hasattr(e.backend,'pin_since') and self.training
+            and c['model_architecture']=='standard' and not c['use_moe'] and c['use_grad_checkpoint'] in (3,4)
+            and self.muon_mantissa and self.activation_dtype=='bf16' and getattr(e.backend,'fused_norm_cast',False)
+            and cache is None and not use_cache and not c['early_exit_layers']):
+            rows=ids.shape[0]*ids.shape[1];n=c['hidden_size']
+            if not hasattr(self,'_boundary_scratch'):
+                mark=e.backend.mark()
+                self._boundary_scratch=(e.backend.empty((rows,n),'bf16'),e.backend.empty((rows,),'fp32'),e.backend.empty((rows,),'fp32'))
+                e.backend.pin_since(mark)
+            # One bounded scratch allocation, shared sequentially by all layers.
+            # A new token budget uses the ordinary path instead of accumulating
+            # persistent per-bucket buffers. Replay always rebuilds normal VJPs.
+            self._boundary_active=self._boundary_scratch[0].shape==(rows,n)
         native=getattr(e.backend,'native_attention',None)
         native_context=None
         if native is not None:

@@ -97,7 +97,7 @@ class TrainingBackend(CublasBackend):
         return super().__exit__(exc_type,exc,traceback)
 
     def empty(self, shape, dtype='fp32', zero=False):
-        self._check()
+        if self._context is None:self._check()
         shape = tuple(shape)
         if not shape or any(type(d) is not int or d <= 0 for d in shape) or dtype not in ITEMSIZE:
             raise ValueError('expected a positive shape and supported dtype')
@@ -111,6 +111,9 @@ class TrainingBackend(CublasBackend):
         # Fixed replay inputs use copy_many_from_numpy with explicit fences.
         pool = None if self._uploading_constant else self._pool.get(size)
         if pool:
+            # Reusing a host-side ownership record performs no CUDA operation.
+            # Actual allocation, initialization and consumers bind their context.
+            # Avoid a redundant cuCtxSetCurrent for every temporary tensor.
             tensor = Tensor(shape, dtype, pool.pop(), self)
             self._pool_bytes -= size
             self.allocator_stats['pool_hits']+=1
@@ -204,6 +207,27 @@ class TrainingBackend(CublasBackend):
         for event in events:
             self._event_pool.append(event)
             del self._live_events[event]
+        self._trim_pool()
+
+    def release_owned(self,tensors):
+        """Consume private checkpoint outputs after their last queued reader.
+
+        Callers must own complete base allocations, not arbitrary views. This
+        is deliberately separate from mark-based temporary reclamation.
+        """
+        tensors=tuple(tensors);pointers={t.storage for t in tensors}
+        if any(t.owner is not self for t in tensors):raise ValueError('foreign checkpoint allocation')
+        if any(p not in self._live or p in self._pinned for p in pointers):
+            raise ValueError('checkpoint release requires unpinned live base allocations')
+        if self.stream!=self.main_stream or self.weight_stream!=self.main_stream:
+            self.synchronize();self.allocator_stats['release_syncs']+=1
+        for p in pointers:
+            _,size=self._live.pop(p)
+            self._live_bytes-=size;self._pool_bytes+=size
+            self._pool.setdefault(size,[]).append(p)
+        self._trim_pool()
+
+    def _trim_pool(self):
         # Recorded addresses must survive capture. Their lifetimes may alias,
         # but no cuMemFree is allowed until the owning plan/context is closed.
         if self._commands is not None:return

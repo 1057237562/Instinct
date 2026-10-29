@@ -71,6 +71,33 @@ def quantized_values(G,U,DY,SY,SG,SU,Y,QG,QGT,QU,QUT,
     else:tl.store(Y+pos,yq,valid)
 
 
+@triton.jit
+def quantized_backward_staged(G,U,DY,SY,SG,SU,Y,QG,QGT,QU,QUT,
+                              ROWS:tl.constexpr,COLS:tl.constexpr,TILE:tl.constexpr=64,
+                              COL_TILE:tl.constexpr=64,COL_MAJOR_GRID:tl.constexpr=False,
+                              BARRIERS:tl.constexpr=False):
+    row=tl.program_id(1 if COL_MAJOR_GRID else 0)*TILE+tl.arange(0,TILE)
+    col=tl.program_id(0 if COL_MAJOR_GRID else 1)*COL_TILE+tl.arange(0,COL_TILE)
+    pos=row[:,None]*COLS+col[None,:];valid=(row[:,None]<ROWS)&(col[None,:]<COLS)
+    transposed=col[None,:]*ROWS+row[:,None]
+    g=tl.load(G+pos,valid,0).to(tl.float32);u=tl.load(U+pos,valid,0).to(tl.float32)
+    denominator=1.+tl.exp(-g)
+    activated=(g/denominator).to(G.dtype.element_ty).to(tl.float32)
+    y=(activated*u).to(G.dtype.element_ty).to(tl.float32)
+    yq=tl.minimum(tl.maximum(y*tl.load(SY),-448.),448.).to(Y.dtype.element_ty,fp_downcast_rounding='rtne')
+    tl.store(Y+transposed,yq,valid)
+    if BARRIERS:tl.debug_barrier()
+    dy=tl.load(DY+pos,valid,0).to(tl.float32);sig=1./denominator
+    derivative=sig*(1.+g*(1.-sig))
+    dg=((dy*u)*derivative).to(G.dtype.element_ty).to(tl.float32)
+    gq=tl.minimum(tl.maximum(dg*tl.load(SG),-57344.),57344.).to(QG.dtype.element_ty,fp_downcast_rounding='rtne')
+    tl.store(QG+pos,gq,valid);tl.store(QGT+transposed,gq,valid)
+    if BARRIERS:tl.debug_barrier()
+    du=(dy*activated).to(U.dtype.element_ty).to(tl.float32)
+    uq=tl.minimum(tl.maximum(du*tl.load(SU),-57344.),57344.).to(QU.dtype.element_ty,fp_downcast_rounding='rtne')
+    tl.store(QU+pos,uq,valid);tl.store(QUT+transposed,uq,valid)
+
+
 def _scale(ops,partial,maximum):
     if getattr(ops.backend,'fused_scale_inverse',False):
         from .quantization import make_scale
@@ -113,9 +140,15 @@ def quantize_swiglu(ops,gate,up,dy=None):
     grid=(triton.cdiv(rows,tile),triton.cdiv(cols,width))
     if col_major:grid=grid[::-1]
     if flat and not backward:grid=(triton.cdiv(rows*cols,1024),)
-    ops.backend.launch(quantized_values,grid,
-        (*operands,sy,sg,su,y,qg,qgt,qu,qut),ROWS=rows,COLS=cols,BACKWARD=backward,
-        TILE=tile,FLAT_FORWARD=flat,COL_TILE=width,COL_MAJOR_GRID=col_major,PRECOMPUTED=cached)
+    stage=getattr(ops.backend,'ffn_backward_stage',0)
+    if backward and stage and not cached:
+        ops.backend.launch(quantized_backward_staged,grid,
+            (*operands,sy,sg,su,y,qg,qgt,qu,qut),ROWS=rows,COLS=cols,TILE=tile,COL_TILE=width,
+            COL_MAJOR_GRID=col_major,BARRIERS=stage==2)
+    else:
+        ops.backend.launch(quantized_values,grid,
+            (*operands,sy,sg,su,y,qg,qgt,qu,qut),ROWS=rows,COLS=cols,BACKWARD=backward,
+            TILE=tile,FLAT_FORWARD=flat,COL_TILE=width,COL_MAJOR_GRID=col_major,PRECOMPUTED=cached)
     return (y,sy,qg,sg,qu,su) if backward else (y,sy)
 
 

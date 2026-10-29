@@ -3,7 +3,7 @@ import statistics
 import math
 
 
-def race(candidates,measure,*,baseline=0,minimum_gain=.01):
+def race(candidates,measure,*,baseline=0,minimum_gain=.01,warmup_ms=0.,drift_limit=None,retries=0):
     """Coarse timing of <=4 candidates, then confirm only baseline and leader.
 
     The baseline wins differences below one percent. Timings use fixed inputs;
@@ -11,28 +11,44 @@ def race(candidates,measure,*,baseline=0,minimum_gain=.01):
     """
     if not candidates or len(candidates)>4:raise ValueError('expected one to four shortlisted candidates')
     if baseline not in {c['index'] for c in candidates}:raise ValueError('baseline missing')
+    if not 0<=retries<=2 or not math.isfinite(warmup_ms) or warmup_ms<0:raise ValueError('invalid timing budget')
     if len(candidates)==1:
         candidates[0]['selection_reason']='only supported candidate'
         return candidates[0]
-    for candidate in candidates:
-        candidate['coarse_ms']=measure(candidate,2)
     control=next(c for c in candidates if c['index']==baseline)
-    leader=min(candidates,key=lambda c:c['coarse_ms'])
-    if not math.isfinite(leader['coarse_ms']):raise RuntimeError('all shortlisted candidates failed')
-    finalists=[control]+([leader] if leader is not control else [])
-    samples={c['index']:[] for c in finalists}
-    # Alternate order so a monotonic clock/temperature drift is not rewarded.
-    for repeat in range(3):
-        for candidate in finalists[::(-1 if repeat%2 else 1)]:
-            samples[candidate['index']].append(measure(candidate,3))
-    for candidate in candidates:
-        if candidate in finalists:
-            candidate['median_ms']=statistics.median(samples[candidate['index']])
-            candidate['samples_ms']=samples[candidate['index']]
-        else:candidate['rejected']='slower in coarse screen'
-    if leader is not control and leader['median_ms']<control['median_ms']*(1.-minimum_gain):return leader
-    if leader is not control:leader['rejected']='improvement below confirmation margin'
-    return control
+    for attempt in range(retries+1):
+        for candidate in candidates:
+            for key in ('coarse_ms','median_ms','samples_ms','rejected'):candidate.pop(key,None)
+        if warmup_ms:
+            estimate=measure(control,2)
+            if math.isfinite(estimate) and estimate>0:
+                count=max(2,min(4096,math.ceil(warmup_ms/max(estimate,.001))))
+                elapsed=measure(control,count)*count
+                control.setdefault('warmup_runs',[]).append(dict(repeats=count,elapsed_ms=elapsed))
+        for candidate in candidates:candidate['coarse_ms']=measure(candidate,2)
+        leader=min(candidates,key=lambda c:c['coarse_ms'])
+        if not math.isfinite(leader['coarse_ms']):raise RuntimeError('all shortlisted candidates failed')
+        finalists=[control]+([leader] if leader is not control else [])
+        samples={c['index']:[] for c in finalists}
+        for repeat in range(3):
+            for candidate in finalists[::(-1 if repeat%2 else 1)]:
+                samples[candidate['index']].append(measure(candidate,3))
+        for candidate in candidates:
+            if candidate in finalists:
+                candidate['median_ms']=statistics.median(samples[candidate['index']])
+                candidate['samples_ms']=samples[candidate['index']]
+            else:candidate['rejected']='slower in coarse screen'
+        unstable=(drift_limit is not None and any(
+            all(math.isfinite(v) and v>0 for v in values) and max(values)/min(values)-1>drift_limit
+            for values in samples.values()))
+        if unstable:
+            control.setdefault('unstable_attempts',[]).append(dict(attempt=attempt,samples_ms=samples))
+            if attempt<retries:continue
+            control['selection_warning']='timing remained unstable; kept heuristic baseline'
+            return control
+        if leader is not control and leader['median_ms']<control['median_ms']*(1.-minimum_gain):return leader
+        if leader is not control:leader['rejected']='improvement below confirmation margin'
+        return control
 
 
 def gemm_shortlist(candidates,limit=4):

@@ -353,7 +353,7 @@ class CublasBackend(CudaBackend):
                         return self.time_call(lambda:self.native.run(plan,candidate['index'],*pointers),stream,repeats)
                     except LtError as error:
                         candidate['rejected']=str(error);return float('inf')
-                best=race(gemm_shortlist(candidates),measure,baseline=candidates[0]['index'])
+                best=race(gemm_shortlist(candidates),measure,baseline=candidates[0]['index'],warmup_ms=100,drift_limit=.05,retries=1)
                 winners=[best]
             for candidate in (() if bounded else candidates):
                 index = candidate['index']
@@ -421,7 +421,7 @@ class CublasBackend(CudaBackend):
                         return self.time_call(lambda:self.native.run_batched(plan,candidate['index'],*pointers),stream,repeats)
                     except LtError as error:
                         candidate['rejected']=str(error);return float('inf')
-                best=race(gemm_shortlist(candidates),measure,baseline=candidates[0]['index'])
+                best=race(gemm_shortlist(candidates),measure,baseline=candidates[0]['index'],warmup_ms=100,drift_limit=.05,retries=1)
                 winners=[best]
             for candidate in (() if bounded else candidates):
                 index=candidate['index']

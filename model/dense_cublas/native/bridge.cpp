@@ -2,6 +2,7 @@
 #include <cublasLt.h>
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -152,6 +153,40 @@ API int instinct_lt_plan_batched(void* handle, int64_t m, int64_t n, int64_t k,
                          int64_t stride_a, int64_t stride_b, int64_t stride_c, void** out) {
     return make_plan(handle,m,n,k,data_type,data_type,data_type,workspace,max_candidates,0,
                      transpose_a,transpose_b,0,batch,stride_a,stride_b,stride_c,out);
+}
+
+// Identical-size BF16 tiles with device pointer arrays. Used for a triangular
+// Gram decomposition; off-diagonal tiles are mirrored separately by the caller.
+API int instinct_lt_plan_pointer_gram(void* handle, int tile, int reduction, int leading,
+                                     int batch, uint64_t workspace, int candidates, void** out) {
+    GUARD_BEGIN
+    if(!handle || !out || tile<1 || reduction<1 || leading<tile || batch<1 || candidates<1 || candidates>64)
+        throw std::invalid_argument("invalid pointer Gram geometry");
+    auto p=std::make_unique<Plan>();p->handle=static_cast<cublasLtHandle_t>(handle);
+    LT(cublasLtMatmulDescCreate(&p->operation,CUBLAS_COMPUTE_32F,CUDA_R_32F));
+    cublasOperation_t t=CUBLAS_OP_T,n=CUBLAS_OP_N;
+    LT(cublasLtMatmulDescSetAttribute(p->operation,CUBLASLT_MATMUL_DESC_TRANSA,&t,sizeof(t)));
+    LT(cublasLtMatmulDescSetAttribute(p->operation,CUBLASLT_MATMUL_DESC_TRANSB,&n,sizeof(n)));
+    LT(cublasLtMatrixLayoutCreate(&p->a,CUDA_R_16BF,reduction,tile,reduction));
+    LT(cublasLtMatrixLayoutCreate(&p->b,CUDA_R_16BF,reduction,tile,reduction));
+    LT(cublasLtMatrixLayoutCreate(&p->c,CUDA_R_16BF,tile,tile,leading));
+    uint32_t mode=CUBLASLT_BATCH_MODE_POINTER_ARRAY;
+    for(auto layout:{p->a,p->b,p->c}) {
+        LT(cublasLtMatrixLayoutSetAttribute(layout,CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,&batch,sizeof(batch)));
+        LT(cublasLtMatrixLayoutSetAttribute(layout,CUBLASLT_MATRIX_LAYOUT_BATCH_MODE,&mode,sizeof(mode)));
+    }
+    LT(cublasLtMatmulPreferenceCreate(&p->preference));size_t limit=static_cast<size_t>(workspace);
+    LT(cublasLtMatmulPreferenceSetAttribute(p->preference,CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,&limit,sizeof(limit)));
+    uint32_t alignment=std::gcd(uint32_t(256),uint32_t(tile)*2u);
+    for(auto attr:{CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES,CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES,
+                   CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES,CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES})
+        LT(cublasLtMatmulPreferenceSetAttribute(p->preference,attr,&alignment,sizeof(alignment)));
+    std::vector<cublasLtMatmulHeuristicResult_t> results(candidates);int count=0;
+    LT(cublasLtMatmulAlgoGetHeuristic(p->handle,p->operation,p->a,p->b,p->c,p->c,p->preference,candidates,results.data(),&count));
+    for(int i=0;i<count;++i)if(results[i].state==CUBLAS_STATUS_SUCCESS && results[i].workspaceSize<=limit)p->candidates.push_back(results[i]);
+    if(p->candidates.empty())throw std::runtime_error("no pointer-array Gram algorithm on this device");
+    *out=p.release();
+    GUARD_END
 }
 
 // Retain ABI 2's precise-accumulation behavior for existing callers.

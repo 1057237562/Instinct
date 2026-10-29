@@ -10,6 +10,7 @@ from experiments.smoke_dense_triton import RejectTorch
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--output',required=True,type=Path)
     p.add_argument('--forward',action='store_true')
+    p.add_argument('--activation-layouts',action='store_true')
     a=p.parse_args();a.output.parent.mkdir(parents=True,exist_ok=True)
     sys.meta_path.insert(0,RejectTorch())
     from model.dense_cublas.memory import TrainingBackend
@@ -23,18 +24,24 @@ def main():
         parts=[e.array(rng.normal(size=shape).astype(np.float32),'bf16').data for _ in range(3)]
         residual=e.array(rng.normal(size=shape).astype(np.float32))
         _,saved=e.ops.norm(x.data,w.data,out_dtype='bf16')
-        for kind in (('input_forward','residual_forward') if a.forward else ('norm','quant')):
+        kinds=('activation_layouts',) if a.activation_layouts else (('input_forward','residual_forward') if a.forward else ('norm','quant'))
+        for kind in kinds:
             reference=None
             configs=[dict(aligned=False,warps=4,tile=32),dict(aligned=True,warps=4,tile=64),
                      dict(aligned=True,warps=8,tile=64)] if kind=='norm' else [dict(aligned=False,warps=4,tile=t) for t in (32,64,128)]
             if a.forward:configs=[dict(aligned=False,warps=4,tile=32,rows=r) for r in (0,1,4)]
+            if a.activation_layouts:configs=[dict(aligned=False,warps=4,tile=64,dual=v) for v in (False,True)]
             for config in configs:
                 mark=b.mark();b.aligned_norm_backward=config['aligned'];b.quant_tile=config['tile']
                 b.kernel_options['model.dense_cublas.fused.rms_backward_sum']={'num_warps':config['warps']}
                 b.norm_forward_rows=max(1,config.get('rows',1));b.fused_input_norm_amax=config.get('rows',0)>0
                 b._commands=[]
                 try:
-                    if kind=='input_forward':
+                    if kind=='activation_layouts':
+                        q,s=e.ops.quantize(parts[0],dual_layout=config['dual'])
+                        qt=e.ops._pack(q,shape[1],shape[0],shape[1],shape[0],(1,shape[1]),True)
+                        out=(q,s,qt)
+                    elif kind=='input_forward':
                         y,_=e.ops.norm(x.data,w.data,out_dtype='bf16');q,s=e.ops.quantize(y);out=(y,q,s)
                     elif kind=='residual_forward':
                         z,y=e.residual_norm(x,e.wrap(parts[0]),w,out_dtype='bf16');out=(z.data,y.data)
@@ -47,7 +54,7 @@ def main():
                 if reference is None:reference=values
                 errors=[float(np.linalg.norm(x-y)/max(np.linalg.norm(y),1e-20)) for x,y in zip(values,reference)]
                 valid=max(errors)<1e-6
-                if kind=='quant':
+                if kind in ('quant','activation_layouts'):
                     for x,y in zip(values,reference):np.testing.assert_array_equal(x,y)
                 for _ in range(2):run()
                 times=[b.time_call(run,b.main_stream,repeats=5) for _ in range(3)]

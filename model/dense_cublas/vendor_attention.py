@@ -56,6 +56,8 @@ class NativeAttention:
         self.forward_calls=self.backward_calls=0
         self.upload_slots=[];self.upload_index=0
         self.tuned={}
+        self.group_cost=None
+        self.frost=None
         self.metrics=dict(plan_builds=0,plan_evictions=0,plan_build_seconds=0.,prepare_seconds=0.,max_workspace_bytes=0,workspace_fallbacks=0,
                           descriptor_padded_tokens=0,global_descriptor_padded_tokens=0,plan_tuning=[])
 
@@ -87,6 +89,7 @@ class NativeAttention:
                 for x,offset in zip(arrays,offsets)]
 
     def prepare(self,shape,segments,heads,kv_heads,dim):
+        self.b._check()  # Descriptor construction is also a CUDA operation.
         begin=time.perf_counter()
         self.context=None
         if shape[1]<getattr(self,'minimum_seq',0):return
@@ -108,7 +111,7 @@ class NativeAttention:
         local_lengths=(tuple(lengths),) if getattr(self.b,'attention_local_maxima',False) else ()
         geometry=(len(lengths),maximum,heads,kv_heads,dim,batch*seq,[])+local_lengths
         limit=getattr(self.b,'attention_workspace_limit_mib',1792)*2**20
-        workspaces=[self.plan(chunk,backward)[1] for chunk in self.chunks(geometry) for backward in (False,True)]
+        workspaces=[self.plan(chunk,backward)[1] for backward in (False,True) for chunk in self.chunks(geometry,backward)]
         if max(workspaces)>limit:
             self.metrics['workspace_fallbacks']+=1
             self.metrics['prepare_seconds']+=time.perf_counter()-begin
@@ -121,7 +124,7 @@ class NativeAttention:
         self.metrics['global_descriptor_padded_tokens']+=len(lengths)*maximum
         self.metrics['prepare_seconds']+=time.perf_counter()-begin
 
-    def chunks(self,context):
+    def chunks(self,context,backward=False):
         from model.dense_triton.runtime import Tensor,ITEMSIZE
         docs,maximum,h,hk,d,total,metadata=context[:7]
         lengths=context[7] if len(context)>7 else ()
@@ -129,6 +132,11 @@ class NativeAttention:
         if size<1:raise ValueError('attention documents per plan must be nonnegative')
         penalty=getattr(self.b,'attention_group_penalty',0)
         partition=document_groups(lengths,size,getattr(self.b,'attention_plan_quantum',128),maximum,penalty) if lengths else tuple((s,min(size,docs-s)) for s in range(0,docs,size))
+        use_cost=not (backward and getattr(self.b,'attention_cost_model',False)=='forward')
+        if use_cost and lengths and getattr(self,'group_cost',None) is not None and self.group_cost[0]==(h,hk,d,total):
+            from .attention_cost import partition as timed_partition
+            partition=timed_partition(lengths,size,getattr(self.b,'attention_plan_quantum',128),
+                maximum,total,self.group_cost[1],partition)
         for start,count in partition:
             chunk_maximum=maximum
             if lengths and getattr(self.b,'attention_local_maxima',False):
@@ -180,7 +188,7 @@ class NativeAttention:
                 self.lib.select(plan,candidate['index'])
                 self.lib.run(plan,buffers,workspace)
                 return self.b.time_call(lambda:self.lib.run(plan,buffers,workspace),self.b.main_stream,repeats=repeats)
-            best=race(candidates,measure)
+            best=race(candidates,measure,warmup_ms=100,drift_limit=.05,retries=1)
             self.lib.select(plan,best['index']);self.tuned[plan.value]=best['index']
             self.metrics['plan_tuning'].append(dict(geometry=list(context[:6]),backward=backward,
                 selected=best['index'],candidates=candidates,seconds=time.perf_counter()-begin))
@@ -198,6 +206,9 @@ class NativeAttention:
         geometries=[(docs,seq,h,hk,d,total) for docs in range(1,size+1)
                     for seq in range(quantum,maximum+1,quantum) if docs*seq<=total]
         if 2*len(geometries)>getattr(self.b,'attention_plan_limit',32):return
+        from .attention_cost import anchors,fit
+        selected=anchors(geometries) if getattr(self.b,'attention_cost_model',False) else set()
+        samples=[]
         begin=time.perf_counter();mark=self.b.mark()
         try:
             q,k,v,out,dy,dq,dk,dv=[self.b.empty((total,heads,d),'bf16',zero=True) for heads in (h,hk,hk,h,h,h,hk,hk)]
@@ -208,14 +219,28 @@ class NativeAttention:
                     +[np.full(docs,seq,np.int32)])
                 context=(docs,seq,h,hk,d,total,metadata)
                 stats=self.b.empty((docs,h,seq),'fp32')
+                elapsed=[]
                 for backward in (False,True):
                     plan,n=self.plan(context,backward)
                     work=self.b.empty((max(1,(n+3)//4),),'fp32')
                     self.run(plan,[q,k,v,out,stats,dy,dq,dk,dv,*metadata],work,context,backward)
+                    if (docs,seq) in selected:
+                        buffers=[q,k,v,out,stats,dy,dq,dk,dv,*metadata]
+                        times=[self.b.time_call(lambda:self.lib.run(plan,buffers,work),self.b.main_stream,repeats=2) for _ in range(3)]
+                        elapsed.append(float(np.median(times)))
+                if elapsed:samples.append(dict(docs=docs,sequence=seq,
+                    milliseconds=elapsed[0] if self.b.attention_cost_model=='forward' else sum(elapsed),
+                    forward_ms=elapsed[0],backward_ms=elapsed[1]))
                 self.b.release_since(local)
             self.b.synchronize()
         finally:self.b.release_since(mark)
         self.metrics['catalog_warmup']=dict(geometries=len(geometries),seconds=time.perf_counter()-begin)
+        if selected:
+            coefficients=fit(samples)
+            if coefficients is not None:self.group_cost=((h,hk,d,total),coefficients)
+            self.metrics['group_cost_model']=dict(samples=samples,coefficients=coefficients,
+                enabled=coefficients is not None,target=self.b.attention_cost_model,
+                scope='dense descriptor anchors; ragged performance validated separately')
 
     def attention(self,q,k,v,mask,dropout,seed,counter,cached,packed,fallback):
         # Bind metadata to the mask carried by this particular forward/replay,
@@ -245,12 +270,19 @@ class NativeAttention:
         self.backward_calls+=1
         docs,maximum,h,hk,d,total,metadata=context[:7]
         dq,dk,dv=[self.b.empty(x.shape,x.dtype,zero=True) for x in (q,k,v)]
-        for chunk in self.chunks(context):
+        for chunk in self.chunks(context,True):
             docs,maximum,h,hk,d,total,metadata=chunk
-            plan,n=self.plan(chunk,True)
             mark=self.b.mark()
             stats=self.b.empty((docs,h,maximum),'fp32')
             self.b.launch(stats_copy,(docs,h,triton.cdiv(maximum,256)),(stats,lse,metadata[2],metadata[3]),SEQ=maximum,HEADS=h,EXPAND=True)
+            if getattr(self.b,'attention_frost_backward',False):
+                if self.frost is None:
+                    from .frost_attention import FrostBackward
+                    self.frost=FrostBackward(self.b)
+                self.frost.run(q,k,v,out,dy,stats,metadata,dq,dk,dv,docs,maximum,h,hk,d)
+                self.b.release_since(mark)
+                continue
+            plan,n=self.plan(chunk,True)
             work=self.b.empty((max(1,(n+3)//4),),'fp32')
             buffers=[q,k,v,out,stats,dy,dq,dk,dv,*metadata]
             self.b._submit('cudnn:attention_backward',lambda plan=plan,buffers=buffers,work=work,chunk=chunk:self.run(plan,buffers,work,chunk,True))

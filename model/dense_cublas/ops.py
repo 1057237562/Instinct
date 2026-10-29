@@ -60,6 +60,7 @@ class CublasDenseOps(DenseOps):
         super().__init__(backend, fp8)
         self._reuse = None
         self._role = 'forward'
+        self.save_activation_layouts = False
 
     @contextmanager
     def reuse_scope(self, cache=None):
@@ -90,16 +91,16 @@ class CublasDenseOps(DenseOps):
             self.backend.wait_event(event)
         return result
 
-    def quantize(self, x, dtype='fp8e4nv'):
+    def quantize(self, x, dtype='fp8e4nv', *, dual_layout=False):
         # Q/K/V share one normalized activation cast; gate/up share another.
         def create():
             dual=bool(getattr(self.backend,'fused_quant_pack',False)
-                      and dtype=='fp8e5' and len(x.shape)==2 and all(d%16==0 for d in x.shape))
+                      and (dtype=='fp8e5' or dual_layout) and len(x.shape)==2 and all(d%16==0 for d in x.shape))
             if getattr(self.backend,'fused_scale_inverse',False):
                 from .quantization import quantize
                 return quantize(self,x,dtype,dual)
             return super(CublasDenseOps,self).quantize(x,dtype,dual_layout=dual)
-        return self._cached(('quant',self._key(x),dtype),create)
+        return self._cached(('quant',self._key(x),dtype,dual_layout),create)
 
     def norm_rotary(self,x,weight,cos,sin,eps=1.e-6,start=0):
         if len(x.shape)!=4 or x.shape[-1]%2 or weight.shape!=(x.shape[-1],):
@@ -154,11 +155,21 @@ class CublasDenseOps(DenseOps):
             result.append((y.view(*x.shape[:-1],weight.shape[0]),saved))
         return result
 
+    def linear(self,x,weight):
+        saved=self.linear_saved(x,weight)
+        _,_,_,qx,qw,scales=saved
+        y=self.mm(qx,qw,transpose_b=True,scales=scales,out_dtype=x.dtype)
+        return y.view(*x.shape[:-1],weight.shape[0]),saved
+
     def linear_saved(self, x, weight):
         """Rebuild VJP operands without repeating a selectively saved GEMM."""
+        if len(weight.shape)!=2 or x.shape[-1]!=weight.shape[1]:
+            raise ValueError('Linear input/weight shapes do not match')
+        if x.dtype not in ('fp32','bf16','fp16') or weight.dtype not in ('fp32','bf16','fp16'):
+            raise ValueError('Linear expects high-precision activations and master weights')
         matrix = x.view(x.numel // x.shape[-1], x.shape[-1])
         if self.fp8:
-            qx, sx = self.quantize(matrix)
+            qx, sx = self.quantize(matrix,dual_layout=self.save_activation_layouts)
             qw, sw = self.quantize(weight)
             scales = sx, sw
         else:

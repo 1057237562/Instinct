@@ -4,22 +4,27 @@
 `codex/cublas-throughput`。模型仍为 32 层、H=1536、FFN=5504、Q/KV=16/4、
 head_dim=96、vocab=6400、共享 embedding/head，共 1,010,277,888 参数。
 
-## 2026-10-29 当前原生预设
+## 2026-10-30 当前原生预设
 
 当前共享原生预设采用cuDNN packed attention、cuBLAS Muon、FP8 scale/倒数融合、
 attention自适应连续分组与组内长度上界、残差梯度融合、cast＋amax、权重scale缓存、
-双1792 MiB checkpoint缓存、256 MiB复用池和512 MiB Muon workspace。
-当前缓存顺序为全部O/LSE、K/V投影、再分配gate/up；V2两桶实际各缓存32层O/LSE及32层K/V，合计1752 MiB。
-Muon的转置准备/更新改用分块访问；SM120上的两类已测对称GEMM使用BK128三角计算。
+双2816 MiB checkpoint缓存、128 MiB复用池和512 MiB Muon workspace。
+当前缓存顺序为全部O/LSE、K/V投影、再分配gate/up；V2两桶实际各缓存32层O/LSE、32层K/V和顶部4层gate/up，合计2784 MiB。
+Optimizer.backward完成一层反向后释放该层私有selective缓存；手动Engine.vjp保持原来的保留行为。
+层末残差与下一层input RMSNorm共享一个有界BF16暂存区，反向仍重建完整VJP。
+重算时E4M3激活量化同时生成dW所需的转置布局，原始checkpoint前向不多存该布局。
+Muon在SM120上对已测形状使用cuBLASLt pointer-array三角分块和镜像；不同batch采用64或512分块，其余保留原路径。
 通用FP8双布局量化使用64 tile。精确累积保持原样，fast accumulation只保留实验开关，未启用。
 `--allocator_release_mib 13312` 控制CUDA异步池在同步时保留内存的阈值；它不是显存硬上限。
 该参数也可在Config WebUI原生设置的Async pool retention MiB中调整，裸CLI省略时保留驱动设置。
 2026-10-28旧预设在16 GiB RTX 5070 Ti生产数据256微步窗口达到15,211有效目标/s；独立128微步为15,081，
 扩大窗口的相同前128微步也为15,081。含loader和Muon更新，不含启动、预热及最终保存；
 完整保存核验通过。权重scale在更新/加载后失效，只增加7168字节常驻标量。
-当前分组为512长度粒度、最多4文档、4096 token等效调度成本和64 plan上限。
-本轮精确累计的同一生产256微步窗口为15,596.733 TPS（+2.5361%），当前仍未达到16k；
-native live峰值增加4.2783%，NVML采样峰值下降1.1555%，完整288微步状态已保存核验。
+当前分组为512长度粒度、最多4文档和64 plan上限。前向通过9个描述符锚点校准耗时模型并选择连续分组；
+反向保持4096 token等效调度成本的原分组，避免采用已超过数值门槛的双向改组方案。
+同一生产256微步窗口为16,045.519 TPS，相对上一轮15,596.733提高2.8774%；
+native live峰值14.1083 GiB（+6.2223%），NVML设备采样峰值15.4776 GiB，峰值时free 0.4433 GiB。
+完整288微步状态已保存核验。测量仍含加载/H2D/更新，排除启动、预热和最终保存；基准固定LR为5e-4，配方LR仍为3e-4。
 `--tune`下，cuBLASLt先按启发式排序、workspace和waves筛到最多4项；cuDNN保留最多4个不同受支持plan。
 粗测后仅交替复测基线和领先项，收益不足1%保留基线；单候选跳过比较计时。
 cuDNN在训练消费数据前预热最多64 plan的合法形状目录，避免首次建图落在测量窗口内。
@@ -93,7 +98,7 @@ Rust 预处理线程和设备双缓冲。原生 `batch_size × max_seq_len` 是�
   4 层 gate/up；3×4096 保留全部 attention O/LSE 和顶部 2 层 gate/up。
   `--selective_cache_mib` 可调整预算。768 MiB 时分别保留全部 K/V、
   顶部 20 层 O/LSE，均不额外保留 gate/up。预算不包含层边界、优化器、量化临时量或驱动池。
-  当前共享配方使用两桶各1792 MiB，同时缓存attention O/LSE和K/V；缓存预算仍可显式覆盖。
+  当前共享配方覆盖为两桶各2816 MiB，同时缓存attention O/LSE、K/V及顶部4层gate/up；缓存预算仍可显式覆盖。
   ckpt3 也已提供；ckpt3/4 仅支持标准 Dense、独立投影，不与 LoRA/融合投影组合。
 - `--muon_mantissa 1 --muon_momentum_dtype bf16`：
   隐藏矩阵为 BF16 高位 + 原始 uint16 低位；EMA/Nesterov 在 FP32 计算，
