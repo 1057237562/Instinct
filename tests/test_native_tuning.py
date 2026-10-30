@@ -144,10 +144,22 @@ def test_race_rewarms_same_shortlist_after_clock_drift():
 
 
 def test_race_bounds_unstable_retries_and_reports_baseline_fallback():
-    candidates=[dict(index=0),dict(index=1)];count=0
+    candidates=[dict(index=0),dict(index=1)];count=0;seen={0:0,1:0}
     def measure(candidate,repeats):
         nonlocal count
-        if repeats==3:count+=1
-        return (1. if candidate['index']==0 else .8)*(1.5 if count%3==1 else 1.)
+        index=candidate['index']
+        if repeats==3:count+=1;seen[index]+=1
+        return (1. if index==0 else .8)*(1.5 if repeats==3 and seen[index]%3==2 else 1.)
     result=race(candidates,measure,drift_limit=.05,retries=1)
     assert result['index']==0 and 'selection_warning' in result and count<=12
+
+
+@pytest.mark.parametrize('leader,expected',[([.67,.74,.74],1),([.67,.67,.90],0)])
+def test_race_uses_conservative_bounds_after_jitter(leader,expected):
+    candidates=[dict(index=0),dict(index=1)]
+    timings={0:iter([1.11,.84,.84]),1:iter(leader)}
+    def measure(candidate,repeats):
+        return next(timings[candidate['index']]) if repeats==3 else (1. if candidate['index']==0 else .7)
+    winner=race(candidates,measure,drift_limit=.05)
+    assert winner['index']==expected
+    if expected:assert 'non-overlapping' in winner['selection_reason']

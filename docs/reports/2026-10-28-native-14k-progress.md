@@ -1,6 +1,6 @@
 # Native V2：2026-10-28 算子优化、15k 验证与显存调优
 
-2026-10-30的cuBLAS分块Muon、层边界融合及缓存生命周期优化，在完整256微步生产窗口达到16,045.519 TPS，保存核验通过。fast accumulation未启用；完整模型基线的梯度重复性限制仍未解决。最新条件与结果见末尾“16k第二轮执行”。下文保留前几轮历史记录。
+2026-10-31最终组合在完整512微步生产窗口达到 **16,053.403 TPS**，使用生产recipe学习率3e-4，完整保存核验通过。采用256粒度分组、共享cuDNN handle及对计时波动更保守的有界选型；同一120-plan目录的常驻增量减少358 MiB。fast accumulation未启用，完整模型基线的梯度重复性限制仍未解决。最新条件与结果见末尾“共享cuDNN运行时资源与扩大验收”。下文保留前几轮历史记录。
 
 2026-10-28组合已完成256测量微步的 **15,210.9661 有效预测目标/秒** 验证；128微步独立运行为15,080.6001 TPS，扩大运行的相同前128微步为15,081.4158 TPS。两轮均完成当前完整状态保存及逐数组核验。新增残差梯度融合、cast＋amax、权重scale复用和自适应连续文档分组；固定样本kernel数由5402降至4314。详细结果见“15k执行结果”。
 
@@ -398,4 +398,87 @@ SM120 CuTe/FROST反向已完成Torch-free packed staging、执行和scatter对�
 
 此前`production_layout.json`只记录到224微步，后续发现进程已不存在且无匹配checkpoint，未计作完成/验收；不从部分JSON补造最终状态。本节两次已核验运行的状态与该中断运行分开保存。
 
-最终聚焦CPU/实际WebUI检查119 passed、4个CUDA用例按标记跳过；另有上述独立GPU数值/性能验证。native bridge构建通过，保留ABI2旧入口，缺少pointer-array扩展时回退原Muon路径。共享配方已更新，实际UI启动命令检查覆盖2816 MiB桶预算与128 MiB复用池。
+最终聚焦CPU/实际WebUI检查122 passed、4个CUDA用例按标记跳过；另有上述独立GPU数值/性能验证。native bridge构建通过，保留ABI2旧入口，缺少pointer-array扩展时回退原Muon路径。共享配方已更新，实际UI启动命令检查覆盖2816 MiB桶预算与128 MiB复用池。
+
+### 扩大窗口与选型稳定性
+
+不能只用上面的最好256微步窗口宣布稳定达标。随后按共享默认配置测512微步，6,102,114个有效目标得到15,790.8017 TPS，相同前256微步为15,845.5778 TPS。更新阶段仍约335 ms/更新；主要回退来自两个FFN GEMM的选择：forward `[1536,12288,5504]` 和 dW `[5504,1536,12288]` 的短计时受到明显漂移影响。一次确认序列从0.898降至0.628 ms，仅靠三次中位数不足以排除该变化。此处不能断言漂移全部来自时钟，因为当时没有同步采集时钟证据。
+
+有界选型仍最多筛4项，但多候选比较前增加约100 ms基线预热；确认样本极差超过5%则重新预热并复测一次，持续不稳定就保留启发式基线且输出警告。单候选不做无意义的比较；没有增加穷举或跨进程持久缓存。
+
+修复后的独立512微步从空闲P8/202 MHz启动，结果为 **15,979.4566 TPS**（381.872435 s），相同前256微步为 **16,037.8873 TPS**。两个FFN选择恢复正常，更新阶段336.2546 ms/更新；512微步含419短桶、93长桶，不能用前256的桶比例代替。该结果距16k仍差约0.957 ms/微步。两次512运行均完成544总微步、保存并逐数组核验当前状态；没有把部分窗口计作完整结果。
+
+后一轮native live峰值仍14.108333 GiB，但NVML设备采样峰值为16,954,400,768字节（约15.7900 GiB），当时free只有140,533,760字节（约0.1309 GiB）。设备采样含运行环境占用且是采样下界，不能把较早的0.443 GiB余量当作始终可用的缓存预算。
+
+[扩大窗口原始记录](../../experiments/results/cublas/target16k_round2/production_shipped512.json) · [稳定选型原始记录](../../experiments/results/cublas/target16k_round2/production_stable512.json) · [选型修复后的Muon五步链](../../experiments/results/cublas/target16k_round2/stable_tuning_chain.json)
+
+另外两类候选没有采用：FFN分阶段写回与插入barrier仍逐位一致，但约1.579 ms，比基线1.574 ms略慢；复用池128→160 MiB只多命中24次分配，固定样本也未加速。基准报告原子写盘约2.306 ms/更新（0.288 ms/微步），保持原测量与持久化方式，没有从分母扣除它来宣称16k。
+
+临时池命中是纯主机元数据操作，已移除其中重复的`cuCtxSetCurrent`；实际CUDA分配、launch和cuDNN准备仍绑定对应context。两个live context交错测试以及四组梯度累积检查通过。固定样本暂未显示可归因的收益，生产验证单列，不把减少API次数自动换算成吞吐提升。
+
+## 共享cuDNN运行时资源与扩大验收（2026-10-31）
+
+去除冗余context绑定后的独立512微步结果是15,979.8448 TPS，完整保存核验通过；与15,979.4566几乎相同，不能归因吞吐收益。
+
+随后256长度粒度、128 plan上限候选在相同固定生产输入上，短/长桶墙钟中位数由718.541/810.197降到713.941/807.536 ms；cuBLAS GEMM选择相同。前向仍用实测耗时模型，反向保留原分组代价模型。原生live峰值基本不变，但更多cuDNN描述符增加了运行时显存占用。
+
+该候选的第一次生产测试按用户请求暂停在528总微步，即496测量微步；已测5,911,075目标/368.076006秒=16,059.3869 TPS。`status=paused_verified`且`completed_requested_windows=false`，当前weights和完整resume已核验，**不能将它计作完整512微步验收**。[暂停记录](../../experiments/results/cublas/target16k_round2/production_quantum256_512.json)
+
+### 每个plan重复创建handle的常驻开销
+
+代码原先为每个SDPA plan调用一次`cudnnCreate`。新可选ABI让同一backend、主机线程和执行流的plan共享handle，并保留context/stream匹配检查；不同流独立分配。plan与handle通过C++共享所有权关联，先释放所有图和plan，再释放handle。旧ABI继续使用原路径。该所有权方式符合[NVIDIA的handle生命周期建议](https://docs.nvidia.com/deeplearning/cudnn/backend/latest/api/cudnn-graph-library.html)，但节省多少必须以本机测量为准。
+
+独立Torch-free进程预热同样120个合法描述符，临时池128 MiB、驱动异步保留阈值0，预热后同步再读取设备free：
+
+| 项目 | 独立handle | 共享handle |
+|---|---:|---:|
+| plan数 | 120 | 120 |
+| handle数 | 120 | 1 |
+| 预热后设备常驻增量 | 608 MiB | 250 MiB |
+| 相对减少 | — | **358 MiB，58.88%** |
+
+这是同条件下目录预热的设备内存增量，不是模型native live或整段训练NVML峰值。没有把358 MiB直接当成总训练峰值下降。新bridge构建通过，旧创建/运行入口保留。共享handle的8组attention验证以及文档/因果隔离通过，最坏参数梯度相对L2为0.000574918，沿用0.0011门槛。
+
+[独立handle显存](../../experiments/results/cublas/target16k_round2/handles_legacy.json) · [共享handle显存](../../experiments/results/cublas/target16k_round2/handles_shared.json) · [共享handle数值检查](../../experiments/results/cublas/target16k_round2/attention_shared_parity.json)
+
+### 波动诊断及候选排除
+
+首轮使用recipe学习率3e-4的共享handle生产诊断出现回退，已按保存流程暂停在312总微步，完整状态核验通过；它不是完整512微步结果。这次选型阶段与CPU测试并行，后续还观察到多个QQ GPU进程及空闲设备占用变化，控制条件不足，不能用它单独归因共享handle的吞吐变化。
+
+计时记录同时暴露了有界选型的判定缺陷：两个大FFN dW候选的最慢确认样本，仍比基线最快样本快，但原规则因为样本漂移超过5%而强制退回较慢基线。修复后仍最多4候选、一次重试；漂移持续时，仅在`max(候选)<min(基线)×0.99`时接受候选，否则保留启发式基线。确认区间重叠及不重叠的测试均覆盖，不用增加穷举次数解决这个问题。
+
+固定探针还修复了初始化顺序：candidate配置须在创建NativeAttention前应用，共享handle才实际生效。早期`fixed_handle_shared.json`的运行时字段仍为`shared_handles=false`，因此不能当作共享handle对照。
+
+RMSNorm分组与多行反向短名单没有取得足够收益；未修改生产默认内核，实验补丁和原始数据保留在ignored结果目录。更低2560 MiB缓存候选也仅作为本机时段内的固定输入诊断，尚未据此更改共享recipe。
+
+### 最终窗口
+
+用户确认其他GPU应用保持空闲后，从相同数据起点独立测量512微步，使用recipe学习率3e-4、256长度粒度、128 plan上限及共享handle；记录loader/H2D主机耗时和主流CUDA跨度。验证期间不并行运行CPU测试或其他GPU基准。
+
+| 项目 | 完整窗口结果 |
+|---|---:|
+| 测量微步/真实更新 | 512 / 64 |
+| 有效预测目标 | 6,102,114 |
+| 窗口墙钟 | 380.113418 s |
+| 有效TPS | **16,053.4033** |
+| 短桶/长桶数 | 419 / 93 |
+| 平均墙钟 | 742.4090 ms/微步 |
+| 前后向主流CUDA跨度 | 699.4979 ms/微步 |
+| 更新阶段 | 338.3370 ms/更新，摊销42.2921 ms/微步 |
+| 两阶段之外的墙钟 | 0.6190 ms/微步 |
+| loader.next主机耗时 | 0.6826 ms/微步 |
+| H2D staging主机耗时 | 0.0998 ms/微步 |
+| native live峰值 | 14.108333 GiB，相比此前同窗口 **0.00%增量** |
+| NVML设备采样峰值 | 15.483471 GiB，相比此前同窗口 **+0.038%** |
+| NVML峰值时free | 0.437428 GiB |
+
+loader和H2D主机耗时与GPU重叠，不能再加到CUDA跨度上；CUDA事件跨度包含GPU活动之间的空档。device-used是采样下界，且不同运行时段的后台占用可变，不等于进程allocated。显存参照是`production_context512.json`；其LR为5e-4，本次为recipe的3e-4，因此吞吐数值不冒充单一改动的严格A/B。两次都是同一419/93桶组成、6,102,114个有效目标。
+
+该窗口使用已建Rust packed缓存，包含加载、H2D、前后向、日志和真实更新，排除启动、32微步预热及最终保存；没有重建冷缓存。完整脚本含启动、保存及逐数组核验共511.8681秒。共544总微步、68更新，最终loss=4.0522084236。
+
+[最终窗口记录](../../experiments/results/cublas/target16k_round2/production_recipe_confirm512.json)与[计时/显存汇总](../../experiments/results/cublas/target16k_round2/final_verification_summary.json)均已完成：`status=complete`、`completed_requested_windows=true`、`verified_current_state=true`、`torch_imported=false`。120 plan、0次淘汰、0次workspace fallback；共享handle已实际启用，最终GEMM选型无持续不稳定回退警告。
+
+- weights：`D:/AI/Instinct/out/native_cublas/native_production_20261031_001510_21700_1536.npz`
+- 完整resume：`D:/AI/Instinct/checkpoints/native_cublas/native_production_20261031_001510_21700_1536_resume.npz`
+
+新默认已接入`enable_fused_ops`，显式探针覆盖仍优先。最终策略、handle所有权/旧ABI回退、有界选型及实际WebUI命令聚焦检查54 passed；此前更广的CPU检查102 passed、4个CUDA用例按标记跳过。更新选型规则后，五种生产Muon几何的五步NS链再次逐位一致，[原始结果](../../experiments/results/cublas/target16k_round2/final_shared_muon_chain.json)。本次确认完整测量窗口超过16k；前文完整32层基线梯度重复性问题仍未闭环，局部数值检查及吞吐验收不能替代该项结论。

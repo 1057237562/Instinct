@@ -12,6 +12,8 @@ def main():
     p.add_argument('--output',required=True,type=Path)
     p.add_argument('--diagnose-repeat',action='store_true')
     p.add_argument('--candidate-quantum',type=int,default=128)
+    p.add_argument('--plan-limit',type=int,default=64)
+    p.add_argument('--shared-handles',action='store_true')
     p.add_argument('--async-metadata',action='store_true')
     p.add_argument('--docs-per-plan',type=int,default=0)
     p.add_argument('--documents',type=int,default=3)
@@ -32,17 +34,26 @@ def main():
     from model.dense_cublas.vendor_attention import NativeAttention
     cfg=dict(hidden_size=192,num_hidden_layers=2,intermediate_size=512,num_attention_heads=4,
         num_key_value_heads=1,head_dim=96,vocab_size=256,max_position_embeddings=4096)
-    result=dict(status='running',cases=[],relative_l2_limit=a.relative_l2_limit);a.output.parent.mkdir(parents=True,exist_ok=True)
+    result=dict(status='running',cases=[],relative_l2_limit=a.relative_l2_limit,
+                candidate_policy=dict(quantum=a.candidate_quantum,plan_limit=a.plan_limit,
+                    shared_handles=a.shared_handles,
+                    docs_per_plan=a.docs_per_plan,group_penalty=a.group_penalty,
+                    local_maxima=a.local_maxima,tune=a.tune,
+                    cost_model='forward' if a.forward_cost_model else a.cost_model))
+    a.output.parent.mkdir(parents=True,exist_ok=True)
     def write():a.output.write_text(json.dumps(result,indent=2))
     def run(mode,seq,fp8,interleaved=False):
         with TrainingBackend(allocator_backend='async') as b:
-            enable_fused_ops(b);b.native_attention=NativeAttention(b)
+            enable_fused_ops(b);b.attention_shared_handle=mode==4 and a.shared_handles
+            b.native_attention=NativeAttention(b)
             # Keep the control independent of the currently shipped defaults.
+            b.attention_plan_quantum=512;b.attention_plan_limit=64
             b.attention_local_maxima=False
             b.attention_group_penalty=0
             b.fused_scale_inverse=False
             if mode==4:
                 b.attention_plan_quantum=a.candidate_quantum
+                b.attention_plan_limit=a.plan_limit
                 b.async_attention_metadata=a.async_metadata
                 b.attention_docs_per_plan=a.docs_per_plan
                 b.attention_local_maxima=a.local_maxima
@@ -90,7 +101,7 @@ def main():
                 relative_l2=relative,repeat_control_l2=control_l2,repeat_control_max_abs=control_abs,original_bound=original_bound)
             result['cases'].append(row);print(json.dumps(row),flush=True);write()
     with TrainingBackend(allocator_backend='async') as b:
-        enable_fused_ops(b);b.native_attention=NativeAttention(b)
+        enable_fused_ops(b);b.attention_shared_handle=a.shared_handles;b.native_attention=NativeAttention(b)
         e=Engine(b);m=Model(e,cfg|dict(use_grad_checkpoint=4),param_dtype='bf16',muon_mantissa=True)
         ids=np.arange(137,dtype=np.int64)[None]%253+3
         segments=np.asarray([[3]*19+[8]*22+[3]*81+[-1]*15],np.int64)

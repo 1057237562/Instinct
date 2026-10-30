@@ -44,6 +44,15 @@ def race(candidates,measure,*,baseline=0,minimum_gain=.01,warmup_ms=0.,drift_lim
         if unstable:
             control.setdefault('unstable_attempts',[]).append(dict(attempt=attempt,samples_ms=samples))
             if attempt<retries:continue
+            # Host scheduling/clock noise must not force a provably slower
+            # heuristic: accept only disjoint confirmation ranges here. The
+            # slowest leader sample must beat the fastest control sample.
+            control_times=samples[control['index']];leader_times=samples[leader['index']]
+            if (leader is not control
+                and all(math.isfinite(v) and v>0 for v in control_times+leader_times)
+                and max(leader_times)<min(control_times)*(1.-minimum_gain)):
+                leader['selection_reason']='non-overlapping confirmation ranges despite timing variation'
+                return leader
             control['selection_warning']='timing remained unstable; kept heuristic baseline'
             return control
         if leader is not control and leader['median_ms']<control['median_ms']*(1.-minimum_gain):return leader

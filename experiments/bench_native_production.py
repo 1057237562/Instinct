@@ -7,6 +7,7 @@ import argparse
 from contextlib import nullcontext
 from collections import Counter
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -33,6 +34,8 @@ def main():
     parser.add_argument('--tail-batches', type=int, default=0)
     parser.add_argument('--warmup-updates', type=int, default=4)
     parser.add_argument('--updates', type=int, default=128)
+    parser.add_argument('--learning-rate', type=float, default=5e-4,
+                        help='Recorded benchmark control; pass 0.0003 to match the native V2 recipe')
     parser.add_argument('--pack-tile', type=int, default=32)
     parser.add_argument('--attention-forward-tile', type=int, default=128)
     parser.add_argument('--attention-forward-cols', type=int, default=64)
@@ -75,6 +78,8 @@ def main():
     if opts.profile_pipeline:opts.profile_stages=True
     if min(opts.start_group, opts.tail_batches) < 0 or min(opts.updates, opts.warmup_updates) < 1:
         parser.error('invalid sample or update counts')
+    if not math.isfinite(opts.learning_rate) or opts.learning_rate<=0:
+        parser.error('learning rate must be positive and finite')
     os.chdir(ROOT)
     sys.meta_path.insert(0, RejectTorch())
     target = opts.output.resolve(); target.parent.mkdir(parents=True, exist_ok=True)
@@ -94,7 +99,7 @@ def main():
     prefix = 'native_production_' + time.strftime('%Y%m%d_%H%M%S') + '_' + str(os.getpid())
     microsteps = (opts.warmup_updates + opts.updates) * 8
     cmd = command(opts.data, extra=['--tokenizer_path', opts.tokenizer, '--sequence_buckets', '3072,4096',
-        '--num_workers', '4', '--copy_prefetch', '--learning_rate', '0.0005', '--epochs', '1',
+        '--num_workers', '4', '--copy_prefetch', '--learning_rate', str(opts.learning_rate), '--epochs', '1',
         '--save_interval', str(opts.save_interval), '--log_interval', '100',
         '--save_dir', 'D:/AI/Instinct/out/native_cublas', '--checkpoint_dir', 'D:/AI/Instinct/checkpoints/native_cublas',
         '--max_steps', str(microsteps), '--save_weight', prefix, '--selective_cache_mib', str(opts.cache_mib),
@@ -147,7 +152,7 @@ def main():
                 'elementwise_block','aligned_pointers','aligned_pointwise_only','async_attention_metadata',
                 'selective_attention_min_seq','attention_plan_quantum','attention_plan_limit','attention_docs_per_plan','attention_local_maxima',
                 'fused_activation_layouts','fused_boundary_norm','release_checkpoint_cache','attention_cost_model',
-                'muon_blocked_gram','muon_blocked_polynomial','muon_gram_tile')}
+                'muon_blocked_gram','muon_blocked_polynomial','muon_gram_tile','attention_shared_handle')}
             report['native_compiler']=str(data.compiler)
             if opts.start_group or opts.tail_batches:
                 manifest=data.build(opts.start_group)

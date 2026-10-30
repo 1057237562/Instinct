@@ -19,6 +19,7 @@ ALLOWED={
     'muon_gram_tile',
     'muon_blocked_polynomial',
     'ffn_backward_stage',
+    'attention_shared_handle',
 }
 
 

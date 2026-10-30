@@ -1,5 +1,6 @@
 // Optional packed attention bridge. CUDA Runtime is linked explicitly.
 #include <cudnn_frontend.h>
+#include <cuda.h>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -53,21 +54,41 @@ struct TunableGraph:fe::graph::Graph {
       }
     }
 };
+struct SharedHandle {
+    cudnnHandle_t value=nullptr;
+    cudaStream_t stream=nullptr;
+    CUcontext context=nullptr;
+    explicit SharedHandle(void* requested):stream(static_cast<cudaStream_t>(requested)) {
+      if(cuCtxGetCurrent(&context)!=CUDA_SUCCESS || !context)throw std::runtime_error("active CUDA context required");
+      check(cudnnCreate(&value));
+      try{check(cudnnSetStream(value,stream));}
+      catch(...){cudnnDestroy(value);value=nullptr;throw;}
+    }
+    ~SharedHandle(){if(value)cudnnDestroy(value);}
+};
+using SharedHandlePtr=std::shared_ptr<SharedHandle>;
 struct Plan {
+    // Declared before graph so the final handle outlives graph destruction.
+    SharedHandlePtr shared_handle;
     cudnnHandle_t handle=nullptr;
     TunableGraph graph;
     bool backward=false;
     bool ragged=false;
     std::vector<int64_t> indices;
     int64_t selected=-1;
-    ~Plan(){if(handle)cudnnDestroy(handle);}
+    ~Plan(){if(handle && !shared_handle)cudnnDestroy(handle);}
 };
 }
 API const char* sdpa_error(){return error.c_str();}
-API int sdpa_create_ex(int64_t b,int64_t s,int64_t h,int64_t hk,int64_t d,int backward,int64_t total,void* stream,void** result,uint64_t* workspace,int tune,uint64_t limit){
+static int create_plan(int64_t b,int64_t s,int64_t h,int64_t hk,int64_t d,int backward,int64_t total,void* stream,void** result,uint64_t* workspace,int tune,uint64_t limit,SharedHandlePtr shared={}){
   try {
     auto p=std::make_unique<Plan>();p->backward=backward!=0;p->ragged=total>0;
-    check(cudnnCreate(&p->handle));check(cudnnSetStream(p->handle,static_cast<cudaStream_t>(stream)));
+    if(shared){
+      CUcontext current=nullptr;
+      if(cuCtxGetCurrent(&current)!=CUDA_SUCCESS || current!=shared->context || stream!=shared->stream)
+        throw std::runtime_error("shared cuDNN handle context/stream mismatch");
+      p->shared_handle=std::move(shared);p->handle=p->shared_handle->value;
+    }else{check(cudnnCreate(&p->handle));check(cudnnSetStream(p->handle,static_cast<cudaStream_t>(stream)));}
     auto& g=p->graph;
     g.set_io_data_type(fe::DataType_t::BFLOAT16).set_intermediate_data_type(fe::DataType_t::FLOAT).set_compute_data_type(fe::DataType_t::FLOAT);
     auto tensor=[&](int id,int64_t heads){return g.tensor(fe::graph::Tensor_attributes().set_uid(id).set_dim({b,heads,s,d}).set_stride({s*heads*d,d,heads*d,1}));};
@@ -131,6 +152,18 @@ API int sdpa_create_ex(int64_t b,int64_t s,int64_t h,int64_t hk,int64_t d,int ba
     }
     *result=p.release();return 0;
   }catch(const std::exception& e){error=e.what();return -1;}
+}
+API int sdpa_handle_create(void* stream,void** result){
+  try{*result=new SharedHandlePtr(std::make_shared<SharedHandle>(stream));return 0;}
+  catch(const std::exception& e){error=e.what();return -1;}
+}
+API void sdpa_handle_destroy(void* handle){delete static_cast<SharedHandlePtr*>(handle);}
+API int sdpa_create_shared_ex(void* handle,int64_t b,int64_t s,int64_t h,int64_t hk,int64_t d,int backward,int64_t total,void* stream,void** result,uint64_t* workspace,int tune,uint64_t limit){
+  if(!handle){error="shared cuDNN handle is null";return -1;}
+  return create_plan(b,s,h,hk,d,backward,total,stream,result,workspace,tune,limit,*static_cast<SharedHandlePtr*>(handle));
+}
+API int sdpa_create_ex(int64_t b,int64_t s,int64_t h,int64_t hk,int64_t d,int backward,int64_t total,void* stream,void** result,uint64_t* workspace,int tune,uint64_t limit){
+  return create_plan(b,s,h,hk,d,backward,total,stream,result,workspace,tune,limit);
 }
 API int sdpa_create(int64_t b,int64_t s,int64_t h,int64_t hk,int64_t d,int backward,int64_t total,void* stream,void** result,uint64_t* workspace){
   return sdpa_create_ex(b,s,h,hk,d,backward,total,stream,result,workspace,0,0);

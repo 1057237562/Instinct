@@ -52,14 +52,16 @@ def stats_copy(PADDED,COMPACT,OFFSETS,LENGTHS,SEQ:tl.constexpr,HEADS:tl.constexp
 
 class NativeAttention:
     def __init__(self,backend):
-        self.b=backend;self.lib=Sdpa();self.plans=OrderedDict();self.context=None
+        self.b=backend;self.lib=Sdpa(shared_handles=getattr(backend,'attention_shared_handle',False))
+        self.plans=OrderedDict();self.context=None
         self.forward_calls=self.backward_calls=0
         self.upload_slots=[];self.upload_index=0
         self.tuned={}
         self.group_cost=None
         self.frost=None
         self.metrics=dict(plan_builds=0,plan_evictions=0,plan_build_seconds=0.,prepare_seconds=0.,max_workspace_bytes=0,workspace_fallbacks=0,
-                          descriptor_padded_tokens=0,global_descriptor_padded_tokens=0,plan_tuning=[])
+                          descriptor_padded_tokens=0,global_descriptor_padded_tokens=0,plan_tuning=[],
+                          shared_handles=self.lib.shared_handles)
 
     def upload_metadata(self,arrays):
         if not getattr(self.b,'async_attention_metadata',False) or self.b._commands is not None:

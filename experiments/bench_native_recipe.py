@@ -234,10 +234,6 @@ def main():
         b.selective_attention_min_seq=args.selective_attention_min_seq
         if args.norm_rope_warps:
             b.kernel_options['model.dense_cublas.fused.norm_rotary_forward']=dict(num_warps=args.norm_rope_warps)
-        if args.native_sdpa:
-            from experiments.native_sdpa.adapter import NativeAttention
-            b.native_attention=NativeAttention(b)
-            b.native_attention.minimum_seq=args.native_sdpa_min_seq
         b.attention_forward_tile=args.attention_forward_tile
         b.attention_forward_cols=args.attention_forward_cols
         b.fast_attention=args.fast_attention
@@ -256,6 +252,10 @@ def main():
         b.packed_skip=not args.no_packed_skip
         from experiments.native_candidate import apply
         report['candidate_config']=apply(b,args.candidate_config)
+        if args.native_sdpa:
+            from experiments.native_sdpa.adapter import NativeAttention
+            b.native_attention=NativeAttention(b)
+            b.native_attention.minimum_seq=args.native_sdpa_min_seq
         e=Engine(b,fp8=bool(args.fp8),fp8_filter='auto',seed=307)
         model=Model(e,cfg,param_dtype='bf16',muon_mantissa=True,seed=307)
         opt=Optimizer(e,model.parameters(),'muon',lr=3e-4,weight_decay=.1,

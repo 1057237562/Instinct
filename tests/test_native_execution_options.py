@@ -28,13 +28,14 @@ def test_production_fusion_policy_preserves_explicit_probe_overrides():
     assert backend.attention_group_penalty==4096
     assert backend.ffn_flat_forward and backend.ffn_quant_tile==64
     assert backend.norm_rope_rows==8 and backend.attention_docs_per_plan==4
-    assert backend.attention_plan_quantum==512 and backend.attention_plan_limit==64
+    assert backend.attention_plan_quantum==256 and backend.attention_plan_limit==128 and backend.attention_shared_handle
     assert backend.muon_tiled_io and backend.muon_symmetric and backend.quant_tile==64
     assert backend.selective_aux_kv and not backend.attention_tune and not backend.attention_prewarm
     assert backend.aligned_pointers and backend.aligned_pointwise_only
     override=SimpleNamespace(fused_norm_backward=False,ffn_quant_tile=32,
                              fused_residual_backward=False,fused_cast_amax=False,cache_weight_scales=False,
                              attention_group_penalty=0,
+                             attention_plan_quantum=512,attention_plan_limit=64,attention_shared_handle=False,
                              fused_scale_inverse=False,attention_local_maxima=False,
                              aligned_pointers=False,aligned_pointwise_only=False)
     enable_fused_ops(override)
@@ -42,6 +43,7 @@ def test_production_fusion_policy_preserves_explicit_probe_overrides():
     assert not override.fused_scale_inverse and not override.attention_local_maxima
     assert not override.fused_residual_backward and not override.fused_cast_amax and not override.cache_weight_scales
     assert override.attention_group_penalty==0
+    assert override.attention_plan_quantum==512 and override.attention_plan_limit==64 and not override.attention_shared_handle
     assert not override.aligned_pointers and not override.aligned_pointwise_only
 
 

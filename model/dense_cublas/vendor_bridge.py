@@ -1,11 +1,13 @@
 """Optional cuDNN C ABI; no cuDNN Python frontend or Torch dependency."""
 import ctypes as ct
 import os
+import threading
 from pathlib import Path
 
 
 class Sdpa:
-    def __init__(self,library=None):
+    """One CUDA-context owner; shared handles are isolated by thread and stream."""
+    def __init__(self,library=None,*,shared_handles=False):
         root=Path(__file__).resolve().parents[2]
         runtime=Path(os.environ.get('CUDNN_PATH',root/'.cache/native-libs/nvidia/cudnn'))
         self.dirs=[]
@@ -28,12 +30,21 @@ class Sdpa:
         self.lib.sdpa_create.argtypes=[ct.c_int64]*5+[ct.c_int,ct.c_int64,ct.c_void_p,ct.POINTER(ct.c_void_p),ct.POINTER(ct.c_uint64)]
         self.lib.sdpa_run.argtypes=[ct.c_void_p,ct.POINTER(ct.c_void_p),ct.c_void_p]
         self.lib.sdpa_destroy.argtypes=[ct.c_void_p]
+        self.lib.sdpa_destroy.restype=None
         self.tuning_abi=hasattr(self.lib,'sdpa_create_ex')
         if self.tuning_abi:
             self.lib.sdpa_create_ex.argtypes=self.lib.sdpa_create.argtypes+[ct.c_int,ct.c_uint64]
             self.lib.sdpa_candidate_count.argtypes=[ct.c_void_p]
             self.lib.sdpa_candidate.argtypes=[ct.c_void_p,ct.c_int,ct.POINTER(ct.c_uint64),ct.POINTER(ct.c_char_p)]
             self.lib.sdpa_select.argtypes=[ct.c_void_p,ct.c_int]
+        self.shared_handles=shared_handles and all(hasattr(self.lib,n) for n in (
+            'sdpa_handle_create','sdpa_handle_destroy','sdpa_create_shared_ex'))
+        self.handles={}
+        if self.shared_handles:
+            self.lib.sdpa_handle_create.argtypes=[ct.c_void_p,ct.POINTER(ct.c_void_p)]
+            self.lib.sdpa_handle_destroy.argtypes=[ct.c_void_p]
+            self.lib.sdpa_handle_destroy.restype=None
+            self.lib.sdpa_create_shared_ex.argtypes=[ct.c_void_p]+self.lib.sdpa_create.argtypes+[ct.c_int,ct.c_uint64]
         self.plans=[]
 
     def check(self,status):
@@ -42,7 +53,13 @@ class Sdpa:
     def plan(self,b,s,h,hk,d,backward,stream,total=0,*,tune=False,workspace_limit=512*2**20):
         p=ct.c_void_p();workspace=ct.c_uint64()
         args=(b,s,h,hk,d,backward,total,stream,ct.byref(p),ct.byref(workspace))
-        if tune:
+        if self.shared_handles:
+            key=(threading.get_ident(),stream.value if hasattr(stream,'value') else stream)
+            if key not in self.handles:
+                handle=ct.c_void_p();self.check(self.lib.sdpa_handle_create(stream,ct.byref(handle)))
+                self.handles[key]=handle
+            self.check(self.lib.sdpa_create_shared_ex(self.handles[key],*args,int(tune),workspace_limit))
+        elif tune:
             if not self.tuning_abi:raise RuntimeError('rebuild native_sdpa for measured plan selection')
             self.check(self.lib.sdpa_create_ex(*args,int(tune),workspace_limit))
         else:self.check(self.lib.sdpa_create(*args))
@@ -66,5 +83,7 @@ class Sdpa:
     def close(self):
         for p in self.plans:self.lib.sdpa_destroy(p)
         self.plans=[]
+        for handle in self.handles.values():self.lib.sdpa_handle_destroy(handle)
+        self.handles={}
         for directory in self.dirs:directory.close()
         self.dirs=[]
