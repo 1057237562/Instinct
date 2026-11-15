@@ -1,0 +1,5 @@
+# Optional production v2_mxfp8 dependencies, tested in .cache/native-dsl.
+# Install requirements-cublas.txt in the native Python environment first.
+nvidia-cutlass-dsl[cu13]==4.8.1
+cuda-bindings==13.4.4
+apache-tvm-ffi==0.1.15.post1

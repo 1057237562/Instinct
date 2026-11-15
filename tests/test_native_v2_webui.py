@@ -1,0 +1,85 @@
+"""Isolated actual UI load plus native recipe/CLI parity; never starts CUDA."""
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import pytest
+from scripts.native_v2_recipe import command,model_config,recipe,ui_values
+from tests.test_cublas_webui_contract import exported_config
+
+
+def test_native_v2_recipe_export_and_cli_match():
+    from trainer.train_cublas import parser,read_config
+    cfg=exported_config(model_config()|ui_values())
+    for key,value in model_config().items():assert cfg[key]==value
+    args=parser().parse_args(command('example.jsonl')[3:])
+    checked=read_config(args)
+    for key,value in model_config().items():assert checked[key]==value
+    for key,value in recipe().items():
+        if key not in ('config_path','data_path'):assert getattr(args,key)==value
+    assert args.data_path=='example.jsonl'
+    from model.dense_cublas.model import configuration
+    from model.dense_cublas.config import WebUIRequest
+    assert configuration(checked)==configuration(WebUIRequest.from_dicts(cfg).model)
+
+
+def test_native_v2_actual_app_load_and_command(tmp_path,monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    root=Path(__file__).resolve().parents[1]
+    (tmp_path/'scripts').mkdir();(tmp_path/'trainer/recipes').mkdir(parents=True)
+    for name in ('scripts/config_webui.py','scripts/native_v2_recipe.py',
+                 'trainer/config_instinct_v2.json','trainer/recipes/instinct_v2_native.json','trainer/train_cublas.py'):
+        shutil.copyfile(root/name,tmp_path/name)
+    # Point the shared loader to the isolated test tree as well.
+    import scripts.native_v2_recipe as catalog
+    monkeypatch.setattr(catalog,'ROOT',tmp_path)
+    captured=[]
+    class Process:
+        pid=123456789
+        def poll(self):return 0
+    def launch(cmd,*args,**kwargs):
+        captured.append(cmd);return Process()
+    app=AppTest.from_file(str(tmp_path/'scripts/config_webui.py'),default_timeout=30).run()
+    assert not app.exception
+    app.radio(key='_preset_radio').set_value('Instinct V2 (native ckpt4)').run()
+    assert not app.exception
+    assert app.session_state['hidden_size']==1536
+    assert app.session_state['intermediate_size']==5504
+    assert app.session_state['runtime_backend']=='cublas'
+    assert app.session_state['use_grad_checkpoint']==4
+    assert app.session_state['native_compute_profile']=='v2_mxfp8'
+    app.text_input(key='native_data_path').set_value('D:/AI/Instinct/dataset/pretrain_coder_l2l3_24b.parquet').run()
+    monkeypatch.setattr(subprocess,'Popen',launch)
+    app.button(key='btn_start_train').click().run()
+    assert not app.exception and captured
+    cmd=captured[-1]
+    for flag,value in (('--muon_mantissa','1'),('--muon_momentum_dtype','bf16'),
+                       ('--muon_workspace_mb','512'),('--use_grad_checkpoint','4'),
+                       ('--fp8_filter','auto'),('--allocator_backend','async'),
+                       ('--attention_backend','cudnn'),('--muon_gemm_backend','cublas'),
+                       ('--sequence_buckets','3072,4096'),('--num_workers','4'),
+                       ('--selective_cache_by_seq','3072:2684,4096:2684'),
+                       ('--compute_profile','v2_mxfp8'),
+                       ('--data_path','D:/AI/Instinct/dataset/pretrain_coder_l2l3_24b.parquet'),
+                       ('--allocator_cache_mib','128'),
+                       ('--allocator_release_mib','13312'),
+                       ('--learning_rate','0.0003'),('--weight_decay','0.1')):
+        assert cmd[cmd.index(flag)+1]==value
+    assert '--packed_attention' in cmd
+    assert '--fused_ops' in cmd
+    assert '--tune' in cmd and '--copy_prefetch' in cmd
+    saved=json.loads((tmp_path/'trainer/config_pretrain.json').read_text(encoding='utf-8'))
+    assert saved['intermediate_size']==5504 and saved['num_hidden_layers']==32
+    resume='D:/AI/Instinct/checkpoints/native_cublas/production_1536_resume.npz'
+    app.text_input(key='native_resume_path').set_value(resume).run()
+    app.checkbox(key='from_resume').check().run()
+    app.button(key='btn_start_train').click().run()
+    assert not app.exception and len(captured)==2
+    cmd=captured[-1]
+    assert cmd[cmd.index('--resume_path')+1]==resume
+    assert cmd[cmd.index('--from_resume')+1]=='1'
+    assert cmd[cmd.index('--save_weight')+1]=='production'
+    assert cmd[cmd.index('--compute_profile')+1]=='v2_mxfp8'
+    panel=json.loads((tmp_path/'trainer/webui_state.json').read_text(encoding='utf-8'))
+    assert panel['native_compute_profile']=='v2_mxfp8' and panel['native_resume_path']==resume

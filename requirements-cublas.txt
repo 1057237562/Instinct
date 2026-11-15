@@ -1,0 +1,10 @@
+# Native trainer only. PyTorch/TorchAO are not runtime dependencies.
+numpy>=1.26,<3
+triton>=3.4,<3.5; sys_platform == 'linux'
+triton-windows>=3.4,<3.5; sys_platform == 'win32'
+tokenizers>=0.21,<0.23
+jinja2>=3.1,<4
+safetensors>=0.4,<1
+sentencepiece>=0.2,<1
+# Optional: swanlab for --use_wandb, streamlit for scripts/config_webui.py.
+# Optional CPU-only torch + datasets for scripts/convert_cublas_checkpoint.py.
