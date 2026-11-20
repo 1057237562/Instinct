@@ -272,6 +272,29 @@ def test_trainer_cli_defaults_to_five_gibibytes(monkeypatch):
     assert args.cache_build_mode == "inline"
 
 
+def test_source_digest_directory_tracks_shards_and_ignores_reports(tmp_path):
+    from scripts.data_loader.managed_cache import _source_digest
+
+    source = tmp_path / 'shards'
+    cache = tmp_path / 'cache'
+    source.mkdir()
+    cache.mkdir()
+    first_shard = source / 'part-00.jsonl'
+    first_shard.write_text('{"text":"first"}\n', encoding='utf-8')
+    first = _source_digest(source, cache)
+    (source / 'audit.report.json').write_text('{}', encoding='utf-8')
+    assert _source_digest(source, cache) == first
+    second_shard = source / 'part-01.jsonl'
+    second_shard.write_text('{"text":"second"}\n', encoding='utf-8')
+    second = _source_digest(source, cache)
+    assert second != first
+    first_shard.write_text('{"text":"changed"}\n', encoding='utf-8')
+    assert _source_digest(source, cache) != second
+    first_shard.write_text('{"text":"first"}\n', encoding='utf-8')
+    second_shard.unlink()
+    assert _source_digest(source, cache) == first
+
+
 def test_source_digest_memo_invalidates_from_head_tail_signature(tmp_path):
     from scripts.data_loader.managed_cache import _source_digest
 

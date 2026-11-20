@@ -275,16 +275,20 @@ def validate_moe_router_migration(args):
         )
 
 
+def broadcast_pause_flag(args, flag):
+    """Use rank zero's decision at the same update boundary on every rank."""
+    if not dist.is_initialized():
+        return flag
+    device = args.device if dist.get_backend() == 'nccl' else 'cpu'
+    status = torch.tensor(flag, device=device)
+    dist.broadcast(status, src=0)
+    return bool(status.item())
+
+
 def pause_requested(args) -> bool:
-    """检查是否存在暂停请求标记文件（--pause_file），存在则训练应在下个 step 边界暂停。
-
-    参数:
-        args: argparse 解析出的命令行参数对象（需含 pause_file）
-
-    返回:
-        标记文件存在返回 True，否则返回 False。
-    """
-    return os.path.exists(args.pause_file)
+    """Read the pause request on rank zero and share it with all ranks."""
+    requested = (not dist.is_initialized() or dist.get_rank() == 0) and os.path.exists(args.pause_file)
+    return broadcast_pause_flag(args, requested)
 
 
 def clear_pause_request(args) -> None:

@@ -1,0 +1,43 @@
+{
+  "backend": {
+    "attention_plan_limit": 192,
+    "attention_tile": 32,
+    "attention_forward_tile": 128,
+    "attention_forward_cols": 64,
+    "mxfp8_training": true,
+    "mxfp8_norm_fusion": true,
+    "mxfp8_norm_backward_fusion": true,
+    "mxfp8_gradient_dtype": "fp8e4nv",
+    "mxfp8_ffn_tile": 64,
+    "mxfp8_cache_ffn": true,
+    "mxfp8_small_projections": true,
+    "kernel_options": {
+      "model.dense_triton.attention.forward": {
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "model.dense_cublas.mxfp8.mxfp8_swiglu": {
+        "num_warps": 8
+      }
+    },
+    "attention_frost_backward": true,
+    "attention_frost_min_seq": 0,
+    "attention_frost_min_plan_seq": 0,
+    "attention_frost_documentwise": true,
+    "attention_frost_max_docs": 24,
+    "frost_q_tile": 64,
+    "frost_kv_tile": 64,
+    "frost_alias_inputs": true,
+    "frost_native_head96": true,
+    "activation_token_capacities": [
+      9728,
+      10240,
+      10752,
+      11264,
+      11776,
+      12288
+    ],
+    "muon_gram_recurrence": true
+  },
+  "compact_long_multiple": 512
+}

@@ -31,13 +31,12 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from scripts.data_loader.lm_dataset import AgentRLDataset
-from trainer.trainer_utils import (Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
+from trainer.trainer_utils import (Logger, is_main_process, lm_checkpoint, checkpoint_after_update, checkpoint_due, wait_for_checkpoint,
                                    setup_seed, SkipBatchSampler, init_model, LMForRewardModel,
                                    config_from_args, build_optimizer, restore_config_from_checkpoint,
                                    apply_torchao_fp8_training)
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx, init_wandb_logger,
-    PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
 )
 from trainer.rollout_engine import create_rollout_engine, compute_per_token_logps
 from trainer.training_profiler import TrainingProfiler
@@ -387,13 +386,11 @@ def rl_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model,
        与 train_grpo.py 一致；
     4. 仅对响应 token 聚合 loss（跳过空行），梯度累积更新并周期性保存。
     """
-    last_step = start_step
     for step, batch in enumerate(loader, start=start_step + 1):
         profiler.begin_step(tokens=0, useful_tokens=0)
         messages_batch = batch['messages']
         tools_batch = batch['tools']
         gt_batch = batch['gt']
-        last_step = step
 
         with profiler.phase("rollout"):
             with torch.no_grad():
@@ -498,7 +495,8 @@ def rl_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model,
         with profiler.phase("backward"):
             loss.backward()
 
-        if step % args.accumulation_steps == 0:
+        optimizer_boundary = step % args.accumulation_steps == 0 or step == iters
+        if optimizer_boundary:
             with profiler.phase("optimizer"):
                 if args.grad_clip > 0: torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
                 optimizer.step(); scheduler.step(); optimizer.zero_grad()
@@ -525,35 +523,18 @@ def rl_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model,
                     "learning_rate": lr,
                 })
 
-        if (step % args.save_interval == 0 or step == iters) and is_main_process():
-            model.eval()
-            moe_suffix = '_moe' if lm_config.use_moe else ''
-            ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
-            raw_model = model.module if isinstance(model, DistributedDataParallel) else model
-            raw_model = getattr(raw_model, '_orig_mod', raw_model)
-            state_dict = raw_model.state_dict()
-            torch.save({k: v.half().cpu() for k, v in state_dict.items()}, ckp)
-            lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer,
-                         epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints', scheduler=scheduler, ref_model=ref_model)
-            model.train()
-            del state_dict
-
         if step % args.save_interval == 0 or step == iters: rollout_engine.update_policy(model)
 
         del per_token_logps, ref_per_token_logps
         del completions, rewards, grouped_rewards, mean_r, std_r, advantages, completion_mask
 
-        if pause_requested(args):
-            clear_pause_request(args)
-            profiler.finish()
-            if is_main_process():
-                pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model, optimizer=optimizer, epoch=epoch, step=step, wandb=wandb, scheduler=scheduler, ref_model=ref_model)
-            Logger('[PAUSED] Training paused — resume checkpoint saved.')
-            sys.exit(PAUSE_EXIT_CODE)
-
-    if last_step > start_step and last_step % args.accumulation_steps != 0:
-        if args.grad_clip > 0: torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        optimizer.step(); scheduler.step(); optimizer.zero_grad()
+        if optimizer_boundary:
+            checkpoint_after_update(
+                args, lm_config, profiler, periodic=step == iters or checkpoint_due(args, step, start_step),
+                weight=args.save_weight, model=model, optimizer=optimizer,
+                epoch=epoch, step=step, wandb=wandb,
+                scheduler=scheduler, ref_model=ref_model,
+            )
 
 
 if __name__ == "__main__":
@@ -679,6 +660,7 @@ if __name__ == "__main__":
                            reward_model, 0, wandb,
                            use_sglang=(args.rollout_engine == "sglang"))
 
+    wait_for_checkpoint()
     final_profile_metrics = profiler.finish()
     if final_profile_metrics and wandb:
         wandb.log(final_profile_metrics)

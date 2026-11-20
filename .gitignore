@@ -80,3 +80,6 @@ data_relay/bin/
 /relay_data/
 .relay_training/
 .relay_code_sync/
+
+# native cuBLASLt/attention build outputs (compiled locally)
+model/dense_cublas/native/build/

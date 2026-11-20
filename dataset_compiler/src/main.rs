@@ -7,6 +7,7 @@ mod read;
 mod reader;
 mod report;
 mod schema;
+mod split;
 mod verify;
 mod write;
 
@@ -35,6 +36,8 @@ fn run() -> Result<()> {
         Command::Compile(args) => compile_command(args),
         Command::Inspect(args) => inspect_command(args),
         Command::Verify(args) => verify_command(args),
+        Command::Split(args) => split::run(&args),
+        Command::VerifyShards(args) => split::verify_command(&args),
     }
 }
 

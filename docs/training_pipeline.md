@@ -26,6 +26,16 @@ python trainer/training_pipeline.py --plan training_pipeline.json --validate-onl
 python trainer/training_pipeline.py --plan training_pipeline.json
 ```
 
+## 异步保存检查点
+
+周期保存默认在优化器更新后复制一份完整的 CPU 续训快照。后台线程负责转换推理权重、
+序列化和写盘，训练可以在写盘期间继续。快照复制仍占用训练线程，并需要额外的主机内存。
+同时只保留一份待写快照。如果到达下一个保存点时上一次仍在写盘，训练会等待它完成。
+
+暂停时会保存当前更新后的模型、优化器和续训游标，并在写入成功后以退出码 42 结束。
+正常结束也会等待最后一次保存。流式预训练在 epoch 末尾确认实际游标写入后，
+才输出该 epoch 的保存完成标记。文件名和续训命令沿用原有格式。
+
 ## 预训练剩余时间
 
 `epoch_time` 表示**当前 epoch 的剩余分钟数**。流式预训练按有效输入 token

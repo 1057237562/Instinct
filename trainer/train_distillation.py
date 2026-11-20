@@ -24,14 +24,13 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from scripts.data_loader.lm_dataset import SFTDataset
 from trainer.trainer_cli import (
-    PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
-    build_autocast_ctx, build_trainer_parser, flush_remaining_grad,
+    build_autocast_ctx, build_trainer_parser,
     init_wandb_logger, set_cosine_lr, setup_dist_and_seed, step_with_scaler,
 )
 from trainer.packing_transition import packing_data_config, SequencePackingPlan
 from trainer.trainer_utils import (
-    Logger, is_main_process, lm_checkpoint, init_model,
-    config_from_args, build_optimizer, pause_save_checkpoint,
+    Logger, lm_checkpoint, init_model,
+    config_from_args, build_optimizer, checkpoint_after_update, checkpoint_due, wait_for_checkpoint,
     restore_config_from_checkpoint, apply_torchao_fp8_training,
     configure_bucket_memory_budget,
     prepare_lm_batch, release_compiled_cuda_memory,
@@ -71,7 +70,6 @@ def train_epoch(epoch, loader, iters, teacher_model, lm_config_student,
                 packing_plan=None):
     start_time = time.time()
     data_config['epoch_steps'] = int(iters)
-    last_step = start_step
 
     if teacher_model is not None:
         teacher_model.eval()
@@ -82,7 +80,6 @@ def train_epoch(epoch, loader, iters, teacher_model, lm_config_student,
             batch, epoch=epoch, step=step,
         ) if packing_plan is not None else ''
         input_ids, labels = batch[:2]
-        last_step = step
         profiler.begin_step(tokens=input_ids.numel(), useful_tokens=(labels != -100).sum().item())
         with profiler.phase("data_transfer"):
             input_ids, labels, sequence_ids = prepare_lm_batch(batch, args.device)
@@ -135,7 +132,8 @@ def train_epoch(epoch, loader, iters, teacher_model, lm_config_student,
         with profiler.phase("backward"):
             scaler.scale(loss).backward()
 
-        if step % args.accumulation_steps == 0:
+        optimizer_boundary = step % args.accumulation_steps == 0 or step == iters
+        if optimizer_boundary:
             with profiler.phase("optimizer"):
                 step_with_scaler(scaler, optimizer, model.parameters(), args.grad_clip)
 
@@ -166,18 +164,6 @@ def train_epoch(epoch, loader, iters, teacher_model, lm_config_student,
                     "elapsed_time": elapsed_min,
                 })
 
-        if (step % args.save_interval == 0 or step == iters) and is_main_process():
-            model.eval()
-            moe_suffix = '_moe' if lm_config_student.use_moe else ''
-            ckp = f'{args.save_dir}/{args.save_weight}_{lm_config_student.hidden_size}{moe_suffix}.pth'
-            raw_model = model.module if isinstance(model, DistributedDataParallel) else model
-            raw_model = getattr(raw_model, '_orig_mod', raw_model)
-            state_dict = raw_model.state_dict()
-            torch.save({k: v.half().cpu() for k, v in state_dict.items()}, ckp)
-            lm_checkpoint(lm_config_student, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints', teacher_model=teacher_model, teacher_config=lm_config_teacher.to_dict(), data_config=data_config)
-            model.train()
-            del state_dict
-
         del input_ids, labels, sequence_ids, loss_mask, res, student_logits, ce_loss, distill_loss, loss
 
         if (
@@ -189,15 +175,14 @@ def train_epoch(epoch, loader, iters, teacher_model, lm_config_student,
                 f'epoch={epoch + 1}, completed buckets >{args.bucket_large_threshold} tokens'
             )
 
-        if pause_requested(args):
-            clear_pause_request(args)
-            profiler.finish()
-            if is_main_process():
-                pause_save_checkpoint(args, lm_config_student, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, teacher_model=teacher_model, teacher_config=lm_config_teacher.to_dict(), data_config=data_config)
-            Logger('[PAUSED] Training paused — resume checkpoint saved.')
-            sys.exit(PAUSE_EXIT_CODE)
-
-    flush_remaining_grad(scaler, optimizer, model.parameters(), args.grad_clip, last_step, start_step, args.accumulation_steps)
+        if optimizer_boundary:
+            checkpoint_after_update(
+                args, lm_config_student, profiler, periodic=step == iters or checkpoint_due(args, step, start_step),
+                weight=args.save_weight, model=model, optimizer=optimizer,
+                epoch=epoch, step=step, wandb=wandb,
+                scaler=scaler, teacher_model=teacher_model,
+                teacher_config=lm_config_teacher.to_dict(), data_config=data_config,
+            )
 
 
 if __name__ == "__main__":
@@ -340,6 +325,7 @@ if __name__ == "__main__":
                 f'epoch={epoch + 1} complete, preparing next long-bucket phase'
             )
 
+    wait_for_checkpoint()
     final_profile_metrics = profiler.finish()
     if final_profile_metrics and wandb:
         wandb.log(final_profile_metrics)

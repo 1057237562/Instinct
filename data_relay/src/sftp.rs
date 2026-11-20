@@ -95,7 +95,13 @@ impl SftpUploader {
             .request_subsystem(true, "sftp")
             .await
             .context("启动 SSH SFTP 子系统失败")?;
-        let sftp = SftpSession::new(channel.into_stream())
+        let writes = std::env::var("INSTINCT_SFTP_CONCURRENT_WRITES").ok()
+            .and_then(|value| value.parse::<usize>().ok()).unwrap_or(8).clamp(1, 128);
+        let sftp = SftpSession::new_with_config(channel.into_stream(), russh_sftp::client::Config {
+            max_concurrent_writes: writes,
+            request_timeout_secs: 60,
+            ..Default::default()
+        })
             .await
             .context("SFTP 初始化失败（实例是否已开机？）")?;
         let fingerprint = recorded.lock().unwrap().clone().unwrap_or_default();
@@ -233,7 +239,48 @@ impl SftpUploader {
         local_size: u64,
         on_progress: &(dyn Fn(u64) + Send + Sync),
     ) -> anyhow::Result<()> {
-        self.upload_file_with_progress(local, remote_path, local_size, &|bytes, _| on_progress(bytes)).await
+        if std::env::var("INSTINCT_RELAY_STREAM_UPLOAD").as_deref() == Ok("1") {
+            return self.upload_stream(local, remote_path, local_size, on_progress).await;
+        }
+        self.upload_file_with_progress(local, remote_path, local_size, &|bytes, resume_credit| {
+            if !resume_credit { on_progress(bytes); }
+        }).await
+    }
+
+    /// Stream large files over an SSH exec channel, retaining the same verified
+    /// `.rpart` prefix. Avoid an SFTP acknowledgement round trip per write window.
+    async fn upload_stream(&self, local: &Path, remote_path: &str, local_size: u64,
+        on_progress: &(dyn Fn(u64) + Send + Sync)) -> anyhow::Result<()> {
+        self.upload_slice(local, remote_path, 0, local_size, on_progress).await
+    }
+
+    pub async fn upload_slice(&self, local: &Path, remote_path: &str, source_offset: u64, local_size: u64,
+        on_progress: &(dyn Fn(u64) + Send + Sync)) -> anyhow::Result<()> {
+        let part = format!("{remote_path}.rpart");
+        let start = self.metadata_size(&part).await.unwrap_or(0);
+        if start > local_size { bail!("remote resume prefix exceeds source size: {part}"); }
+        let mut source = tokio::fs::File::open(local).await?;
+        source.seek(std::io::SeekFrom::Start(source_offset + start)).await?;
+        let mut source = source.take(local_size - start);
+        let mut channel = self.handle.channel_open_session().await?;
+        channel.exec(true, format!("cat >> {}", shell_quote(&part))).await?;
+        let mut buffer = vec![0; 1024 * 1024];
+        loop {
+            let count = source.read(&mut buffer).await?;
+            if count == 0 { break; }
+            channel.data(&buffer[..count]).await?;
+            on_progress(count as u64);
+        }
+        channel.eof().await?;
+        let mut code = None;
+        while let Some(message) = channel.wait().await {
+            if let russh::ChannelMsg::ExitStatus { exit_status } = message {code=Some(exit_status);}
+        }
+        if code != Some(0) {bail!("SSH stream upload failed: {part}, exit={code:?}");}
+        if self.metadata_size(&part).await != Some(local_size) {bail!("stream upload size mismatch: {part}");}
+        if self.metadata_size(remote_path).await.is_some() {bail!("stream destination already exists: {remote_path}");}
+        self.sftp.rename(&part, remote_path).await?;
+        Ok(())
     }
 
     async fn upload_file_with_progress(

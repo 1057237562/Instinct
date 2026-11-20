@@ -26,14 +26,14 @@ from scripts.data_loader.lm_dataset import PretrainDataset
 from trainer.trainer_utils import (
     Logger, is_main_process, lm_checkpoint,
     init_model, config_from_args, build_optimizer,
-    pause_save_checkpoint, restore_config_from_checkpoint, apply_torchao_fp8_training,
+    checkpoint_after_update, checkpoint_due, wait_for_checkpoint, save_training_checkpoint,
+    restore_config_from_checkpoint, apply_torchao_fp8_training,
     prepare_lm_batch, release_compiled_cuda_memory,
     configure_bucket_memory_budget,
 )
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx, init_wandb_logger,
     set_cosine_lr, set_cosine_lr_progress, step_with_scaler, flush_remaining_grad,
-    PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
     add_moe_router_migration_arg, validate_moe_router_migration,
 )
 from trainer.packing_transition import packing_data_config, SequencePackingPlan
@@ -97,20 +97,6 @@ def _recompiled_resume_note(saved_data_config, streaming_plan, data_path):
         'is replayed or skipped.  Resuming at an epoch boundary has no drift, and '
         'compiling with --align-chunk-bytes makes the cursor exact.'
     )
-
-
-def _pause_after_update(epoch, step, wandb):
-    """Save only after pending accumulated gradients have been applied."""
-    if not pause_requested(args):
-        return
-    clear_pause_request(args)
-    profiler.finish()
-    if is_main_process():
-        pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=model,
-                              optimizer=optimizer, scaler=scaler, epoch=epoch,
-                              step=step, wandb=wandb, data_config=data_config)
-    Logger('[PAUSED] Training paused — resume checkpoint saved.')
-    sys.exit(PAUSE_EXIT_CODE)
 
 
 def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
@@ -181,7 +167,9 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
         with profiler.phase("backward"):
             scaler.scale(loss).backward()
 
-        if step % args.accumulation_steps == 0:
+        epoch_end = token_schedule is None and step == iters
+        optimizer_boundary = step % args.accumulation_steps == 0 or epoch_end
+        if optimizer_boundary:
             with profiler.phase("optimizer"):
                 step_with_scaler(scaler, optimizer, model.parameters(), args.grad_clip)
 
@@ -235,21 +223,6 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
                     log_dict.update(routing_stats.metrics())
             if wandb: wandb.log(log_dict)
 
-        if (
-            step % args.save_interval == 0
-            or (token_schedule is None and step == iters)
-        ) and is_main_process():
-            model.eval()
-            moe_suffix = '_moe' if lm_config.use_moe else ''
-            ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
-            raw_model = model.module if isinstance(model, DistributedDataParallel) else model
-            raw_model = getattr(raw_model, '_orig_mod', raw_model)
-            state_dict = raw_model.state_dict()
-            torch.save({k: v.half().cpu() for k, v in state_dict.items()}, ckp)
-            lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints', data_config=data_config)
-            model.train()
-            del state_dict
-
         del input_ids, labels, sequence_ids, loss, aux_loss_for_log
 
         if (
@@ -261,14 +234,25 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, start_step: int = 0,
                 f'epoch={epoch + 1}, completed buckets >{args.bucket_large_threshold} tokens'
             )
 
-        # Resume states do not contain pending gradients. Honor pause only at
-        # an optimizer boundary, leaving the request armed while accumulating.
-        if step % args.accumulation_steps == 0:
-            _pause_after_update(epoch, step, wandb)
+        # The resume format does not include pending accumulated gradients.
+        if optimizer_boundary:
+            checkpoint_after_update(
+                args, lm_config, profiler,
+                periodic=epoch_end or checkpoint_due(args, step, start_step),
+                weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler,
+                epoch=epoch, step=step, wandb=wandb, data_config=data_config,
+            )
 
-    flush_remaining_grad(scaler, optimizer, model.parameters(), args.grad_clip, last_step, start_step, args.accumulation_steps)
-    if last_step > start_step:
-        _pause_after_update(epoch, last_step, wandb)
+    # Streaming has no reliable step count. Flush at iterator exhaustion.
+    if token_schedule is not None or last_step < iters:
+        flush_remaining_grad(scaler, optimizer, model.parameters(), args.grad_clip,
+                             last_step, start_step, args.accumulation_steps)
+    if last_step > start_step and (token_schedule is not None or last_step < iters):
+        checkpoint_after_update(
+            args, lm_config, profiler, periodic=False,
+            weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler,
+            epoch=epoch, step=last_step, wandb=wandb, data_config=data_config,
+        )
     return last_step
 
 
@@ -499,10 +483,10 @@ if __name__ == "__main__":
             # __len__ is only an ETA estimate because packing is local to each
             # window. Always persist the exact final cursor and model state.
             if is_main_process():
-                pause_save_checkpoint(
+                save_training_checkpoint(
                     args, lm_config, weight=args.save_weight, model=model,
                     optimizer=optimizer, scaler=scaler, epoch=epoch,
-                    step=last_step, wandb=wandb, data_config=data_config,
+                    step=last_step, wandb=wandb, data_config=data_config, wait=True,
                 )
                 Logger(
                     f'Epoch:[{epoch + 1}/{args.epochs}]({last_step}/{last_step}), '
@@ -540,6 +524,7 @@ if __name__ == "__main__":
                 f'epoch={epoch + 1} complete, preparing next long-bucket phase'
             )
 
+    wait_for_checkpoint()
     final_profile_metrics = profiler.finish()
     if final_profile_metrics and wandb:
         wandb.log(final_profile_metrics)

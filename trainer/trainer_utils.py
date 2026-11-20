@@ -11,6 +11,9 @@ import math
 import gc
 import inspect
 import importlib.metadata
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from copy import copy, deepcopy
 from dataclasses import replace
 import numpy as np
 import torch
@@ -1042,125 +1045,199 @@ def build_optimizer(params, lr: float, optimizer: str = 'adamw', **kwargs) -> to
     raise ValueError(f"未知优化器: {optimizer}，可选: adamw / adafactor / muon")
 
 
-def lm_checkpoint(lm_config, weight: str = 'full_sft', model=None, optimizer=None, epoch: int = 0, step: int = 0, wandb=None, save_dir: str = './checkpoints', **kwargs):
-    """保存或加载训练检查点。
+def _checkpoint_state(value):
+    raw_value = value.module if isinstance(value, DistributedDataParallel) else value
+    raw_value = getattr(raw_value, '_orig_mod', raw_value)
+    if isinstance(raw_value, torch.nn.Module):
+        return raw_value.state_dict(keep_vars=True)
+    return raw_value.state_dict()
 
-    参数:
-        lm_config: 模型配置（决定文件名中的 hidden_size / _moe 后缀）
-        weight: 权重前缀名
-        model: 传入时执行「保存」，为 None 时执行「加载」
-        optimizer / epoch / step / wandb: 随 resume 检查点一并保存的训练状态
-        save_dir: 检查点保存目录（默认 ./checkpoints）
-        **kwargs: 额外随检查点保存的状态（如 scaler / ref_model / teacher_model）
 
-    说明:
-        - 保存：原子写入权重 .pth、resume 检查点与 config JSON；
-        - 加载：读取 *_resume.pth，GPU 数量变化时自动按比例换算 step。
-    """
-    os.makedirs(save_dir, exist_ok=True)
-    moe_path = '_moe' if lm_config.use_moe else ''
-    ckp_path = f'{save_dir}/{weight}_{lm_config.hidden_size}{moe_path}.pth'
-    resume_path = f'{save_dir}/{weight}_{lm_config.hidden_size}{moe_path}_resume.pth'
+def _checkpoint_to_cpu(value, tensors):
+    # state_dict() can expose live tensors even when the model or optimizer is on CPU.
+    if isinstance(value, torch.Tensor):
+        key = id(value)
+        if key not in tensors:
+            # keep_vars=True lets tied parameters share one CPU copy.
+            tensors[key] = value.detach().to(device='cpu', copy=True)
+        return tensors[key]
+    if isinstance(value, dict):
+        result = copy(value)
+        for key, item in value.items():
+            result[key] = _checkpoint_to_cpu(item, tensors)
+        if hasattr(value, '_metadata'):
+            result._metadata = deepcopy(value._metadata)
+        return result
+    if isinstance(value, list):
+        return [_checkpoint_to_cpu(item, tensors) for item in value]
+    if type(value) is tuple:
+        return tuple(_checkpoint_to_cpu(item, tensors) for item in value)
+    return deepcopy(value)
 
-    if model is not None:
-        raw_model = model.module if isinstance(model, DistributedDataParallel) else model
-        raw_model = getattr(raw_model, '_orig_mod', raw_model)
-        raw_state_dict = raw_model.state_dict()
-        state_dict = {
-            k: (v.detach().half().cpu() if v.is_floating_point() else v.detach().cpu())
-            for k, v in raw_state_dict.items()
-        }
-        resume_state_dict = {k: v.detach().cpu() for k, v in raw_state_dict.items()}
-        ckp_tmp = ckp_path + '.tmp'
-        torch.save(state_dict, ckp_tmp)
-        os.replace(ckp_tmp, ckp_path)
-        wandb_id = None
-        if wandb:
-            if hasattr(wandb, 'get_run'):
-                run = wandb.get_run()
-                wandb_id = getattr(run, 'id', None) if run else None
+
+def _checkpoint_snapshot(lm_config, model, optimizer, epoch, step, wandb, extra):
+    run = wandb.get_run() if wandb and hasattr(wandb, 'get_run') else wandb
+    data = {
+        'model': dict(_checkpoint_state(model)),
+        'optimizer': optimizer.state_dict(),
+        'epoch': epoch,
+        'step': step,
+        'world_size': dist.get_world_size() if dist.is_initialized() else 1,
+        'wandb_id': getattr(run, 'id', None),
+        'config': lm_config.to_dict(),
+    }
+    for key, value in extra.items():
+        if value is not None:
+            data[key] = _checkpoint_state(value) if hasattr(value, 'state_dict') else value
+    return _checkpoint_to_cpu(data, {})
+
+
+def _write_checkpoint(base_path, snapshot, output_path=None, lora_save=False):
+    # Stage all files before publication. Replace the resume file last so a
+    # failed serialization never overwrites the last resumable checkpoint.
+    artifacts = []
+
+    def stage(path, value, *, json_file=False):
+        mode = 'w' if json_file else 'wb'
+        encoding = 'utf-8' if json_file else None
+        with tempfile.NamedTemporaryFile(
+            mode=mode, encoding=encoding, dir=os.path.dirname(path),
+            prefix=os.path.basename(path) + '.', suffix='.tmp', delete=False,
+        ) as handle:
+            artifacts.append((handle.name, path))
+            if json_file:
+                json.dump(value, handle, ensure_ascii=False, indent=2)
             else:
-                wandb_id = getattr(wandb, 'id', None)
+                torch.save(value, handle)
 
-        resume_data = {
-            'model': resume_state_dict,
-            'optimizer': optimizer.state_dict(),
-            'epoch': epoch,
-            'step': step,
-            'world_size': dist.get_world_size() if dist.is_initialized() else 1,
-            'wandb_id': wandb_id,
-            'config': lm_config.to_dict(),
-        }
-        for key, value in kwargs.items():
-            if value is not None:
-                if hasattr(value, 'state_dict'):
-                    raw_value = value.module if isinstance(value, DistributedDataParallel) else value
-                    raw_value = getattr(raw_value, '_orig_mod', raw_value)
-                    resume_data[key] = raw_value.state_dict()
-                else:
-                    resume_data[key] = value
+    try:
+        converted = {}
+        weights = {}
+        for key, tensor in snapshot['model'].items():
+            if tensor.is_floating_point():
+                if id(tensor) not in converted:
+                    converted[id(tensor)] = tensor.half()
+                tensor = converted[id(tensor)]
+            weights[key] = tensor
+        del converted
+        checkpoint_weights = base_path + '.pth'
+        stage(checkpoint_weights, weights)
+        if output_path is not None and os.path.abspath(output_path) != os.path.abspath(checkpoint_weights):
+            if lora_save:
+                output_weights = {
+                    key: tensor.half() for key, tensor in weights.items()
+                    if '.lora.' in key or key.startswith('lora.')
+                }
+            else:
+                output_weights = {key: tensor.half() for key, tensor in weights.items()}
+            stage(output_path, output_weights)
+            del output_weights
+        del weights
+        stage(base_path + '.json', snapshot['config'], json_file=True)
+        stage(base_path + '_resume.pth', snapshot)
+        for temporary, path in artifacts:
+            os.replace(temporary, path)
+    finally:
+        for temporary, _ in artifacts:
+            try:
+                os.remove(temporary)
+            except FileNotFoundError:
+                pass
 
-        resume_tmp = resume_path + '.tmp'
-        torch.save(resume_data, resume_tmp)
-        os.replace(resume_tmp, resume_path)
 
-        config_json_path = f'{save_dir}/{weight}_{lm_config.hidden_size}{moe_path}.json'
-        config_json_tmp = config_json_path + '.tmp'
-        with open(config_json_tmp, 'w', encoding='utf-8') as f:
-            json.dump(lm_config.to_dict(), f, ensure_ascii=False, indent=2)
-        os.replace(config_json_tmp, config_json_path)
+def _checkpoint_name(lm_config, weight):
+    moe_suffix = '_moe' if lm_config.use_moe else ''
+    return f'{weight}_{lm_config.hidden_size}{moe_suffix}'
 
-        del raw_state_dict, state_dict, resume_state_dict, resume_data
-        torch.cuda.empty_cache()
-    else:  # 加载模式
-        if os.path.exists(resume_path):
-            ckp_data = torch.load(resume_path, map_location='cpu')
-            saved_ws = ckp_data.get('world_size', 1)
-            current_ws = dist.get_world_size() if dist.is_initialized() else 1
-            if saved_ws != current_ws:
-                ckp_data['step'] = ckp_data['step'] * saved_ws // current_ws
-                data_config = ckp_data.get('data_config')
-                if data_config and data_config.get('epoch_steps'):
-                    data_config['epoch_steps'] = data_config['epoch_steps'] * saved_ws // current_ws
-                Logger(f'GPU数量变化({saved_ws}→{current_ws})，step已自动转换为{ckp_data["step"]}')
-            return ckp_data
+
+def lm_checkpoint(lm_config, weight: str = 'full_sft', model=None, optimizer=None, epoch: int = 0, step: int = 0, wandb=None, save_dir: str = './checkpoints', **kwargs):
+    """Load a resume checkpoint, or synchronously save one for direct callers."""
+    os.makedirs(save_dir, exist_ok=True)
+    base_path = os.path.join(save_dir, _checkpoint_name(lm_config, weight))
+    if model is not None:
+        snapshot = _checkpoint_snapshot(lm_config, model, optimizer, epoch, step, wandb, kwargs)
+        _write_checkpoint(base_path, snapshot)
+        return
+
+    resume_path = base_path + '_resume.pth'
+    if not os.path.exists(resume_path):
         return None
+    ckp_data = torch.load(resume_path, map_location='cpu')
+    saved_ws = ckp_data.get('world_size', 1)
+    current_ws = dist.get_world_size() if dist.is_initialized() else 1
+    if saved_ws != current_ws:
+        ckp_data['step'] = ckp_data['step'] * saved_ws // current_ws
+        data_config = ckp_data.get('data_config')
+        if data_config and data_config.get('epoch_steps'):
+            data_config['epoch_steps'] = data_config['epoch_steps'] * saved_ws // current_ws
+        Logger(f'GPU数量变化({saved_ws}→{current_ws})，step已自动转换为{ckp_data["step"]}')
+    return ckp_data
 
 
-def pause_save_checkpoint(args, lm_config, *, weight, model, optimizer, epoch, step, scaler=None, wandb=None, lora_save=False, **lm_ckpt_kwargs) -> None:
-    """暂停时保存检查点（与各训练脚本的周期保存语义完全一致）。
+_checkpoint_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='checkpoint')
+_pending_checkpoint = None
 
-    参数:
-        args: 训练参数（需含 save_dir，决定权重 .pth 的输出目录）
-        lm_config: 模型配置（决定文件名中的 hidden_size / _moe 后缀）
-        weight: 权重前缀名
-        model: 当前模型（传入 lm_checkpoint 保存 resume 检查点）
-        optimizer: 优化器
-        epoch / step: 当前训练位置
-        scaler: GradScaler（可为 None，PPO / GRPO / Agent 训练不传）
-        wandb: 日志对象（可为 None）
-        lora_save: 为 True 时仅保存 LoRA 分支权重（save_lora），不保存完整 state_dict
-        **lm_ckpt_kwargs: 额外随 resume 检查点保存的状态（如 ref_model / teacher_model / scheduler / critic_model 等）
 
-    说明:
-        - 先写 out/ 下的权重 .pth（fp16，或 LoRA 专用权重），再经 lm_checkpoint 原子写入 resume 检查点；
-        - 与周期保存语义一致：不冲刷梯度，由调用方以 is_main_process() 守护后再调用。
-    """
-    model.eval()
-    if lora_save:
-        from model.model_lora import save_lora
-        moe_suffix = '_moe' if lm_config.use_moe else ''
-        save_lora(model, f'{args.save_dir}/{weight}_{lm_config.hidden_size}{moe_suffix}.pth')
-    else:
-        moe_suffix = '_moe' if lm_config.use_moe else ''
-        ckp = f'{args.save_dir}/{weight}_{lm_config.hidden_size}{moe_suffix}.pth'
-        raw_model = model.module if isinstance(model, DistributedDataParallel) else model
-        raw_model = getattr(raw_model, '_orig_mod', raw_model)
-        state_dict = raw_model.state_dict()
-        torch.save({k: v.half().cpu() for k, v in state_dict.items()}, ckp)
-        del state_dict
-    lm_checkpoint(lm_config, weight=weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints', **lm_ckpt_kwargs)
-    model.train()
+def wait_for_checkpoint():
+    """Wait for the submitted checkpoint and propagate its write error."""
+    global _pending_checkpoint
+    if _pending_checkpoint is not None:
+        future, _pending_checkpoint = _pending_checkpoint, None
+        future.result()
+
+
+def save_training_checkpoint(args, lm_config, *, weight, model, optimizer, epoch, step,
+                             scaler=None, wandb=None, lora_save=False, wait=False, **extra):
+    """Snapshot at the optimizer boundary, then write using one background worker."""
+    global _pending_checkpoint
+    # Bound host memory to one snapshot, even when disk is slower than training.
+    try:
+        wait_for_checkpoint()
+    except Exception as exc:
+        Logger(f'[Checkpoint] Previous save failed: {exc}. Saving epoch={epoch + 1}, step={step}.')
+    os.makedirs('./checkpoints', exist_ok=True)
+    name = _checkpoint_name(lm_config, weight)
+    snapshot = _checkpoint_snapshot(lm_config, model, optimizer, epoch, step, wandb,
+                                    dict(extra, scaler=scaler))
+    _pending_checkpoint = _checkpoint_executor.submit(
+        _write_checkpoint, os.path.abspath(f'./checkpoints/{name}'), snapshot,
+        os.path.abspath(os.path.join(args.save_dir, name + '.pth')), lora_save,
+    )
+    if wait:
+        wait_for_checkpoint()
+
+
+def pause_save_checkpoint(args, lm_config, **state):
+    """Publish the checkpoint for this pause before acknowledging the request."""
+    save_training_checkpoint(args, lm_config, wait=True, **state)
+
+
+def checkpoint_after_update(args, lm_config, profiler, *, periodic, **state):
+    from trainer.trainer_cli import (
+        PAUSE_EXIT_CODE, broadcast_pause_flag, clear_pause_request, pause_requested,
+    )
+
+    if pause_requested(args):
+        saved = False
+        if is_main_process():
+            try:
+                clear_pause_request(args)
+                pause_save_checkpoint(args, lm_config, **state)
+                saved = True
+            except Exception as exc:
+                Logger(f'[Checkpoint] Pause save failed: {exc}. Training will continue.')
+        if broadcast_pause_flag(args, saved):
+            profiler.finish()
+            Logger('[PAUSED] Training paused \u2014 resume checkpoint saved.')
+            sys.exit(PAUSE_EXIT_CODE)
+    if periodic and is_main_process():
+        save_training_checkpoint(args, lm_config, **state)
+
+
+def checkpoint_due(args, step, start_step):
+    """At an optimizer boundary, check whether this update crossed a save interval."""
+    previous_step = max(start_step, step - args.accumulation_steps)
+    return previous_step // args.save_interval < step // args.save_interval
 
 
 def configure_moe_training_router(config, *, norm_topk_prob=None, top_k=None):

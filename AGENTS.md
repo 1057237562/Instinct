@@ -1,4 +1,4 @@
-# Instinct Agent Instructions
+﻿# Instinct Agent Instructions
 
 ## What this is
 Instinct is a single-GPU language-model training and inference project with V1/V2 Dense and MoE configurations, plus linear-attention and RecurrsiveInstinct backbones. All core algorithms (Dense/MoE Transformer, Pretrain, SFT, LoRA, DPO, PPO, GRPO, CISPO, Agentic RL, KD) are implemented in pure PyTorch — no `trl`/`peft` abstractions. Rust tools handle dataset compilation and the AutoDL data/training relay.
@@ -527,6 +527,113 @@ cargo clippy
   unique output prefixes under `trainer/pipeline_runs/`. Nonzero exits, including
   pause (42), stop later stages. Restarting the pipeline creates a new run; resume
   the paused stage through its trainer. Only stage-owned dataset caches are cleaned.
+
+## Primary evaluation metrics (model / SFT / data changes)
+
+Every model, SFT-corpus or data-pipeline change presented as an improvement **must report
+these primary code metrics**, measured with the recorded protocols below (do not substitute
+other evaluators or a thinking-only number):
+
+1. **HumanEval+ pass@1 / pass@10** - evalplus HumanEval+ v0.1.10, via the recorded driver
+   copied from `eval/evalplus/<run>/run_eval.py`: convert the native inference `.npz` to the
+   weights-only `.pth` form, 164 tasks x 10 samples, temperature 0.8 / top_p 0.95 / top_k 50 /
+   seed 42 / max_new_tokens 512, **thinking disabled**, batch 32. Report
+   `metrics.plus.pass@1|pass@10` (headline) and the base HumanEval columns for context.
+   Artifacts: `humaneval.metrics.json`, `humaneval.inference.json`, samples/results/logs.
+2. **MBPP+ pass@1 / pass@10** - same driver, evalplus MBPP+ v0.2.0, 378 tasks x 10 samples,
+   identical decoding. Report `metrics.plus.pass@1|pass@10` plus base MBPP.
+   Artifacts: `mbpp.metrics.json` and `mbpp/`.
+3. **LiveCodeBench release_v6 pass@1, thinking ON and thinking OFF** - the copied
+   `eval/livecodebench/<run>/generate.py` + WASI `score.py` harness (not the built-in
+   `--lcb_evaluate`/`lcb_runner` path, which is not installed and not the recorded protocol):
+   1,055 tasks, `--lcb_prompt_style chat`, 1 sample/task, temperature 0, seed 42, batch 16,
+   total context 4096, chat template `--open_thinking 1` and `--open_thinking 0`; extraction
+   is the last fenced block (after the first `</think>` when thinking). **KV cache must use
+   the eval-local MXFP8 E4M3 cache** (`eval/.../mxfp8_cache.py`, `install(model, 4096, 4096)`
+   after model init), not the fp32/static model-dtype path. Report `metrics.pass@1` for both
+   modes plus `outcomes` (`no_code`/context-cap, `timeout`). Artifacts: `full.metrics.json`
+   per mode. The 16,384-context retry (`retry16k_mxfp8/`) is an optional secondary view,
+   not the headline number.
+
+Rules:
+
+- Quote evalplus `base` and `plus` only with labels; the headline is HumanEval+/MBPP+
+  pass@1 and the LCB think/no-think pass@1 pair.
+- Record checkpoint provenance (step, processed tokens, npz/pth SHA-256), exact flags,
+  context, and artifact directory. Do not present partial JSON metrics as a finished run.
+- Free the GPU first: pause any training through its save-and-pause flow; EvalPlus/LCB
+  scoring is CPU (WASI) and may overlap generation.
+- Reference artifacts: `eval/evalplus/native_sft_*` and `eval/livecodebench/native_sft_*`;
+  harness details in `docs/humaneval.md`, `docs/gsm8k.md`, `docs/eval_webui.md`.
+
+### Recorded v4-corpus checkpoint results
+
+v4 corpus (`dataset/instinctv2_sft_concise_reasoning_635m_v4`, 616,173 rows /
+559,202,079 packed input tokens / 34,578 blocks): v3 non-code rows kept as-is plus a
+replaced code-thinking lane of 7,390 UltraData Code_think rows whose reasoning lengths
+follow a truncated normal N(2048, 1024^2) over [0, 8192]; no synthesis or truncation was
+used. Training continues from the v3 step-3,072 weights with a fresh optimizer and a
+recomputed LR schedule (4.9676e-6 -> 2e-6 over 34,578 blocks); it was paused through the
+save-and-pause flow at step 3,000 (48,469,768 processed tokens).
+
+Checkpoint provenance: `out/native_sft_concise_reasoning_635m_v4/native_instinctv2_sft_concise_reasoning_635m_v4_1536.npz`
+SHA-256 `585879867c748a780774fe35cd9aad6fecbb2c847d4df6bb59e05f07bbcdacfe`;
+converted `step03000.pth` SHA-256 `671b4c33ad09ef4d00079bb255054f46979e1fc857f30eb058e51814803391ee`.
+
+| Metric (v4 step 3,000) | v4 | v3 step 3,072 reference |
+| --- | ---: | ---: |
+| HumanEval+ pass@1 | 0.4421 | 0.4518 |
+| HumanEval+ pass@10 | 0.7317 | 0.7439 |
+| HumanEval base pass@1 / pass@10 | 0.4713 / 0.7622 | 0.4768 / 0.7561 |
+| MBPP+ pass@1 / pass@10 | 0.4802 / 0.7090 | 0.4825 / 0.6958 |
+| MBPP base pass@1 / pass@10 | 0.5463 / 0.7884 | 0.5521 / 0.7804 |
+| LCB release_v6 latest-175 think pass@1 | 0.0857 | 0.1086 |
+| LCB release_v6 latest-175 no-think pass@1 | 0.1200 | 0.1257 |
+
+Artifacts: `eval/evalplus/native_sft_concise_reasoning_635m_v4_step03000_pass10/`
+(HumanEval+: 164 tasks x 10 samples, thinking off, temp 0.8/top_p 0.95/top_k 50/seed 42/
+max_new 512), plus the matching `eval/livecodebench/native_sft_concise_reasoning_635m_v4_step03000_release_v6_{think,nothink}_ctx4096_latest175/`
+runs (1,055 release_v6 prompts restricted to the latest 175, greedy, context 4096, MXFP8
+E4M3 KV cache). LCB think-mode detail for this checkpoint: 107/175 generations reached
+the 4096-context cap before closing `</think>` (v3 reference: 27), hence `no_code = 107`
+and the think pass@1 drop; the no-think run has `no_code = 18` and `timeout = 2`.
+Record new rows here only after their JSON artifacts are complete.
+
+### InstinctR1 think-branch probe (step 1,664)
+
+InstinctR1 starts from the V2 1B pretrain acceptance checkpoint
+(`checkpoints/native_cublas/cloud_step2004666/native_v2_1b_acceptance_1536.npz`,
+step 2,004,666) and trains one epoch on the same v4 corpus (34,578 blocks) with a
+fresh SFT schedule 2e-6 -> 1e-5 (warmup 128 updates) -> 2e-6; checkpoints every 128
+steps (synchronous). Probe at step 1,664 / 26,917,716 tokens
+(npz SHA-256 `beb63b3d763775275b89f67634bf7bf26d11a83b6af9a4af53400088629a267a`,
+converted `step01664.pth` SHA-256 `177340db046ec0642ea3ee511622ef5db315bea48b2ce302e28627d81b1788f7`)
+through the recorded LCB latest-175 harness:
+
+| Metric | R1 step 1,664 | v4 step 3,000 | v3 step 3,072 |
+| --- | ---: | ---: | ---: |
+| LCB release_v6 latest-175 think pass@1 | 0.0571 (10/175) | 0.0857 | 0.1086 |
+| LCB release_v6 latest-175 no-think pass@1 | 0.1029 (18/175) | 0.1200 | 0.1257 |
+
+At ~4.8% of the epoch the pretrain-based branch is still below the older SFT
+lineage; think mode had 139/175 generations hit the 4,096-context cap before
+closing `</think>` (`no_code = 141`), while no-think had `no_code = 29` and
+`timeout = 5`. Artifacts:
+`eval/livecodebench/native_instinct_r1_step01664_release_v6_{think,nothink}_ctx4096_latest175/`
+and provenance `eval/evalplus/native_instinct_r1_step01664_lcb_provenance/`.
+
+8192-context retry, over-context subset only: the 139 latest-175 tasks whose 4096-context
+think generation hit the context cap were re-generated with total context 8192 (MXFP8
+E4M3 KV capacity 8192, greedy, same seed; `LCB_SUBSET_PATH` filters both generation and
+scoring to those 139 ids). At 4096 those 139 tasks had 0 passes (all `no_code`); at 8192
+they score 4 passes (pass@1 0.0288; outcomes: no_code 123, failed 11, timeout 1) and
+16/139 close `</think>` with final code, but 120/139 still hit the cap. Substituting only
+this subset into the original 175-task run leaves the other 36 tasks unchanged at their
+4096 results, implying a full-175 think pass@1 of about 0.0800 (not directly measured).
+Artifacts: `eval/livecodebench/native_instinct_r1_step01664_release_v6_think_ctx8192_latest175/`
+(`subset_ids.json`, subset-scored `latest.metrics.json`; results SHA-256
+`52cbced543e41cc72efc8c19785821243b6734fda50361c944637e05bc1739ad`).
+
 
 ## Critical gotchas
 

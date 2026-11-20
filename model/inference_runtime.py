@@ -8,6 +8,7 @@ shapes and warms up the prefill and decode graphs at load time. CUDA graphs
 (``reduce-overhead``) are deliberately NOT used: the decode loop grows the KV
 cache with ``torch.cat`` every step, which cannot be captured.
 """
+import os
 import sys
 import torch
 import torch.nn.functional as F
@@ -213,6 +214,23 @@ def optimize_inference(model, mode='auto'):
     # inference-optimized models opt in; trainers and eval scripts keep the
     # growing cache until they call this.
     model._static_cache_ok = True
+    config = model.config
+    kv_heads = config.num_key_value_heads or config.num_attention_heads
+    if (mode == 'auto' and type(model).__module__ == 'model.model_instinct'
+            and config.flash_attn and torch.version.cuda
+            and parameters.dtype in (torch.bfloat16, torch.float16)
+            and torch.cuda.get_device_capability(parameters.device)[0] >= 8
+            and 16 <= config.head_dim <= 128 and config.head_dim % 16 == 0
+            and config.num_attention_heads % kv_heads == 0
+            and config.num_attention_heads // kv_heads <= 16
+            and os.environ.get('INSTINCT_STATIC_GQA_DECODE', '1') != '0'):
+        try:
+            from model.static_gqa_decode import static_gqa_attention
+        except ImportError:
+            pass
+        else:
+            model._static_gqa_attention = static_gqa_attention
+            detail += ', length-aware static attention'
     trunk = mode in ('full', 'reduce-overhead') and _trunk_compile_eligible(model.config) and _compile_model_trunk(model, mode)
     if trunk:
         captured = ' (decode step captured as a CUDA graph)' if mode == 'reduce-overhead' else ''

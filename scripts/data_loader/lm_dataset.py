@@ -83,7 +83,9 @@ def pre_processing_chat(conversations, add_system_ratio=0.2, rng=None):
     return conversations
 
 def post_processing_chat(prompt_content, empty_think_ratio=0.2, rng=None):
-    # 以80%概率移除空思考标签
+    # 以80%概率移除空思考标签；构建脚本可用 INSTINCT_EMPTY_THINK_RATIO 覆盖
+    # （SFT 数据构建需要 empty_think_ratio=0 时，spawn 的 map worker 也会继承该环境变量）。
+    empty_think_ratio = float(os.environ.get("INSTINCT_EMPTY_THINK_RATIO", empty_think_ratio))
     rng = rng or random
     if '<think>\n\n</think>\n\n' in prompt_content and rng.random() > empty_think_ratio:
         prompt_content = prompt_content.replace('<think>\n\n</think>\n\n', '')

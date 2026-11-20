@@ -652,3 +652,78 @@ def test_inference_dispatch_is_installed_by_optimize_inference():
         layer.experts[0].gate_proj.weight.add_(1.0)
     model(torch.randint(3, 200, (1, 4), device='cuda'), use_cache=False)
     assert not torch.equal(layer._inference_stacked[0], stacks[0])
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_length_aware_attention_replays_live_bounds_and_finished_rows(dtype):
+    pytest.importorskip('triton')
+    if not torch.version.cuda or torch.cuda.get_device_capability()[0] < 8:
+        pytest.skip('length-aware attention requires NVIDIA Ampere or newer')
+    from model.flash_attn_4 import flash_attention
+    from model.static_gqa_decode import static_gqa_attention
+
+    torch.manual_seed(21)
+    q = torch.randn(3, 1, 16, 96, device='cuda', dtype=dtype)
+    k = torch.randn(3, 512, 4, 96, device='cuda', dtype=dtype)
+    v = torch.randn_like(k)
+    starts = torch.zeros(3, 1, device='cuda', dtype=torch.long)
+    positions = torch.full_like(starts, 511)
+    finished = torch.zeros(3, device='cuda', dtype=torch.bool)
+    static_gqa_attention(q, k, v, starts, positions, finished)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = static_gqa_attention(q, k, v, starts, positions, finished)
+
+    for pad, end, done in (([0, 21, 70], [30, 200, 350], [False, True, False]),
+                           ([6, 5, 50], [6, 131, 70], [True, False, False])):
+        starts[:, 0] = torch.tensor(pad, device='cuda')
+        positions[:, 0] = torch.tensor(end, device='cuda')
+        finished.copy_(torch.tensor(done, device='cuda'))
+        graph.replay()
+        slots = torch.arange(512, device='cuda')
+        mask = (slots >= starts) & (slots <= positions) & ~finished[:, None]
+        expected = flash_attention(q, k, v, is_causal=False, attention_mask=mask[:, None, None])
+        torch.testing.assert_close(actual, expected, atol=0.004, rtol=0.02)
+        assert torch.count_nonzero(actual[finished]) == 0
+
+
+@pytest.mark.gpu
+def test_length_aware_generate_grows_cache_without_reprefill(monkeypatch):
+    pytest.importorskip('triton')
+    from model.inference_runtime import optimize_inference
+
+    monkeypatch.delenv('INSTINCT_STATIC_GQA_DECODE', raising=False)
+    model = _tiny_model(use_moe=False, flash_attn=True, max_position_embeddings=2048)
+    model = optimize_inference(model.cuda().to(torch.bfloat16), 'auto')
+    backend = getattr(model, '_static_gqa_attention', None)
+    if backend is None:
+        pytest.skip('length-aware attention is unavailable in this environment')
+
+    torch.manual_seed(13)
+    ids, mask = _left_padded_batch([torch.randint(3, 200, (500,)), torch.randint(3, 200, (509,))])
+    ids, mask = ids.cuda(), mask.cuda()
+    model._static_cache_decode_headroom = 1
+    model._static_gqa_attention = None
+    expected = _generate(model, ids, attention_mask=mask, max_new_tokens=8, eos_token_id=None)
+    model._decode_states_batched.clear()
+    model._static_gqa_attention = backend
+
+    with monkeypatch.context() as patch:
+        forward = model.forward
+        prefill_lengths = []
+
+        def record(input_ids, *args, **kwargs):
+            if input_ids.shape[1] > 1:
+                prefill_lengths.append(input_ids.shape[1])
+            return forward(input_ids, *args, **kwargs)
+
+        patch.setattr(model, 'forward', record)
+        actual = _generate(model, ids, attention_mask=mask, max_new_tokens=8, eos_token_id=None)
+
+    torch.testing.assert_close(actual, expected)
+    assert prefill_lengths == [509]
+    states = model._decode_states_batched[2]
+    assert set(states) == {512, 1024}
+    assert all(state.graph is not None for state in states.values())

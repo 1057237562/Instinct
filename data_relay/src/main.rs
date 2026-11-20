@@ -14,6 +14,7 @@ mod data_upload;
 mod datasets;
 mod disk;
 mod deliver;
+mod file_upload;
 mod jupyter;
 mod model;
 mod pull;
@@ -53,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
     let mut training_request = None;
     let mut auto_gpu = false;
     let mut from_panel_cache = false;
+    let mut upload_manifest = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config" => {
@@ -61,7 +63,8 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(2);
                 }));
             }
-            "serve" | "check" | "deliver" | "inspect-server" | "remote-script" | "training" => cmd = arg,
+            "serve" | "check" | "deliver" | "inspect-server" | "remote-script" | "training" | "upload-files" => cmd = arg,
+            "--upload-manifest" => upload_manifest = Some(PathBuf::from(args.next().ok_or_else(|| anyhow::anyhow!("--upload-manifest requires a JSON path"))?)),
             "--training-action" => training_action = args.next().ok_or_else(|| anyhow::anyhow!("--training-action requires an action"))?,
             "--job-id" => training_job = Some(args.next().ok_or_else(|| anyhow::anyhow!("--job-id requires an ID"))?),
             "--request-json" => training_request = Some(PathBuf::from(args.next().ok_or_else(|| anyhow::anyhow!("--request-json requires a path"))?)),
@@ -106,6 +109,10 @@ async fn main() -> anyhow::Result<()> {
     if auto_gpu { cfg.autodl.allow_gpu_boot = true; }
     if cmd == "remote-script" {
         return deliver::run_remote_script(&cfg, remote_script.as_deref().ok_or_else(|| anyhow::anyhow!("remote-script requires --remote-script FILE"))?).await;
+    }
+    if cmd == "upload-files" {
+        let relay = Relay::new(config_path, cfg)?;
+        return file_upload::run(relay, upload_manifest.as_deref().ok_or_else(|| anyhow::anyhow!("upload-files requires --upload-manifest FILE"))?).await;
     }
     if cmd == "inspect-server" {
         return deliver::inspect_server(&cfg).await;

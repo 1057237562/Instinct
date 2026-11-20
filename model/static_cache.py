@@ -6,12 +6,11 @@ cache length part of the graph's shape, which is why the decode step cannot be
 captured as a CUDA graph: Inductor would need a fresh capture for every length.
 
 A ``StaticKVCache`` fixes the shape for the whole generation instead. Each step
-writes its slice in place and attention reads the full buffer through a mask
-built from the current position, so every decode step has identical shapes and
-no host-derived offsets. Buffers carry a batch dimension, so a left-padded
+writes its slice in place and the device position bounds attention, so every
+decode step has identical shapes and no host-derived offsets. A left-padded
 batch gets the same treatment as one sequence: every row's prompt ends at the
-same storage column, the step's slot is uniform across the batch, and the only
-per-row state is the ``pad_starts`` offset that the mask folds in.
+same storage column and the step's slot is uniform across the batch.
+``pad_starts`` supplies each row's first visible slot.
 """
 from __future__ import annotations
 
@@ -24,12 +23,16 @@ import torch
 class StaticKVCacheLayer:
     """One layer's buffers, shaped for ``Attention``'s ``(k, v)`` convention."""
 
-    __slots__ = ("key", "value", "row_index")
+    __slots__ = ("key", "value", "row_index", "decode_attention", "pad_starts", "finished")
 
-    def __init__(self, key: torch.Tensor, value: torch.Tensor, row_index: torch.Tensor):
+    def __init__(self, key: torch.Tensor, value: torch.Tensor, row_index: torch.Tensor,
+                 decode_attention=None, pad_starts=None, finished=None):
         self.key = key
         self.value = value
         self.row_index = row_index
+        self.decode_attention = decode_attention
+        self.pad_starts = pad_starts
+        self.finished = finished
 
     def append(self, keys: torch.Tensor, values: torch.Tensor, positions: torch.Tensor):
         """Write one step's keys/values in place and return the whole buffer.
@@ -56,7 +59,7 @@ class StaticKVCache:
     """
 
     def __init__(self, max_cache_len: int, layer_specs: Sequence, dtype, device,
-                 batch_size: int = 1):
+                 batch_size: int = 1, decode_attention=None):
         self.batch_size = batch_size
         self.max_cache_len = max_cache_len
         self.key_positions = torch.arange(max_cache_len, device=device)
@@ -64,6 +67,9 @@ class StaticKVCache:
         # a left-padded prompt writes its pad prefix into the buffer and the
         # mask drops those slots through this offset instead.
         self.pad_starts = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+        self.decode_attention = decode_attention
+        self.finished = (torch.zeros(batch_size, dtype=torch.bool, device=device)
+                         if decode_attention is not None else None)
         row_index = torch.arange(batch_size, device=device).view(batch_size, 1)
         self.layers: List[StaticKVCacheLayer] = [
             StaticKVCacheLayer(
@@ -71,7 +77,7 @@ class StaticKVCache:
                             dtype=dtype, device=device),
                 torch.zeros(batch_size, max_cache_len, num_kv_heads, head_dim,
                             dtype=dtype, device=device),
-                row_index,
+                row_index, decode_attention, self.pad_starts, self.finished,
             )
             for num_kv_heads, head_dim in layer_specs
         ]
@@ -102,17 +108,22 @@ class StaticKVCache:
     def __iter__(self):
         return iter(self.layers)
 
-    def mask_for(self, position_ids: torch.Tensor) -> torch.Tensor:
+    def mask_for(self, position_ids: torch.Tensor, key_length: int | None = None) -> torch.Tensor:
         """Bool attention mask for the current step.
 
         A key is visible when its cache slot is not past the query's own
         position — causal for a prompt, length-limiting for decode — and not
-        inside the row's pad prefix. Shape is ``[batch, 1, query,
-        max_cache_len]`` on every step.
+        inside the row's pad prefix. The last axis defaults to the full cache.
         """
-        slots = self.key_positions[None, None, None, :]
+        slots = self.key_positions[None, None, None, :key_length]
         mask = slots <= position_ids[:, None, :, None]
         return mask & (slots >= self.pad_starts[:, None, None, :])
+
+    def copy_prefix_from(self, previous: StaticKVCache, length: int) -> None:
+        """Migrate the populated prefix into a larger bucket's stable buffers."""
+        for layer, old_layer in zip(self.layers, previous.layers):
+            layer.key[:, :length].copy_(old_layer.key[:, :length])
+            layer.value[:, :length].copy_(old_layer.value[:, :length])
 
 
 def build_static_cache(model, max_cache_len: int, dtype=None, device=None,
@@ -196,9 +207,10 @@ class DecodeState:
     so a later, shorter prompt can reuse the same buffers safely.
     """
 
-    def __init__(self, capacity: int, specs, dtype, device, batch_size: int = 1):
+    def __init__(self, capacity: int, specs, dtype, device, batch_size: int = 1,
+                 decode_attention=None):
         self.batch_size = batch_size
-        self.cache = StaticKVCache(capacity, specs, dtype, device, batch_size)
+        self.cache = StaticKVCache(capacity, specs, dtype, device, batch_size, decode_attention)
         self.step_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
         self.step_position = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
         self.graph = None          # (CUDAGraph, outputs) once recorded

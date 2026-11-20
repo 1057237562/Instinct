@@ -33,6 +33,35 @@ pub enum Command {
     Inspect(InspectArgs),
     /// Compare a compiled parquet file against its JSONL source.
     Verify(VerifyArgs),
+    /// Losslessly split a Parquet file at row-group boundaries.
+    Split(SplitArgs),
+    /// Verify every shard hash and its original row-group mapping.
+    VerifyShards(VerifyShardsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyShardsArgs {
+    pub manifest: PathBuf,
+    /// Verify just this physical shard while retaining complete logical coverage.
+    #[arg(long)]
+    pub file: Option<String>,
+    #[arg(long, default_value_t = 2)]
+    pub threads: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct SplitArgs {
+    #[arg(short, long)]
+    pub input: PathBuf,
+    /// New destination directory (must not already exist).
+    #[arg(short, long)]
+    pub output: PathBuf,
+    /// Approximate compressed size per shard; whole row groups are preserved.
+    #[arg(long, value_parser = parse_size, default_value = "5GiB")]
+    pub target_size: u64,
+    /// Concurrent shard copy/verification workers.
+    #[arg(long, default_value_t = 2)]
+    pub threads: usize,
 }
 
 #[derive(Debug, Args)]

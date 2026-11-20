@@ -30,12 +30,11 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from model.model_instinct import InstinctForCausalLM
 from scripts.data_loader.lm_dataset import RLAIFDataset
 from trainer.trainer_utils import (Logger, is_main_process, lm_checkpoint,
-                                   pause_save_checkpoint, setup_seed, SkipBatchSampler, init_model,
+                                   checkpoint_after_update, wait_for_checkpoint, setup_seed, SkipBatchSampler, init_model,
                                    LMForRewardModel, config_from_args, build_optimizer,
                                    restore_config_from_checkpoint, apply_torchao_fp8_training)
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx, init_wandb_logger,
-    PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
 )
 from trainer.rollout_engine import create_rollout_engine
 from trainer.training_profiler import TrainingProfiler
@@ -326,34 +325,17 @@ def ppo_train_epoch(epoch: int, loader, iters: int, rollout_engine, ref_model, a
                    f"ClipFrac: {clipfrac_val:.4f}, Critic Loss: {critic_loss_val:.4f}, "
                    f"Avg Response Len: {avg_len_val:.2f}, Actor LR: {actor_lr:.8f}, Critic LR: {critic_lr:.8f}")
 
-        if (step % args.save_interval == 0 or step == iters) and is_main_process():
-            actor_model.eval()
-            moe_suffix = '_moe' if lm_config.use_moe else ''
-            ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
-            raw_actor = actor_model.module if isinstance(actor_model, DistributedDataParallel) else actor_model
-            raw_actor = getattr(raw_actor, '_orig_mod', raw_actor)
-            actor_state = raw_actor.state_dict()
-            torch.save({k: v.half().cpu() for k, v in actor_state.items()}, ckp)
-
-            # 使用 lm_checkpoint 保存完整状态（包括 critic）
-            lm_checkpoint(lm_config, weight=args.save_weight, model=actor_model, optimizer=actor_optimizer,
-                         epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints',
-                         scheduler=actor_scheduler, critic_model=critic_model,
-                         critic_optimizer=critic_optimizer, critic_scheduler=critic_scheduler, ref_model=ref_model)
-            actor_model.train()
-            del actor_state
-
         del enc, gen_out, completion_ids, responses_text, rewards, full_mask, values_seq, advantages
         del labels, resp_labels, resp_idx, resp_pad_mask, valid_resp, eos_mask, has_eos, eos_pos, resp_lengths, resp_policy_mask, resp_value_mask, old_resp_logp, ref_resp_logp
         del kl, kl_ref, policy_loss, value_loss, loss, token_rewards, returns, old_resp_values, prompt_lens, logp_pos
 
-        if pause_requested(args):
-            clear_pause_request(args)
-            profiler.finish()
-            if is_main_process():
-                pause_save_checkpoint(args, lm_config, weight=args.save_weight, model=actor_model, optimizer=actor_optimizer, epoch=epoch, step=step, wandb=wandb, scheduler=actor_scheduler, critic_model=critic_model, critic_optimizer=critic_optimizer, critic_scheduler=critic_scheduler, ref_model=ref_model)
-            Logger('[PAUSED] Training paused — resume checkpoint saved.')
-            sys.exit(PAUSE_EXIT_CODE)
+        checkpoint_after_update(
+            args, lm_config, profiler, periodic=step == iters or step % args.save_interval == 0,
+            weight=args.save_weight, model=actor_model, optimizer=actor_optimizer,
+            epoch=epoch, step=step, wandb=wandb,
+            scheduler=actor_scheduler, critic_model=critic_model,
+            critic_optimizer=critic_optimizer, critic_scheduler=critic_scheduler, ref_model=ref_model,
+        )
 
 
 if __name__ == "__main__":
@@ -499,6 +481,7 @@ if __name__ == "__main__":
         else:
             ppo_train_epoch(epoch, loader, len(loader), rollout_engine, ref_model, actor_scheduler, critic_scheduler, reward_model, 0, wandb, use_sglang = (args.rollout_engine == "sglang"))
 
+    wait_for_checkpoint()
     final_profile_metrics = profiler.finish()
     if final_profile_metrics and wandb:
         wandb.log(final_profile_metrics)

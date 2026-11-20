@@ -397,6 +397,8 @@ def resolve_model_config_path(weight_path: str, repo_root: str) -> str:
     """
     root = Path(repo_root)
     weight = Path(weight_path)
+    if weight.suffix.lower() == '.npz':
+        return str(weight) if weight.is_file() else ''
     config_name = weight.with_suffix(".json").name
     candidates = (
         weight.with_suffix(".json"),

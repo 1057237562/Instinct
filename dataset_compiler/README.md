@@ -143,7 +143,53 @@ so a training cursor survives the container switch unchanged. Planning reads
 only the `token_count` column, and materializing one 381,033-row chunk takes
 4.1 s (394 MiB).
 
-## Options worth knowing
+## Split an existing Parquet corpus
+
+```powershell
+./target/release/dataset_compiler split `
+  -i ../dataset/pretrain_coder_l2l3_24b.parquet `
+  -o ../dataset/pretrain_coder_l2l3_24b_shards_5gib `
+  --target-size 5GiB --threads 2
+```
+
+The destination directory must be new. This copies encoded column chunks;
+there is no text decoding or recompression. Shards keep contiguous whole row
+groups, so sizes are approximate (the nearest row-group boundary). The source
+file is only read. Rayon copies and verifies independent shards concurrently;
+each shard's writer is sequential. Use a small thread count and a low process
+priority when sharing the machine with training; disk bandwidth is still shared.
+
+Every encoded column chunk is compared against the source using SHA-256, and
+each shard's schema, row counts and `token_count` sum are checked. File-level
+metadata is retained, with aligned chunk boundaries rebased to the shard's
+local row numbers. Optional page indexes and bloom filters are omitted; row
+values, columns, compression and order are unchanged. Completed shards have
+lexically ordered `part-00001-of-00005.parquet` names. Incomplete files end in
+`.partial`; `manifest.json` appears only after the whole operation succeeds
+and records original row ranges, token totals and output hashes. Only use the
+directory once that manifest reports `complete`.
+
+Pass one shard as `--data_path` to train it separately, or pass the directory
+to read the complete corpus. The production native cuBLAS loader supports exact
+continuation from the original file to a complete shard directory: the manifest
+retains `source_identity` and `source_row_group_rows`, and `verify-shards
+DIRECTORY/manifest.json --threads 2` checks every file's SHA-256 and complete
+row-group coverage before use. The loader retains global group numbers, batch
+shuffle seeds, cache keys and the original checkpoint identity while routing
+physical reads to the corresponding shard/local group. It can rebuild plans
+and packed caches without the original large file. Existing checkpoints need
+no rewriting. Running processes keep their current source; the new directory
+is selected on the next resume. This requires the updated native loader and
+compiler; it does not change standard PyTorch resume contracts. Selecting a
+manifest-listed single shard in the updated native loader limits that run to
+the selected file while retaining the global cursor. Its end uses the usual
+final-batch gradient flush, saves the full resume state and pauses. The production
+wrapper prepares the next shard for the next Resume click; the final shard
+completes the epoch. A partial accumulation is flushed at that boundary, so
+optimizer update grouping can differ from a continuous run. A global native
+plan embedded in `native_plans` permits use with only the selected file present.
+
+## Compile options
 
 | Flag | Default | Meaning |
 | --- | --- | --- |

@@ -81,6 +81,12 @@ class TokenRateStreamer:
         self.started = None
         self.state = (0, None)
         self.first = True
+        self.token_timing = False
+        self.first_token_at = self.last_token_at = None
+
+    def enable_token_timing(self):
+        """Opt in when every token is delivered individually (native chat)."""
+        self.token_timing = True
 
     def start_decode(self):
         """Exclude prompt prefill/compilation from the conventional decode rate."""
@@ -95,6 +101,10 @@ class TokenRateStreamer:
         else:
             count, _ = self.state
             self.state = (count + tokens.numel(), now)
+            if self.token_timing and tokens.numel():
+                if self.first_token_at is None:
+                    self.first_token_at = now
+                self.last_token_at = now
         self.streamer.put(tokens)
 
     def end(self):
@@ -105,6 +115,13 @@ class TokenRateStreamer:
     def snapshot(self):
         count, end = self.state
         elapsed = max(0, end - self.started) if end is not None and self.started is not None else 0
+        if self.token_timing:
+            decode = max(0, self.last_token_at - self.first_token_at) if self.first_token_at is not None else 0
+            intervals = max(0, count - 1)
+            return {'tokens': count, 'seconds': elapsed,
+                    'tokens_per_second': intervals / decode if decode > 0 else 0,
+                    'decode_tokens': intervals, 'decode_seconds': decode,
+                    'ttft_seconds': self.first_token_at - self.started if self.first_token_at is not None else None}
         return {'tokens': count, 'seconds': elapsed, 'tokens_per_second': count / elapsed if elapsed else 0}
 
     def __iter__(self):
@@ -112,7 +129,24 @@ class TokenRateStreamer:
 
 
 def speed_caption(stats):
-    return f"{stats['tokens_per_second']:.1f} tokens/s · {stats['tokens']} tokens · {stats['seconds']:.2f}s"
+    rate = f"{stats['tokens_per_second']:.1f}" if stats.get('decode_tokens', 1) else '—'
+    caption = f"{rate} tokens/s · {stats['tokens']} tokens · {stats['seconds']:.2f}s"
+    if stats.get('ttft_seconds') is not None:
+        caption += f" · TTFT {stats['ttft_seconds']:.2f}s"
+    return caption
+
+
+def combine_generation_stats(items):
+    tokens = sum(item['tokens'] for item in items)
+    seconds = sum(item['seconds'] for item in items)
+    result = dict(tokens=tokens, seconds=seconds, tokens_per_second=tokens / seconds if seconds else 0)
+    if items and all('decode_seconds' in item for item in items):
+        decode_seconds = sum(item['decode_seconds'] for item in items)
+        decode_tokens = sum(item['decode_tokens'] for item in items)
+        result.update(decode_seconds=decode_seconds, decode_tokens=decode_tokens,
+                      tokens_per_second=decode_tokens / decode_seconds if decode_seconds else 0,
+                      ttft_seconds=items[0]['ttft_seconds'])
+    return result
 
 
 def render_updates(streamer, interval=0.1, clock=time.perf_counter):

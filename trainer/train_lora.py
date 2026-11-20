@@ -20,9 +20,9 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from scripts.data_loader.lm_dataset import SFTDataset
-from model.model_lora import save_lora, apply_lora
+from model.model_lora import apply_lora
 from trainer.trainer_utils import (
-    Logger, is_main_process, lm_checkpoint, pause_save_checkpoint,
+    Logger, lm_checkpoint, checkpoint_after_update, checkpoint_due, wait_for_checkpoint,
     init_model, config_from_args, build_optimizer,
     restore_config_from_checkpoint, apply_torchao_fp8_training,
     configure_bucket_memory_budget,
@@ -30,8 +30,7 @@ from trainer.trainer_utils import (
 )
 from trainer.trainer_cli import (
     build_trainer_parser, setup_dist_and_seed, build_autocast_ctx,
-    init_wandb_logger, set_cosine_lr, step_with_scaler, flush_remaining_grad,
-    PAUSE_EXIT_CODE, pause_requested, clear_pause_request,
+    init_wandb_logger, set_cosine_lr, step_with_scaler,
 )
 from trainer.packing_transition import packing_data_config, SequencePackingPlan
 from trainer.training_profiler import TrainingProfiler
@@ -57,7 +56,6 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, lora_params: list,
     """
     start_time = time.time()
     data_config['epoch_steps'] = int(iters)
-    last_step = start_step
     for step, batch in enumerate(loader, start=start_step + 1):
         bucket_status = packing_plan.observe_batch(
             batch, epoch=epoch, step=step,
@@ -66,7 +64,6 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, lora_params: list,
         profiler.begin_step(tokens=input_ids.numel(), useful_tokens=(labels != -100).sum().item())
         with profiler.phase("data_transfer"):
             input_ids, labels, sequence_ids = prepare_lm_batch(batch, args.device)
-        last_step = step
         set_cosine_lr(optimizer, epoch, step, iters, args)
 
         with profiler.phase("forward"):
@@ -78,7 +75,8 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, lora_params: list,
         with profiler.phase("backward"):
             scaler.scale(loss).backward()
 
-        if step % args.accumulation_steps == 0:
+        optimizer_boundary = step % args.accumulation_steps == 0 or step == iters
+        if optimizer_boundary:
             with profiler.phase("optimizer"):
                 step_with_scaler(scaler, optimizer, lora_params, args.grad_clip)
 
@@ -98,26 +96,16 @@ def train_epoch(epoch: int, loader: DataLoader, iters: int, lora_params: list,
             Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}{bucket_text}, epoch_time: {eta_min:.1f}min, elapsed_time: {elapsed_min:.1f}min')
             if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min, "elapsed_time": elapsed_min})
 
-        if (step % args.save_interval == 0 or step == iters) and is_main_process():
-            model.eval()
-            moe_suffix = '_moe' if lm_config.use_moe else ''
-            lora_save_path = f'{args.save_dir}/{args.lora_name}_{lm_config.hidden_size}{moe_suffix}.pth'
-            # LoRA只保存LoRA权重
-            save_lora(model, lora_save_path)
-            lm_checkpoint(lm_config, weight=args.lora_name, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, save_dir='./checkpoints', data_config=data_config)
-            model.train()
-
         del input_ids, labels, sequence_ids, res, loss
 
-        if pause_requested(args):
-            clear_pause_request(args)
-            profiler.finish()
-            if is_main_process():
-                pause_save_checkpoint(args, lm_config, weight=args.lora_name, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, lora_save=True, data_config=data_config)
-            Logger('[PAUSED] Training paused — LoRA checkpoint saved.')
-            sys.exit(PAUSE_EXIT_CODE)
+        if optimizer_boundary:
+            checkpoint_after_update(
+                args, lm_config, profiler, periodic=step == iters or checkpoint_due(args, step, start_step),
+                weight=args.lora_name, model=model, optimizer=optimizer,
+                epoch=epoch, step=step, wandb=wandb,
+                scaler=scaler, lora_save=True, data_config=data_config,
+            )
 
-    flush_remaining_grad(scaler, optimizer, lora_params, args.grad_clip, last_step, start_step, args.accumulation_steps)
 
 if __name__ == "__main__":
     parser = build_trainer_parser(
@@ -240,6 +228,7 @@ if __name__ == "__main__":
         else:
             train_epoch(epoch, loader, len(loader), lora_params, 0, wandb, packing_plan)
 
+    wait_for_checkpoint()
     final_profile_metrics = profiler.finish()
     if final_profile_metrics and wandb:
         wandb.log(final_profile_metrics)

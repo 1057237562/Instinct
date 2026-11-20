@@ -447,6 +447,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "futures-util",
  "percent-encoding",
  "reqwest",
  "russh",

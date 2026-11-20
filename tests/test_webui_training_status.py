@@ -10,6 +10,14 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_external_native_runs(monkeypatch):
+    # These tests synthesize Torch sessions and must not discover the user's
+    # real, shared native checkpoint manifest through the source __file__.
+    from scripts import native_training_monitor
+    monkeypatch.setattr(native_training_monitor, 'snapshot', lambda _: None)
+
+
 class _SessionState(dict):
     def __getattr__(self, name):
         return self[name]

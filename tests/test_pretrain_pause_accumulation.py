@@ -7,6 +7,7 @@ import pytest
 import torch
 
 import trainer.train_pretrain as trainer
+from trainer import trainer_utils
 from trainer.training_profiler import TrainingProfiler
 
 
@@ -45,7 +46,7 @@ def test_pause_saves_applied_gradients(monkeypatch, tmp_path, accumulation, star
     def save(*a, **kw):
         assert all(p.grad is None for p in model.parameters())
         saved.append(kw['step'])
-    monkeypatch.setattr(trainer, 'pause_save_checkpoint', save)
+    monkeypatch.setattr(trainer_utils, 'pause_save_checkpoint', save)
     batches = [torch.full((1, 4), i + 1, dtype=torch.long) for i in range(count)]
     def loader():
         for index, tokens in enumerate(batches, 1):

@@ -194,7 +194,7 @@ def test_real_pretrain_log_samples_clock_after_loss_sync(monkeypatch, streaming)
 
     args = SimpleNamespace(device='cpu', profile='off', early_exit=0, epochs=2,
                            accumulation_steps=1, grad_clip=1., log_interval=1,
-                           save_interval=10000, use_compile=0)
+                           save_interval=10000, save_weight='test', use_compile=0)
     model = Model()
     optimizer = torch.optim.SGD(model.parameters(), lr=.1)
     data_config = {'streaming_processed_tokens': 12300, 'streaming_chunks': 10}
@@ -207,7 +207,7 @@ def test_real_pretrain_log_samples_clock_after_loss_sync(monkeypatch, streaming)
     monkeypatch.setattr(torch.Tensor, 'item', synchronized_item)
     monkeypatch.setattr(trainer, 'set_cosine_lr', lambda *a: None)
     monkeypatch.setattr(trainer, 'set_cosine_lr_progress', lambda *a: None)
-    monkeypatch.setattr(trainer, '_pause_after_update', lambda *a: None)
+    monkeypatch.setattr(trainer, 'checkpoint_after_update', lambda *a, **kw: None)
     logs, metrics = [], []
     monkeypatch.setattr(trainer, 'Logger', logs.append)
     batches = [(torch.ones((1, n), dtype=torch.long), torch.ones((1, n), dtype=torch.long))

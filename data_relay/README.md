@@ -417,6 +417,34 @@ API（均需访问令牌）：`POST /api/code-sync` 接收 `instance_uuid/includ
 测试：`cargo test`、`python data_relay/tests/test_code_sync_remote.py`、
 `node data_relay/tests/test_code_sync_ui.cjs`（浏览器测试使用隔离本地中继与模拟远端响应）。
 
+### 按清单交付原生运行文件
+
+`upload-files --upload-manifest FILE.json` 复用中继的 AutoDL 实例选择、SSH
+主机密钥固定与断点传输，适用于完整原生源码包、NPZ 检查点等需要明确目标路径的文件。
+它只连接已经运行的实例，不更新 Git、不切换 GPU 模式，也不覆盖内容不同的目标文件。
+
+```json
+{"host":"connect.example.com","port":12345,"files":[
+  {"source":"D:/artifacts/native.zip","destination":"/autodl-tmp/native.zip"}
+]}
+```
+
+```powershell
+data_relay.exe --config private-config.toml upload-files --upload-manifest files.json
+```
+
+清单中的 SSH 地址必须与所选实例一致。每个本地源先计算 SHA-256，远端通过完整
+SHA-256 后才以不覆盖的硬链接操作安装目标文件；重试保留 `.incoming.rpart`。
+配置、上传清单与日志应放在忽略的 `relay_data/`，凭据只放配置文件。
+
+大文件可设置 `INSTINCT_RELAY_STREAM_UPLOAD=1` 使用 SSH 流式写入；再设置
+`INSTINCT_RELAY_PARALLEL_UPLOAD=1` 会使用 8 条独立连接传输 32 MiB 的有界片段。
+原连续前缀、范围计划和已完成片段都可复用；片段全部完成后通过系统 `cat` 顺序组装，
+校验整个文件，再清除本次片段。组装阶段会同时占用片段与完整临时文件空间，启动前
+必须为其及后续训练的检查点原子替换预留空间。`PROGRESS` 不计历史断点字节。
+普通 SFTP 可通过 `INSTINCT_SFTP_CONCURRENT_WRITES` 调整确认窗口（1–128，默认 8）；
+该窗口代表在途 I/O 请求数，不代表 CPU 解析线程数。上传代码本身不会启动训练。
+
 ### 启动与续训
 
 项目根目录双击 `start_data_relay.bat`，启动器从 `data_relay/bin/` 下的 `data_relay_manager.exe`、

@@ -3,6 +3,44 @@ from types import SimpleNamespace
 from scripts.stream_metrics import TokenRateStreamer, speed_caption, render_updates
 
 
+def test_native_token_rate_separates_ttft_and_tool_turns():
+    from scripts.stream_metrics import combine_generation_stats
+    times = iter([0., 10., 10.1, 10.2, 10.3])
+    delegate = SimpleNamespace(put=lambda t: None, end=lambda: None)
+    metrics = TokenRateStreamer(delegate, clock=lambda: next(times))
+    metrics.enable_token_timing()
+    token = SimpleNamespace(numel=lambda: 1)
+    metrics.put(token)  # prompt
+    metrics.put(token)
+    metrics.put(token)
+    metrics.put(token)
+    metrics.end()
+    result = metrics.snapshot()
+    assert result['tokens'] == 3
+    assert result['ttft_seconds'] == 10.
+    assert abs(result['tokens_per_second'] - 10.) < 1e-10
+    assert result['seconds'] == 10.3
+    combined = combine_generation_stats([result, result])
+    assert combined['tokens'] == 6
+    assert combined['decode_tokens'] == 4
+    assert abs(combined['tokens_per_second'] - 10.) < 1e-10
+    assert 'TTFT 10.00s' in speed_caption(combined)
+
+
+def test_native_single_token_does_not_invent_decode_throughput():
+    times = iter([0., 2., 2.1])
+    metrics = TokenRateStreamer(SimpleNamespace(put=lambda t: None, end=lambda: None), clock=lambda: next(times))
+    metrics.enable_token_timing()
+    token = SimpleNamespace(numel=lambda: 1)
+    metrics.put(token)
+    metrics.put(token)
+    metrics.end()
+    result = metrics.snapshot()
+    assert result['ttft_seconds'] == 2.
+    assert result['decode_tokens'] == 0
+    assert '— tokens/s' in speed_caption(result)
+
+
 def test_counts_blocks_excludes_prompt_and_freezes_elapsed():
     times = iter([10.0, 12.0, 13.0, 14.0])
     forwarded = []

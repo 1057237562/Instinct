@@ -20,8 +20,18 @@ import torch
 import numpy as np
 import streamlit as st
 from transformers import AutoTokenizer
-from scripts.stream_metrics import TokenRateStreamer, speed_caption, render_updates
+# Streamlit can retain helper modules from before the native-runtime upgrade.
+# Refresh that older API once while keeping this session's conversation state.
+import importlib
+import scripts.stream_metrics as _stream_metrics
+import scripts.chat_native as _chat_native
+if not hasattr(_stream_metrics, 'combine_generation_stats'):
+    importlib.reload(_stream_metrics)
+if not hasattr(_chat_native, 'NATIVE_CHAT_RUNTIME_VERSION'):
+    importlib.reload(_chat_native)
+from scripts.stream_metrics import TokenRateStreamer, speed_caption, render_updates, combine_generation_stats
 from scripts.chat_generation import GenerationTask, stop_generation
+from scripts.chat_native import NativeChatModel, discover_chat_weights, read_native_metadata, NATIVE_CHAT_RUNTIME_VERSION
 from scripts.chat_icons import svg_label
 from scripts.chat_tools import (
     ChatTextIteratorStreamer, split_tool_calls, tool_request_message, run_tool_calls,
@@ -457,9 +467,14 @@ def render_model_config(config_path, *, config=None):
         return
     try:
         if config is None:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = InstinctConfig(**json.load(f))
-    except (OSError, ValueError, TypeError) as exc:
+            if config_path.lower().endswith('.npz'):
+                metadata = read_native_metadata(config_path)
+                config = InstinctConfig(**metadata['config'])
+                st.sidebar.caption(f"cuBLASLt · BF16 · step={metadata.get('progress', {}).get('steps', '?')}")
+            else:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = InstinctConfig(**json.load(f))
+    except (OSError, ValueError, TypeError, KeyError) as exc:
         st.sidebar.error(f"{get_text('config_error')}: {exc}")
         return
     architecture = 'MoE' if config.use_moe else 'Dense'
@@ -480,6 +495,9 @@ def load_model_tokenizer(config_path, tokenizer_path, weight_path=None):
     hidden global reference after the session's unload button is pressed and
     therefore prevents CUDA memory from being released.
     """
+    if weight_path and weight_path.lower().endswith('.npz'):
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        return NativeChatModel(weight_path, repo_root), tokenizer
     with open(config_path, 'r', encoding='utf-8') as f:
         cfg_dict = json.load(f)
     config = InstinctConfig(**cfg_dict)
@@ -721,23 +739,15 @@ if "tokenizer_path" not in st.session_state:
 
 default_weight = os.path.join(repo_root, "out", "pretrain_768.pth")
 if "weight_path" not in st.session_state:
-    st.session_state.weight_path = default_weight if os.path.exists(default_weight) else ""
+    available_weights = discover_chat_weights(repo_root)
+    latest_native = next((p for p in available_weights.values() if p.lower().endswith('.npz')), '')
+    st.session_state.weight_path = latest_native or (default_weight if os.path.exists(default_weight) else "")
 
 tokenizer_path = st.sidebar.text_input("tokenizer dir", value=st.session_state.tokenizer_path, key="tok_path")
 
-# Scan for available .pth weight files
+# Native NPZ contains its own topology, including full resume archives.
 def _scan_weights():
-    entries = {}
-    for scan_dir, label in [("../out", "out"), ("../checkpoints", "checkpoints")]:
-        scan_path = os.path.join(script_dir, scan_dir)
-        if not os.path.isdir(scan_path):
-            continue
-        for f in sorted(os.listdir(scan_path)):
-            if f.endswith(".pth") and "_resume" not in f:
-                full = os.path.join(scan_path, f)
-                size_mb = os.path.getsize(full) / (1024 * 1024)
-                entries[f"{label}/{f}  ({size_mb:.0f} MB)"] = full
-    return entries
+    return discover_chat_weights(repo_root)
 
 weight_options = _scan_weights()
 weight_labels = list(weight_options.keys())
@@ -746,14 +756,14 @@ if weight_labels:
     CUSTOM_TOKEN = "Custom path..."
     weight_labels.append(CUSTOM_TOKEN)
     current = st.session_state.weight_path
-    default_idx = 0
+    default_idx = len(weight_labels) - 1 if current else 0
     for i, (label, path) in enumerate(weight_options.items()):
         if os.path.normpath(path) == os.path.normpath(current):
             default_idx = i
             break
 
-    selected = st.sidebar.selectbox(svg_label('folder', "weight .pth"), weight_labels, index=default_idx,
-                                    key="wt_select", help="Detected weight files in out/ and checkpoints/")
+    selected = st.sidebar.selectbox(svg_label('folder', "weight .pth / .npz"), weight_labels, index=default_idx,
+                                    key="wt_select", help="out/ and checkpoints/ · newest first · NPZ → cuBLASLt BF16")
     if selected == CUSTOM_TOKEN:
         weight_path = st.sidebar.text_input(svg_label('folder', "Custom path"), value=current, key="wt_custom")
     else:
@@ -761,7 +771,7 @@ if weight_labels:
         if "_wt_custom" in st.session_state:
             del st.session_state._wt_custom
 else:
-    weight_path = st.sidebar.text_input("weight .pth", value=st.session_state.weight_path, key="wt_path")
+    weight_path = st.sidebar.text_input("weight .pth / .npz", value=st.session_state.weight_path, key="wt_path")
 
 config_path = resolve_model_config_path(weight_path, repo_root)
 
@@ -775,8 +785,28 @@ st.session_state.config_path = config_path
 st.session_state.tokenizer_path = tokenizer_path
 st.session_state.weight_path = weight_path
 
-ready = os.path.exists(config_path) and os.path.isdir(tokenizer_path)
+ready = os.path.isfile(weight_path) and os.path.exists(config_path) and os.path.isdir(tokenizer_path)
 slogan = "Instinct Chat"
+
+# Hot upgrades replace only the inference worker, preserving the user's chat
+# and controls instead of requiring a server restart or clearing conversation.
+if (st.session_state.get('model_loaded')
+        and st.session_state.get('loaded_weight_path', '').lower().endswith('.npz')
+        and getattr(st.session_state.model, 'runtime_version', 0) != NATIVE_CHAT_RUNTIME_VERSION):
+    if not stop_generation(st.session_state):
+        st.sidebar.warning(get_text('generation_stopping'))
+        st.stop()
+    previous = st.session_state.pop('model')
+    st.session_state.model_loaded = False
+    previous.close()
+    with st.spinner(get_text('loading_model')):
+        try:
+            model, tokenizer = load_model_tokenizer(st.session_state.loaded_config_path,
+                                                    tokenizer_path, st.session_state.loaded_weight_path)
+            st.session_state.model, st.session_state.tokenizer = model, tokenizer
+            st.session_state.model_loaded = True
+        except Exception as exc:
+            st.sidebar.error(f"{get_text('load_failed')}: {exc}")
 
 if not st.session_state.get('model_loaded', False):
     if ready:
@@ -800,6 +830,8 @@ if not st.session_state.get('model_loaded', False):
 else:
     loaded_name = os.path.basename(st.session_state.get('loaded_weight_path', ''))
     st.sidebar.success(svg_label('success', f"{get_text('model_loaded')}: {loaded_name}"))
+    if isinstance(st.session_state.model, NativeChatModel):
+        st.sidebar.caption(st.session_state.model.backend)
     st.sidebar.caption(get_text('loaded_config'))
     render_model_config(
         st.session_state.get('loaded_config_path', ''),
@@ -837,7 +869,9 @@ st.sidebar.markdown('<hr style="margin: 12px 0 16px 0;">', unsafe_allow_html=Tru
 
 # 功能开关
 st.session_state.enable_thinking = st.sidebar.checkbox(get_text('thinking'), value=False, help=get_text('think_tip'))
-st.session_state.enable_logit_lens = st.sidebar.checkbox(get_text('logit_lens'), value=False)
+lens_supported = getattr(st.session_state.get('model'), 'supports_logit_lens', True)
+st.session_state.enable_logit_lens = st.sidebar.checkbox(
+    get_text('logit_lens'), value=False, disabled=not lens_supported) and lens_supported
 st.session_state.selected_tools = []
 with st.sidebar.expander(get_text('tools')):
     st.caption(get_text('tool_select'))
@@ -1019,7 +1053,7 @@ def main():
             template_kwargs["tools"] = tools
         new_prompt = tokenizer.apply_chat_template(st.session_state.chat_messages, **template_kwargs)
 
-        inputs = tokenizer(new_prompt, return_tensors="pt", truncation=True).to(device)
+        inputs = tokenizer(new_prompt, return_tensors="pt", truncation=True).to(getattr(model, 'input_device', device))
 
         lens = None
         if logit_lens_slot is not None:
@@ -1091,7 +1125,7 @@ def main():
                 })
             render_chat_response(placeholder, full_answer, tool_events)
             new_prompt = tokenizer.apply_chat_template(st.session_state.chat_messages, **template_kwargs)
-            inputs = tokenizer(new_prompt, return_tensors="pt", truncation=True).to(device)
+            inputs = tokenizer(new_prompt, return_tensors="pt", truncation=True).to(getattr(model, 'input_device', device))
             streamer = ChatTextIteratorStreamer(tokenizer, skip_prompt=True)
             streamer = TokenRateStreamer(streamer)
             generation_kwargs["input_ids"] = inputs.input_ids
@@ -1115,10 +1149,7 @@ def main():
         if not answer.strip() and tool_events:
             st.caption(get_text('tool_no_answer'))
         loading_slot.empty()
-        total_tokens = sum(item['tokens'] for item in generation_stats)
-        total_seconds = sum(item['seconds'] for item in generation_stats)
-        stats = {'tokens': total_tokens, 'seconds': total_seconds,
-                 'tokens_per_second': total_tokens / total_seconds if total_seconds else 0}
+        stats = combine_generation_stats(generation_stats)
         speed_slot.caption(speed_caption(stats))
 
         messages.append({"role": "assistant", "content": answer, "generation_stats": stats,

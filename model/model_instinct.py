@@ -283,11 +283,14 @@ class Attention(nn.Module):
         cos, sin = position_embeddings
         xq, xk = apply_rotary_pos_emb(xq, xk, cos, sin)
         static = isinstance(past_key_value, StaticKVCacheLayer)
+        decode_attention = None
         if static:
-            # Preallocated buffer: this step's slice is written in place and the
-            # whole buffer is attended through the mask the trunk built, so the
-            # shapes never change and the step stays capturable.
-            xk, xv = past_key_value.append(xk, xv, cache_positions)
+            cache_k, cache_v = past_key_value.append(xk, xv, cache_positions)
+            if not self.training:
+                decode_attention = past_key_value.decode_attention
+            # Prefill can use the prompt's own K/V tensors after storing them.
+            if decode_attention is None or seq_len == 1:
+                xk, xv = cache_k, cache_v
             past_kv = past_key_value if use_cache else None
         else:
             if past_key_value is not None:
@@ -297,7 +300,10 @@ class Attention(nn.Module):
                 xk = torch.cat([k_past, xk], dim=1)
                 xv = torch.cat([v_past, xv], dim=1)
             past_kv = make_cache(xk, xv, self.kv_cache_dtype) if use_cache else None
-        if self.flash and not self.training and static:
+        if decode_attention is not None and seq_len == 1:
+            output = decode_attention(xq, xk, xv, past_key_value.pad_starts,
+                                      cache_positions, past_key_value.finished).reshape(bsz, 1, -1)
+        elif self.flash and not self.training and static:
             # The mask carries causality already (see StaticKVCache.mask_for).
             output = flash_attention(xq, xk, xv, dropout_p=0.0,
                                      is_causal=False, attention_mask=attention_mask)
@@ -541,10 +547,12 @@ class InstinctModel(nn.Module):
             if position_ids is None:
                 raise ValueError("a StaticKVCache needs explicit position_ids")
             start_pos = 0
-            # The cache owns the mask: it hides the buffer tail and, on a
-            # prompt, everything after each query. Building it here keeps every
-            # layer's SDPA the same shape on every step.
-            attention_mask = past_key_values.mask_for(position_ids)
+            if past_key_values.decode_attention is None or self.training:
+                attention_mask = past_key_values.mask_for(position_ids)
+            elif seq_length > 1:
+                attention_mask = past_key_values.mask_for(position_ids, key_length=seq_length)
+            else:
+                attention_mask = None  # the decode kernel reads the bounds on device
         else:
             if hasattr(past_key_values, 'layers'):
                 past_key_values = None  # legacy HF cache objects are not ours
@@ -910,18 +918,20 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                   f'rather than {self.config.kv_cache_dtype}: a quantized buffer would have to be '
                   f'dequantized and re-quantized on every step.', flush=True)
         parameters = next(self.parameters())
-        state = DecodeState(capacity, layer_specs(self), parameters.dtype, input_ids.device, batch)
-        bytes_needed = sum(layer.key.numel() * layer.key.element_size() * 2 for layer in state.cache)
+        specs = layer_specs(self)
         if input_ids.device.type == 'cuda':
+            bytes_needed = 2 * batch * capacity * parameters.element_size() * sum(
+                heads * dim for heads, dim in specs)
             free, _ = torch.cuda.mem_get_info(input_ids.device)
             if bytes_needed > batch_capacity_guard(batch) * free:
-                del state
                 print(f'[Inference] static KV cache needs {bytes_needed / 2 ** 20:.0f} MiB of '
                       f'{free / 2 ** 20:.0f} MiB free for max_new_tokens={max_new_tokens}; '
                       f'using the growing cache.', flush=True)
                 if raise_on_memory:
                     raise _StaticCacheMemoryFull()
                 return None
+        state = DecodeState(capacity, specs, parameters.dtype, input_ids.device, batch,
+                            getattr(self, '_static_gqa_attention', None))
         # Keep the smallest state as the fast path for normal chat turns and one
         # larger state for a response that crossed a capacity boundary.  When a
         # response grows again, replace the larger state rather than evicting
@@ -936,16 +946,14 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                                   max_new_tokens, chunks, sample, forward_kwargs):
         """Decode into a fixed-shape cache; returns the number of tokens written.
 
-        Token/EOS bookkeeping matches the growing-cache loop exactly, so the two
-        paths emit identical sequences. Every decode step has identical shapes
-        and no host-derived offset, which is what lets this step be captured as
-        one CUDA graph. Prefill keeps the prompt's shape and is not captured.
+        Token/EOS bookkeeping matches the growing-cache loop. The fixed shapes
+        and device-resident offsets let each bucket replay one CUDA graph.
+        Prefill uses the prompt's shape and runs outside the graph.
 
         A left-padded batch shares one physical cursor: every row's prompt ends
         at the same storage column, the step's slot is ``initial_length + step``
-        for the whole batch, and each row's pad prefix is dropped by the mask.
-        Finished rows keep stepping -- their forced-EOS tokens land in their own
-        slots, which no other row attends -- exactly like the growing loop.
+        for the whole batch, and each row's pad prefix is hidden. Finished rows
+        keep emitting EOS, and the length-aware kernel skips their KV reads.
         """
         initial_length = input_storage.shape[1] - max_new_tokens
         device = input_storage.device
@@ -953,6 +961,8 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         prompt = input_storage[:, :initial_length]
         eos_token_id = sample['eos_token_id']
         cache = state.cache
+        if cache.finished is not None:
+            cache.finished.zero_()
         position_ids = torch.arange(initial_length, device=device).unsqueeze(0).expand(batch, -1)
         outputs = self.forward(prompt, None, cache, use_cache=True, position_ids=position_ids,
                                **forward_kwargs)
@@ -963,6 +973,10 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
         # stays valid for every later turn that reuses the state.
         step_ids, step_position = state.step_ids, state.step_position
         graph_eligible = self._decode_kwargs_capturable(forward_kwargs)
+        # LongRoPE can change the frequency table used by an entire prefill.
+        # Diagnostics also rely on the original forward boundaries.
+        copy_on_growth = (cache.decode_attention is not None and graph_eligible and not self.training
+                          and self.model.freqs_cos_short is None)
         for step in range(max_new_tokens):
             position = initial_length + step
             input_storage[:, position:position + 1].copy_(next_token)
@@ -972,10 +986,8 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
             final_step = step + 1 == max_new_tokens
             if chunks.push(next_token, finished, final=final_step) or final_step:
                 break  # stop before the forward whose logits would be discarded
-            # The answer reached this cache's real capacity.  Allocate the next
-            # bucket and prefill it from the tokens already produced.  This is
-            # infrequent (at 512/1024/2048/...) and avoids paying the largest
-            # bucket's attention cost for every short answer.
+            # The answer reached this bucket's capacity. Copy the prefix to the
+            # next bucket when its cached representations can be reused.
             if position >= state.capacity:
                 context = input_storage[:, :position + 1]
                 try:
@@ -993,18 +1005,25 @@ class InstinctForCausalLM(PreTrainedModel, GenerationMixin):
                     raise RuntimeError(
                         'static KV cache could not grow at capacity boundary; '
                         'reduce the context length or free GPU memory')
+                if copy_on_growth:
+                    state.cache.copy_prefix_from(cache, position)
                 cache = state.cache
                 step_ids, step_position = state.step_ids, state.step_position
-                position_ids = torch.arange(position + 1, device=device).unsqueeze(0).expand(batch, -1)
-                outputs = self.forward(
-                    context, None, cache, use_cache=True,
-                    position_ids=position_ids, **forward_kwargs)
-                next_token = _sample_next_token(
-                    outputs.logits[:, -1, :], context, finished, **sample)
-                continue
+                if cache.finished is not None:
+                    cache.finished.zero_()
+                if not copy_on_growth:
+                    position_ids = torch.arange(position + 1, device=device).unsqueeze(0).expand(batch, -1)
+                    outputs = self.forward(
+                        context, None, cache, use_cache=True,
+                        position_ids=position_ids, **forward_kwargs)
+                    next_token = _sample_next_token(
+                        outputs.logits[:, -1, :], context, finished, **sample)
+                    continue
 
             step_ids.copy_(next_token.view(batch, 1))
             step_position.fill_(position)
+            if cache.finished is not None and eos_token_id is not None and graph_eligible:
+                cache.finished.copy_(finished)
             # A graph recorded for plain decoding must never serve a call with
             # Python callbacks (logit lens / early-exit diagnostics).
             if state.graph is not None and graph_eligible:

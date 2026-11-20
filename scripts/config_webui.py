@@ -34,6 +34,7 @@ try:
     )
     from scripts.autotune_panel import active as autotune_active
     from scripts.muon_controls import panel_arguments as muon_panel_arguments, use_chunk16
+    from scripts import native_training_monitor
 except ModuleNotFoundError:
     from moe_router_controls import migration_args as moe_router_migration_args
     from cpt_defaults import apply_cpt_defaults
@@ -46,6 +47,8 @@ except ModuleNotFoundError:
     )
     from autotune_panel import active as autotune_active
     from muon_controls import panel_arguments as muon_panel_arguments, use_chunk16
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import native_training_monitor
 
 # ═══════════════════════════════════════════════════════════════
 # Page config
@@ -4831,6 +4834,8 @@ with st.sidebar:
                 or _dataset_missing or _base_missing
                 or st.session_state.get('train_status') == 'running'
                 or autotune_active(st.session_state) or _autotune_profile_invalid
+                or bool((native_training_monitor.snapshot(os.path.join(
+                    _checkpoints_dir(), 'native_cublas', 'training_run.json')) or {}).get('alive'))
             )
             if st.session_state.get('train_status') == 'paused':
                 _resume_type = st.session_state.get('train_type', 'pretrain')
@@ -5159,6 +5164,13 @@ def _render_training_activity():
                     st.rerun()
 
 with _ui["activity"]:
+    @st.fragment(run_every=2)
+    def _render_native_training_activity():
+        native_training_monitor.render(st, os.path.join(
+            _checkpoints_dir(), 'native_cublas', 'training_run.json'),
+            read_log=_read_training_log, render_charts=render_log_metrics_charts)
+
+    _render_native_training_activity()
     _render_training_activity()
 
 

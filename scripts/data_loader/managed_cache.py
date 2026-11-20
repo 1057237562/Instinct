@@ -19,6 +19,14 @@ def _source_digest(source, parent):
     from filelock import FileLock
 
     source = Path(source).resolve()
+    if source.is_dir():
+        from scripts.data_loader.source_format import source_files
+        shards = [
+            (Path(filename).relative_to(source).as_posix(),
+             _source_digest(Path(filename), parent))
+            for filename in source_files(source)
+        ]
+        return hashlib.sha256(json.dumps(shards).encode('utf-8')).hexdigest()
     stat = source.stat()
     sample = hashlib.sha256()
     with source.open('rb') as handle:
