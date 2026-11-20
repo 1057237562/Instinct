@@ -622,6 +622,14 @@ closing `</think>` (`no_code = 141`), while no-think had `no_code = 29` and
 `eval/livecodebench/native_instinct_r1_step01664_release_v6_{think,nothink}_ctx4096_latest175/`
 and provenance `eval/evalplus/native_instinct_r1_step01664_lcb_provenance/`.
 
+Retired: the checkpoint behind these numbers (`native_instinct_r1`, steps 1,664 and
+3,320) was trained under the legacy batch-global LongRoPE rule and was deleted on
+2026-11-21; the run logs are kept under `tmp/archive/native_instinct_r1_legacy_20261121/`
+and the evaluation JSON files remain only as historical records. The replacement run
+`native_instinct_r1_pos` retrains the same pretrain base and corpus with the fixed
+position-unique semantics (branch `codex/longrope-fix`).
+
+
 8192-context retry, over-context subset only: the 139 latest-175 tasks whose 4096-context
 think generation hit the context cap were re-generated with total context 8192 (MXFP8
 E4M3 KV capacity 8192, greedy, same seed; `LCB_SUBSET_PATH` filters both generation and
