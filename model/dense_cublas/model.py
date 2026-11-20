@@ -148,10 +148,20 @@ class Model:
             self._parameter('model.loop_gate.A_log', (h,), zeros=True)
         if c['model_architecture'] == 'looped_legacy' and c['loop_iters']:
             self._parameter('model.loop_pos_embed.weight', (c['loop_iters'], h), zeros=True)
-        self.cos, self.sin = (engine.array(x) for x in rope_tables(c))
-        from .rope import is_longrope, longrope_tables
+        from .rope import (is_longrope, longrope_tables, mixed_longrope_tables,
+                           rope_switch_mode)
+        scaling = c.get('rope_scaling')
+        position_mode = (is_longrope(scaling)
+                         and rope_switch_mode(scaling) == 'position')
+        tables = mixed_longrope_tables(c) if position_mode else rope_tables(c)
+        self.cos, self.sin = (engine.array(x) for x in tables)
+        # Legacy batch mode stores the short table separately: one table is
+        # selected per forward from the largest logical position, and rollout
+        # rebuilds the KV cache if the decoding context later crosses the
+        # boundary. Position mode needs no companion table because each position
+        # already carries its own encoding in the mixed tables above.
         self.short_rope = (tuple(engine.array(x) for x in longrope_tables(c, False))
-                           if is_longrope(c.get('rope_scaling')) else None)
+                           if is_longrope(scaling) and not position_mode else None)
         if c.get('freeze_embeddings', False):
             self.params['model.embed_tokens.weight'].requires_grad = False
         self._zero_aux = engine.full((1,), 0.)

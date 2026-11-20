@@ -41,8 +41,8 @@ def test_longrope_uses_per_dimension_factors_and_retains_initial_positions():
     assert not torch.allclose(long_cos[2, 1:4], native_cos[2, 1:4])
 
 
-def test_longrope_switches_from_short_to_long_cache_at_original_context():
-    scaling = _longrope_config(long_retained_start_tokens=0)
+def test_longrope_legacy_batch_mode_switches_whole_forward_at_original_context():
+    scaling = _longrope_config(long_retained_start_tokens=0, switch_mode="batch")
     long_cos, long_sin, short_cos, short_sin = build_rope_caches(
         8, 16, 10_000.0, scaling
     )
@@ -64,6 +64,57 @@ def test_longrope_switches_from_short_to_long_cache_at_original_context():
         start_pos=0, seq_length=6, position_ids=packed_positions,
     )
     torch.testing.assert_close(packed[0], short_cos[packed_positions])
+
+
+def test_longrope_default_position_mode_is_position_unique():
+    scaling = _longrope_config(long_retained_start_tokens=0)
+    assert scaling.get("switch_mode") is None
+    long_cos, long_sin, short_cos, short_sin = build_rope_caches(
+        8, 16, 10_000.0, scaling
+    )
+    positions = torch.tensor([[0, 1, 2, 3, 4, 7]])
+    cos, _ = select_rope_cache(
+        long_cos, long_sin, short_cos, short_sin, scaling,
+        start_pos=0, seq_length=6, position_ids=positions,
+    )
+    torch.testing.assert_close(cos[:, :4], short_cos[positions][:, :4])
+    torch.testing.assert_close(cos[:, 4:], long_cos[positions][:, 4:])
+    # A token's encoding depends only on its own position, not on the batch.
+    alone = select_rope_cache(
+        long_cos, long_sin, short_cos, short_sin, scaling,
+        start_pos=0, seq_length=1, position_ids=torch.tensor([[3]]),
+    )
+    within = select_rope_cache(
+        long_cos, long_sin, short_cos, short_sin, scaling,
+        start_pos=0, seq_length=2, position_ids=torch.tensor([[3, 9]]),
+    )
+    torch.testing.assert_close(alone[0].reshape(-1, 8)[0], within[0].reshape(-1, 8)[0])
+    torch.testing.assert_close(within[0].reshape(-1, 8)[0], short_cos[3])
+    # Decoding across the boundary keeps the emitted prefix on the short table
+    # and only encodes the new positions with the long table.
+    prefill = select_rope_cache(
+        long_cos, long_sin, short_cos, short_sin, scaling,
+        start_pos=0, seq_length=4,
+    )
+    torch.testing.assert_close(prefill[0], short_cos[:4])
+    decode = select_rope_cache(
+        long_cos, long_sin, short_cos, short_sin, scaling,
+        start_pos=4, seq_length=1,
+    )
+    torch.testing.assert_close(decode[0][0], long_cos[4])
+
+
+def test_longrope_switch_mode_validation():
+    position = validate_rope_scaling(_longrope_config(), dim=8, max_position_embeddings=16)
+    assert position["switch_mode"] == "position"
+    batch = validate_rope_scaling(
+        _longrope_config(switch_mode="batch"), dim=8, max_position_embeddings=16
+    )
+    assert batch["switch_mode"] == "batch"
+    with pytest.raises(ValueError, match="switch_mode"):
+        validate_rope_scaling(
+            _longrope_config(switch_mode="token"), dim=8, max_position_embeddings=16
+        )
 
 
 def test_longrope_defaults_to_paper_attention_scaling():

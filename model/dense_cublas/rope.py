@@ -1,5 +1,6 @@
 """NumPy LongRoPE tables for the Torch-free native runtime."""
 import math
+import os
 import numpy as np
 
 
@@ -7,14 +8,24 @@ def is_longrope(scaling):
     return isinstance(scaling, dict) and scaling.get('rope_type', scaling.get('type')) == 'longrope'
 
 
+def rope_switch_mode(scaling):
+    """Resolve the LongRoPE table combination mode (position or legacy batch)."""
+    configured = (scaling or {}).get('switch_mode')
+    mode = os.environ.get('INSTINCT_ROPE_SWITCH_MODE') or configured or 'position'
+    if mode not in ('position', 'batch'):
+        raise ValueError('LongRoPE switch_mode must be position or batch')
+    return mode
+
+
 def validate_longrope(scaling, head_dim, maximum):
     allowed = {'type', 'rope_type', 'factor', 'original_max_position_embeddings',
                'short_factor', 'long_factor', 'attention_factor',
                'short_attention_factor', 'long_attention_factor',
                'retained_start_tokens', 'short_retained_start_tokens',
-               'long_retained_start_tokens'}
+               'long_retained_start_tokens', 'switch_mode'}
     if set(scaling) - allowed:
         raise ValueError('unknown LongRoPE fields')
+    rope_switch_mode(scaling)
     original = scaling.get('original_max_position_embeddings')
     if type(original) is not int or original < 2 or original > maximum:
         raise ValueError('invalid LongRoPE original context')
@@ -57,3 +68,21 @@ def longrope_tables(config, long_context=True):
         for table, fn in zip(result, (np.cos, np.sin)):
             table[:retained] = np.tile(fn(native), (1, 2))
     return tuple(result)
+
+
+def mixed_longrope_tables(config):
+    """Position-unique LongRoPE tables (short rows then long rows).
+
+    Rows below ``original_max_position_embeddings`` come from the short table
+    (normally the original RoPE, since short factors are 1.0); rows at or beyond
+    it come from the scaled long table. A position therefore has exactly one
+    encoding regardless of document length, batch packing or KV-cache decoding.
+    """
+    scaling = config['rope_scaling']
+    original = scaling['original_max_position_embeddings']
+    long_cos, long_sin = longrope_tables(config, True)
+    short_cos, short_sin = longrope_tables(config, False)
+    cos, sin = long_cos.copy(), long_sin.copy()
+    cos[:original] = short_cos[:original]
+    sin[:original] = short_sin[:original]
+    return cos, sin

@@ -1,4 +1,4 @@
-﻿# Instinct Agent Instructions
+# Instinct Agent Instructions
 
 ## What this is
 Instinct is a single-GPU language-model training and inference project with V1/V2 Dense and MoE configurations, plus linear-attention and RecurrsiveInstinct backbones. All core algorithms (Dense/MoE Transformer, Pretrain, SFT, LoRA, DPO, PPO, GRPO, CISPO, Agentic RL, KD) are implemented in pure PyTorch — no `trl`/`peft` abstractions. Rust tools handle dataset compilation and the AutoDL data/training relay.
@@ -685,6 +685,19 @@ the MXFP8 E4M3 KV cache. Artifacts:
 `eval/livecodebench/native_instinct_r1_pos_step01500_release_v6_{think,nothink}_ctx4096_latest175/`.
 
 ## Critical gotchas
+
+### LongRoPE switch modes
+
+LongRoPE now combines its short/long factor tables per logical position by
+default (`rope_scaling.switch_mode: "position"`, implemented in
+`model/rope.py::select_rope_cache` and
+`model/dense_cublas/rope.py::mixed_longrope_tables`): a token's encoding depends
+only on its own position, so packed document composition and KV-cache decoding
+never change an already emitted position. The legacy Phi-3 batch-global rule is
+still available as `switch_mode: "batch"` (or `INSTINCT_ROPE_SWITCH_MODE=batch`).
+Checkpoints trained with the old rule (all SFT stages through InstinctR1) must be
+evaluated with that override to reproduce their recorded numbers, while new runs
+should train and evaluate under `position`. Details: `docs/LongRoPE.md`.
 
 ### `__package__` hack
 Training scripts and `scripts/` files set `__package__` + `sys.path.append` to resolve imports from the repo root. This is intentional — do NOT refactor away without understanding the import chain.
