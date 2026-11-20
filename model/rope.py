@@ -10,6 +10,7 @@ this module deliberately validates and consumes them instead of inventing an
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional
 
 import torch
@@ -123,7 +124,26 @@ def validate_rope_scaling(
         )
     config["short_retained_start_tokens"] = short_retained
     config["long_retained_start_tokens"] = long_retained
+    config["switch_mode"] = rope_switch_mode(config)
     return config
+
+
+def rope_switch_mode(rope_scaling: Optional[dict]) -> str:
+    """Resolve how the LongRoPE short and long factor tables are combined.
+
+    ``position`` (default) picks the table per logical position, so a token's
+    encoding depends only on its own position. ``batch`` reproduces the legacy
+    Phi-3 dynamic rule that selects one table for the whole forward from the
+    largest logical position (sensitive to packing and KV-cache decoding).
+    ``INSTINCT_ROPE_SWITCH_MODE`` overrides the JSON field, which lets an
+    evaluation reproduce a checkpoint trained under the other regime without
+    rewriting its config file.
+    """
+    configured = (rope_scaling or {}).get("switch_mode")
+    mode = os.environ.get("INSTINCT_ROPE_SWITCH_MODE") or configured or "position"
+    if mode not in {"position", "batch"}:
+        raise ValueError('LongRoPE switch_mode must be "position" or "batch"')
+    return mode
 
 
 def _longrope_attention_factor(config: dict, long_context: bool) -> float:
@@ -229,7 +249,16 @@ def select_rope_cache(
     seq_length: int,
     position_ids: Optional[torch.Tensor] = None,
 ):
-    """Select and index the correct LongRoPE cache for the current context."""
+    """Index the LongRoPE cache for the requested positions.
+
+    With ``rope_scaling["switch_mode"] == "position"`` (the default) the table is
+    chosen per logical position, so a token's positional encoding only depends on
+    its own position. Packed documents, batch composition and KV-cache decoding
+    therefore never change the encoding of already emitted positions, which keeps
+    training and long-context generation consistent. ``"batch"`` reproduces the
+    legacy Phi-3 dynamic rule: one table for the whole forward, selected from the
+    largest logical position in the batch.
+    """
     if short_cos is None:
         cos, sin = long_cos, long_sin
         if position_ids is not None:
@@ -240,24 +269,42 @@ def select_rope_cache(
         )
 
     original_max = int(rope_scaling["original_max_position_embeddings"])
+    switch_mode = rope_switch_mode(rope_scaling)
+    if switch_mode not in {"position", "batch"}:
+        raise ValueError('LongRoPE switch_mode must be "position" or "batch"')
     if position_ids is None:
-        cos, sin = (
-            (short_cos, short_sin)
-            if start_pos + seq_length <= original_max
-            else (long_cos, long_sin)
-        )
+        positions = torch.arange(start_pos, start_pos + seq_length)
+        if switch_mode == "batch":
+            cos, sin = (
+                (short_cos, short_sin)
+                if start_pos + seq_length <= original_max
+                else (long_cos, long_sin)
+            )
+            return (
+                cos[start_pos : start_pos + seq_length],
+                sin[start_pos : start_pos + seq_length],
+            )
+        long_mask = (positions >= original_max)[:, None]
         return (
-            cos[start_pos : start_pos + seq_length],
-            sin[start_pos : start_pos + seq_length],
+            torch.where(long_mask, long_cos[start_pos : start_pos + seq_length],
+                        short_cos[start_pos : start_pos + seq_length]),
+            torch.where(long_mask, long_sin[start_pos : start_pos + seq_length],
+                        short_sin[start_pos : start_pos + seq_length]),
         )
 
-    # Match the dynamic LongRoPE rule used by Phi-3: switch globally according
-    # to the largest logical position. torch.where avoids Tensor.item() graph
-    # breaks and also handles position resets produced by sequence packing.
-    use_long = position_ids.amax() + 1 > original_max
     short_selected = (short_cos[position_ids], short_sin[position_ids])
     long_selected = (long_cos[position_ids], long_sin[position_ids])
+    if switch_mode == "batch":
+        # Legacy dynamic rule: one table per forward, chosen from the largest
+        # logical position. This handles position resets from packing but makes
+        # short documents in a long batch inherit the long table.
+        use_long = position_ids.amax() + 1 > original_max
+        return (
+            torch.where(use_long, long_selected[0], short_selected[0]),
+            torch.where(use_long, long_selected[1], short_selected[1]),
+        )
+    long_mask = (position_ids >= original_max).unsqueeze(-1)
     return (
-        torch.where(use_long, long_selected[0], short_selected[0]),
-        torch.where(use_long, long_selected[1], short_selected[1]),
+        torch.where(long_mask, long_selected[0], short_selected[0]),
+        torch.where(long_mask, long_selected[1], short_selected[1]),
     )

@@ -35,6 +35,22 @@ def test_native_longrope_frequencies_retained_positions_and_short_table():
         validate_longrope(scaling()|{'long_factor':[2.]},8,128)
 
 
+def test_native_longrope_position_mode_tables_are_position_unique():
+    from model.dense_cublas.rope import longrope_tables, mixed_longrope_tables
+    config=dict(head_dim=8,max_position_embeddings=128,rope_theta=10000.,rope_scaling=scaling())
+    long_tables=longrope_tables(config,True)
+    short_tables=longrope_tables(config,False)
+    mixed=mixed_longrope_tables(config)
+    np.testing.assert_allclose(mixed[0][:4],short_tables[0][:4])
+    np.testing.assert_allclose(mixed[1][:4],short_tables[1][:4])
+    np.testing.assert_allclose(mixed[0][4:],long_tables[0][4:])
+    np.testing.assert_allclose(mixed[1][4:],long_tables[1][4:])
+    validate_longrope(scaling()|{'switch_mode':'batch'},8,128)
+    validate_longrope(scaling()|{'switch_mode':'position'},8,128)
+    with pytest.raises(ValueError):
+        validate_longrope(scaling()|{'switch_mode':'token'},8,128)
+
+
 def test_packed_sft_cache_preserves_labels_boundaries_and_padding(tmp_path):
     row=dict(input_ids=[1,7,2,1,8,2,0,0],loss_mask=[False,True,True,False,True,True,False,False],
              segment_lengths=[3,3],valid_tokens=6,block_length=8)

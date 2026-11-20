@@ -106,3 +106,21 @@ LongRoPE 不是一个固定缩放倍率。论文使用困惑度驱动的进化�
 - [Microsoft LongRoPE 官方实现](https://github.com/microsoft/LongRoPE)
 - [LongRoPE2: Near-Lossless LLM Context Window Scaling](https://arxiv.org/abs/2502.20082)
 
+## 实现注意：LongRoPE 的 switch_mode（位置唯一 vs 旧 batch 全局）
+
+本仓库同时存在两套 RoPE 选择语义，由 `rope_scaling.switch_mode` 控制（可用环境变量
+`INSTINCT_ROPE_SWITCH_MODE` 覆盖）：
+
+- `position`（默认，修复后语义）：每个位置只使用与自身位置对应的表——位置小于
+  `original_max_position_embeddings` 用 short 表（常规为原始 RoPE），大于等于它用
+  long 表。同一个位置在任何 packed 文档、batch 组成或 KV cache 状态下编码都一致，
+  因此长上下文生成不会出现旧 key 与新 query 混用两套因子的情况。
+- `batch`（旧行为，仅用于复现历史结果）：按整个 forward 的最大逻辑位置选择一张表，
+  packed 长 block 会把短文档也切到 long 表；解码跨越原始上下文时会让缓存 key 与新
+  token 混用 short/long 表（rollout 在跨越时会重建完整 prefix cache）。
+
+历史 checkpoint（包括 InstinctR1 与更早的 SFT 阶段）是在 `batch` 语义下训练的，评测时
+需要设置 `INSTINCT_ROPE_SWITCH_MODE=batch` 才能复现已记录的数字；新训练与评测应统一
+使用默认的 `position` 语义。实现位置：`model/rope.py::select_rope_cache`、
+`model/dense_cublas/rope.py::mixed_longrope_tables`、`model/dense_cublas/model.py`，
+测试见 `tests/test_longrope.py` 与 `tests/test_native_sft_longrope.py`。
