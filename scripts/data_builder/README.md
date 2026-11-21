@@ -172,3 +172,25 @@ python scripts/data_builder/apply_identity_repairs.py dataset/sft_t2t_mini.jsonl
 python scripts/data_builder/remove_topic_rows.py dataset/sft_t2t_mini.identity_repaired.jsonl \
   --profile lgbt --output dataset/sft_t2t_mini.train_ready.jsonl
 ```
+
+## Rebalancing a code-think lane by natural length
+
+`rebalance_code_think_lane.py` re-selects code-thinking rows by their real
+reasoning length instead of resampling to a fixed length distribution. Rows are
+selected, never truncated or rewritten, so the `</think>` closing signal stays
+intact; it keeps a quota of genuinely short thinking (default 25% <= 256 tokens)
+and reports any bucket the candidate pool cannot fill. It does not synthesize
+data, and a bucket may exceed its quota by at most `--max-overshoot` (default
+1.5x), so a skewed pool yields fewer rows rather than a skewed length profile.
+
+```bash
+python scripts/data_builder/rebalance_code_think_lane.py \
+  --input dataset/code_think_candidates.jsonl \
+  --output dataset/code_think_lane_v5.jsonl --target-rows 7390 \
+  --difficulty-field metadata.difficulty        # optional round-robin by difficulty
+```
+
+The default buckets (`0-256:0.25,257-768:0.25,769-1536:0.30,1537-2500:0.20`) are
+a starting point for an ablation, not a validated recipe. Empty think blocks are a
+separate switch applied when packing: build the cache with
+`INSTINCT_EMPTY_THINK_RATIO=0.2`-`0.4` (the v4 packer forced `0`).
