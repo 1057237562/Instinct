@@ -643,6 +643,43 @@ Artifacts: `eval/livecodebench/native_instinct_r1_step01664_release_v6_think_ctx
 `52cbced543e41cc72efc8c19785821243b6734fda50361c944637e05bc1739ad`).
 
 
+### InstinctR1 position-mode probe (step 1,500)
+
+`native_instinct_r1_pos` replaces the retired R1 branch: same V2 1B pretrain
+acceptance checkpoint (step 2,004,666), same v4 corpus and SFT schedule
+(2e-6 -> 1e-5 -> 2e-6), but trained under the fixed position-unique LongRoPE
+semantics (branch `codex/longrope-fix`, `INSTINCT_ROPE_SWITCH_MODE=position`;
+`--save_interval 512`, async checkpoints). Paused through the save-and-pause flow
+at step 1,500 / 24,241,835 processed tokens. Native npz SHA-256
+`96d218de351b3846cde84b7fd4200f7673fe75326b9070468e69dbac0044ab18`; converted
+`step01500.pth` SHA-256 `3d16f8bf83c6e448fe15caa17833f6eaf53bbf40ec4b1617a957061859f2f826`;
+model config SHA-256 `d0e6a7d12498578ce88ebf5a7013865c98f3d0fd1cb3974c6be1a12aa62a7387`.
+
+| Metric (pos @1,500) | pos step 1,500 | retired R1 step 1,664 | v4 step 3,000 (no-think lineage) |
+| --- | ---: | ---: | ---: |
+| HumanEval+ pass@1 / pass@10 | 0.2555 / 0.6037 | not measured | 0.4421 / 0.7317 |
+| HumanEval base pass@1 / pass@10 | 0.2835 / 0.6402 | not measured | 0.4713 / 0.7622 |
+| MBPP+ pass@1 / pass@10 | 0.4294 / 0.6984 | not measured | 0.4802 / 0.7090 |
+| MBPP base pass@1 / pass@10 | 0.5082 / 0.7937 | not measured | 0.5463 / 0.7884 |
+| LCB release_v6 latest-175 think pass@1 | 0.0457 (8/175) | 0.0571 (10/175) | 0.0857 |
+| LCB release_v6 latest-175 no-think pass@1 | 0.0914 (16/175) | 0.1029 (18/175) | 0.1200 |
+
+At 4.3% of the epoch both LCB modes are modestly below the retired-branch probe
+(8 vs 10 think passes, 16 vs 18 no-think; single-sample 175-task noise), while
+think mode now reaches the 4,096-context cap less often: 758/1,055 full-prompt
+generations capped (about 126/175 equivalent) and 269 closed with final code,
+with outcomes `no_code = 140`, `failed = 25`, `timeout = 2`. No-think outcomes
+were `no_code = 16`, `failed = 141`, `timeout = 2`. EvalPlus uses the recorded
+driver (164x10 HumanEval+, 378x10 MBPP+, thinking off, temp 0.8 / top_p 0.95 /
+top_k 50 / seed 42 / max_new 512, batch 32). LCB generation: think was generated
+over all 1,055 release_v6 prompts and filtered to the latest-175 ids for scoring
+(derived `latest.generations.json`, `generation_sha256` patched in
+`inference.json`); no-think used `LCB_LATEST_ONLY=1`; both use context 4096 and
+the MXFP8 E4M3 KV cache. Artifacts:
+`eval/evalplus/native_instinct_r1_pos_step01500_pass10/`,
+`eval/evalplus/native_instinct_r1_pos_step01500_lcb_provenance/`, and
+`eval/livecodebench/native_instinct_r1_pos_step01500_release_v6_{think,nothink}_ctx4096_latest175/`.
+
 ## Critical gotchas
 
 ### `__package__` hack
