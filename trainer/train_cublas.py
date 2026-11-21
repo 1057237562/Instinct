@@ -453,6 +453,13 @@ def train(args,backend=None,tokenizer=None,reward_model=None,observer=None,*,mer
         initial_steps=progress['steps']
         started=time.perf_counter();last_loss=None;stop_requested=False
         report_started=started;report_tokens=0
+        # Optional zero-gradient diagnostic: INSTINCT_THINK_STATS=1 prints how the
+        # supervised tokens split into think body / answer and how often <think>
+        # is closed. Host-side numpy only; it never touches the loss or optimizer.
+        think_window=None
+        if packed_sft and os.environ.get('INSTINCT_THINK_STATS','0')=='1':
+            from model.dense_cublas.think_stats import ThinkStatsWindow
+            think_window=ThinkStatsWindow()
         previous_sigint=None
         if threading.current_thread() is threading.main_thread():
             previous_sigint=signal.getsignal(signal.SIGINT)
@@ -544,6 +551,7 @@ def train(args,backend=None,tokenizer=None,reward_model=None,observer=None,*,mer
                     if packed_sft:
                         progress['processed_tokens']+=int(np.count_nonzero(batch[2]>=0))
                         progress['supervised_tokens']+=int(np.count_nonzero(batch[1][:,1:]!=-100))
+                        if think_window is not None:think_window.update(batch[0],batch[1],batch[2])
                     if merge_packed_pairs:
                         progress['paired_forwards']=progress.get('paired_forwards',0)+1
                     if streaming:
@@ -574,6 +582,7 @@ def train(args,backend=None,tokenizer=None,reward_model=None,observer=None,*,mer
                         completed_steps=progress['steps']-initial_steps
                         eta=(time.perf_counter()-started)/max(completed_steps,1)*max(0,total_steps-progress['steps'])/60.
                         print(f'Epoch:[{epoch+1}/{args.epochs}]({math.ceil(progress["cursor"]/args.batch_size)}/{total_batches}), loss: {last_loss:.6f}, learning_rate: {current_lr:.8f}, epoch_time: {eta:.3f}min, tokens/s: {rate:.1f}',flush=True)
+                        if think_window is not None:print(think_window.format(),flush=True)
                         metrics={'loss':last_loss,'learning_rate':current_lr,'tokens_per_second':rate,'step':progress['steps']}
                         if step_graph is not None:
                             metrics.update(cuda_graph_captures=step_graph.plan.capture_count,
