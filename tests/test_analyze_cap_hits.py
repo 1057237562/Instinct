@@ -44,6 +44,15 @@ def test_cut_in_open_fence_and_still_thinking():
     assert still['category'] == 'capped_still_thinking' and not still['loop']
 
 
+def test_recorded_context_limit_flag_from_lcb_harness():
+    # eval/livecodebench/<run>/generate.py writes reached_context_limit per task.
+    result = cap.analyze({'question_id': 'q', 'raw_response': 'still going', 'reached_context_limit': True})
+    assert result['capped'] and result['cap_rule'] == 'recorded'
+    assert result['category'] == 'capped_still_thinking'
+    done = cap.analyze({'question_id': 'q', 'raw_response': CODE, 'reached_context_limit': False})
+    assert not done['capped']
+
+
 def test_capped_decided_by_token_count_and_fallback_heuristic():
     by_tokens = cap.analyze({'question_id': 'q', 'raw_response': 'x ' * 50, 'n_tokens': 4000}, cap_tokens=4000)
     assert by_tokens['capped'] and by_tokens['cap_rule'] == 'token_count'

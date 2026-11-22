@@ -24,7 +24,9 @@ this repository, so field names are detected, not assumed; override with
 ``--text-field`` / ``--id-field`` / ``--tokens-field`` if yours differ. A task
 counts as *capped* by the first rule that applies:
 
-  1. a recorded ``finish_reason`` (capped iff ``'length'``) or ``capped`` / ``hit_cap`` field;
+  1. a recorded ``finish_reason`` (capped iff ``'length'``) or a boolean
+     ``capped`` / ``hit_cap`` / ``reached_context_limit`` / ``context_limit_hit``
+     field (the recorded LCB harness writes ``reached_context_limit``);
   2. ``--cap-tokens N`` together with a generated-token-count field >= N;
   3. fallback heuristic: no ``</think>`` AND no final code block (reported as
      ``likely`` and flagged in the summary, because it can over-count).
@@ -124,7 +126,12 @@ def analyze(record, text_field=None, tokens_field=None, cap_tokens=None, think_m
 
     tokens = pick(record, TOKEN_FIELDS, tokens_field)
     rule = None
-    recorded = next((record[k] for k in ('capped', 'hit_cap') if record.get(k) is not None), None)
+    # Explicit per-task cap flags used by the recorded harness and by common
+    # inference dumps. ``reached_context_limit`` is what
+    # eval/livecodebench/<run>/generate.py writes next to ``responses.jsonl``.
+    recorded = next((record[k] for k in ('capped', 'hit_cap', 'reached_context_limit',
+                                        'hit_context_limit', 'context_limit_hit')
+                     if record.get(k) is not None), None)
     if record.get('finish_reason') is not None:
         capped, rule = record['finish_reason'] == 'length', 'recorded'
     elif recorded is not None:
