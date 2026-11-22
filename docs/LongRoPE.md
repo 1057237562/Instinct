@@ -119,6 +119,20 @@ LongRoPE 不是一个固定缩放倍率。论文使用困惑度驱动的进化�
   packed 长 block 会把短文档也切到 long 表；解码跨越原始上下文时会让缓存 key 与新
   token 混用 short/long 表（rollout 在跨越时会重建完整 prefix cache）。
 
+- `smooth`（可选，仅用于新训练）：只用一张表，`position <= smooth_start` 与原始 RoPE
+  完全一致；在 `[smooth_start, smooth_end]`（默认 `[original, 2*original]`）内，每个旋转对的
+  **频率** `w / F(p)` 在 short 与 long 因子之间按几何方式过渡，注意力幅度线性过渡；
+  `smooth_end` 之后与 long 表的相对相位一致。它消除了 `position` 模式在边界处的跳变。
+
+  相位必须是该频率的**逐位置累加** `sum_{u<=p} w / F(u)`，不能写成 `p * w / F(p)`：因子随位置
+  增大时，后者对任何 long 因子大于 e 的旋转对都会在过渡区内**倒着走**（key 在 query 之前却被
+  编码成在其之后，位置 8000 与原始位置 569 的相位相同），测试
+  `test_native_smooth_phase_is_monotone_and_parallel_to_the_long_table` 专门防止回归。
+  累加后 `smooth_end` 之后与 long 表只差一个常数相位偏移，RoPE 只使用相对相位，因此等价。
+  过渡区越长越平缓；目标上下文远大于 `2*original`（例如 64K）时，可以把 `smooth_end`
+  设得更大，但这是经验判断，需要用 loss 和 passkey 验证。`smooth` 与 `position`、`batch`
+  的编码互不相同，不能互换使用已训练的 checkpoint。
+
 历史 checkpoint（包括 InstinctR1 与更早的 SFT 阶段）是在 `batch` 语义下训练的，评测时
 需要设置 `INSTINCT_ROPE_SWITCH_MODE=batch` 才能复现已记录的数字；新训练与评测应统一
 使用默认的 `position` 语义。实现位置：`model/rope.py::select_rope_cache`、

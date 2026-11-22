@@ -76,14 +76,19 @@ def longrope_tables(config, long_context=True):
     return tuple(result)
 
 
-def smooth_longrope_tables(config):
-    """Single LongRoPE table with a smooth post-boundary ramp to the long factors.
+def smooth_longrope_phase(config):
+    """Float64 rotary phase ``(positions, head_dim / 2)`` and attention amplitude.
 
-    Positions below ``smooth_start`` use the short (original RoPE) factors and
-    attention scale exactly. Over ``[smooth_start, smooth_end]`` each rotary
-    pair's factor is interpolated geometrically between short and long and the
-    attention scale is ramped linearly, so the encoding is continuous at the
-    boundary. Positions beyond ``smooth_end`` are exactly the long table.
+    The *frequency* of every rotary pair, ``w / F(p)``, is interpolated
+    geometrically between its short and long factor over
+    ``[smooth_start, smooth_end]`` and the phase is its running sum
+    ``sum_{u=1..p} w / F(u)``.  Do **not** use ``p * w / F(p)`` instead: once the
+    factor grows with position that product is not monotone in ``p`` (for any pair
+    whose long factor exceeds e the phase runs backwards inside the ramp, so a key
+    behind the query is encoded as ahead of it).  Accumulating the frequency keeps
+    the phase strictly increasing, continuous at both ends of the ramp, equal to
+    plain RoPE for ``p <= smooth_start`` and parallel to the long table (same
+    *relative* phase, which is all RoPE uses) for ``p >= smooth_end``.
     """
     scaling = config['rope_scaling']
     dim, maximum = config['head_dim'], config['max_position_embeddings']
@@ -96,14 +101,28 @@ def smooth_longrope_tables(config):
                             scaling.get('attention_factor', 1.0))
     long_amp = scaling.get('long_attention_factor', scaling.get(
         'attention_factor', math.sqrt(1 + math.log(factor) / math.log(original))))
-    frequencies = 1. / (config['rope_theta'] ** (np.arange(0, dim, 2, dtype=np.float32) / dim))
-    positions = np.arange(maximum, dtype=np.float32)
-    t = np.clip((positions - start) / max(stop - start, 1), 0.0, 1.0).astype(np.float32)
-    factors = (np.power(np.asarray(scaling['short_factor'], np.float32)[None, :], (1.0 - t)[:, None])
-               * np.power(np.asarray(scaling['long_factor'], np.float32)[None, :], t[:, None]))
-    amplitude = short_amp + (long_amp - short_amp) * t
-    phase = positions[:, None] * frequencies[None, :] / factors
-    return tuple(np.tile(fn(phase), (1, 2)).astype(np.float32) * amplitude[:, None]
+    frequencies = 1. / (config['rope_theta'] ** (np.arange(0, dim, 2, dtype=np.float64) / dim))
+    positions = np.arange(maximum, dtype=np.float64)
+    t = np.clip((positions - start) / max(stop - start, 1), 0.0, 1.0)
+    factors = (np.power(np.asarray(scaling['short_factor'], np.float64)[None, :], (1.0 - t)[:, None])
+               * np.power(np.asarray(scaling['long_factor'], np.float64)[None, :], t[:, None]))
+    step = frequencies[None, :] / factors
+    phase = np.cumsum(step, axis=0) - step[:1]
+    return phase, short_amp + (long_amp - short_amp) * t
+
+
+def smooth_longrope_tables(config):
+    """Single LongRoPE table with a smooth post-boundary ramp to the long factors.
+
+    Positions up to ``smooth_start`` use the short (original RoPE) factors and
+    attention scale exactly. Over ``[smooth_start, smooth_end]`` each rotary
+    pair's frequency is interpolated geometrically between short and long and
+    the attention scale is ramped linearly, so the encoding is continuous at the
+    boundary. Beyond ``smooth_end`` the table has the long table's *relative*
+    phase; see :func:`smooth_longrope_phase` for why the phase is accumulated.
+    """
+    phase, amplitude = smooth_longrope_phase(config)
+    return tuple(np.tile(fn(phase), (1, 2)).astype(np.float32) * amplitude[:, None].astype(np.float32)
                  for fn in (np.cos, np.sin))
 
 

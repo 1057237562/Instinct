@@ -62,8 +62,10 @@ def test_native_smooth_longrope_is_continuous_and_keeps_prefix():
     long_ = longrope_tables(short_cfg, True)
     np.testing.assert_allclose(smooth[0][:4], short[0][:4], rtol=1e-6)
     np.testing.assert_allclose(smooth[1][:4], short[1][:4], rtol=1e-6)
-    np.testing.assert_allclose(smooth[0][16:], long_[0][16:], rtol=1e-6)
-    np.testing.assert_allclose(smooth[1][16:], long_[1][16:], rtol=1e-6)
+    # Beyond smooth_end the phase runs parallel to the long table (a constant offset that
+    # RoPE never sees), so compare the relative rotation between positions, not the table.
+    for q, k in ((16, 16), (17, 16), (40, 20), (127, 16)):
+        np.testing.assert_allclose(_relative(smooth, q, k), _relative(long_, q, k), atol=5e-5)
     frequencies = 1. / (10000. ** (np.arange(0, 8, 2, dtype=np.float32) / 8))
     np.testing.assert_allclose(smooth[0][4], np.tile(np.cos(4 * frequencies), (1, 2))[0],
                                rtol=2e-6, atol=2e-6)
@@ -73,6 +75,39 @@ def test_native_smooth_longrope_is_continuous_and_keeps_prefix():
     with pytest.raises(ValueError):
         validate_longrope(base | {'switch_mode': 'smooth', 'smooth_start': 4,
                                   'smooth_end': 3}, 8, 128)
+
+
+def _relative(tables, q, k):
+    cos, sin = tables
+    return np.stack([cos[q] * cos[k] + sin[q] * sin[k], sin[q] * cos[k] - cos[q] * sin[k]])
+
+
+def test_native_smooth_phase_is_monotone_and_parallel_to_the_long_table():
+    """Regression: interpolating the factor and multiplying by position (p * w / F(p)) makes the
+    phase of every pair with long factor > e run backwards inside the ramp."""
+    from model.dense_cublas.rope import smooth_longrope_phase
+    head_dim, original, maximum, theta = 96, 4096, 65536, 1e6
+    long_factor = np.concatenate([np.ones(11), np.geomspace(1.08, 7.43, 12), np.full(25, 16.)])
+    cfg = dict(head_dim=head_dim, max_position_embeddings=maximum, rope_theta=theta,
+               rope_scaling=dict(type='longrope', factor=16., original_max_position_embeddings=original,
+                                 short_factor=[1.] * 48, long_factor=long_factor.tolist(),
+                                 short_attention_factor=1., switch_mode='smooth'))
+    phase, amplitude = smooth_longrope_phase(cfg)
+    w = 1. / theta ** (np.arange(0, head_dim, 2) / head_dim)
+    start, stop = original, 2 * original
+    assert phase.shape == (maximum, 48)
+    assert (np.diff(phase, axis=0) > 0).all()                       # strictly increasing for every pair
+    np.testing.assert_allclose(phase[:start + 1], np.arange(start + 1)[:, None] * w, rtol=1e-12)
+    for q, k in ((20000, 9000), (60000, 30000), (stop, stop + 1)):  # parallel to the long table beyond the ramp
+        np.testing.assert_allclose(phase[q] - phase[k], (q - k) * w / long_factor, rtol=1e-9, atol=1e-12)
+    step = np.diff(phase, axis=0)
+    assert np.abs(step[start] / step[start - 1] - 1).max() < 1e-3   # continuous slope at the start of the ramp
+    assert amplitude[start] == 1. and abs(amplitude[stop] - np.sqrt(1 + np.log(16.) / np.log(original))) < 1e-12
+    # the formula this replaces, for the record: tail pair 40 ends the ramp far behind where it started
+    t = np.clip((np.arange(maximum) - start) / (stop - start), 0, 1)
+    old = np.arange(maximum) * w[40] / long_factor[40] ** t
+    assert old[stop] < old[start]
+    assert phase[stop, 40] > phase[start, 40]
 
 
 def test_packed_sft_cache_preserves_labels_boundaries_and_padding(tmp_path):

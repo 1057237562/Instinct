@@ -241,32 +241,35 @@ def precompute_freqs_cis(
 def precompute_smooth_freqs_cis(dim: int, end: int, rope_base: float, rope_scaling: dict):
     """Single LongRoPE table that ramps short -> long factors after smooth_start.
 
-    Positions below ``smooth_start`` are exactly the short/original table; over
-    ``[smooth_start, smooth_end]`` every rotary pair's factor is interpolated
-    geometrically between the short and long factor and the attention scale is
-    ramped linearly, so the encoding stays continuous at the boundary. Positions
-    beyond ``smooth_end`` are exactly the long table. This avoids both the hard
-    table switch of ``position`` mode and the q/k cross-boundary mixing it causes.
+    Positions up to ``smooth_start`` are exactly the short/original table. Over
+    ``[smooth_start, smooth_end]`` every rotary pair's *frequency* ``w / F(p)`` is
+    interpolated geometrically between the short and long factor and the
+    attention scale is ramped linearly; beyond ``smooth_end`` the table has the
+    long table's relative phase. The phase is the running sum of that frequency,
+    not ``p * w / F(p)``: once the factor grows with position the product is not
+    monotone (for a pair whose long factor exceeds e it runs backwards inside the
+    ramp, encoding a key behind the query as ahead of it), whereas the
+    accumulated phase is strictly increasing and continuous at both ends.
     """
     config = validate_rope_scaling(rope_scaling, dim, end)
     if config is None or rope_scaling_type(config) != "longrope":
         raise ValueError("smooth mode requires a longrope rope_scaling config")
     start = int(config["smooth_start"])
     stop = int(config["smooth_end"])
-    factors_short = torch.tensor(config["short_factor"], dtype=torch.float32)
-    factors_long = torch.tensor(config["long_factor"], dtype=torch.float32)
-    base_inv = 1.0 / (rope_base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+    factors_short = torch.tensor(config["short_factor"], dtype=torch.float64)
+    factors_long = torch.tensor(config["long_factor"], dtype=torch.float64)
+    base_inv = 1.0 / (rope_base ** (torch.arange(0, dim, 2, dtype=torch.float64) / dim))
     short_amp = _longrope_attention_factor(config, False)
     long_amp = _longrope_attention_factor(config, True)
-    positions = torch.arange(end, dtype=torch.float32)
+    positions = torch.arange(end, dtype=torch.float64)
     t = ((positions - start) / max(stop - start, 1)).clamp(0.0, 1.0)
     log_factors = ((1.0 - t)[:, None] * torch.log(factors_short)[None, :]
                    + t[:, None] * torch.log(factors_long)[None, :])
-    factors = torch.exp(log_factors)
-    amplitude = short_amp + (long_amp - short_amp) * t
-    angles = torch.outer(positions, base_inv) / factors
-    return torch.cat((angles.cos(), angles.cos()), dim=-1) * amplitude[:, None], \
-        torch.cat((angles.sin(), angles.sin()), dim=-1) * amplitude[:, None]
+    step = base_inv[None, :] / torch.exp(log_factors)
+    phase = torch.cumsum(step, dim=0) - step[:1]
+    amplitude = (short_amp + (long_amp - short_amp) * t)[:, None]
+    return (torch.cat((phase.cos(), phase.cos()), dim=-1) * amplitude).float(), \
+        (torch.cat((phase.sin(), phase.sin()), dim=-1) * amplitude).float()
 
 
 def build_rope_caches(dim: int, end: int, rope_base: float, rope_scaling: Optional[dict]):
