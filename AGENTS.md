@@ -546,14 +546,18 @@ other evaluators or a thinking-only number):
 3. **LiveCodeBench release_v6 pass@1, thinking ON and thinking OFF** - the copied
    `eval/livecodebench/<run>/generate.py` + WASI `score.py` harness (not the built-in
    `--lcb_evaluate`/`lcb_runner` path, which is not installed and not the recorded protocol):
-   1,055 tasks, `--lcb_prompt_style chat`, 1 sample/task, temperature 0, seed 42, batch 16,
-   total context 4096, chat template `--open_thinking 1` and `--open_thinking 0`; extraction
-   is the last fenced block (after the first `</think>` when thinking). **KV cache must use
-   the eval-local MXFP8 E4M3 cache** (`eval/.../mxfp8_cache.py`, `install(model, 4096, 4096)`
-   after model init), not the fp32/static model-dtype path. Report `metrics.pass@1` for both
-   modes plus `outcomes` (`no_code`/context-cap, `timeout`). Artifacts: `full.metrics.json`
-   per mode. The 16,384-context retry (`retry16k_mxfp8/`) is an optional secondary view,
-   not the headline number.
+   1,055 tasks restricted to the latest 175 (`LCB_LATEST_ONLY=1` in the copied harness,
+   which writes `latest.generations.json`), `--lcb_prompt_style chat`, 1 sample/task,
+   temperature 0, seed 42, batch 16, chat template `--open_thinking 1` and
+   `--open_thinking 0`; extraction is the last fenced block (after the first `</think>`
+   when thinking). **Thinking ON uses total context 8192** (the reasoning path needs the
+   headroom; a 4096 cap leaves most generations without final code) and **thinking OFF
+   uses total context 4096**. **KV cache must use the eval-local MXFP8 E4M3 cache**
+   (`eval/.../mxfp8_cache.py`, `install(model, CONTEXT, CONTEXT)` with CONTEXT 8192 for
+   thinking and 4096 for no-think after model init), not the fp32/static model-dtype path.
+   Report `metrics.pass@1` for both modes plus `outcomes` (`no_code`/context-cap,
+   `timeout`). Artifacts: `latest.metrics.json` per mode. The 16,384-context retry
+   (`retry16k_mxfp8/`) remains an optional secondary view, not the headline number.
 
 Rules:
 
