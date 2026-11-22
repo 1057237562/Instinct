@@ -28,8 +28,9 @@ cache with ``INSTINCT_EMPTY_THINK_RATIO`` between 0.2 and 0.4 instead of 0 (the
 v4 packer forced 0 and asserted ``empty_thinking_blocks == 0``), and relax that
 assertion for the new run.
 
-Input: JSONL (optionally ``.gz``) rows with ``conversations`` whose last turn is
-an assistant message carrying ``reasoning_content``. Token counts use
+Input: JSONL (optionally ``.gz``) rows whose last message is an assistant turn
+carrying ``reasoning_content``. Both the repo SFT spelling (``conversations``)
+and the raw UltraData spelling (``messages``) are accepted. Token counts use
 ``model/tokenizer.json`` (needs the ``tokenizers`` package).
 
     python scripts/data_builder/rebalance_code_think_lane.py \
@@ -88,8 +89,24 @@ def get_path(row, dotted):
     return value
 
 
+def messages_of(row):
+    """Return the conversation list from either repo SFT or UltraData source rows.
+
+    The packed SFT corpora use ``conversations`` while the raw UltraData code-think
+    shards (``tmp/instinctv2_sft_2b_sources/data/think/Code``) use ``messages``;
+    both put the reasoning in the assistant turn's ``reasoning_content``.
+    """
+    if not isinstance(row, dict):
+        return None
+    for key in ('conversations', 'messages'):
+        value = row.get(key)
+        if isinstance(value, list):
+            return value
+    return None
+
+
 def assistant_turn(row):
-    messages = row.get('conversations') if isinstance(row, dict) else None
+    messages = messages_of(row)
     if not isinstance(messages, list) or not messages or messages[-1].get('role') != 'assistant':
         return None
     if not any(m.get('role') == 'user' and isinstance(m.get('content'), str) for m in messages):
@@ -98,7 +115,8 @@ def assistant_turn(row):
 
 
 def question_key(row):
-    users = [m['content'] for m in row['conversations'] if m.get('role') == 'user']
+    messages = messages_of(row) or []
+    users = [m['content'] for m in messages if m.get('role') == 'user']
     return hashlib.sha256(re.sub(r'\s+', ' ', users[0]).strip().casefold().encode('utf-8', 'replace')).hexdigest()
 
 

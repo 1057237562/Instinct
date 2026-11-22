@@ -95,6 +95,19 @@ def test_rejections():
     assert rejection({'conversations': []}, True) == 'invalid'
 
 
+def test_accepts_ultradata_messages_schema():
+    # Raw shards under tmp/instinctv2_sft_2b_sources/data/think/Code use `messages`.
+    row = make_row(1, 5)
+    row['messages'] = row.pop('conversations')
+    assert rejection(row, True) is None
+    selected, report = select([row], words, BUCKETS, 5)
+    assert report['selected_rows'] == 1 and selected[0] is row
+    no_reasoning = make_row(2, 5)
+    no_reasoning['messages'] = no_reasoning.pop('conversations')
+    no_reasoning['messages'][1]['reasoning_content'] = ''
+    assert rejection(no_reasoning, True) == 'no_reasoning'
+
+
 def test_max_per_question_and_difficulty_round_robin():
     same = [make_row(i, 5, question='same question') for i in range(4)]
     _, report = select(same, words, BUCKETS, 10, max_per_question=1)
