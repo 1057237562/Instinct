@@ -51,6 +51,30 @@ def test_native_longrope_position_mode_tables_are_position_unique():
         validate_longrope(scaling()|{'switch_mode':'token'},8,128)
 
 
+def test_native_smooth_longrope_is_continuous_and_keeps_prefix():
+    from model.dense_cublas.rope import longrope_tables, mixed_longrope_tables, smooth_longrope_tables
+    base = scaling()
+    cfg = dict(head_dim=8, max_position_embeddings=128, rope_theta=10000.,
+               rope_scaling=base | dict(switch_mode='smooth', smooth_start=4, smooth_end=16))
+    smooth = smooth_longrope_tables(cfg)
+    short_cfg = dict(cfg, rope_scaling=base | dict(switch_mode='batch'))
+    short = longrope_tables(short_cfg, False)
+    long_ = longrope_tables(short_cfg, True)
+    np.testing.assert_allclose(smooth[0][:4], short[0][:4], rtol=1e-6)
+    np.testing.assert_allclose(smooth[1][:4], short[1][:4], rtol=1e-6)
+    np.testing.assert_allclose(smooth[0][16:], long_[0][16:], rtol=1e-6)
+    np.testing.assert_allclose(smooth[1][16:], long_[1][16:], rtol=1e-6)
+    frequencies = 1. / (10000. ** (np.arange(0, 8, 2, dtype=np.float32) / 8))
+    np.testing.assert_allclose(smooth[0][4], np.tile(np.cos(4 * frequencies), (1, 2))[0],
+                               rtol=2e-6, atol=2e-6)
+    assert not np.allclose(smooth[0][4], long_[0][4])
+    smooth_steps = np.abs(np.diff(smooth[0], axis=0)).max(axis=1)
+    assert smooth_steps[3] <= 3.0 * max(smooth_steps[2], smooth_steps[4])
+    with pytest.raises(ValueError):
+        validate_longrope(base | {'switch_mode': 'smooth', 'smooth_start': 4,
+                                  'smooth_end': 3}, 8, 128)
+
+
 def test_packed_sft_cache_preserves_labels_boundaries_and_padding(tmp_path):
     row=dict(input_ids=[1,7,2,1,8,2,0,0],loss_mask=[False,True,True,False,True,True,False,False],
              segment_lengths=[3,3],valid_tokens=6,block_length=8)

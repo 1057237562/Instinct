@@ -9,11 +9,11 @@ def is_longrope(scaling):
 
 
 def rope_switch_mode(scaling):
-    """Resolve the LongRoPE table combination mode (position or legacy batch)."""
+    """Resolve the LongRoPE table mode: position / smooth / legacy batch."""
     configured = (scaling or {}).get('switch_mode')
     mode = os.environ.get('INSTINCT_ROPE_SWITCH_MODE') or configured or 'position'
-    if mode not in ('position', 'batch'):
-        raise ValueError('LongRoPE switch_mode must be position or batch')
+    if mode not in ('position', 'batch', 'smooth'):
+        raise ValueError('LongRoPE switch_mode must be position, batch or smooth')
     return mode
 
 
@@ -22,13 +22,19 @@ def validate_longrope(scaling, head_dim, maximum):
                'short_factor', 'long_factor', 'attention_factor',
                'short_attention_factor', 'long_attention_factor',
                'retained_start_tokens', 'short_retained_start_tokens',
-               'long_retained_start_tokens', 'switch_mode'}
+               'long_retained_start_tokens', 'switch_mode',
+               'smooth_start', 'smooth_end'}
     if set(scaling) - allowed:
         raise ValueError('unknown LongRoPE fields')
     rope_switch_mode(scaling)
     original = scaling.get('original_max_position_embeddings')
     if type(original) is not int or original < 2 or original > maximum:
         raise ValueError('invalid LongRoPE original context')
+    smooth_start = scaling.get('smooth_start', original)
+    smooth_end = scaling.get('smooth_end', min(2 * original, maximum))
+    if (type(smooth_start) is not int or type(smooth_end) is not int
+            or not (original <= smooth_start < smooth_end <= maximum)):
+        raise ValueError('LongRoPE smooth_start/smooth_end out of range')
     factor = scaling.get('factor', maximum / original)
     if not math.isfinite(factor) or factor < 1 or head_dim % 2:
         raise ValueError('invalid LongRoPE factor or head dimension')
@@ -68,6 +74,37 @@ def longrope_tables(config, long_context=True):
         for table, fn in zip(result, (np.cos, np.sin)):
             table[:retained] = np.tile(fn(native), (1, 2))
     return tuple(result)
+
+
+def smooth_longrope_tables(config):
+    """Single LongRoPE table with a smooth post-boundary ramp to the long factors.
+
+    Positions below ``smooth_start`` use the short (original RoPE) factors and
+    attention scale exactly. Over ``[smooth_start, smooth_end]`` each rotary
+    pair's factor is interpolated geometrically between short and long and the
+    attention scale is ramped linearly, so the encoding is continuous at the
+    boundary. Positions beyond ``smooth_end`` are exactly the long table.
+    """
+    scaling = config['rope_scaling']
+    dim, maximum = config['head_dim'], config['max_position_embeddings']
+    validate_longrope(scaling, dim, maximum)
+    original = scaling['original_max_position_embeddings']
+    start = int(scaling.get('smooth_start', original))
+    stop = int(scaling.get('smooth_end', min(2 * original, maximum)))
+    factor = scaling.get('factor', maximum / original)
+    short_amp = scaling.get('short_attention_factor',
+                            scaling.get('attention_factor', 1.0))
+    long_amp = scaling.get('long_attention_factor', scaling.get(
+        'attention_factor', math.sqrt(1 + math.log(factor) / math.log(original))))
+    frequencies = 1. / (config['rope_theta'] ** (np.arange(0, dim, 2, dtype=np.float32) / dim))
+    positions = np.arange(maximum, dtype=np.float32)
+    t = np.clip((positions - start) / max(stop - start, 1), 0.0, 1.0).astype(np.float32)
+    factors = (np.power(np.asarray(scaling['short_factor'], np.float32)[None, :], (1.0 - t)[:, None])
+               * np.power(np.asarray(scaling['long_factor'], np.float32)[None, :], t[:, None]))
+    amplitude = short_amp + (long_amp - short_amp) * t
+    phase = positions[:, None] * frequencies[None, :] / factors
+    return tuple(np.tile(fn(phase), (1, 2)).astype(np.float32) * amplitude[:, None]
+                 for fn in (np.cos, np.sin))
 
 
 def mixed_longrope_tables(config):
