@@ -104,6 +104,38 @@ def test_longrope_default_position_mode_is_position_unique():
     torch.testing.assert_close(decode[0][0], long_cos[4])
 
 
+def test_longrope_smooth_mode_is_continuous_and_keeps_prefix():
+    smooth = _longrope_config(long_retained_start_tokens=0, switch_mode="smooth",
+                              smooth_start=4, smooth_end=8)
+    long_cos, _, short_cos, _ = build_rope_caches(8, 16, 10_000.0, smooth)
+    assert short_cos is None  # smooth mode is a single unified table
+    native, _ = precompute_freqs_cis(8, 16, 10_000.0, None)
+    torch.testing.assert_close(long_cos[:4], native[:4])
+    batch = _longrope_config(long_retained_start_tokens=0, switch_mode="batch")
+    long_ref, _, _, _ = build_rope_caches(8, 16, 10_000.0, batch)
+    torch.testing.assert_close(long_cos[8:], long_ref[8:])
+
+    short_cos_ref, _ = precompute_freqs_cis(8, 16, 10_000.0, None, long_context=False)
+    torch.testing.assert_close(long_cos[4], short_cos_ref[4])
+    assert not torch.allclose(long_cos[4], long_ref[4])
+    smooth_steps = torch.diff(long_cos, dim=0).abs().amax(dim=1)
+    assert smooth_steps[3] <= 3.0 * max(float(smooth_steps[2]), float(smooth_steps[4]))
+
+
+def test_longrope_smooth_mode_validation():
+    scaling = validate_rope_scaling(
+        _longrope_config(switch_mode="smooth", smooth_start=4, smooth_end=8),
+        dim=8, max_position_embeddings=16,
+    )
+    assert scaling["switch_mode"] == "smooth"
+    assert (scaling["smooth_start"], scaling["smooth_end"]) == (4, 8)
+    with pytest.raises(ValueError, match="smooth_start"):
+        validate_rope_scaling(
+            _longrope_config(switch_mode="smooth", smooth_start=5, smooth_end=4),
+            dim=8, max_position_embeddings=16,
+        )
+
+
 def test_longrope_switch_mode_validation():
     position = validate_rope_scaling(_longrope_config(), dim=8, max_position_embeddings=16)
     assert position["switch_mode"] == "position"

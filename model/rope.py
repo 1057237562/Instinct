@@ -124,6 +124,15 @@ def validate_rope_scaling(
         )
     config["short_retained_start_tokens"] = short_retained
     config["long_retained_start_tokens"] = long_retained
+    smooth_start = int(config.get("smooth_start", original_max))
+    smooth_end = int(config.get("smooth_end", min(2 * original_max, max_position_embeddings)))
+    if not (original_max <= smooth_start < smooth_end <= max_position_embeddings):
+        raise ValueError(
+            "LongRoPE smooth_start/smooth_end must satisfy "
+            "original_max <= smooth_start < smooth_end <= max_position_embeddings"
+        )
+    config["smooth_start"] = smooth_start
+    config["smooth_end"] = smooth_end
     config["switch_mode"] = rope_switch_mode(config)
     return config
 
@@ -132,17 +141,21 @@ def rope_switch_mode(rope_scaling: Optional[dict]) -> str:
     """Resolve how the LongRoPE short and long factor tables are combined.
 
     ``position`` (default) picks the table per logical position, so a token's
-    encoding depends only on its own position. ``batch`` reproduces the legacy
+    encoding depends only on its own position.  ``smooth`` keeps positions below
+    ``smooth_start`` on the short (original) table and ramps the per-dimension
+    factors/attention scale towards the long table over
+    ``[smooth_start, smooth_end]``, so the encoding is continuous at the
+    boundary instead of switching tables.  ``batch`` reproduces the legacy
     Phi-3 dynamic rule that selects one table for the whole forward from the
     largest logical position (sensitive to packing and KV-cache decoding).
     ``INSTINCT_ROPE_SWITCH_MODE`` overrides the JSON field, which lets an
-    evaluation reproduce a checkpoint trained under the other regime without
+    evaluation reproduce a checkpoint trained under another regime without
     rewriting its config file.
     """
     configured = (rope_scaling or {}).get("switch_mode")
     mode = os.environ.get("INSTINCT_ROPE_SWITCH_MODE") or configured or "position"
-    if mode not in {"position", "batch"}:
-        raise ValueError('LongRoPE switch_mode must be "position" or "batch"')
+    if mode not in {"position", "batch", "smooth"}:
+        raise ValueError('LongRoPE switch_mode must be "position", "batch" or "smooth"')
     return mode
 
 
@@ -225,8 +238,42 @@ def precompute_freqs_cis(
     return freqs_cos, freqs_sin
 
 
+def precompute_smooth_freqs_cis(dim: int, end: int, rope_base: float, rope_scaling: dict):
+    """Single LongRoPE table that ramps short -> long factors after smooth_start.
+
+    Positions below ``smooth_start`` are exactly the short/original table; over
+    ``[smooth_start, smooth_end]`` every rotary pair's factor is interpolated
+    geometrically between the short and long factor and the attention scale is
+    ramped linearly, so the encoding stays continuous at the boundary. Positions
+    beyond ``smooth_end`` are exactly the long table. This avoids both the hard
+    table switch of ``position`` mode and the q/k cross-boundary mixing it causes.
+    """
+    config = validate_rope_scaling(rope_scaling, dim, end)
+    if config is None or rope_scaling_type(config) != "longrope":
+        raise ValueError("smooth mode requires a longrope rope_scaling config")
+    start = int(config["smooth_start"])
+    stop = int(config["smooth_end"])
+    factors_short = torch.tensor(config["short_factor"], dtype=torch.float32)
+    factors_long = torch.tensor(config["long_factor"], dtype=torch.float32)
+    base_inv = 1.0 / (rope_base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+    short_amp = _longrope_attention_factor(config, False)
+    long_amp = _longrope_attention_factor(config, True)
+    positions = torch.arange(end, dtype=torch.float32)
+    t = ((positions - start) / max(stop - start, 1)).clamp(0.0, 1.0)
+    log_factors = ((1.0 - t)[:, None] * torch.log(factors_short)[None, :]
+                   + t[:, None] * torch.log(factors_long)[None, :])
+    factors = torch.exp(log_factors)
+    amplitude = short_amp + (long_amp - short_amp) * t
+    angles = torch.outer(positions, base_inv) / factors
+    return torch.cat((angles.cos(), angles.cos()), dim=-1) * amplitude[:, None], \
+        torch.cat((angles.sin(), angles.sin()), dim=-1) * amplitude[:, None]
+
+
 def build_rope_caches(dim: int, end: int, rope_base: float, rope_scaling: Optional[dict]):
     """Build the active cache and, for LongRoPE, its short-context companion."""
+    if rope_scaling_type(rope_scaling) == "longrope" and rope_switch_mode(rope_scaling) == "smooth":
+        smooth_cos, smooth_sin = precompute_smooth_freqs_cis(dim, end, rope_base, rope_scaling)
+        return smooth_cos, smooth_sin, None, None
     long_cos, long_sin = precompute_freqs_cis(
         dim, end, rope_base, rope_scaling, long_context=True
     )

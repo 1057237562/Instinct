@@ -149,11 +149,16 @@ class Model:
         if c['model_architecture'] == 'looped_legacy' and c['loop_iters']:
             self._parameter('model.loop_pos_embed.weight', (c['loop_iters'], h), zeros=True)
         from .rope import (is_longrope, longrope_tables, mixed_longrope_tables,
-                           rope_switch_mode)
+                           rope_switch_mode, smooth_longrope_tables)
         scaling = c.get('rope_scaling')
-        position_mode = (is_longrope(scaling)
-                         and rope_switch_mode(scaling) == 'position')
-        tables = mixed_longrope_tables(c) if position_mode else rope_tables(c)
+        mode = rope_switch_mode(scaling) if is_longrope(scaling) else None
+        position_mode = mode in ('position', 'smooth')
+        if mode == 'position':
+            tables = mixed_longrope_tables(c)
+        elif mode == 'smooth':
+            tables = smooth_longrope_tables(c)
+        else:
+            tables = rope_tables(c)
         self.cos, self.sin = (engine.array(x) for x in tables)
         # Legacy batch mode stores the short table separately: one table is
         # selected per forward from the largest logical position, and rollout
