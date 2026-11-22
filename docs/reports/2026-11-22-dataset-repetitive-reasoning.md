@@ -76,6 +76,7 @@
 
 ## 五、建议
 - **清洗**：用 `rebalance_code_think_lane.py` 的 5-gram 过滤对完整池重选 lane；原始池会掉 37%，但被掉的主要是 >8k 词的退化长文（66% 重复），代价可接受；阈值 0.88 建议先抽样复核，必要时提到 0.92 以减少误伤枚举式有效推理。
+- **修复优先于丢弃**：`experiments/clean_think_repetition.py` 提供 `scan / clean / rebuild-lane` 三个子命令，对"便宜可修"的重复（重复代码块、整行复制、重复句子、token 短循环）做定点删除并校验，修不了则整行丢弃（绝不盲截断）；`rebuild-lane` 会保留自然长度分布并强制短 think 配额。
 - **保形**：保留自然长度分布 + 强制短 think 配额（≤256 token，默认 25%），并允许 `INSTINCT_EMPTY_THINK_RATIO=0.2–0.4` 教"不思考直接答"。
 - **别只截断**：v4 的教训是"截短样本"不等于"去重复"；选择（整行保留/整行丢弃）优于改写。
 - **监控**：训练开 `INSTINCT_THINK_STATS=1` 看 close_rate 和长度桶；评测用 `analyze_cap_hits.py` 把撞上限拆成 loop / still-thinking / code-in-think。
