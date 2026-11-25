@@ -717,6 +717,43 @@ batch 32). Artifacts:
 The run is mid-epoch (64.4%) with a different data mixture and the smooth RoPE
 semantics, so these numbers are a checkpoint probe, not a final-epoch result.
 
+### instinctv2_sft_santitized_2b probe (step 66,048)
+
+A later probe of the same run, evaluated from the **weights npz** rather than the
+resume state: the 66,560 save failed with `PermissionError(13)` because the
+periodic archive task held a read handle on the 13 GiB resume file while the
+trainer tried to replace it. The trainer had written weights for step 66,048
+(1,072,520,943 tokens) but the matching resume never landed, leaving the live
+resume at step 65,536 / 1,064,208,249 tokens. EvalPlus requires the checkpoint's
+own `progress` metadata, so the evaluator now derives step/tokens from the
+weights npz and cross-checks that it carries no optimizer state. Weights SHA-256
+`3adb083ad2b66b6f8076f1c68c7201ebba7df564aa0607e6d029dc7c5c647a71`;
+converted `step66048.pth` SHA-256 `0250ef7757b43425445e5b3d04b9f3174c426dff0dea7e7b1367ef7795527d7d`.
+
+| Metric | @66,048 | @50,688 | R1 position @30,720 | v4 @3,000 |
+| --- | ---: | ---: | ---: | ---: |
+| HumanEval+ pass@1 / pass@10 | 0.3610 / 0.6585 | 0.3476 / 0.6463 | 0.4018 / 0.6768 | 0.4421 / 0.7317 |
+| HumanEval base pass@1 / pass@10 | 0.3945 / 0.6951 | 0.3793 / 0.6951 | 0.4232 / 0.7073 | 0.4713 / 0.7622 |
+| MBPP+ pass@1 / pass@10 | 0.4661 / 0.7143 | 0.4524 / 0.6878 | 0.4574 / 0.6931 | 0.4802 / 0.7090 |
+| MBPP base pass@1 / pass@10 | 0.5323 / 0.7963 | 0.5209 / 0.7778 | 0.5291 / 0.7937 | 0.5463 / 0.7884 |
+| LCB latest-175 think pass@1 (ctx 8192) | 0.0800 (14/175) | 0.0971 (17/175) | 0.0857 (15/175, ctx 4096) | 0.0857 (ctx 4096) |
+| LCB latest-175 no-think pass@1 (ctx 4096) | 0.1086 (19/175) | 0.1257 (22/175) | 0.1257 (22/175) | 0.1200 |
+
+EvalPlus improved over 50,688 in both suites; LCB moved the other way by 3 tasks
+in each mode (single-sample 175-task noise; think cap hits 123 vs 121, closed
+52 vs 54, so most of the headroom is still consumed by truncated reasoning).
+Artifacts: `eval/evalplus/native_instinctv2_sft_santitized_2b_step66048_pass10/`,
+`..._step66048_lcb_provenance/`, and
+`eval/livecodebench/native_instinctv2_sft_santitized_2b_step66048_release_v6_{think_ctx8192,nothink_ctx4096}_latest175/`.
+Report: `eval/auto_eval_native_instinctv2_sft_santitized_2b/REPORT.md`.
+Training was then resumed from the 65,536 resume and paused through the
+save-and-pause flow at step 66,052 / 1,072,586,204 tokens (weights SHA-256
+`a18c70f4b997a6b8f618c5caee06383c5aa17a3f5abbe09a4447a6ad36595fa7`, resume
+`6bc3d5313d6b3d4b93959f289bbb47380614daab14008cfbf77e0ba34e40bf7b`), so that npz
+path now holds the 66,052 snapshot and no longer the evaluated 66,048 state (the
+converted `step66048.pth` is retained for reproduction). Logs for this run are
+archived under `docs/reports/20261125_instinctv2_sft_santitized_2b/`.
+
 ## Critical gotchas
 
 ### LongRoPE switch modes
