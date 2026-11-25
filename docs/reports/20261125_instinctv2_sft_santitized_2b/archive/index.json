@@ -1,0 +1,486 @@
+{
+  "archives": [
+    {
+      "file": "native_instinct_r1_pos_1536_step01500_weights.npz",
+      "step": 1500,
+      "bytes": 4081487726,
+      "sha256": "96d218de351b3846cde84b7fd4200f7673fe75326b9070468e69dbac0044ab18",
+      "progress": {
+        "steps": 1500,
+        "epoch": 0,
+        "cursor": 1500,
+        "processed_tokens": 24241835,
+        "supervised_tokens": 16931372,
+        "world_size": 1,
+        "data_seed": 42
+      },
+      "kind": "weights"
+    },
+    {
+      "file": "native_instinct_r1_pos_1536_step01500_resume.npz",
+      "step": 1500,
+      "bytes": 14086625390,
+      "sha256": "2a05555215260aa1edbee16de2285fb4958591e85f989aa15a1b69adbe39ebc9",
+      "progress": {
+        "steps": 1500,
+        "epoch": 0,
+        "cursor": 1500,
+        "processed_tokens": 24241835,
+        "supervised_tokens": 16931372,
+        "world_size": 1,
+        "data_seed": 42
+      },
+      "kind": "resume"
+    },
+    {
+      "file": "native_instinct_r1_pos_1536_step01536_resume.npz",
+      "step": 1536,
+      "bytes": 14086625390,
+      "sha256": "a3e5d3b4e1d06eedbe996a7af016ae0a226bbae3daab1eb9c2259537e8aea5a9",
+      "progress": {
+        "steps": 1536,
+        "epoch": 0,
+        "cursor": 1536,
+        "processed_tokens": 24829218,
+        "supervised_tokens": 17344311,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step02560_resume.npz",
+      "step": 2560,
+      "bytes": 14087839158,
+      "sha256": "505c7b2d5d5192f06297d022fb34a612136f758a804467c4fa086b902df93381",
+      "progress": {
+        "steps": 2560,
+        "epoch": 0,
+        "cursor": 2560,
+        "processed_tokens": 41587911,
+        "supervised_tokens": 31858801,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_concise_reasoning_635m_v4_1536_step03000_weights.npz",
+      "step": 3000,
+      "bytes": 4081487838,
+      "sha256": "585879867c748a780774fe35cd9aad6fecbb2c847d4df6bb59e05f07bbcdacfe",
+      "progress": {
+        "steps": 3000,
+        "epoch": 0,
+        "cursor": 3000,
+        "processed_tokens": 48469768,
+        "supervised_tokens": 0,
+        "world_size": 1,
+        "data_seed": 42
+      },
+      "kind": "weights"
+    },
+    {
+      "file": "native_instinctv2_sft_concise_reasoning_635m_v4_1536_step03000_resume.npz",
+      "step": 3000,
+      "bytes": 14086625502,
+      "sha256": "962d20d3b118bae9c48b52585d528a49464e97b2a415a91b7502b27cd5718a26",
+      "progress": {
+        "steps": 3000,
+        "epoch": 0,
+        "cursor": 3000,
+        "processed_tokens": 48469768,
+        "supervised_tokens": 0,
+        "world_size": 1,
+        "data_seed": 42
+      },
+      "kind": "resume"
+    },
+    {
+      "file": "native_instinctv2_sft_concise_reasoning_635m_v3_1536_step03072_resume.npz",
+      "step": 3072,
+      "bytes": 14086753478,
+      "sha256": "d1f40d662b26238153e928289c86a1dc60a1dc10a49b762a7a1ec7fac4c8b99f",
+      "progress": {
+        "steps": 3072,
+        "epoch": 0,
+        "cursor": 3072,
+        "processed_tokens": 49852256,
+        "supervised_tokens": 36144801,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_concise_reasoning_635m_v3_1536_step03840_resume.npz",
+      "step": 3840,
+      "bytes": 14086753478,
+      "sha256": "ae283e10d0e53d5eba8946076a4ddcf0e3fcc009b9c69c585483150c7d0bbd49",
+      "progress": {
+        "steps": 3840,
+        "epoch": 0,
+        "cursor": 3840,
+        "processed_tokens": 62291020,
+        "supervised_tokens": 45099733,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_concise_reasoning_635m_v3_1536_step04352_resume.npz",
+      "step": 4352,
+      "bytes": 14086754898,
+      "sha256": "6cb50ebb4a2ee600d5ad93013d0ac2273b32f5d9d65d5bee2452cfbbcccd0b24",
+      "progress": {
+        "steps": 4352,
+        "epoch": 0,
+        "cursor": 4352,
+        "processed_tokens": 70592453,
+        "supervised_tokens": 51247988,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinct_r1_pos_1536_step08704_resume.npz",
+      "step": 8704,
+      "bytes": 14086626814,
+      "sha256": "7237623596e9a3767f0b2fdfbb8da358f22ef747481192f8b9be8264211eb73a",
+      "progress": {
+        "steps": 8704,
+        "epoch": 0,
+        "cursor": 8704,
+        "processed_tokens": 140811445,
+        "supervised_tokens": 98792103,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step09728_resume.npz",
+      "step": 9728,
+      "bytes": 14087840586,
+      "sha256": "81a06a5e13cb7b9587eb7ec37afbe3cdf205aaba77c11952837fe6bbb9126de3",
+      "progress": {
+        "steps": 9728,
+        "epoch": 0,
+        "cursor": 9728,
+        "processed_tokens": 158004654,
+        "supervised_tokens": 120876919,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_concise_reasoning_635m_v3_1536_step10052_resume.npz",
+      "step": 10052,
+      "bytes": 14086754914,
+      "sha256": "48d5d62225bf93f204130fd33b775936e0ef01bd7651f33ee6d58d18e12594c6",
+      "progress": {
+        "steps": 10052,
+        "epoch": 0,
+        "cursor": 10052,
+        "processed_tokens": 162848697,
+        "supervised_tokens": 118269488,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_concise_reasoning_635m_v3_1536_step14848_resume.npz",
+      "step": 14848,
+      "bytes": 14086754914,
+      "sha256": "bd0a9259f0cf2c2c6a23dcbfb06a82b9761138a5ce690dc2e5d03cf21e6f2c45",
+      "progress": {
+        "steps": 14848,
+        "epoch": 0,
+        "cursor": 14848,
+        "processed_tokens": 240631384,
+        "supervised_tokens": 174649762,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinct_r1_pos_1536_step15872_resume.npz",
+      "step": 15872,
+      "bytes": 14086626826,
+      "sha256": "4b90c3642906865004551c2cc2254cbd0a922610d580f7e986039dd97cd7a25f",
+      "progress": {
+        "steps": 15872,
+        "epoch": 0,
+        "cursor": 15872,
+        "processed_tokens": 256787650,
+        "supervised_tokens": 179935217,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_concise_reasoning_635m_v3_1536_step17248_resume.npz",
+      "step": 17248,
+      "bytes": 14086754914,
+      "sha256": "74c039aa49cdce83d741343543ab3e34241d94ee539766bb179c7150bd7d2aff",
+      "progress": {
+        "steps": 17248,
+        "epoch": 0,
+        "cursor": 17248,
+        "processed_tokens": 279465073,
+        "supervised_tokens": 202779721,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_concise_reasoning_635m_v3_1536_step17404_resume.npz",
+      "step": 17404,
+      "bytes": 14086754914,
+      "sha256": "048cb2118ca4df5031080a94f8a59a7c2480a7743204876571709bfa44e3a6bb",
+      "progress": {
+        "steps": 17404,
+        "epoch": 0,
+        "cursor": 17404,
+        "processed_tokens": 281991893,
+        "supervised_tokens": 204585411,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step17408_resume.npz",
+      "step": 17408,
+      "bytes": 14087840594,
+      "sha256": "e24636a9001b7632b1592f6c862386863112d257e061ff6c60dab93f9357c083",
+      "progress": {
+        "steps": 17408,
+        "epoch": 0,
+        "cursor": 17408,
+        "processed_tokens": 282655971,
+        "supervised_tokens": 216059749,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinct_r1_pos_1536_step23040_resume.npz",
+      "step": 23040,
+      "bytes": 14086626826,
+      "sha256": "e4b3d3f74019fb81a82ebd474ac4bc7df0048a8d24f4ae4d60648964b2c040a3",
+      "progress": {
+        "steps": 23040,
+        "epoch": 0,
+        "cursor": 23040,
+        "processed_tokens": 372746879,
+        "supervised_tokens": 261377413,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step24576_resume.npz",
+      "step": 24576,
+      "bytes": 14087840594,
+      "sha256": "1f383972ea1a093300825b5f90c994da04ac6e36defa881e028de356d8798a98",
+      "progress": {
+        "steps": 24576,
+        "epoch": 0,
+        "cursor": 24576,
+        "processed_tokens": 399085795,
+        "supervised_tokens": 304906219,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinct_r1_pos_1536_step30208_resume.npz",
+      "step": 30208,
+      "bytes": 14086626826,
+      "sha256": "4cdc492ca9f1dd72a5254501c3c06e92f594dcf7d7c2f085b994bfb3b49e259b",
+      "progress": {
+        "steps": 30208,
+        "epoch": 0,
+        "cursor": 30208,
+        "processed_tokens": 488582649,
+        "supervised_tokens": 342658454,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinct_r1_pos_1536_step30720_weights.npz",
+      "step": 30720,
+      "bytes": 4081487742,
+      "sha256": "089b4ab04affb466c756d2ed1bf0e8d8df8da8bf19f7c0bae7bfb689989ae201",
+      "progress": {
+        "steps": 30720,
+        "epoch": 0,
+        "cursor": 30720,
+        "processed_tokens": 496894810,
+        "supervised_tokens": 348543893,
+        "world_size": 1,
+        "data_seed": 42
+      },
+      "kind": "weights"
+    },
+    {
+      "file": "native_instinct_r1_pos_1536_step30720_resume.npz",
+      "step": 30720,
+      "bytes": 14086626826,
+      "sha256": "2c55777c0758cdfe53555ef36105fa98a7cd213fd326dabf484a708ef58652f9",
+      "progress": {
+        "steps": 30720,
+        "epoch": 0,
+        "cursor": 30720,
+        "processed_tokens": 496894810,
+        "supervised_tokens": 348543893,
+        "world_size": 1,
+        "data_seed": 42
+      },
+      "kind": "resume"
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step31744_resume.npz",
+      "step": 31744,
+      "bytes": 14087840594,
+      "sha256": "2e203140bbdd889c755c6e0130e011ac1d8acde316e932e0550492b9bf19de31",
+      "progress": {
+        "steps": 31744,
+        "epoch": 0,
+        "cursor": 31744,
+        "processed_tokens": 515518789,
+        "supervised_tokens": 394159886,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step35840_weights.npz",
+      "step": 35840,
+      "bytes": 4082701510,
+      "sha256": "4172dc1533da73a7797d633b9dc3048ecfec7285a1416c8297d97d1ce0cf0a36",
+      "kind": "weights",
+      "progress": {
+        "steps": 35840,
+        "processed_tokens": 581993013
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step35840_resume.npz",
+      "step": 35840,
+      "bytes": 14087840594,
+      "sha256": "75adc205b5d33edf0b2d48624a6502fa9728c8b66016bb68cf2f381e6f19b110",
+      "kind": "resume",
+      "progress": {
+        "steps": 35840,
+        "processed_tokens": 581993013
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step38912_resume.npz",
+      "step": 38912,
+      "bytes": 14087840594,
+      "sha256": "bc33ca02832e3141c8260a7d945c3f81ad4e24d23b3f2db92f0ec0aa327e6ddc",
+      "progress": {
+        "steps": 38912,
+        "epoch": 0,
+        "cursor": 38912,
+        "processed_tokens": 631866707,
+        "supervised_tokens": 483102242,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step46080_resume.npz",
+      "step": 46080,
+      "bytes": 14087842014,
+      "sha256": "ce9dd63a368c9f8a29a17e58f92ce3a72c17f87cc59fef13d326584808095392",
+      "progress": {
+        "steps": 46080,
+        "epoch": 0,
+        "cursor": 46080,
+        "processed_tokens": 748240868,
+        "supervised_tokens": 572050323,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step50688_weights.npz",
+      "step": 50688,
+      "bytes": 4082701510,
+      "sha256": "3f3e1501e18d3782a9343944a26b776545408e0670da0972bedf6439b5f3cf97",
+      "kind": "weights"
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step50688_resume.npz",
+      "step": 50688,
+      "bytes": 14087842014,
+      "sha256": "d90f2d995df17cfef78434c15ed3bf574f0d2496baeafbf29cde4afa30f36cfe",
+      "kind": "resume"
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step51200_resume.npz",
+      "step": 51200,
+      "bytes": 14087842014,
+      "sha256": "bad76769bc2fb77dfe326569e479a44b91c19cd0a9d18e6e70693746aa7bf221",
+      "progress": {
+        "steps": 51200,
+        "epoch": 0,
+        "cursor": 51200,
+        "processed_tokens": 831338313,
+        "supervised_tokens": 635572840,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step58368_resume.npz",
+      "step": 58368,
+      "bytes": 14087842014,
+      "sha256": "ba8c79049049fb1b865a4275bc7623254edcd6e1da5f3aa45f5bf257301ae742",
+      "progress": {
+        "steps": 58368,
+        "epoch": 0,
+        "cursor": 58368,
+        "processed_tokens": 947750971,
+        "supervised_tokens": 724551790,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step65536_resume.npz",
+      "step": 65536,
+      "bytes": 14087842018,
+      "sha256": "c76ce01b805c90da83937b8964b2bc1eaa54f3a5a3c50e700926ae308f2d35be",
+      "progress": {
+        "steps": 65536,
+        "epoch": 0,
+        "cursor": 65536,
+        "processed_tokens": 1064208249,
+        "supervised_tokens": 813234938,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    },
+    {
+      "file": "native_instinctv2_sft_santitized_2b_1536_step66052_resume.npz",
+      "step": 66052,
+      "bytes": 14087842018,
+      "sha256": "6bc3d5313d6b3d4b93959f289bbb47380614daab14008cfbf77e0ba34e40bf7b",
+      "progress": {
+        "steps": 66052,
+        "epoch": 0,
+        "cursor": 66052,
+        "processed_tokens": 1072586204,
+        "supervised_tokens": 819656214,
+        "world_size": 1,
+        "data_seed": 42
+      }
+    }
+  ],
+  "last_run": {
+    "step": 66052,
+    "status": "archived",
+    "sha256": "6bc3d5313d6b3d4b93959f289bbb47380614daab14008cfbf77e0ba34e40bf7b"
+  }
+}

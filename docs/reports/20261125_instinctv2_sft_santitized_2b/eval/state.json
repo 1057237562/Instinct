@@ -1,0 +1,9 @@
+{
+  "training_status": "manual",
+  "step": 66048,
+  "tokens": 1072520943,
+  "stage": "done",
+  "updated_at": "2026-11-25T21:00:00",
+  "report": "D:\\AI\\Instinct\\eval\\auto_eval_native_instinctv2_sft_santitized_2b\\REPORT.md",
+  "finished_at": "2026-11-25T21:00:00"
+}

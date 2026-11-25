@@ -1,0 +1,70 @@
+{
+  "checkpoint": "D:\\AI\\Instinct\\out\\native_instinctv2_sft_santitized_2b\\native_instinctv2_sft_santitized_2b_1536.npz",
+  "checkpoint_sha256": "3f3e1501e18d3782a9343944a26b776545408e0670da0972bedf6439b5f3cf97",
+  "checkpoint_step": 50688,
+  "checkpoint_tokens": 823006842,
+  "converted_weights_sha256": "18d991d5a829d3081b50d3caefb7d79f179ffc742098bdc81a7c2659add4250b",
+  "model_config_sha256": "6d33c746b2343e7963f6faad69a9cd2275199c932830fdbe487c36829af0687b",
+  "batch_size": 32,
+  "samples_per_task": 10,
+  "temperature": 0.8,
+  "top_p": 0.95,
+  "top_k": 50,
+  "seed": 42,
+  "max_new_tokens": 512,
+  "thinking": false,
+  "prompt_style": "zero-shot chat",
+  "model_load_seconds": 30.962263399997028,
+  "gpu": "NVIDIA GeForce RTX 5070 Ti",
+  "dtype": "torch.bfloat16",
+  "dataset_sha256": "af43697e8791c4c149bdfd6b489d8b5412507551ac20e28a439f650b8225db63",
+  "tasks": 378,
+  "samples": 3780,
+  "samples_sha256": "10cd8f1abf3769b239548139d4ec1d50876e19f315db521bc2562caf5d899ea4",
+  "token_limit_hits": 24,
+  "generation_seconds": 255.82371570000396,
+  "generated_tokens": 419995,
+  "generated_tokens_per_second": 1641.7359854647498,
+  "peak_gpu_allocated_bytes": 9453640704,
+  "metrics": {
+    "base": {
+      "pass@1": 0.5208994708994709,
+      "pass@10": 0.7777777777777778,
+      "samples_passed": 1969,
+      "tasks_passed": 294
+    },
+    "plus": {
+      "pass@1": 0.4523809523809524,
+      "pass@10": 0.6878306878306878,
+      "samples_passed": 1710,
+      "tasks_passed": 260
+    }
+  },
+  "outcomes": {
+    "base": {
+      "passed": 1969,
+      "failed": 1805,
+      "timed out": 6
+    },
+    "plus": {
+      "passed": 1710,
+      "skipped": 1811,
+      "failed": 258,
+      "timed out": 1
+    }
+  },
+  "suite_input_counts": {
+    "base": 1174,
+    "plus": 39841
+  },
+  "evalplus_revision": "26d6d00bb1fd0fa37f39c99d5290da67891d1c5e",
+  "reference_oracle_warnings": {},
+  "sanitizer": "EvalPlus sanitize, one solution per full raw reply",
+  "scoring_runtime": "WASI with official MBPP input deserialization and comparison rules",
+  "scoring_workers": 8,
+  "resumed_candidates": 0,
+  "remaining_scoring_seconds": 405.9752762999997,
+  "benchmark": "MBPP+",
+  "version": "v0.2.0",
+  "scoring_seconds": 405.9752762999997
+}

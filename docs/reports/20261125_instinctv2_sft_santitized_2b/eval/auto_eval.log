@@ -1,0 +1,661 @@
+[2026-11-25T01:15:32] === auto evaluation for native_instinctv2_sft_santitized_2b ===
+[2026-11-25T01:15:32] watchdog started; waiting for trainer pid 34100 / native_instinctv2_sft_santitized_2b.status.json
+[2026-11-25T01:17:07] === auto evaluation for native_instinctv2_sft_santitized_2b ===
+[2026-11-25T01:17:07] watchdog started; waiting for trainer pid 34100 / native_instinctv2_sft_santitized_2b.status.json
+[2026-11-25T04:16:34] training stopped: status=failed step=66560
+[2026-11-25T04:16:39] final checkpoint: step=65536 tokens=1064208249
+[2026-11-25T04:16:39] run (Instinct): E:\miniconda3\python.exe D:\AI\Instinct\tmp\native_sft_santitized_2b\setup_eval.py --step 65536 --tokens 1064208249
+$ (D:\AI\Instinct) E:\miniconda3\python.exe D:\AI\Instinct\tmp\native_sft_santitized_2b\setup_eval.py --step 65536 --tokens 1064208249
+D:\AI\Instinct\eval\evalplus\native_instinctv2_sft_santitized_2b_step65536_pass10\step65536.pth
+{
+  "step": 65536,
+  "tokens": 1064208249,
+  "npz_sha256": "3adb083ad2b66b6f8076f1c68c7201ebba7df564aa0607e6d029dc7c5c647a71",
+  "evalplus": "D:\\AI\\Instinct\\eval\\evalplus\\native_instinctv2_sft_santitized_2b_step65536_pass10",
+  "pth": "D:\\AI\\Instinct\\eval\\evalplus\\native_instinctv2_sft_santitized_2b_step65536_lcb_provenance\\step65536.pth",
+  "provenance": "D:\\AI\\Instinct\\eval\\evalplus\\native_instinctv2_sft_santitized_2b_step65536_lcb_provenance",
+  "lcb_dirs": [
+    "D:\\AI\\Instinct\\eval\\livecodebench\\native_instinctv2_sft_santitized_2b_step65536_release_v6_think_ctx8192_latest175",
+    "D:\\AI\\Instinct\\eval\\livecodebench\\native_instinctv2_sft_santitized_2b_step65536_release_v6_nothink_ctx4096_latest175"
+  ]
+}
+[2026-11-25T04:17:05] exit=0
+[2026-11-25T04:17:05] run (native_instinctv2_sft_santitized_2b_step65536_pass10): E:\miniconda3\python.exe run_eval.py generate --workers 8
+$ (D:\AI\Instinct\eval\evalplus\native_instinctv2_sft_santitized_2b_step65536_pass10) E:\miniconda3\python.exe run_eval.py generate --workers 8
+Traceback (most recent call last):
+  File "D:\AI\Instinct\eval\evalplus\native_instinctv2_sft_santitized_2b_step65536_pass10\run_eval.py", line 237, in <module>
+    generate()
+  File "D:\AI\Instinct\eval\evalplus\native_instinctv2_sft_santitized_2b_step65536_pass10\run_eval.py", line 81, in generate
+    raise ValueError("Unexpected native inference checkpoint")
+ValueError: Unexpected native inference checkpoint
+[2026-11-25T04:17:08] exit=1
+[2026-11-25T08:00:00] === auto evaluation for native_instinctv2_sft_santitized_2b ===
+[2026-11-25T08:00:00] watchdog started; waiting for trainer pid 34100 / native_instinctv2_sft_santitized_2b.status.json
+[2026-11-25T08:00:00] training stopped: status=failed step=66560
+[2026-11-25T08:00:05] final checkpoint: step=65536 tokens=1064208249
+[2026-11-25T08:00:05] evaluation directories already exist; reusing them
+[2026-11-25T08:00:05] run (native_instinctv2_sft_santitized_2b_step65536_pass10): E:\miniconda3\python.exe run_eval.py generate --workers 8
+$ (D:\AI\Instinct\eval\evalplus\native_instinctv2_sft_santitized_2b_step65536_pass10) E:\miniconda3\python.exe run_eval.py generate --workers 8
+Traceback (most recent call last):
+  File "D:\AI\Instinct\eval\evalplus\native_instinctv2_sft_santitized_2b_step65536_pass10\run_eval.py", line 237, in <module>
+    generate()
+  File "D:\AI\Instinct\eval\evalplus\native_instinctv2_sft_santitized_2b_step65536_pass10\run_eval.py", line 81, in generate
+    raise ValueError("Unexpected native inference checkpoint")
+ValueError: Unexpected native inference checkpoint
+[2026-11-25T08:00:08] exit=1
+[2026-11-25T20:12:52] === auto evaluation for native_instinctv2_sft_santitized_2b ===
+[2026-11-25T20:12:52] --now: evaluating the current weights npz without waiting for training
+[2026-11-25T20:12:58] final checkpoint: step=66048 tokens=1072520943
+[2026-11-25T20:12:58] evaluation directories already exist; reusing them
+[2026-11-25T20:12:58] run (native_instinctv2_sft_santitized_2b_step66048_pass10): E:\miniconda3\python.exe run_eval.py generate --workers 8
+$ (D:\AI\Instinct\eval\evalplus\native_instinctv2_sft_santitized_2b_step66048_pass10) E:\miniconda3\python.exe run_eval.py generate --workers 8
+W1125 20:13:39.031000 27452 site-packages\torch\utils\_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W1125 20:13:39.128000 27452 site-packages\torch\utils\_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+Model Params: 1010.28M
+[Inference] Compiled kernels enabled: 129 RMSNorm, 32 SwiGLU, length-aware static attention; first use compiles/caches kernels.
+Generating humaneval: 1640 candidates for 164 tasks
+[Eval batch 1/52] sequences=32 prompt_width=92 padding=2.4% kv_cache_dtype=fp32 generated_tokens=3026 tokens/s=152.1 time=19.90s
+[Eval batch 2/52] sequences=32 prompt_width=100 padding=2.6% kv_cache_dtype=fp32 generated_tokens=3072 tokens/s=1260.4 time=2.44s
+[Eval batch 3/52] sequences=32 prompt_width=113 padding=7.1% kv_cache_dtype=fp32 generated_tokens=2466 tokens/s=1297.7 time=1.90s
+[Eval batch 4/52] sequences=32 prompt_width=122 padding=3.5% kv_cache_dtype=fp32 generated_tokens=4861 tokens/s=2322.7 time=2.09s
+[Eval batch 5/52] sequences=32 prompt_width=123 padding=0.1% kv_cache_dtype=fp32 generated_tokens=3566 tokens/s=2326.6 time=1.53s
+[Eval batch 6/52] sequences=32 prompt_width=128 padding=1.7% kv_cache_dtype=fp32 generated_tokens=2693 tokens/s=2223.0 time=1.21s
+[Eval batch 7/52] sequences=32 prompt_width=135 padding=2.9% kv_cache_dtype=fp32 generated_tokens=4817 tokens/s=1806.2 time=2.67s
+[Eval batch 8/52] sequences=32 prompt_width=138 padding=0.9% kv_cache_dtype=fp32 generated_tokens=4387 tokens/s=1654.8 time=2.65s
+[Eval batch 9/52] sequences=32 prompt_width=142 padding=1.9% kv_cache_dtype=fp32 generated_tokens=3661 tokens/s=1790.3 time=2.04s
+[Eval batch 10/52] sequences=32 prompt_width=144 padding=0.7% kv_cache_dtype=fp32 generated_tokens=3814 tokens/s=1881.0 time=2.03s
+[Eval batch 11/52] sequences=32 prompt_width=146 padding=0.9% kv_cache_dtype=fp32 generated_tokens=4391 tokens/s=2799.2 time=1.57s
+[Eval batch 12/52] sequences=32 prompt_width=147 padding=0.2% kv_cache_dtype=fp32 generated_tokens=4204 tokens/s=2239.0 time=1.88s
+[Eval batch 13/52] sequences=32 prompt_width=150 padding=1.0% kv_cache_dtype=fp32 generated_tokens=2579 tokens/s=2565.0 time=1.01s
+[Eval batch 14/52] sequences=32 prompt_width=153 padding=0.9% kv_cache_dtype=fp32 generated_tokens=3049 tokens/s=1780.3 time=1.71s
+[Eval batch 15/52] sequences=32 prompt_width=154 padding=0.4% kv_cache_dtype=fp32 generated_tokens=3819 tokens/s=3221.3 time=1.19s
+[Eval batch 16/52] sequences=32 prompt_width=161 padding=2.1% kv_cache_dtype=fp32 generated_tokens=3693 tokens/s=2923.9 time=1.26s
+[Eval batch 17/52] sequences=32 prompt_width=162 padding=0.2% kv_cache_dtype=fp32 generated_tokens=3333 tokens/s=2819.2 time=1.18s
+[Eval batch 18/52] sequences=32 prompt_width=169 padding=1.9% kv_cache_dtype=fp32 generated_tokens=5400 tokens/s=2331.8 time=2.32s
+[Eval batch 19/52] sequences=32 prompt_width=174 padding=1.4% kv_cache_dtype=fp32 generated_tokens=5456 tokens/s=2080.1 time=2.62s
+[Eval batch 20/52] sequences=32 prompt_width=175 padding=0.0% kv_cache_dtype=fp32 generated_tokens=4477 tokens/s=1766.2 time=2.53s
+[Eval batch 21/52] sequences=32 prompt_width=179 padding=1.0% kv_cache_dtype=fp32 generated_tokens=5870 tokens/s=2162.2 time=2.71s
+[Eval batch 22/52] sequences=32 prompt_width=180 padding=0.5% kv_cache_dtype=fp32 generated_tokens=5770 tokens/s=2130.2 time=2.71s
+[Eval batch 23/52] sequences=32 prompt_width=181 padding=0.3% kv_cache_dtype=fp32 generated_tokens=3708 tokens/s=1734.9 time=2.14s
+[Eval batch 24/52] sequences=32 prompt_width=182 padding=0.1% kv_cache_dtype=fp32 generated_tokens=4866 tokens/s=2170.3 time=2.24s
+[Eval batch 25/52] sequences=32 prompt_width=184 padding=0.2% kv_cache_dtype=fp32 generated_tokens=3857 tokens/s=1528.9 time=2.52s
+[Eval batch 26/52] sequences=32 prompt_width=187 padding=0.7% kv_cache_dtype=fp32 generated_tokens=4668 tokens/s=1772.2 time=2.63s
+[Eval batch 27/52] sequences=32 prompt_width=190 padding=0.9% kv_cache_dtype=fp32 generated_tokens=6352 tokens/s=2536.7 time=2.50s
+[Eval batch 28/52] sequences=32 prompt_width=194 padding=0.4% kv_cache_dtype=fp32 generated_tokens=5934 tokens/s=2168.3 time=2.74s
+[Eval batch 29/52] sequences=32 prompt_width=199 padding=1.4% kv_cache_dtype=fp32 generated_tokens=5886 tokens/s=2415.6 time=2.44s
+[Eval batch 30/52] sequences=32 prompt_width=202 padding=0.4% kv_cache_dtype=fp32 generated_tokens=6051 tokens/s=2202.6 time=2.75s
+[Eval batch 31/52] sequences=32 prompt_width=206 padding=0.9% kv_cache_dtype=fp32 generated_tokens=4387 tokens/s=1614.0 time=2.72s
+[Eval batch 32/52] sequences=32 prompt_width=208 padding=0.2% kv_cache_dtype=fp32 generated_tokens=5229 tokens/s=1908.2 time=2.74s
+[Eval batch 33/52] sequences=32 prompt_width=212 padding=0.6% kv_cache_dtype=fp32 generated_tokens=6635 tokens/s=2387.7 time=2.78s
+[Eval batch 34/52] sequences=32 prompt_width=217 padding=1.2% kv_cache_dtype=fp32 generated_tokens=5806 tokens/s=2095.5 time=2.77s
+[Eval batch 35/52] sequences=32 prompt_width=222 padding=0.8% kv_cache_dtype=fp32 generated_tokens=4598 tokens/s=1673.2 time=2.75s
+[Eval batch 36/52] sequences=32 prompt_width=230 padding=1.5% kv_cache_dtype=fp32 generated_tokens=7378 tokens/s=2618.7 time=2.82s
+[Eval batch 37/52] sequences=32 prompt_width=237 padding=2.2% kv_cache_dtype=fp32 generated_tokens=4489 tokens/s=1627.4 time=2.76s
+[Eval batch 38/52] sequences=32 prompt_width=239 padding=0.4% kv_cache_dtype=fp32 generated_tokens=5610 tokens/s=2590.9 time=2.17s
+[Eval batch 39/52] sequences=32 prompt_width=241 padding=0.4% kv_cache_dtype=fp32 generated_tokens=6522 tokens/s=2315.6 time=2.82s
+[Eval batch 40/52] sequences=32 prompt_width=244 padding=0.5% kv_cache_dtype=fp32 generated_tokens=5825 tokens/s=2074.1 time=2.81s
+[Eval batch 41/52] sequences=32 prompt_width=250 padding=0.7% kv_cache_dtype=fp32 generated_tokens=5500 tokens/s=1961.2 time=2.80s
+[Eval batch 42/52] sequences=32 prompt_width=257 padding=1.3% kv_cache_dtype=fp32 generated_tokens=6073 tokens/s=2137.8 time=2.84s
+[Eval batch 43/52] sequences=32 prompt_width=272 padding=2.8% kv_cache_dtype=fp32 generated_tokens=5396 tokens/s=1957.4 time=2.76s
+[Eval batch 44/52] sequences=32 prompt_width=289 padding=2.4% kv_cache_dtype=fp32 generated_tokens=6843 tokens/s=2433.7 time=2.81s
+[Eval batch 45/52] sequences=32 prompt_width=303 padding=1.1% kv_cache_dtype=fp32 generated_tokens=7206 tokens/s=2460.0 time=2.93s
+[Eval batch 46/52] sequences=32 prompt_width=312 padding=1.6% kv_cache_dtype=fp32 generated_tokens=4293 tokens/s=2441.2 time=1.76s
+[Eval batch 47/52] sequences=32 prompt_width=338 padding=3.9% kv_cache_dtype=fp32 generated_tokens=6859 tokens/s=2311.4 time=2.97s
+[Eval batch 48/52] sequences=32 prompt_width=353 padding=2.3% kv_cache_dtype=fp32 generated_tokens=6849 tokens/s=2301.0 time=2.98s
+[Eval batch 49/52] sequences=32 prompt_width=370 padding=2.9% kv_cache_dtype=fp32 generated_tokens=7581 tokens/s=2506.9 time=3.02s
+[Eval batch 50/52] sequences=32 prompt_width=403 padding=4.9% kv_cache_dtype=fp32 generated_tokens=8652 tokens/s=2774.4 time=3.12s
+[Inference] static KV cache needs 3072 MiB of 2271 MiB free for max_new_tokens=1; using the growing cache.
+[Eval batch 51/52] sequences=32 prompt_width=532 padding=20.1% kv_cache_dtype=fp32 generated_tokens=8386 tokens/s=2004.6 time=4.18s
+[Eval batch 52/52] sequences=8 prompt_width=532 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3321 tokens/s=1129.7 time=2.94s
+humaneval: 263164 output tokens in 143.54s
+Generating mbpp: 3780 candidates for 378 tasks
+[Eval batch 1/119] sequences=32 prompt_width=74 padding=3.0% kv_cache_dtype=fp32 generated_tokens=2537 tokens/s=1940.0 time=1.31s
+[Eval batch 2/119] sequences=32 prompt_width=75 padding=0.3% kv_cache_dtype=fp32 generated_tokens=3628 tokens/s=1881.4 time=1.93s
+[Eval batch 3/119] sequences=32 prompt_width=76 padding=0.2% kv_cache_dtype=fp32 generated_tokens=3017 tokens/s=2781.3 time=1.08s
+[Eval batch 4/119] sequences=32 prompt_width=77 padding=1.0% kv_cache_dtype=fp32 generated_tokens=2932 tokens/s=1581.7 time=1.85s
+[Eval batch 5/119] sequences=32 prompt_width=77 padding=0.0% kv_cache_dtype=fp32 generated_tokens=1795 tokens/s=1169.8 time=1.53s
+[Eval batch 6/119] sequences=32 prompt_width=77 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3611 tokens/s=2737.8 time=1.32s
+[Eval batch 7/119] sequences=32 prompt_width=78 padding=0.3% kv_cache_dtype=fp32 generated_tokens=1977 tokens/s=1607.6 time=1.23s
+[Eval batch 8/119] sequences=32 prompt_width=78 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2981 tokens/s=1841.5 time=1.62s
+[Eval batch 9/119] sequences=32 prompt_width=79 padding=0.6% kv_cache_dtype=fp32 generated_tokens=2330 tokens/s=3015.2 time=0.77s
+[Eval batch 10/119] sequences=32 prompt_width=79 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2050 tokens/s=2421.4 time=0.85s
+[Eval batch 11/119] sequences=32 prompt_width=80 padding=0.4% kv_cache_dtype=fp32 generated_tokens=2157 tokens/s=997.0 time=2.16s
+[Eval batch 12/119] sequences=32 prompt_width=81 padding=0.7% kv_cache_dtype=fp32 generated_tokens=1947 tokens/s=1681.3 time=1.16s
+[Eval batch 13/119] sequences=32 prompt_width=81 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3537 tokens/s=1381.3 time=2.56s
+[Eval batch 14/119] sequences=32 prompt_width=82 padding=0.9% kv_cache_dtype=fp32 generated_tokens=1774 tokens/s=1918.0 time=0.92s
+[Eval batch 15/119] sequences=32 prompt_width=82 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2736 tokens/s=2073.8 time=1.32s
+[Eval batch 16/119] sequences=32 prompt_width=82 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2303 tokens/s=1861.6 time=1.24s
+[Eval batch 17/119] sequences=32 prompt_width=82 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3196 tokens/s=1377.9 time=2.32s
+[Eval batch 18/119] sequences=32 prompt_width=83 padding=0.2% kv_cache_dtype=fp32 generated_tokens=3451 tokens/s=1345.6 time=2.56s
+[Eval batch 19/119] sequences=32 prompt_width=84 padding=0.9% kv_cache_dtype=fp32 generated_tokens=2947 tokens/s=1808.7 time=1.63s
+[Eval batch 20/119] sequences=32 prompt_width=84 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3927 tokens/s=2184.8 time=1.80s
+[Eval batch 21/119] sequences=32 prompt_width=84 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2342 tokens/s=2324.0 time=1.01s
+[Eval batch 22/119] sequences=32 prompt_width=84 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2133 tokens/s=1535.5 time=1.39s
+[Eval batch 23/119] sequences=32 prompt_width=84 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3711 tokens/s=1449.5 time=2.56s
+[Eval batch 24/119] sequences=32 prompt_width=85 padding=0.5% kv_cache_dtype=fp32 generated_tokens=2074 tokens/s=2432.3 time=0.85s
+[Eval batch 25/119] sequences=32 prompt_width=85 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2924 tokens/s=1215.1 time=2.41s
+[Eval batch 26/119] sequences=32 prompt_width=86 padding=1.1% kv_cache_dtype=fp32 generated_tokens=3462 tokens/s=1343.7 time=2.58s
+[Eval batch 27/119] sequences=32 prompt_width=86 padding=0.0% kv_cache_dtype=fp32 generated_tokens=7851 tokens/s=2971.3 time=2.64s
+[Eval batch 28/119] sequences=32 prompt_width=86 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2500 tokens/s=2903.1 time=0.86s
+[Eval batch 29/119] sequences=32 prompt_width=86 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3572 tokens/s=1391.3 time=2.57s
+[Eval batch 30/119] sequences=32 prompt_width=87 padding=0.4% kv_cache_dtype=fp32 generated_tokens=2546 tokens/s=2168.2 time=1.17s
+[Eval batch 31/119] sequences=32 prompt_width=87 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3468 tokens/s=1847.6 time=1.88s
+[Eval batch 32/119] sequences=32 prompt_width=88 padding=1.0% kv_cache_dtype=fp32 generated_tokens=3441 tokens/s=1922.0 time=1.79s
+[Eval batch 33/119] sequences=32 prompt_width=88 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3376 tokens/s=1315.8 time=2.57s
+[Eval batch 34/119] sequences=32 prompt_width=88 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3772 tokens/s=1466.1 time=2.57s
+[Eval batch 35/119] sequences=32 prompt_width=88 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3441 tokens/s=1338.5 time=2.57s
+[Eval batch 36/119] sequences=32 prompt_width=89 padding=0.4% kv_cache_dtype=fp32 generated_tokens=2999 tokens/s=2137.5 time=1.40s
+[Eval batch 37/119] sequences=32 prompt_width=89 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3589 tokens/s=2539.3 time=1.41s
+[Eval batch 38/119] sequences=32 prompt_width=89 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3002 tokens/s=1287.7 time=2.33s
+[Eval batch 39/119] sequences=32 prompt_width=90 padding=0.5% kv_cache_dtype=fp32 generated_tokens=2245 tokens/s=2217.2 time=1.01s
+[Eval batch 40/119] sequences=32 prompt_width=90 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3136 tokens/s=1221.5 time=2.57s
+[Eval batch 41/119] sequences=32 prompt_width=91 padding=1.0% kv_cache_dtype=fp32 generated_tokens=3200 tokens/s=1780.2 time=1.80s
+[Eval batch 42/119] sequences=32 prompt_width=91 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2925 tokens/s=1791.2 time=1.63s
+[Eval batch 43/119] sequences=32 prompt_width=91 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2844 tokens/s=1264.1 time=2.25s
+[Eval batch 44/119] sequences=32 prompt_width=92 padding=0.5% kv_cache_dtype=fp32 generated_tokens=3725 tokens/s=2261.3 time=1.65s
+[Eval batch 45/119] sequences=32 prompt_width=92 padding=0.0% kv_cache_dtype=fp32 generated_tokens=4156 tokens/s=1604.9 time=2.59s
+[Eval batch 46/119] sequences=32 prompt_width=92 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3518 tokens/s=1500.4 time=2.34s
+[Eval batch 47/119] sequences=32 prompt_width=93 padding=0.6% kv_cache_dtype=fp32 generated_tokens=2555 tokens/s=1726.2 time=1.48s
+[Eval batch 48/119] sequences=32 prompt_width=93 padding=0.0% kv_cache_dtype=fp32 generated_tokens=4749 tokens/s=2082.3 time=2.28s
+[Eval batch 49/119] sequences=32 prompt_width=94 padding=0.5% kv_cache_dtype=fp32 generated_tokens=4308 tokens/s=1664.3 time=2.59s
+[Eval batch 50/119] sequences=32 prompt_width=94 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3319 tokens/s=1843.5 time=1.80s
+[Eval batch 51/119] sequences=32 prompt_width=94 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3750 tokens/s=1653.4 time=2.27s
+[Eval batch 52/119] sequences=32 prompt_width=94 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3565 tokens/s=1684.2 time=2.12s
+[Eval batch 53/119] sequences=32 prompt_width=95 padding=0.5% kv_cache_dtype=fp32 generated_tokens=3577 tokens/s=1383.4 time=2.59s
+[Eval batch 54/119] sequences=32 prompt_width=95 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2550 tokens/s=1802.9 time=1.41s
+[Eval batch 55/119] sequences=32 prompt_width=95 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3451 tokens/s=1633.5 time=2.11s
+[Eval batch 56/119] sequences=32 prompt_width=96 padding=0.3% kv_cache_dtype=fp32 generated_tokens=5389 tokens/s=2116.5 time=2.55s
+[Eval batch 57/119] sequences=32 prompt_width=96 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3441 tokens/s=2299.2 time=1.50s
+[Eval batch 58/119] sequences=32 prompt_width=96 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2813 tokens/s=2555.1 time=1.10s
+[Eval batch 59/119] sequences=32 prompt_width=97 padding=0.5% kv_cache_dtype=fp32 generated_tokens=4827 tokens/s=2112.2 time=2.29s
+[Eval batch 60/119] sequences=32 prompt_width=97 padding=0.0% kv_cache_dtype=fp32 generated_tokens=4443 tokens/s=1768.5 time=2.51s
+[Eval batch 61/119] sequences=32 prompt_width=98 padding=1.0% kv_cache_dtype=fp32 generated_tokens=4375 tokens/s=2519.3 time=1.74s
+[Eval batch 62/119] sequences=32 prompt_width=98 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3082 tokens/s=1715.1 time=1.80s
+[Eval batch 63/119] sequences=32 prompt_width=98 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2529 tokens/s=2297.1 time=1.10s
+[Eval batch 64/119] sequences=32 prompt_width=98 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3716 tokens/s=2247.5 time=1.65s
+[Eval batch 65/119] sequences=32 prompt_width=99 padding=0.1% kv_cache_dtype=fp32 generated_tokens=4959 tokens/s=3266.0 time=1.52s
+[Eval batch 66/119] sequences=32 prompt_width=100 padding=0.6% kv_cache_dtype=fp32 generated_tokens=4947 tokens/s=1899.9 time=2.60s
+[Eval batch 67/119] sequences=32 prompt_width=100 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3035 tokens/s=2138.8 time=1.42s
+[Eval batch 68/119] sequences=32 prompt_width=101 padding=0.8% kv_cache_dtype=fp32 generated_tokens=3262 tokens/s=1272.5 time=2.56s
+[Eval batch 69/119] sequences=32 prompt_width=101 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2978 tokens/s=2102.3 time=1.42s
+[Eval batch 70/119] sequences=32 prompt_width=102 padding=0.7% kv_cache_dtype=fp32 generated_tokens=3114 tokens/s=1977.9 time=1.57s
+[Eval batch 71/119] sequences=32 prompt_width=102 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3513 tokens/s=2127.8 time=1.65s
+[Eval batch 72/119] sequences=32 prompt_width=103 padding=0.8% kv_cache_dtype=fp32 generated_tokens=2722 tokens/s=1514.3 time=1.80s
+[Eval batch 73/119] sequences=32 prompt_width=103 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3225 tokens/s=2404.7 time=1.34s
+[Eval batch 74/119] sequences=32 prompt_width=104 padding=0.1% kv_cache_dtype=fp32 generated_tokens=4022 tokens/s=2214.8 time=1.82s
+[Eval batch 75/119] sequences=32 prompt_width=104 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3676 tokens/s=1867.2 time=1.97s
+[Eval batch 76/119] sequences=32 prompt_width=105 padding=0.3% kv_cache_dtype=fp32 generated_tokens=4665 tokens/s=2452.8 time=1.90s
+[Eval batch 77/119] sequences=32 prompt_width=106 padding=0.5% kv_cache_dtype=fp32 generated_tokens=3196 tokens/s=1937.5 time=1.65s
+[Eval batch 78/119] sequences=32 prompt_width=106 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2939 tokens/s=1777.6 time=1.65s
+[Eval batch 79/119] sequences=32 prompt_width=107 padding=0.1% kv_cache_dtype=fp32 generated_tokens=2804 tokens/s=1872.7 time=1.50s
+[Eval batch 80/119] sequences=32 prompt_width=107 padding=0.0% kv_cache_dtype=fp32 generated_tokens=4739 tokens/s=1926.4 time=2.46s
+[Eval batch 81/119] sequences=32 prompt_width=108 padding=0.9% kv_cache_dtype=fp32 generated_tokens=3146 tokens/s=2474.6 time=1.27s
+[Eval batch 82/119] sequences=32 prompt_width=109 padding=0.5% kv_cache_dtype=fp32 generated_tokens=3242 tokens/s=1530.0 time=2.12s
+[Eval batch 83/119] sequences=32 prompt_width=109 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2658 tokens/s=1779.0 time=1.49s
+[Eval batch 84/119] sequences=32 prompt_width=110 padding=0.7% kv_cache_dtype=fp32 generated_tokens=3688 tokens/s=1733.1 time=2.13s
+[Eval batch 85/119] sequences=32 prompt_width=110 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3418 tokens/s=2156.8 time=1.58s
+[Eval batch 86/119] sequences=32 prompt_width=111 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3718 tokens/s=2046.1 time=1.82s
+[Eval batch 87/119] sequences=32 prompt_width=111 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3112 tokens/s=2301.8 time=1.35s
+[Eval batch 88/119] sequences=32 prompt_width=112 padding=0.2% kv_cache_dtype=fp32 generated_tokens=3338 tokens/s=2949.8 time=1.13s
+[Eval batch 89/119] sequences=32 prompt_width=113 padding=0.4% kv_cache_dtype=fp32 generated_tokens=2611 tokens/s=2182.4 time=1.20s
+[Eval batch 90/119] sequences=32 prompt_width=114 padding=0.3% kv_cache_dtype=fp32 generated_tokens=4941 tokens/s=1886.2 time=2.62s
+[Eval batch 91/119] sequences=32 prompt_width=115 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3921 tokens/s=1506.6 time=2.60s
+[Eval batch 92/119] sequences=32 prompt_width=115 padding=0.0% kv_cache_dtype=fp32 generated_tokens=4206 tokens/s=1598.2 time=2.63s
+[Eval batch 93/119] sequences=32 prompt_width=117 padding=0.9% kv_cache_dtype=fp32 generated_tokens=2447 tokens/s=2176.3 time=1.12s
+[Eval batch 94/119] sequences=32 prompt_width=118 padding=0.6% kv_cache_dtype=fp32 generated_tokens=2168 tokens/s=1804.4 time=1.20s
+[Eval batch 95/119] sequences=32 prompt_width=118 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3572 tokens/s=1724.4 time=2.07s
+[Eval batch 96/119] sequences=32 prompt_width=120 padding=0.8% kv_cache_dtype=fp32 generated_tokens=4443 tokens/s=1859.1 time=2.39s
+[Eval batch 97/119] sequences=32 prompt_width=121 padding=0.5% kv_cache_dtype=fp32 generated_tokens=5196 tokens/s=2396.9 time=2.17s
+[Eval batch 98/119] sequences=32 prompt_width=123 padding=1.1% kv_cache_dtype=fp32 generated_tokens=2775 tokens/s=2171.4 time=1.28s
+[Eval batch 99/119] sequences=32 prompt_width=124 padding=0.6% kv_cache_dtype=fp32 generated_tokens=4177 tokens/s=1595.1 time=2.62s
+[Eval batch 100/119] sequences=32 prompt_width=124 padding=0.0% kv_cache_dtype=fp32 generated_tokens=2994 tokens/s=1459.9 time=2.05s
+[Eval batch 101/119] sequences=32 prompt_width=126 padding=0.5% kv_cache_dtype=fp32 generated_tokens=2443 tokens/s=1615.7 time=1.51s
+[Eval batch 102/119] sequences=32 prompt_width=127 padding=0.7% kv_cache_dtype=fp32 generated_tokens=3421 tokens/s=1539.6 time=2.22s
+[Eval batch 103/119] sequences=32 prompt_width=127 padding=0.0% kv_cache_dtype=fp32 generated_tokens=5321 tokens/s=2018.0 time=2.64s
+[Eval batch 104/119] sequences=32 prompt_width=132 padding=2.8% kv_cache_dtype=fp32 generated_tokens=3562 tokens/s=1711.0 time=2.08s
+[Eval batch 105/119] sequences=32 prompt_width=133 padding=0.0% kv_cache_dtype=fp32 generated_tokens=3819 tokens/s=1449.3 time=2.63s
+[Eval batch 106/119] sequences=32 prompt_width=136 padding=1.4% kv_cache_dtype=fp32 generated_tokens=3047 tokens/s=1990.1 time=1.53s
+[Eval batch 107/119] sequences=32 prompt_width=137 padding=0.6% kv_cache_dtype=fp32 generated_tokens=4888 tokens/s=1845.8 time=2.65s
+[Eval batch 108/119] sequences=32 prompt_width=138 padding=0.6% kv_cache_dtype=fp32 generated_tokens=4488 tokens/s=1987.5 time=2.26s
+[Eval batch 109/119] sequences=32 prompt_width=141 padding=0.5% kv_cache_dtype=fp32 generated_tokens=3452 tokens/s=2969.8 time=1.16s
+[Eval batch 110/119] sequences=32 prompt_width=146 padding=0.4% kv_cache_dtype=fp32 generated_tokens=3653 tokens/s=1472.7 time=2.48s
+[Eval batch 111/119] sequences=32 prompt_width=148 padding=0.8% kv_cache_dtype=fp32 generated_tokens=2832 tokens/s=2294.6 time=1.23s
+[Eval batch 112/119] sequences=32 prompt_width=153 padding=1.4% kv_cache_dtype=fp32 generated_tokens=3576 tokens/s=1836.7 time=1.95s
+[Eval batch 113/119] sequences=32 prompt_width=154 padding=0.5% kv_cache_dtype=fp32 generated_tokens=2347 tokens/s=1900.9 time=1.23s
+[Eval batch 114/119] sequences=32 prompt_width=160 padding=2.4% kv_cache_dtype=fp32 generated_tokens=3722 tokens/s=1448.5 time=2.57s
+[Eval batch 115/119] sequences=32 prompt_width=171 padding=1.9% kv_cache_dtype=fp32 generated_tokens=5773 tokens/s=2268.9 time=2.54s
+[Eval batch 116/119] sequences=32 prompt_width=185 padding=3.2% kv_cache_dtype=fp32 generated_tokens=3906 tokens/s=1457.2 time=2.68s
+[Eval batch 117/119] sequences=32 prompt_width=201 padding=4.2% kv_cache_dtype=fp32 generated_tokens=4076 tokens/s=1504.0 time=2.71s
+[Eval batch 118/119] sequences=32 prompt_width=256 padding=11.5% kv_cache_dtype=fp32 generated_tokens=5970 tokens/s=2133.3 time=2.80s
+[Eval batch 119/119] sequences=4 prompt_width=256 padding=0.0% kv_cache_dtype=fp32 generated_tokens=409 tokens/s=538.9 time=0.76s
+mbpp: 405496 output tokens in 221.88s
+Generation process completed in 414.42s
+[2026-11-25T20:19:56] exit=0
+[2026-11-25T20:19:56] run (native_instinctv2_sft_santitized_2b_step66048_pass10): E:\miniconda3\python.exe run_eval.py humaneval --workers 8
+$ (D:\AI\Instinct\eval\evalplus\native_instinctv2_sft_santitized_2b_step66048_pass10) E:\miniconda3\python.exe run_eval.py humaneval --workers 8
+Scored 100/1640 HumanEval+ candidates
+Scored 200/1640 HumanEval+ candidates
+Scored 300/1640 HumanEval+ candidates
+Scored 400/1640 HumanEval+ candidates
+Scored 500/1640 HumanEval+ candidates
+Scored 600/1640 HumanEval+ candidates
+Scored 700/1640 HumanEval+ candidates
+Scored 800/1640 HumanEval+ candidates
+Scored 900/1640 HumanEval+ candidates
+Scored 1000/1640 HumanEval+ candidates
+Scored 1100/1640 HumanEval+ candidates
+Scored 1200/1640 HumanEval+ candidates
+Scored 1300/1640 HumanEval+ candidates
+Scored 1400/1640 HumanEval+ candidates
+Scored 1500/1640 HumanEval+ candidates
+Scored 1600/1640 HumanEval+ candidates
+Scored 1640/1640 HumanEval+ candidates
+{"base": {"samples_passed": 647, "tasks_passed": 114, "pass@1": 0.39451219512195124, "pass@10": 0.6951219512195121}, "plus": {"samples_passed": 592, "tasks_passed": 108, "pass@1": 0.36097560975609755, "pass@10": 0.6585365853658537}}
+[2026-11-25T20:23:02] exit=0
+[2026-11-25T20:23:02] run (native_instinctv2_sft_santitized_2b_step66048_pass10): E:\miniconda3\python.exe run_eval.py mbpp --workers 8
+$ (D:\AI\Instinct\eval\evalplus\native_instinctv2_sft_santitized_2b_step66048_pass10) E:\miniconda3\python.exe run_eval.py mbpp --workers 8
+MBPP+ scoring with 8 workers, retaining 0 completed candidates
+Scored 200/3780 MBPP+ candidates
+<unknown>:2: SyntaxWarning: invalid escape sequence '\('
+<unknown>:2: SyntaxWarning: invalid escape sequence '\('
+<unknown>:2: SyntaxWarning: invalid escape sequence '\('
+Scored 400/3780 MBPP+ candidates
+Scored 600/3780 MBPP+ candidates
+Scored 800/3780 MBPP+ candidates
+Scored 1000/3780 MBPP+ candidates
+Scored 1200/3780 MBPP+ candidates
+Scored 1400/3780 MBPP+ candidates
+<unknown>:4: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:4: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:4: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:4: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:4: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:4: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:3: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:3: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:3: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:3: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:3: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:3: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:2: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:2: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:2: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:2: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:2: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:2: SyntaxWarning: invalid escape sequence '\w'
+Scored 1600/3780 MBPP+ candidates
+Scored 1800/3780 MBPP+ candidates
+Scored 2000/3780 MBPP+ candidates
+Scored 2200/3780 MBPP+ candidates
+Scored 2400/3780 MBPP+ candidates
+Scored 2600/3780 MBPP+ candidates
+Scored 2800/3780 MBPP+ candidates
+Scored 3000/3780 MBPP+ candidates
+Scored 3200/3780 MBPP+ candidates
+Scored 3400/3780 MBPP+ candidates
+Scored 3600/3780 MBPP+ candidates
+Scored 3780/3780 MBPP+ candidates
+{"base": {"pass@1": 0.5322751322751322, "pass@10": 0.7962962962962963, "samples_passed": 2012, "tasks_passed": 301}, "plus": {"pass@1": 0.46613756613756613, "pass@10": 0.7142857142857143, "samples_passed": 1762, "tasks_passed": 270}}
+[2026-11-25T20:29:54] exit=0
+[2026-11-25T20:29:54] run (Instinct): E:\miniconda3\python.exe D:\AI\Instinct\eval\livecodebench\native_instinctv2_sft_santitized_2b_step66048_release_v6_think_ctx8192_latest175\generate.py
+$ (D:\AI\Instinct) E:\miniconda3\python.exe D:\AI\Instinct\eval\livecodebench\native_instinctv2_sft_santitized_2b_step66048_release_v6_think_ctx8192_latest175\generate.py
+W1125 20:30:23.396000 25528 site-packages\torch\utils\_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W1125 20:30:23.471000 25528 site-packages\torch\utils\_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+Model Params: 1010.28M
+[Inference] Compiled kernels enabled: 129 RMSNorm, 32 SwiGLU, length-aware static attention; first use compiles/caches kernels.
+Latest-only: 175 replies
+Validated 175 complete prompts, longest=1920
+Generating 175 replies
+[MXFP8 KV] batch=8, capacity=8192, storage_bytes=1660944384
+[Eval batch 1/22] sequences=8 prompt_width=442 padding=8.7% kv_cache_dtype=fp32 generated_tokens=25895 tokens/s=462.8 time=55.95s
+[Eval batch 2/22] sequences=8 prompt_width=482 padding=3.7% kv_cache_dtype=fp32 generated_tokens=33957 tokens/s=744.0 time=45.64s
+[Eval batch 3/22] sequences=8 prompt_width=513 padding=2.4% kv_cache_dtype=fp32 generated_tokens=35091 tokens/s=766.6 time=45.78s
+[Eval batch 4/22] sequences=8 prompt_width=534 padding=1.4% kv_cache_dtype=fp32 generated_tokens=35051 tokens/s=767.5 time=45.67s
+[Eval batch 5/22] sequences=8 prompt_width=547 padding=1.0% kv_cache_dtype=fp32 generated_tokens=34414 tokens/s=757.2 time=45.45s
+[Eval batch 6/22] sequences=8 prompt_width=599 padding=3.2% kv_cache_dtype=fp32 generated_tokens=42568 tokens/s=863.3 time=49.31s
+[Eval batch 7/22] sequences=8 prompt_width=619 padding=1.9% kv_cache_dtype=fp32 generated_tokens=41591 tokens/s=845.6 time=49.18s
+[Eval batch 8/22] sequences=8 prompt_width=649 padding=2.0% kv_cache_dtype=fp32 generated_tokens=27181 tokens/s=652.9 time=41.63s
+[Eval batch 9/22] sequences=8 prompt_width=660 padding=0.5% kv_cache_dtype=fp32 generated_tokens=46299 tokens/s=914.8 time=50.61s
+[Eval batch 10/22] sequences=8 prompt_width=693 padding=2.7% kv_cache_dtype=fp32 generated_tokens=40822 tokens/s=873.7 time=46.72s
+[Eval batch 11/22] sequences=8 prompt_width=718 padding=1.4% kv_cache_dtype=fp32 generated_tokens=45934 tokens/s=920.0 time=49.93s
+[Eval batch 12/22] sequences=8 prompt_width=746 padding=1.4% kv_cache_dtype=fp32 generated_tokens=49112 tokens/s=963.6 time=50.97s
+[Eval batch 13/22] sequences=8 prompt_width=759 padding=1.0% kv_cache_dtype=fp32 generated_tokens=59464 tokens/s=1055.3 time=56.35s
+[Eval batch 14/22] sequences=8 prompt_width=800 padding=2.2% kv_cache_dtype=fp32 generated_tokens=53297 tokens/s=1004.2 time=53.07s
+[Eval batch 15/22] sequences=8 prompt_width=830 padding=1.2% kv_cache_dtype=fp32 generated_tokens=58896 tokens/s=1061.0 time=55.51s
+[Eval batch 16/22] sequences=8 prompt_width=867 padding=1.9% kv_cache_dtype=fp32 generated_tokens=53484 tokens/s=1009.4 time=52.99s
+[Eval batch 17/22] sequences=8 prompt_width=918 padding=2.4% kv_cache_dtype=fp32 generated_tokens=52947 tokens/s=1003.6 time=52.76s
+[Eval batch 18/22] sequences=8 prompt_width=1003 padding=3.1% kv_cache_dtype=fp32 generated_tokens=45947 tokens/s=931.8 time=49.31s
+[Eval batch 19/22] sequences=8 prompt_width=1049 padding=2.1% kv_cache_dtype=fp32 generated_tokens=57144 tokens/s=1039.2 time=54.99s
+[Eval batch 20/22] sequences=8 prompt_width=1118 padding=2.8% kv_cache_dtype=fp32 generated_tokens=54813 tokens/s=1025.4 time=53.46s
+[Eval batch 21/22] sequences=8 prompt_width=1292 padding=4.8% kv_cache_dtype=fp32 generated_tokens=49696 tokens/s=977.0 time=50.87s
+[MXFP8 KV] batch=7, capacity=8192, storage_bytes=1453326336
+[Eval batch 22/22] sequences=7 prompt_width=1920 padding=18.6% kv_cache_dtype=fp32 generated_tokens=39429 tokens/s=891.5 time=44.23s
+Generated 175/175 complete replies
+{"checkpoint": "D:\\AI\\Instinct\\out\\native_instinctv2_sft_santitized_2b\\native_instinctv2_sft_santitized_2b_1536.npz", "checkpoint_sha256": "3adb083ad2b66b6f8076f1c68c7201ebba7df564aa0607e6d029dc7c5c647a71", "converted_weights_sha256": "0250ef7757b43425445e5b3d04b9f3174c426dff0dea7e7b1367ef7795527d7d", "model_config_sha256": "6d33c746b2343e7963f6faad69a9cd2275199c932830fdbe487c36829af0687b", "sft_microbatches": 3072, "sft_optimizer_updates": 768, "sft_tokens": 49852256, "generation": {"samples_per_task": 1, "temperature": 0.0, "open_thinking": true, "prompt_style": "chat", "context_tokens": 8192, "output_budget": "context_tokens minus batch padded prompt width", "batch_size": 8, "static_cache_preallocated_on_resume": true, "kv_cache": "MXFP8 E4M3 with one UE8M0 scale per 32 values", "seed": 42, "dtype": "bfloat16", "gpu": "NVIDIA GeForce RTX 5070 Ti", "extraction": "last fenced block after first </think>"}, "prompt_sha256": {"prompts.jsonl": "00818d48b131213ef5df697efa8e38afcdd9da6710a6a5243f8299700e6ccea8", "latest_prompts.jsonl": "17e1191b54c6288aaeeebcb4461ff94a1d6859aa5395398c9e1748ad14605849"}, "generation_sha256": "9b20d2db997d9a9daef6d37c67fdbcf0d963389faf136d2c6273a86dcf0998b9", "responses_sha256": "70498de0cdb11df6e62f5f32e0f0965b84dddddf0e4838d6cf6e9ac12c1fe1c0", "model_load_seconds": 27.66130320000002, "generation_seconds": 1100.5721525, "generated_tokens": 983032, "generated_tokens_per_second": 893.2008662648768, "run_wall_seconds": 1100.6690088000003, "resumed_responses": 0, "token_limit_hits": 123, "response_counts": {"nonempty_thinking": 175, "reached_context_limit": 123, "closed_thinking": 52, "nonempty_closed_thinking": 52, "has_final_code": 52}, "prompt_tokens_min": 336, "prompt_tokens_max": 1920, "peak_gpu_allocated_bytes": 5993350144}
+[2026-11-25T20:48:55] exit=0
+[2026-11-25T20:48:55] run (Instinct): E:\miniconda3\python.exe D:\AI\Instinct\eval\livecodebench\native_instinctv2_sft_santitized_2b_step66048_release_v6_think_ctx8192_latest175\score.py latest
+$ (D:\AI\Instinct) E:\miniconda3\python.exe D:\AI\Instinct\eval\livecodebench\native_instinctv2_sft_santitized_2b_step66048_release_v6_think_ctx8192_latest175\score.py latest
+latest: scored 25/175
+latest: scored 50/175
+latest: scored 75/175
+latest: scored 100/175
+latest: scored 125/175
+latest: scored 150/175
+latest: scored 175/175
+{
+  "checkpoint": "D:\\AI\\Instinct\\out\\native_instinctv2_sft_santitized_2b\\native_instinctv2_sft_santitized_2b_1536.npz",
+  "checkpoint_sha256": "3adb083ad2b66b6f8076f1c68c7201ebba7df564aa0607e6d029dc7c5c647a71",
+  "converted_weights_sha256": "0250ef7757b43425445e5b3d04b9f3174c426dff0dea7e7b1367ef7795527d7d",
+  "model_config_sha256": "6d33c746b2343e7963f6faad69a9cd2275199c932830fdbe487c36829af0687b",
+  "sft_microbatches": 3072,
+  "sft_optimizer_updates": 768,
+  "sft_tokens": 49852256,
+  "generation": {
+    "samples_per_task": 1,
+    "temperature": 0.0,
+    "open_thinking": true,
+    "prompt_style": "chat",
+    "context_tokens": 8192,
+    "output_budget": "context_tokens minus batch padded prompt width",
+    "batch_size": 8,
+    "static_cache_preallocated_on_resume": true,
+    "kv_cache": "MXFP8 E4M3 with one UE8M0 scale per 32 values",
+    "seed": 42,
+    "dtype": "bfloat16",
+    "gpu": "NVIDIA GeForce RTX 5070 Ti",
+    "extraction": "last fenced block after first </think>"
+  },
+  "prompt_sha256": {
+    "prompts.jsonl": "00818d48b131213ef5df697efa8e38afcdd9da6710a6a5243f8299700e6ccea8",
+    "latest_prompts.jsonl": "17e1191b54c6288aaeeebcb4461ff94a1d6859aa5395398c9e1748ad14605849"
+  },
+  "generation_sha256": "9b20d2db997d9a9daef6d37c67fdbcf0d963389faf136d2c6273a86dcf0998b9",
+  "responses_sha256": "70498de0cdb11df6e62f5f32e0f0965b84dddddf0e4838d6cf6e9ac12c1fe1c0",
+  "model_load_seconds": 27.66130320000002,
+  "generation_seconds": 1100.5721525,
+  "generated_tokens": 983032,
+  "generated_tokens_per_second": 893.2008662648768,
+  "run_wall_seconds": 1100.6690088000003,
+  "resumed_responses": 0,
+  "token_limit_hits": 123,
+  "response_counts": {
+    "nonempty_thinking": 175,
+    "reached_context_limit": 123,
+    "closed_thinking": 52,
+    "nonempty_closed_thinking": 52,
+    "has_final_code": 52
+  },
+  "prompt_tokens_min": 336,
+  "prompt_tokens_max": 1920,
+  "peak_gpu_allocated_bytes": 5993350144,
+  "benchmark": "LiveCodeBench code generation",
+  "release": "v6",
+  "dataset_revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505",
+  "dataset_sha256": {
+    "test6.jsonl": "bb4c364f71921c4495a6ad15abe1a927350b720009f4933e2e71f8af0f6fd1f5"
+  },
+  "upstream_judge_commit": "28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24",
+  "scoring_runtime": "WASI guest, upstream judge and comparisons with host-enforced wall-clock timeout",
+  "timeout_per_test_seconds": 6,
+  "date_min": "2025-01-04T00:00:00",
+  "date_max": "2025-04-06T00:00:00",
+  "metrics": {
+    "tasks": 175,
+    "passed": 14,
+    "pass@1": 0.08,
+    "outcomes": {
+      "no_code": 123,
+      "failed": 38,
+      "passed": 14
+    }
+  },
+  "breakdown": {
+    "difficulty": {
+      "easy": {
+        "tasks": 43,
+        "passed": 12,
+        "pass@1": 0.27906976744186046,
+        "outcomes": {
+          "no_code": 11,
+          "failed": 20,
+          "passed": 12
+        }
+      },
+      "hard": {
+        "tasks": 80,
+        "passed": 0,
+        "pass@1": 0.0,
+        "outcomes": {
+          "no_code": 73,
+          "failed": 7
+        }
+      },
+      "medium": {
+        "tasks": 52,
+        "passed": 2,
+        "pass@1": 0.038461538461538464,
+        "outcomes": {
+          "no_code": 39,
+          "failed": 11,
+          "passed": 2
+        }
+      }
+    },
+    "platform": {
+      "atcoder": {
+        "tasks": 112,
+        "passed": 11,
+        "pass@1": 0.09821428571428571,
+        "outcomes": {
+          "no_code": 83,
+          "failed": 18,
+          "passed": 11
+        }
+      },
+      "leetcode": {
+        "tasks": 63,
+        "passed": 3,
+        "pass@1": 0.047619047619047616,
+        "outcomes": {
+          "no_code": 40,
+          "failed": 20,
+          "passed": 3
+        }
+      }
+    },
+    "shard": {
+      "test6.jsonl": {
+        "tasks": 175,
+        "passed": 14,
+        "pass@1": 0.08,
+        "outcomes": {
+          "no_code": 123,
+          "failed": 38,
+          "passed": 14
+        }
+      }
+    }
+  },
+  "results_sha256": "144a566cb9da310eb35313a8a1af43de325060b0a53b4fed525c4ff06de1f850",
+  "scoring_seconds": 7.313000000000102
+}
+[2026-11-25T20:49:04] exit=0
+[2026-11-25T20:49:04] run (Instinct): E:\miniconda3\python.exe D:\AI\Instinct\eval\livecodebench\native_instinctv2_sft_santitized_2b_step66048_release_v6_nothink_ctx4096_latest175\generate.py
+$ (D:\AI\Instinct) E:\miniconda3\python.exe D:\AI\Instinct\eval\livecodebench\native_instinctv2_sft_santitized_2b_step66048_release_v6_nothink_ctx4096_latest175\generate.py
+W1125 20:49:16.815000 35732 site-packages\torch\utils\_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W1125 20:49:16.892000 35732 site-packages\torch\utils\_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+Model Params: 1010.28M
+[Inference] Compiled kernels enabled: 129 RMSNorm, 32 SwiGLU, length-aware static attention; first use compiles/caches kernels.
+Latest-only: 175 replies
+Validated 175 complete prompts, longest=1924
+Generating 175 replies
+[MXFP8 KV] batch=16, capacity=4096, storage_bytes=1660944384
+[Eval batch 1/11] sequences=16 prompt_width=486 padding=9.9% kv_cache_dtype=fp32 generated_tokens=5977 tokens/s=276.4 time=21.62s
+[Eval batch 2/11] sequences=16 prompt_width=538 padding=3.8% kv_cache_dtype=fp32 generated_tokens=2899 tokens/s=1214.5 time=2.39s
+[Eval batch 3/11] sequences=16 prompt_width=603 padding=6.3% kv_cache_dtype=fp32 generated_tokens=6590 tokens/s=360.5 time=18.28s
+[Eval batch 4/11] sequences=16 prompt_width=653 padding=4.2% kv_cache_dtype=fp32 generated_tokens=6842 tokens/s=376.8 time=18.16s
+[Eval batch 5/11] sequences=16 prompt_width=697 padding=4.0% kv_cache_dtype=fp32 generated_tokens=4143 tokens/s=1347.2 time=3.08s
+[Eval batch 6/11] sequences=16 prompt_width=750 padding=3.2% kv_cache_dtype=fp32 generated_tokens=13236 tokens/s=737.4 time=17.95s
+[Eval batch 7/11] sequences=16 prompt_width=804 padding=4.1% kv_cache_dtype=fp32 generated_tokens=18234 tokens/s=1005.5 time=18.13s
+[Eval batch 8/11] sequences=16 prompt_width=871 padding=3.6% kv_cache_dtype=fp32 generated_tokens=19680 tokens/s=997.5 time=19.73s
+[Eval batch 9/11] sequences=16 prompt_width=1007 padding=6.8% kv_cache_dtype=fp32 generated_tokens=11114 tokens/s=650.7 time=17.08s
+[Eval batch 10/11] sequences=16 prompt_width=1122 padding=5.5% kv_cache_dtype=fp32 generated_tokens=14596 tokens/s=861.4 time=16.94s
+[MXFP8 KV] batch=15, capacity=4096, storage_bytes=1557135360
+[Eval batch 11/11] sequences=15 prompt_width=1924 padding=27.8% kv_cache_dtype=fp32 generated_tokens=14807 tokens/s=1030.9 time=14.36s
+Generated 175/175 complete replies
+{"checkpoint": "D:\\AI\\Instinct\\out\\native_instinctv2_sft_santitized_2b\\native_instinctv2_sft_santitized_2b_1536.npz", "checkpoint_sha256": "3adb083ad2b66b6f8076f1c68c7201ebba7df564aa0607e6d029dc7c5c647a71", "converted_weights_sha256": "0250ef7757b43425445e5b3d04b9f3174c426dff0dea7e7b1367ef7795527d7d", "model_config_sha256": "6d33c746b2343e7963f6faad69a9cd2275199c932830fdbe487c36829af0687b", "sft_microbatches": 3072, "sft_optimizer_updates": 768, "sft_tokens": 49852256, "generation": {"samples_per_task": 1, "temperature": 0.0, "open_thinking": false, "prompt_style": "chat", "context_tokens": 4096, "output_budget": "context_tokens minus batch padded prompt width", "batch_size": 16, "static_cache_preallocated_on_resume": true, "kv_cache": "MXFP8 E4M3 with one UE8M0 scale per 32 values", "seed": 42, "dtype": "bfloat16", "gpu": "NVIDIA GeForce RTX 5070 Ti", "extraction": "last fenced block"}, "prompt_sha256": {"prompts.jsonl": "00818d48b131213ef5df697efa8e38afcdd9da6710a6a5243f8299700e6ccea8", "latest_prompts.jsonl": "17e1191b54c6288aaeeebcb4461ff94a1d6859aa5395398c9e1748ad14605849"}, "generation_sha256": "28ef526d038da38716d1f8ba0e93af42f153872363fb2a98ec55977681effed0", "responses_sha256": "3b4492ca95626f1a3db7b7e87019e3abdd22fd40172a9c9e7a863acb4bd58879", "model_load_seconds": 15.228830000000016, "generation_seconds": 167.91567859999986, "generated_tokens": 118118, "generated_tokens_per_second": 703.4363972727922, "run_wall_seconds": 168.00584720000006, "resumed_responses": 0, "token_limit_hits": 24, "response_counts": {"has_final_code": 151, "reached_context_limit": 24}, "prompt_tokens_min": 340, "prompt_tokens_max": 1924, "peak_gpu_allocated_bytes": 6758909952}
+[2026-11-25T20:52:16] exit=0
+[2026-11-25T20:52:16] run (Instinct): E:\miniconda3\python.exe D:\AI\Instinct\eval\livecodebench\native_instinctv2_sft_santitized_2b_step66048_release_v6_nothink_ctx4096_latest175\score.py latest
+$ (D:\AI\Instinct) E:\miniconda3\python.exe D:\AI\Instinct\eval\livecodebench\native_instinctv2_sft_santitized_2b_step66048_release_v6_nothink_ctx4096_latest175\score.py latest
+latest: scored 25/175
+latest: scored 50/175
+latest: scored 75/175
+latest: scored 100/175
+latest: scored 125/175
+latest: scored 150/175
+latest: scored 175/175
+{
+  "checkpoint": "D:\\AI\\Instinct\\out\\native_instinctv2_sft_santitized_2b\\native_instinctv2_sft_santitized_2b_1536.npz",
+  "checkpoint_sha256": "3adb083ad2b66b6f8076f1c68c7201ebba7df564aa0607e6d029dc7c5c647a71",
+  "converted_weights_sha256": "0250ef7757b43425445e5b3d04b9f3174c426dff0dea7e7b1367ef7795527d7d",
+  "model_config_sha256": "6d33c746b2343e7963f6faad69a9cd2275199c932830fdbe487c36829af0687b",
+  "sft_microbatches": 3072,
+  "sft_optimizer_updates": 768,
+  "sft_tokens": 49852256,
+  "generation": {
+    "samples_per_task": 1,
+    "temperature": 0.0,
+    "open_thinking": false,
+    "prompt_style": "chat",
+    "context_tokens": 4096,
+    "output_budget": "context_tokens minus batch padded prompt width",
+    "batch_size": 16,
+    "static_cache_preallocated_on_resume": true,
+    "kv_cache": "MXFP8 E4M3 with one UE8M0 scale per 32 values",
+    "seed": 42,
+    "dtype": "bfloat16",
+    "gpu": "NVIDIA GeForce RTX 5070 Ti",
+    "extraction": "last fenced block"
+  },
+  "prompt_sha256": {
+    "prompts.jsonl": "00818d48b131213ef5df697efa8e38afcdd9da6710a6a5243f8299700e6ccea8",
+    "latest_prompts.jsonl": "17e1191b54c6288aaeeebcb4461ff94a1d6859aa5395398c9e1748ad14605849"
+  },
+  "generation_sha256": "28ef526d038da38716d1f8ba0e93af42f153872363fb2a98ec55977681effed0",
+  "responses_sha256": "3b4492ca95626f1a3db7b7e87019e3abdd22fd40172a9c9e7a863acb4bd58879",
+  "model_load_seconds": 15.228830000000016,
+  "generation_seconds": 167.91567859999986,
+  "generated_tokens": 118118,
+  "generated_tokens_per_second": 703.4363972727922,
+  "run_wall_seconds": 168.00584720000006,
+  "resumed_responses": 0,
+  "token_limit_hits": 24,
+  "response_counts": {
+    "has_final_code": 151,
+    "reached_context_limit": 24
+  },
+  "prompt_tokens_min": 340,
+  "prompt_tokens_max": 1924,
+  "peak_gpu_allocated_bytes": 6758909952,
+  "benchmark": "LiveCodeBench code generation",
+  "release": "v6",
+  "dataset_revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505",
+  "dataset_sha256": {
+    "test6.jsonl": "bb4c364f71921c4495a6ad15abe1a927350b720009f4933e2e71f8af0f6fd1f5"
+  },
+  "upstream_judge_commit": "28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24",
+  "scoring_runtime": "WASI guest, upstream judge and comparisons with host-enforced wall-clock timeout",
+  "timeout_per_test_seconds": 6,
+  "date_min": "2025-01-04T00:00:00",
+  "date_max": "2025-04-06T00:00:00",
+  "metrics": {
+    "tasks": 175,
+    "passed": 19,
+    "pass@1": 0.10857142857142857,
+    "outcomes": {
+      "failed": 131,
+      "no_code": 24,
+      "passed": 19,
+      "timeout": 1
+    }
+  },
+  "breakdown": {
+    "difficulty": {
+      "easy": {
+        "tasks": 43,
+        "passed": 17,
+        "pass@1": 0.3953488372093023,
+        "outcomes": {
+          "failed": 26,
+          "passed": 17
+        }
+      },
+      "hard": {
+        "tasks": 80,
+        "passed": 0,
+        "pass@1": 0.0,
+        "outcomes": {
+          "failed": 58,
+          "no_code": 21,
+          "timeout": 1
+        }
+      },
+      "medium": {
+        "tasks": 52,
+        "passed": 2,
+        "pass@1": 0.038461538461538464,
+        "outcomes": {
+          "failed": 47,
+          "no_code": 3,
+          "passed": 2
+        }
+      }
+    },
+    "platform": {
+      "atcoder": {
+        "tasks": 112,
+        "passed": 14,
+        "pass@1": 0.125,
+        "outcomes": {
+          "failed": 75,
+          "no_code": 22,
+          "passed": 14,
+          "timeout": 1
+        }
+      },
+      "leetcode": {
+        "tasks": 63,
+        "passed": 5,
+        "pass@1": 0.07936507936507936,
+        "outcomes": {
+          "failed": 56,
+          "passed": 5,
+          "no_code": 2
+        }
+      }
+    },
+    "shard": {
+      "test6.jsonl": {
+        "tasks": 175,
+        "passed": 19,
+        "pass@1": 0.10857142857142857,
+        "outcomes": {
+          "failed": 131,
+          "no_code": 24,
+          "passed": 19,
+          "timeout": 1
+        }
+      }
+    }
+  },
+  "results_sha256": "561e8c89731f985636a4201041b93578d3a7e2b1022d03814a84ac59d1af2d64",
+  "scoring_seconds": 17.65599999999995
+}
+[2026-11-25T20:52:35] exit=0
+[2026-11-25T20:55:07] === auto evaluation for native_instinctv2_sft_santitized_2b ===
+[2026-11-25T20:55:07] watchdog started; waiting for trainer pid 34100 / native_instinctv2_sft_santitized_2b.status.json
+[2026-11-25T20:59:32] === auto evaluation for native_instinctv2_sft_santitized_2b ===
+[2026-11-25T20:59:32] --now: evaluating the current weights npz without waiting for training
+[2026-11-25T20:59:38] final checkpoint: step=66048 tokens=1072520943
+[2026-11-25T20:59:38] evaluation directories already exist; reusing them
+[2026-11-25T21:00:00] report written: D:\AI\Instinct\eval\auto_eval_native_instinctv2_sft_santitized_2b\REPORT.md

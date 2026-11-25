@@ -1,0 +1,64 @@
+{
+  "checkpoint": "D:\\AI\\Instinct\\out\\native_instinctv2_sft_santitized_2b\\native_instinctv2_sft_santitized_2b_1536.npz",
+  "checkpoint_sha256": "3f3e1501e18d3782a9343944a26b776545408e0670da0972bedf6439b5f3cf97",
+  "checkpoint_step": 50688,
+  "checkpoint_tokens": 823006842,
+  "converted_weights_sha256": "18d991d5a829d3081b50d3caefb7d79f179ffc742098bdc81a7c2659add4250b",
+  "model_config_sha256": "6d33c746b2343e7963f6faad69a9cd2275199c932830fdbe487c36829af0687b",
+  "batch_size": 32,
+  "samples_per_task": 10,
+  "temperature": 0.8,
+  "top_p": 0.95,
+  "top_k": 50,
+  "seed": 42,
+  "max_new_tokens": 512,
+  "thinking": false,
+  "prompt_style": "zero-shot chat",
+  "model_load_seconds": 30.962263399997028,
+  "gpu": "NVIDIA GeForce RTX 5070 Ti",
+  "dtype": "torch.bfloat16",
+  "dataset_sha256": "272720b90ac375502c8ed23cd791c2a93dfb22a911641a494da74a426c09f101",
+  "tasks": 164,
+  "samples": 1640,
+  "samples_sha256": "33936778e2d8091c145b86229f5682786eadcac8773216d56c9c5993cf81e304",
+  "token_limit_hits": 43,
+  "generation_seconds": 162.17770490000112,
+  "generated_tokens": 257944,
+  "generated_tokens_per_second": 1590.5022219857435,
+  "peak_gpu_allocated_bytes": 9453640704,
+  "benchmark": "HumanEval+",
+  "version": "v0.1.10",
+  "metrics": {
+    "base": {
+      "samples_passed": 622,
+      "tasks_passed": 114,
+      "pass@1": 0.37926829268292683,
+      "pass@10": 0.6951219512195121
+    },
+    "plus": {
+      "samples_passed": 570,
+      "tasks_passed": 106,
+      "pass@1": 0.3475609756097561,
+      "pass@10": 0.6463414634146342
+    }
+  },
+  "outcomes": {
+    "base": {
+      "failed": 1017,
+      "passed": 622,
+      "timed out": 1
+    },
+    "plus": {
+      "skipped": 1018,
+      "passed": 570,
+      "failed": 47,
+      "timed out": 5
+    }
+  },
+  "scoring_seconds": 175.54193349999696,
+  "suite_input_counts": {
+    "base": 1570,
+    "plus": 122683
+  },
+  "scoring_runtime": "WASI, EvalPlus base and additional input cases"
+}

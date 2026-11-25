@@ -1,0 +1,10 @@
+{
+ "start_step": 0,
+ "accumulation_steps": 4,
+ "warmup_updates": 128,
+ "decay_start_step": 512,
+ "end_step": 77919,
+ "start_lr": 2e-06,
+ "peak_lr": 1e-05,
+ "min_lr": 2e-06
+}

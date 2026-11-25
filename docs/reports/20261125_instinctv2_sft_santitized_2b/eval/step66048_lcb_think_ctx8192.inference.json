@@ -1,0 +1,47 @@
+{
+  "checkpoint": "D:\\AI\\Instinct\\out\\native_instinctv2_sft_santitized_2b\\native_instinctv2_sft_santitized_2b_1536.npz",
+  "checkpoint_sha256": "3adb083ad2b66b6f8076f1c68c7201ebba7df564aa0607e6d029dc7c5c647a71",
+  "converted_weights_sha256": "0250ef7757b43425445e5b3d04b9f3174c426dff0dea7e7b1367ef7795527d7d",
+  "model_config_sha256": "6d33c746b2343e7963f6faad69a9cd2275199c932830fdbe487c36829af0687b",
+  "sft_microbatches": 3072,
+  "sft_optimizer_updates": 768,
+  "sft_tokens": 49852256,
+  "generation": {
+    "samples_per_task": 1,
+    "temperature": 0.0,
+    "open_thinking": true,
+    "prompt_style": "chat",
+    "context_tokens": 8192,
+    "output_budget": "context_tokens minus batch padded prompt width",
+    "batch_size": 8,
+    "static_cache_preallocated_on_resume": true,
+    "kv_cache": "MXFP8 E4M3 with one UE8M0 scale per 32 values",
+    "seed": 42,
+    "dtype": "bfloat16",
+    "gpu": "NVIDIA GeForce RTX 5070 Ti",
+    "extraction": "last fenced block after first </think>"
+  },
+  "prompt_sha256": {
+    "prompts.jsonl": "00818d48b131213ef5df697efa8e38afcdd9da6710a6a5243f8299700e6ccea8",
+    "latest_prompts.jsonl": "17e1191b54c6288aaeeebcb4461ff94a1d6859aa5395398c9e1748ad14605849"
+  },
+  "generation_sha256": "9b20d2db997d9a9daef6d37c67fdbcf0d963389faf136d2c6273a86dcf0998b9",
+  "responses_sha256": "70498de0cdb11df6e62f5f32e0f0965b84dddddf0e4838d6cf6e9ac12c1fe1c0",
+  "model_load_seconds": 27.66130320000002,
+  "generation_seconds": 1100.5721525,
+  "generated_tokens": 983032,
+  "generated_tokens_per_second": 893.2008662648768,
+  "run_wall_seconds": 1100.6690088000003,
+  "resumed_responses": 0,
+  "token_limit_hits": 123,
+  "response_counts": {
+    "nonempty_thinking": 175,
+    "reached_context_limit": 123,
+    "closed_thinking": 52,
+    "nonempty_closed_thinking": 52,
+    "has_final_code": 52
+  },
+  "prompt_tokens_min": 336,
+  "prompt_tokens_max": 1920,
+  "peak_gpu_allocated_bytes": 5993350144
+}

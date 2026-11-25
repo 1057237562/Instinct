@@ -1,0 +1,137 @@
+{
+  "checkpoint": "D:\\AI\\Instinct\\out\\native_instinctv2_sft_santitized_2b\\native_instinctv2_sft_santitized_2b_1536.npz",
+  "checkpoint_sha256": "3adb083ad2b66b6f8076f1c68c7201ebba7df564aa0607e6d029dc7c5c647a71",
+  "converted_weights_sha256": "0250ef7757b43425445e5b3d04b9f3174c426dff0dea7e7b1367ef7795527d7d",
+  "model_config_sha256": "6d33c746b2343e7963f6faad69a9cd2275199c932830fdbe487c36829af0687b",
+  "sft_microbatches": 3072,
+  "sft_optimizer_updates": 768,
+  "sft_tokens": 49852256,
+  "generation": {
+    "samples_per_task": 1,
+    "temperature": 0.0,
+    "open_thinking": true,
+    "prompt_style": "chat",
+    "context_tokens": 8192,
+    "output_budget": "context_tokens minus batch padded prompt width",
+    "batch_size": 8,
+    "static_cache_preallocated_on_resume": true,
+    "kv_cache": "MXFP8 E4M3 with one UE8M0 scale per 32 values",
+    "seed": 42,
+    "dtype": "bfloat16",
+    "gpu": "NVIDIA GeForce RTX 5070 Ti",
+    "extraction": "last fenced block after first </think>"
+  },
+  "prompt_sha256": {
+    "prompts.jsonl": "00818d48b131213ef5df697efa8e38afcdd9da6710a6a5243f8299700e6ccea8",
+    "latest_prompts.jsonl": "17e1191b54c6288aaeeebcb4461ff94a1d6859aa5395398c9e1748ad14605849"
+  },
+  "generation_sha256": "9b20d2db997d9a9daef6d37c67fdbcf0d963389faf136d2c6273a86dcf0998b9",
+  "responses_sha256": "70498de0cdb11df6e62f5f32e0f0965b84dddddf0e4838d6cf6e9ac12c1fe1c0",
+  "model_load_seconds": 27.66130320000002,
+  "generation_seconds": 1100.5721525,
+  "generated_tokens": 983032,
+  "generated_tokens_per_second": 893.2008662648768,
+  "run_wall_seconds": 1100.6690088000003,
+  "resumed_responses": 0,
+  "token_limit_hits": 123,
+  "response_counts": {
+    "nonempty_thinking": 175,
+    "reached_context_limit": 123,
+    "closed_thinking": 52,
+    "nonempty_closed_thinking": 52,
+    "has_final_code": 52
+  },
+  "prompt_tokens_min": 336,
+  "prompt_tokens_max": 1920,
+  "peak_gpu_allocated_bytes": 5993350144,
+  "benchmark": "LiveCodeBench code generation",
+  "release": "v6",
+  "dataset_revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505",
+  "dataset_sha256": {
+    "test6.jsonl": "bb4c364f71921c4495a6ad15abe1a927350b720009f4933e2e71f8af0f6fd1f5"
+  },
+  "upstream_judge_commit": "28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24",
+  "scoring_runtime": "WASI guest, upstream judge and comparisons with host-enforced wall-clock timeout",
+  "timeout_per_test_seconds": 6,
+  "date_min": "2025-01-04T00:00:00",
+  "date_max": "2025-04-06T00:00:00",
+  "metrics": {
+    "tasks": 175,
+    "passed": 14,
+    "pass@1": 0.08,
+    "outcomes": {
+      "no_code": 123,
+      "failed": 38,
+      "passed": 14
+    }
+  },
+  "breakdown": {
+    "difficulty": {
+      "easy": {
+        "tasks": 43,
+        "passed": 12,
+        "pass@1": 0.27906976744186046,
+        "outcomes": {
+          "no_code": 11,
+          "failed": 20,
+          "passed": 12
+        }
+      },
+      "hard": {
+        "tasks": 80,
+        "passed": 0,
+        "pass@1": 0.0,
+        "outcomes": {
+          "no_code": 73,
+          "failed": 7
+        }
+      },
+      "medium": {
+        "tasks": 52,
+        "passed": 2,
+        "pass@1": 0.038461538461538464,
+        "outcomes": {
+          "no_code": 39,
+          "failed": 11,
+          "passed": 2
+        }
+      }
+    },
+    "platform": {
+      "atcoder": {
+        "tasks": 112,
+        "passed": 11,
+        "pass@1": 0.09821428571428571,
+        "outcomes": {
+          "no_code": 83,
+          "failed": 18,
+          "passed": 11
+        }
+      },
+      "leetcode": {
+        "tasks": 63,
+        "passed": 3,
+        "pass@1": 0.047619047619047616,
+        "outcomes": {
+          "no_code": 40,
+          "failed": 20,
+          "passed": 3
+        }
+      }
+    },
+    "shard": {
+      "test6.jsonl": {
+        "tasks": 175,
+        "passed": 14,
+        "pass@1": 0.08,
+        "outcomes": {
+          "no_code": 123,
+          "failed": 38,
+          "passed": 14
+        }
+      }
+    }
+  },
+  "results_sha256": "144a566cb9da310eb35313a8a1af43de325060b0a53b4fed525c4ff06de1f850",
+  "scoring_seconds": 7.313000000000102
+}

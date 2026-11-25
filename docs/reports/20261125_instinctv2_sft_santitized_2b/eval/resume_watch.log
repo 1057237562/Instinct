@@ -1,0 +1,5 @@
+﻿2026-11-25T20:15:26 watcher started (waiting for eval to finish)
+2026-11-25T20:17:03 watcher started (waiting for eval to finish)
+2026-11-25T20:55:07 eval process gone (stage=lcb_nothink)
+2026-11-25T20:55:07 launched SFT resume: return=0 pid=34460
+2026-11-25T20:55:07 armed end-of-training eval watchdog: return=0 pid=43932
