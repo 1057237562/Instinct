@@ -684,6 +684,39 @@ the MXFP8 E4M3 KV cache. Artifacts:
 `eval/evalplus/native_instinct_r1_pos_step01500_lcb_provenance/`, and
 `eval/livecodebench/native_instinct_r1_pos_step01500_release_v6_{think,nothink}_ctx4096_latest175/`.
 
+### instinctv2_sft_santitized_2b probe (step 50,688)
+
+`native_instinctv2_sft_santitized_2b` is the first SFT stage trained on
+`dataset/instinctv2_sft_santitized_2b` (1,514,592 rows / 77,919 packed 16K blocks /
+1,265,404,059 packed valid tokens; assembled token estimate 1,311.1M, think share
+33.9% before packing) from the V2 Dense pretrain acceptance checkpoint
+(step 2,004,666), with the smooth LongRoPE mode (`model_smooth.config.json`,
+smooth_start=4096/smooth_end=8192; accumulated-phase fix commit `1a5fd1b`; LR
+2e-6 -> 1e-5 (warmup 128 updates) -> 2e-6 over 77,919 steps). It was paused through
+the save-and-pause flow at step 50,688 / 823,006,842 tokens (64.4% of the epoch).
+Weights SHA-256 `3f3e1501e18d3782a9343944a26b776545408e0670da0972bedf6439b5f3cf97`;
+converted `step50688.pth` SHA-256 `18d991d5a829d3081b50d3caefb7d79f179ffc742098bdc81a7c2659add4250b`.
+
+| Metric (sanitized @50,688) | value | R1 position @30,720 | v4 @3,000 |
+| --- | ---: | ---: | ---: |
+| HumanEval+ pass@1 / pass@10 | 0.3476 / 0.6463 | 0.4018 / 0.6768 | 0.4421 / 0.7317 |
+| HumanEval base pass@1 / pass@10 | 0.3793 / 0.6951 | 0.4232 / 0.7073 | 0.4713 / 0.7622 |
+| MBPP+ pass@1 / pass@10 | 0.4524 / 0.6878 | 0.4574 / 0.6931 | 0.4802 / 0.7090 |
+| MBPP base pass@1 / pass@10 | 0.5209 / 0.7778 | 0.5291 / 0.7937 | 0.5463 / 0.7884 |
+| LCB latest-175 think pass@1 (ctx 8192) | 0.0971 (17/175) | 0.0857 (15/175, ctx 4096) | 0.0857 (ctx 4096) |
+| LCB latest-175 no-think pass@1 (ctx 4096) | 0.1257 (22/175) | 0.1257 (22/175) | 0.1200 |
+
+Think@8192 detail: 121/175 capped (no_code), 37 failed, 54 closed with final code;
+outcomes by difficulty easy 14/43, medium 3/52, hard 0/80. No-think: 26 capped,
+124 failed, 3 timeout; easy 19/43, medium 3/52, hard 0/80. EvalPlus uses the
+recorded driver (thinking off, temp 0.8/top_p 0.95/top_k 50/seed 42/max_new 512,
+batch 32). Artifacts:
+`eval/evalplus/native_instinctv2_sft_santitized_2b_step50688_pass10/`,
+`eval/evalplus/native_instinctv2_sft_santitized_2b_step50688_lcb_provenance/`,
+`eval/livecodebench/native_instinctv2_sft_santitized_2b_step50688_release_v6_{think_ctx8192,nothink_ctx4096}_latest175/`.
+The run is mid-epoch (64.4%) with a different data mixture and the smooth RoPE
+semantics, so these numbers are a checkpoint probe, not a final-epoch result.
+
 ## Critical gotchas
 
 ### LongRoPE switch modes
